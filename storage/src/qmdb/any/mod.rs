@@ -136,7 +136,7 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index-build concurrency (see [crate::qmdb::IndexBuild::Concurrency]) --
+    /// The index-build concurrency (see [crate::qmdb::IndexBuild::Concurrency]):
     /// `()` for index types that build serially, and the number of build tasks (including the
     /// init task itself, which replays and routes the log, so `1` builds entirely on the init
     /// task) for index types that build in parallel.
@@ -2988,7 +2988,7 @@ mod bitmap_tests {
                 .unwrap();
             let (db, _) = db.apply_batch(b).await.unwrap();
 
-            // Setup sanity -- anchor in committed index.
+            // Setup sanity: anchor in committed index.
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![1]));
             let committed_bitmap_len = db.bitmap.len();
 

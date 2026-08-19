@@ -251,11 +251,11 @@ mod private {
         H: Hasher,
     {
         /// Merkle structure where each leaf is an item digest.
-        /// Invariant -- leaf i corresponds to item i in `journal`.
+        /// Invariant: leaf i corresponds to item i in `journal`.
         pub(crate) merkle: M,
 
         /// Journal of items.
-        /// Invariant -- item i corresponds to leaf i in `merkle`.
+        /// Invariant: item i corresponds to leaf i in `merkle`.
         pub(crate) journal: C,
 
         pub(crate) hasher: StandardHasher<H>,

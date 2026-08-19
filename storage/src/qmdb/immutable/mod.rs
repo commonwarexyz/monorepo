@@ -14,7 +14,7 @@
 //!
 //! The floor controls two things:
 //! - **Pruning**: [`Immutable::prune`] only allows pruning up to the floor.
-//! - **Reconstruction** -- on restart or sync, the index is rebuilt from the floor
+//! - **Reconstruction**: on restart or sync, the index is rebuilt from the floor
 //!   onward. Keys set before the floor are not loaded into memory.
 //!
 //! The floor must be monotonically non-decreasing across commits and must not exceed

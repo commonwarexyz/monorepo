@@ -377,7 +377,7 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index-build concurrency (see [crate::qmdb::IndexBuild::Concurrency]) --
+    /// The index-build concurrency (see [crate::qmdb::IndexBuild::Concurrency]):
     /// `()` for index types that build serially, and the number of build tasks (including the
     /// init task itself, which replays and routes the log, so `1` builds entirely on the init
     /// task) for index types that build in parallel.
