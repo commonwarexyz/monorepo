@@ -24,14 +24,20 @@
 //!
 //! Two rules keep callers out of trouble. The lock is not reentrant, so never
 //! hold a lease while acquiring another, on any cell, because a mutation queued
-//! between the two would deadlock both. And a [`Writer`] must outlive the
-//! readers from the same cell. Dropping the writer does not drop the database,
-//! so readers would otherwise go on answering from a database that can never
-//! advance.
+//! between the two would deadlock both. And a [`Writer`] should outlive the
+//! readers from the same cell. Dropping the writer closes the cell, and later
+//! leases park instead of answering from a database that can never advance.
 
 use commonware_utils::sync::{AsyncRwLockReadGuard, TracedAsyncRwLock};
 use futures::future;
-use std::{future::Future, ops::Deref, sync::Arc};
+use std::{
+    future::Future,
+    ops::Deref,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 enum State<T> {
     Live(T),
@@ -41,11 +47,22 @@ enum State<T> {
 
 struct Cell<T> {
     state: TracedAsyncRwLock<State<T>>,
+    /// Latched when the writer drops. A one-way flag, so a relaxed load
+    /// suffices, and a lease that races the drop is indistinguishable from
+    /// one granted a moment earlier.
+    closed: AtomicBool,
 }
 
 impl<T> Cell<T> {
     async fn read(&self) -> ReadGuard<'_, T> {
         let guard = self.state.read().await;
+        if self.closed.load(Ordering::Relaxed) {
+            // The writer is gone, so the database can never advance. Serving
+            // would hand out frozen state. Park like the poisoned case.
+            drop(guard);
+            tracing::error!("database cell closed; parking reader");
+            return future::pending().await;
+        }
         match AsyncRwLockReadGuard::try_map(guard, |state| match state {
             State::Live(db) => Some(db),
             State::Poisoned => None,
@@ -75,15 +92,22 @@ pub fn split<T>(db: T) -> (Writer<T>, Reader<T>) {
 ///
 /// This is the only value with [`mutate`](Self::mutate), and it is deliberately
 /// not [`Clone`], so at most one exists per cell. It does not own the database.
-/// Dropping it leaves readers on a database that can no longer advance, which is
-/// why it must outlive the readers taken from the same cell.
+/// Dropping it closes the cell, since the database can never advance again, and
+/// later leases park instead of serving frozen state.
 pub struct Writer<T>(Arc<Cell<T>>);
+
+impl<T> Drop for Writer<T> {
+    fn drop(&mut self) {
+        self.0.closed.store(true, Ordering::Relaxed);
+    }
+}
 
 impl<T> Writer<T> {
     /// Wrap `db` in a fresh cell, returning its sole mutation authority.
     pub fn new(db: T) -> Self {
         Self(Arc::new(Cell {
             state: TracedAsyncRwLock::new("database_cell", State::Live(db)),
+            closed: AtomicBool::new(false),
         }))
     }
 
@@ -103,8 +127,8 @@ impl<T> Writer<T> {
     /// takes the writer with it, and if the database was already taken out it
     /// also poisons the cell, so a second mutation of a poisoned cell is
     /// unreachable rather than merely documented. Leases taken afterward park
-    /// forever. (Dropped while still queued for the lock, the cell stays live
-    /// but can never advance again -- the same wedge as dropping the writer.)
+    /// forever. (Dropped while still queued for the lock, the writer's own drop
+    /// closes the cell the same way.)
     pub async fn mutate<F, Fut, R>(self, mutation: F) -> (Self, R)
     where
         F: FnOnce(T) -> Fut,
@@ -183,7 +207,7 @@ mod tests {
             }
 
             context.sleep(Duration::from_millis(5)).await;
-            writer
+            let (_writer, ()) = writer
                 .mutate(|db| async move {
                     assert_eq!(db, 0);
                     (db + 1, ())
@@ -206,13 +230,14 @@ mod tests {
             let (acquired_tx, acquired) = oneshot::channel::<()>();
 
             let mutation_task = context.child("mutation").spawn(move |_| async move {
-                writer
+                let (writer, ()) = writer
                     .mutate(|db| async move {
                         let _ = acquired_tx.send(());
                         let _ = release.await;
                         (db + 1, ())
                     })
                     .await;
+                writer
             });
 
             acquired.await.expect("mutation must start");
@@ -224,8 +249,26 @@ mod tests {
             );
 
             release_tx.send(()).expect("mutation is waiting");
-            mutation_task.await.expect("mutation completes");
+            let _writer = mutation_task.await.expect("mutation completes");
             assert_eq!(*read.await, 1, "the lease sees the mutated state");
+        });
+    }
+
+    /// Dropping the writer closes the cell. Later leases park instead of
+    /// answering from a database that can never advance.
+    #[test]
+    fn dropped_writer_parks_readers() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (writer, reader) = split(0u64);
+            assert_eq!(*reader.read().await, 0);
+            drop(writer);
+
+            let read = reader.read();
+            futures::pin_mut!(read);
+            assert!(
+                read.as_mut().now_or_never().is_none(),
+                "a lease after the writer drops must park, not serve frozen state",
+            );
         });
     }
 

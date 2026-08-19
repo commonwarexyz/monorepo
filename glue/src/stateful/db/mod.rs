@@ -31,11 +31,10 @@
 //!
 //! Two invariants keep this sound. A batch handed to [`ManagedDb::finalize`]
 //! must not read through its own reader, because that call runs while the write
-//! side is held. And a [`Writer`] must outlive the readers from the same cell.
-//! Dropping the writer does not drop the database, so readers would otherwise
-//! go on answering from a database that can never advance. Both invariants
-//! hold structurally today, because the set holds the [`Writer`] and every
-//! reader lives in a batch the set outlives.
+//! side is held. And a [`Writer`] should outlive the readers from the same
+//! cell. Dropping the writer closes the cell, and later leases park instead of
+//! answering from a database that can never advance. The set holds the
+//! [`Writer`], and every reader lives in a batch the set outlives.
 //!
 //! # State Sync
 //!
