@@ -246,12 +246,10 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// return a precomputed result.
     ///
     /// This is local policy: participants with different settings interoperate.
-    /// The default opts out.
+    /// Return `None` to opt out.
     ///
     /// [Pipelined Handoff]: crate::simplex#pipelined-handoff
-    fn elect_early(&self, _round: Round) -> Option<Participant> {
-        None
-    }
+    fn elect_early(&self, round: Round) -> Option<Participant>;
 }
 
 /// Configuration for round-robin leader election.
@@ -475,6 +473,10 @@ where
                     .seed_signature
             }),
         )
+    }
+
+    fn elect_early(&self, _round: Round) -> Option<Participant> {
+        None
     }
 }
 

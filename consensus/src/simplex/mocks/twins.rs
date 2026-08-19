@@ -338,10 +338,12 @@ where
         self.fallback.elect(round, certificate)
     }
 
-    // `elect_early` deliberately keeps the opt-out default. Scripted
-    // `round_leaders` answer `elect` during the attack prefix, so an early
-    // election delegated to the fallback could contradict the script and
-    // violate the `elect_early == elect` contract.
+    fn elect_early(&self, _round: Round) -> Option<Participant> {
+        // Scripted `round_leaders` answer `elect` during the attack prefix, so
+        // delegating to the fallback could contradict the script and violate
+        // the `elect_early == elect` contract.
+        None
+    }
 }
 
 /// Controls how multi-round scenarios are constructed.
