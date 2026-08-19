@@ -90,7 +90,7 @@ impl SigningKey {
             .to_extended()
             .scalar_mul_secret(&scalar_le_bytes);
         let verifying_key = VerifyingKey {
-            bytes: point.to_bytes(),
+            bytes: core::VerifyingKeyBytes::new(point.to_bytes()),
             point: Some(point),
         };
 
@@ -119,7 +119,7 @@ impl SigningKey {
 
         let challenge_digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
-            .chain(self.verifying_key.bytes)
+            .chain(self.verifying_key.bytes.as_bytes())
             .chain(msg)
             .finalize_fixed()
             .into();
@@ -205,7 +205,7 @@ pub struct VerifyingKey {
     ///
     /// When deserializing, we just have the bytes, deferring parsing of them until
     /// signature verification, so that we can more efficiently parse them in batch.
-    bytes: [u8; 32],
+    bytes: core::VerifyingKeyBytes,
     /// If available, the point associated with these bytes.
     point: Option<G>,
 }
@@ -238,25 +238,25 @@ impl Hash for VerifyingKey {
 
 impl Debug for VerifyingKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", Hex(&self.bytes))
+        write!(f, "{}", Hex(self.bytes.as_bytes()))
     }
 }
 
 impl Display for VerifyingKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", Hex(&self.bytes))
+        write!(f, "{}", Hex(self.bytes.as_bytes()))
     }
 }
 
 impl AsRef<[u8]> for VerifyingKey {
     fn as_ref(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_bytes()
     }
 }
 
 impl Write for VerifyingKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.bytes.write(buf);
+        self.bytes.as_bytes().write(buf);
     }
 }
 
@@ -269,7 +269,7 @@ impl Read for VerifyingKey {
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
+            bytes: core::VerifyingKeyBytes::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?),
             point: None,
         })
     }
@@ -279,7 +279,7 @@ impl Read for VerifyingKey {
 impl arbitrary::Arbitrary<'_> for VerifyingKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            bytes: u.arbitrary()?,
+            bytes: core::VerifyingKeyBytes::new(u.arbitrary()?),
             point: None,
         })
     }
@@ -298,7 +298,7 @@ impl VerifyingKey {
         let a = match self.point {
             Some(point) => point,
             None => {
-                let Some(point) = GAffine::decompress(&self.bytes) else {
+                let Some(point) = GAffine::decompress(self.bytes.as_bytes()) else {
                     return false;
                 };
                 point.to_extended()
@@ -307,7 +307,7 @@ impl VerifyingKey {
 
         let digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
-            .chain(self.bytes)
+            .chain(self.bytes.as_bytes())
             .chain(msg)
             .finalize_fixed()
             .into();
@@ -391,9 +391,19 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
+/// Inputs retained for batch verification.
+///
+/// The encoded key is the batch pipeline's authoritative identity. Its optional decoded point is
+/// an individual-verification cache and is not part of the queued state.
+struct BatchItem {
+    message: Vec<u8>,
+    public_key: core::VerifyingKeyBytes,
+    signature: core::Signature,
+}
+
 /// A batch verification context.
 pub struct BatchVerifier {
-    items: Vec<(Vec<u8>, VerifyingKey, core::Signature)>,
+    items: Vec<BatchItem>,
 }
 
 impl BatchVerifier {
@@ -412,11 +422,11 @@ impl BatchVerifier {
         public_key: &VerifyingKey,
         signature: &Signature,
     ) {
-        self.items.push((
-            union_unique(namespace, message),
-            public_key.clone(),
-            core::Signature::from_bytes(signature.bytes),
-        ));
+        self.items.push(BatchItem {
+            message: union_unique(namespace, message),
+            public_key: public_key.bytes,
+            signature: core::Signature::from_bytes(signature.bytes),
+        });
     }
 
     /// Check all the signatures in the batch.
@@ -427,16 +437,25 @@ impl BatchVerifier {
     /// `rng` collide, an event of negligible probability (about `2^-128`).
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
-        let items = self.items.iter().map(|(message, public_key, signature)| {
-            (&public_key.bytes, signature, message.as_slice())
-        });
+        let items = self
+            .items
+            .iter()
+            .map(|item| (&item.public_key, &item.signature, item.message.as_slice()));
         core::verify_batch_bytes(rng, items, strategy)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SigningKey;
+    use super::{BatchItem, SigningKey};
+
+    #[test]
+    fn batch_items_do_not_retain_decoded_key_cache() {
+        assert_eq!(
+            core::mem::size_of::<BatchItem>(),
+            core::mem::size_of::<(Vec<u8>, [u8; 32], super::core::Signature)>(),
+        );
+    }
 
     #[test]
     fn signature_is_bound_to_namespace() {

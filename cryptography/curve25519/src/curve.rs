@@ -874,10 +874,6 @@ pub trait WithBackend {
     type Output;
 
     /// Run the computation with a concrete backend.
-    ///
-    /// The AVX-512 dispatcher enables its target features around this entire method, allowing the
-    /// backend operations it invokes to inline without crossing a target-feature boundary for
-    /// every operation.
     fn call<B: Backend>(self, backend: B) -> Self::Output;
 }
 

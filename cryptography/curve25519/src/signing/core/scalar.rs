@@ -135,9 +135,9 @@ fn mul5x4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 9] {
     t
 }
 
-/// Reduces a 512-bit value (eight little-endian 64-bit limbs) modulo `L` via Barrett reduction
-/// (Handbook of Applied Cryptography, Algorithm 14.42), replacing what used to be a 512-iteration
-/// bit-serial double-and-add-mod loop with a fixed handful of limb multiplications.
+/// Reduces a 512-bit value (eight little-endian 64-bit limbs) modulo `L` with a fixed number of
+/// limb multiplications using Barrett reduction (Handbook of Applied Cryptography, Algorithm
+/// 14.42).
 ///
 /// With word size `b = 2^64` and `L` fitting in `k = 4` words, this reduces any `x < b^(2k) =
 /// 2^512`: `q = floor(floor(x / b^(k-1)) * MU / b^(k+1))` approximates `floor(x / L)` (using the
@@ -319,9 +319,9 @@ mod tests {
         out
     }
 
-    /// The bit-serial double-and-add-mod reduction [`Scalar::from_bytes_mod_order_wide`] used
-    /// before it was replaced with Barrett reduction: slow (a conditional-subtract per bit of the
-    /// 512-bit input), but obviously correct, so it is kept here as a differential-test oracle.
+    /// A bit-serial double-and-add-mod reduction used as a differential-test oracle for
+    /// [`Scalar::from_bytes_mod_order_wide`]. It performs one conditional subtraction per input
+    /// bit, making it slow but straightforward to audit.
     fn reduce_wide_naive(bytes: &[u8; 64]) -> Scalar {
         let mut r = [0u64; 4];
         for byte_index in (0..64).rev() {
