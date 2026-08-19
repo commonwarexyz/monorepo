@@ -2098,6 +2098,10 @@ mod tests {
             );
             Participant::new(0)
         }
+
+        fn elect_early(&self, _round: Rnd) -> Option<Participant> {
+            None
+        }
     }
 
     #[test]
