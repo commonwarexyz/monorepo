@@ -401,10 +401,10 @@ Each profile below fixes $N=1{,}000{,}000$ registered accounts, $T=1{,}000{,}000
     <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
     <tr>
       <td style="padding-left:20px;">assignment</td>
-      <td style="text-align:right;">1.39 MB</td>
-      <td style="text-align:right;">79.4 MB</td>
-      <td style="text-align:right;">436 MB</td>
-      <td style="text-align:right;">514 MB</td>
+      <td style="text-align:right;">1.39 MB <span style="color:#666;">(67%)</span></td>
+      <td style="text-align:right;">79.4 MB <span style="color:#666;">(68%)</span></td>
+      <td style="text-align:right;">436 MB <span style="color:#666;">(67%)</span></td>
+      <td style="text-align:right;">514 MB <span style="color:#666;">(67%)</span></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">check and sign</td>
@@ -457,7 +457,7 @@ Benchmark chart: These are four measured profiles, not an interpolation. Points 
 
 Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated component leaves and signatures behind each credited row. Neither disappears behind the phrase “one row per account.” All four profiles register the same million accounts, yet at $A=1{,}024$ the validator's assignment is 1.39 MB: distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments. The chain payload remains nearly flat because it carries the header, quorum certificate, and terminal prefix opening—not the rows or component leaves. This fixture queues no withdrawals and no full closes, whose re-check and row openings would otherwise add to it. The challenge rows submit one proven higher-tip challenge: its payload grows only with the two lookup depths, and its check verifies two signatures and two openings.
 
-The timers cover warm, in-memory close construction and validation on an 18-core Apple M5 Pro with 64 GiB, with the shared worker pool capped at eight threads. They exclude payment acceptance, networking, durable storage, key and registry construction, and custody execution. Canonical encoding for hashing and signature verification remains included. Corpus bytes count each of the 256 pieces once, before replication to its 67 holders, the validator rows report the busiest of the 100 assignments, and the challenge rows target a mid-registry credited account's mid-set component.
+The timers cover warm, in-memory close construction and validation on an 18-core Apple M5 Pro with 64 GiB, with the shared worker pool capped at eight threads. They exclude payment acceptance, networking, durable storage, key and registry construction, and custody execution. Canonical encoding for hashing and signature verification remains included. Corpus bytes count each of the 256 pieces once, before replication to its 67 holders, the validator rows report the busiest of the 100 assignments with its share of the public corpus in parentheses, and the challenge rows target a mid-registry credited account's mid-set component.
 
 ## The Account-Level Trade
 
