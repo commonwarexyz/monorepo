@@ -2335,7 +2335,7 @@ mod tests {
                     .finalize(harness.context_cell.as_present(), &winner),
             );
             select! {
-                _ = &mut finalize => panic!("finalize completed before its hook returned"),
+                _ = &mut finalize => panic!("finalize completed before its finalized hook returned"),
                 result = &mut started => result.expect("finalized hook should start"),
             }
 

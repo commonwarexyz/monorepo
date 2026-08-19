@@ -1,8 +1,9 @@
 //! The post-sync processing loop of the stateful actor.
 //!
 //! The loop owns the database set and is the only thing that mutates it.
-//! Verification jobs hold readers instead, so they are never cancelled. A
-//! job that is mid-read when a finalized block arrives finishes that read, the
+//! Verification jobs hold readers instead, so nothing short of actor shutdown
+//! cancels one. A job that is mid-read when a finalized block arrives finishes
+//! that read, the
 //! apply runs, and the job continues against the state it installs. A job on
 //! the losing side of that apply is refused at its next batch operation
 //! ([`ExecutionError::Stale`](crate::stateful::ExecutionError::Stale)) and

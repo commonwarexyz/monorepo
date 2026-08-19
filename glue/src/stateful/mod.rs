@@ -297,9 +297,9 @@ where
     /// ops root and operation range used by replay sync.
     ///
     /// This future is scoped to its caller. Dropping the response cancels only
-    /// this request. The wrapper never cancels it, so a batch operation running
-    /// when a finalized block is applied waits for that apply and then
-    /// continues.
+    /// this request. The wrapper never cancels it while the actor runs, so a
+    /// batch operation running when a finalized block is applied waits for that
+    /// apply and then continues. Actor shutdown drops it with everything else.
     ///
     /// `batches` is a branch-scoped view, not a historical snapshot. Retained
     /// ancestor overlays preserve same-branch state, while unresolved reads fall
@@ -328,9 +328,9 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// This future may be cancelled if its originating request is dropped. The
-    /// wrapper itself never cancels it. Cancellation must not violate
-    /// invariants or lose durable progress.
+    /// This future may be cancelled if its originating request is dropped or
+    /// the actor shuts down; the wrapper never cancels it while the actor runs.
+    /// Cancellation must not violate invariants or lose durable progress.
     ///
     /// Storage errors from batch operations are propagated as [`ExecutionError`],
     /// never interpreted (see [`verify`](Self::verify)). The wrapper re-checks

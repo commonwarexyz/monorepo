@@ -24,7 +24,7 @@
 //! cloned and grants a [`ReadGuard`] covering exactly one storage call.
 //!
 //! Because a read guard never spans application code, a mutation waits at most one
-//! storage call to start, and work holding a reader is never cancelled, so it
+//! storage call to start, and no mutation ever cancels work holding a reader, so it
 //! pauses at its next read and resumes once the mutation completes. A mutation
 //! that is interrupted leaves the cell poisoned, which is reachable only while
 //! the mutating task is being torn down.
@@ -34,7 +34,9 @@
 //! side is held. And a [`Writer`] should outlive the readers from the same
 //! cell. Dropping the writer closes the cell, and later reads park instead of
 //! answering from a database that can never advance. The set holds the
-//! [`Writer`], and every reader lives in a batch the set outlives.
+//! [`Writer`]; readers live in batches, in verification jobs, and in the
+//! [`Application::finalized`](crate::stateful::Application::finalized) hook,
+//! which may keep one past the actor's exit, where its reads park.
 //!
 //! # State Sync
 //!
@@ -1795,7 +1797,7 @@ mod tests {
     use super::{
         Anchor, Barrier, CoordinatorAction, CoordinatorState, DatabaseSet,
         MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Reader, Single, StateSyncDb, StateSyncSet,
-        SyncEngineConfig, TipUpdate, Writer, drain_single_tip_updates, split,
+        SyncEngineConfig, TipUpdate, drain_single_tip_updates, split,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -1820,12 +1822,12 @@ mod tests {
     };
 
     mod managed_db_lifecycle {
-        use super::{ManagedDb, Writer, split};
-        use crate::stateful::db::Unmerkleized;
+        use super::{ManagedDb, split};
+        use crate::stateful::{db::Unmerkleized, tests::mocks::finalize};
         use commonware_cryptography::{Sha256, sha256::Digest};
         use commonware_parallel::Sequential;
         use commonware_runtime::{
-            Handle, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+            Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
         };
         use commonware_storage::{
             journal::contiguous::{
@@ -2134,22 +2136,6 @@ mod tests {
                 witness: variable_journal_config(context, suffix, ()),
                 commit_codec_config: (),
             }
-        }
-
-        /// Finalize `batch` through the cell, returning the snapshot and flush handle.
-        async fn finalize<T: ManagedDb<Context>>(
-            writer: Writer<T>,
-            batch: T::Merkleized,
-        ) -> (Writer<T>, T::Snapshot, Handle<()>) {
-            let (writer, (snapshot, sync)) = writer
-                .mutate(|db| async move {
-                    let (db, snapshot, sync) = T::finalize(db, batch).await.unwrap_or_else(|err| {
-                        panic!("finalize failed: {err:?}");
-                    });
-                    (db, (snapshot, sync))
-                })
-                .await;
-            (writer, snapshot, sync)
         }
 
         async fn assert_initial_sync_target_and_finalize<T>(context: Context, config: T::Config)

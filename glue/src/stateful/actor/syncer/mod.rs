@@ -411,11 +411,8 @@ where
     let mut databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
 
-    // In the case that the applied targets do not match the marshal floor, we may
-    // have suffered a crash that left the set in an inconsistent state. In this case,
-    // we attempt to repair by rewinding the databases back to the marshal floor. If
-    // the rewind fails to produce a consistent state, we must crash. This can occur
-    // if the databases were corrupted or pruned too aggressively.
+    // Applied targets off the marshal floor mean a crash left the set
+    // inconsistent. Rewinding to the floor repairs it or panics.
     if databases.committed_targets().await != processed_targets {
         databases = databases.rewind_to_targets(processed_targets.clone()).await;
         assert!(

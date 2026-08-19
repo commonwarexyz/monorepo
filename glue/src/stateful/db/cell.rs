@@ -23,8 +23,9 @@
 //! [`commonware_storage::qmdb::Error::StaleRead`]).
 //!
 //! Two rules keep callers out of trouble. The lock is not reentrant, so never
-//! hold a read guard while acquiring another, on any cell, because a mutation queued
-//! between the two would deadlock both. And a [`Writer`] should outlive the
+//! hold a read guard while acquiring another. On the same cell a mutation queued
+//! between the two deadlocks both, and across cells the same habit invites
+//! order-inversion deadlocks. And a [`Writer`] should outlive the
 //! readers from the same cell. Dropping the writer closes the cell, and later
 //! reads park instead of answering from a database that can never advance.
 
@@ -60,7 +61,7 @@ impl<T> Cell<T> {
             // The writer is gone, so the database can never advance. Serving
             // would hand out frozen state. Park like the poisoned case.
             drop(guard);
-            tracing::error!("database cell closed; parking reader");
+            tracing::error!("database cell closed, parking reader");
             return future::pending().await;
         }
         match AsyncRwLockReadGuard::try_map(guard, |state| match state {
@@ -73,7 +74,7 @@ impl<T> Cell<T> {
                 // this task is dropped with the rest of the actor, and the trace
                 // separates that from a bug if the process outlives the cell.
                 drop(guard);
-                tracing::error!("database cell poisoned; parking reader");
+                tracing::error!("database cell poisoned, parking reader");
                 future::pending().await
             }
         }
