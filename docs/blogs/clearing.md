@@ -407,6 +407,6 @@ $$
 
 For repeated activity over a fixed set of accounts and components, $(A+H+\Phi)/T\to 0$. Account-level clearing compresses repetition, not change: every changed account still pays for its row and every component for its terminal pair, but additional payments between them add nothing. No traffic pattern adds a per-payment term to the close either, because acceptance reserves room per account and per component, never per payment.
 
-And this is as good as the trust model allows. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault. Settlement cannot make less than the changed state available to users who recover from public data alone, and this close adds only the terminal pairs and the frontier that splices the change into the registry.
+And this is as good as the trust model allows. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault. Settlement cannot make less than the changed state available to users who recover from public data alone, and this close adds only the terminal pairs and the frontier needed to reconstruct the registry around those changes.
 
 When the close is clean, those involved keep the receipts. The settlement chain only keeps the change.
