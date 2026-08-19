@@ -660,16 +660,20 @@ mod tests {
         )
     }
 
-    async fn spawn_gated_application(
-        context: &deterministic::Context,
-        prefix: &str,
-        app: GatedApp,
-    ) -> (
+    /// A spawned gated application's mailbox, snapshot subscriber, marshal
+    /// guard, and actor handle.
+    type GatedApplication = (
         Mailbox<deterministic::Context, GatedApp>,
         Subscriber<SnapshotsOf<TestDatabases, deterministic::Context>>,
         Box<dyn std::any::Any>,
         Handle<()>,
-    ) {
+    );
+
+    async fn spawn_gated_application(
+        context: &deterministic::Context,
+        prefix: &str,
+        app: GatedApp,
+    ) -> GatedApplication {
         let mut signing = context.child("signing");
         let scheme =
             scheme_mocks::fixture(&mut signing, b"gated-application", 1).schemes[0].clone();
@@ -691,12 +695,7 @@ mod tests {
         context: &deterministic::Context,
         app: GatedApp,
         marshal: fixtures::MarshalFixture,
-    ) -> (
-        Mailbox<deterministic::Context, GatedApp>,
-        Subscriber<SnapshotsOf<TestDatabases, deterministic::Context>>,
-        Box<dyn std::any::Any>,
-        Handle<()>,
-    ) {
+    ) -> GatedApplication {
         let processor = Processor::new(
             app,
             test_databases(),
