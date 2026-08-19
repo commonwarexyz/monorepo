@@ -123,10 +123,10 @@ O’Grady</a></div>
         holds the system honest. Payments flow through a non-custodial
         operator selected by the sender: if the operator disappears or
         censors an account, senders and recipients alike can force
-        recovery through the settlement chain alone. The protocol
+        recovery through the settlement chain alone. And the protocol
         requires only signatures and Merkle openings.</p>
-        <p>For fixed accounts and parallelism, settlement costs the same
-        for one payment or a bajillion.</p>
+        <p>For a given set of accounts, one payment or a bajillion costs
+        the same to settle.</p>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
         as Browsing the Web</h2>
         <p>A Bajillion epoch starts from an authenticated account vector
@@ -140,8 +140,8 @@ O’Grady</a></div>
         class="math inline">B_a</span>, cumulative debit <span
         class="math inline">D_a</span>, operator-promised credit <span
         class="math inline">C_a</span>, a receipt count, and an activity
-        flag. To send <span class="math inline">x&gt;0</span> base units
-        from <span class="math inline">a</span> to <span
+        flag. To send <span class="math inline">x&gt;0</span> from <span
+        class="math inline">a</span> to <span
         class="math inline">b</span>, the payer signs the exact next
         debit, and the operator accepts by advancing the recipient’s
         receive shard <span class="math inline">\kappa</span> from its
@@ -745,18 +745,6 @@ O’Grady</a></div>
         The onchain commitment (right) stays 5.62–5.94 KB across
         profiles.</p>
         </div>
-        <p>The timers cover warm, in-memory close construction and
-        validation on an 18-core Apple M5 Pro with 64 GiB, with the
-        shared worker pool capped at eight threads. They exclude payment
-        acceptance, networking, durable storage, key and registry
-        construction, and custody execution.</p>
-        <p>Canonical encoding for hashing and signature verification
-        remains included. Corpus bytes count each of the 256 pieces
-        once, before replication to its 67 holders. The validator rows
-        report the busiest of the 100 assignments, with its percentage
-        reduction from the public corpus in parentheses, and the
-        challenge rows target a mid-registry credited account’s mid-set
-        shard.</p>
         <h2 id="a-bajillion-payments-one-settlement">A Bajillion
         Payments, One Settlement</h2>
         <p>The operator’s work scales with payments: it verifies,

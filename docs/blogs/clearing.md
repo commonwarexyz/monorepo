@@ -389,10 +389,6 @@ This fixture queues no withdrawals and no full closes, whose re-check and row op
 Figure 5: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The offchain public corpus (left) depends on $A$ and $h$: shards move the million-account corpus by only $1.2\times$ but the sparse corpus by $57\times$. The onchain commitment (right) stays 5.62–5.94 KB across profiles.
 :::
 
-The timers cover warm, in-memory close construction and validation on an 18-core Apple M5 Pro with 64 GiB, with the shared worker pool capped at eight threads. They exclude payment acceptance, networking, durable storage, key and registry construction, and custody execution.
-
-Canonical encoding for hashing and signature verification remains included. Corpus bytes count each of the 256 pieces once, before replication to its 67 holders. The validator rows report the busiest of the 100 assignments, with its percentage reduction from the public corpus in parentheses, and the challenge rows target a mid-registry credited account's mid-set shard.
-
 ## A Bajillion Payments, One Settlement
 
 The operator's work scales with payments: it verifies, durably commits, and signs every one of the $T$ payments it accepts. The public close has no per-payment term. It carries one row per changed account ($A$), one terminal pair per receive shard ($H$), and one frontier digest per untouched subtree ($|\Phi_e|$):
