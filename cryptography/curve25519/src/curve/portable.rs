@@ -1,4 +1,5 @@
 //! Plain-Rust lane adapter over scalar field and group arithmetic.
+
 use super::{F, FBackend, FVec, G, GAffineVec, GBackend, GVec};
 use core::array;
 

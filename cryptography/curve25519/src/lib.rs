@@ -6,6 +6,7 @@
 //! Cryptographic operations that accept an RNG require a cryptographically secure and
 //! unpredictable source unless documented otherwise. A weak or predictable RNG may compromise
 //! security.
+
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 // Every public item here is currently ALPHA, so the `commonware_stability_BETA`+ builds (which
 // compile everything out) legitimately have no live callers of the internal modules below.
