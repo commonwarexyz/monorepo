@@ -1178,6 +1178,46 @@ impl<F: Family, E: Context, D: Digest> crate::merkle::storage::Storage for Snaps
             Err(e) => Err(Error::Journal(e)),
         }
     }
+
+    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        // Serve memory-resident nodes directly and batch the rest through the
+        // captured journal, mirroring the live structure's override.
+        let bounds = self.flushed.bounds();
+        let mut nodes = vec![None; positions.len()];
+        let mut journal_positions = Vec::with_capacity(positions.len());
+        for (slot, &position) in nodes.iter_mut().zip(positions) {
+            if let Some(node) = self.mem.get_node(position) {
+                *slot = Some(node);
+            } else if *position >= bounds.start {
+                // In-subsequence order is preserved, so this stays strictly increasing.
+                journal_positions.push(*position);
+            } else {
+                return Err(Error::ElementPruned(position));
+            }
+        }
+
+        // Within-bounds reads are guaranteed not to return `ItemPruned` (see
+        // [`crate::journal::contiguous::Contiguous::read`]).
+        let items = if journal_positions.is_empty() {
+            Vec::new()
+        } else {
+            self.flushed
+                .read_many(&journal_positions)
+                .await
+                .map_err(Error::Journal)?
+        };
+
+        // The unfilled slots are exactly the journal subsequence, in the order it was built.
+        let mut items = items.into_iter();
+        Ok(nodes
+            .into_iter()
+            .map(|node| node.unwrap_or_else(|| items.next().expect("one item per journal read")))
+            .collect())
+    }
 }
 
 #[cfg(test)]
