@@ -53,6 +53,16 @@
 //! `3^-m`, and `r` rounds with probability at most `3^{-rm}`. The check uses
 //! `r*m >= ceil(security / log2(3))` total combinations (81 at 128-bit).
 //!
+//! The bound needs no independence between the combinations and the points:
+//! the points are fixed — arbitrarily and adversarially correlated — before
+//! the coefficients are drawn, and the conditioning argument is uniform over
+//! that choice (a cancelling pair achieves exactly `1/3`, never more). What it
+//! does not survive is coefficient reuse across batches or a randomness source
+//! the point-chooser can predict. Larger coefficients would not strengthen a
+//! combination: in a component of order 3 a coefficient acts through its
+//! residue mod 3, so even full-width random weights leave a cancelling pair a
+//! `1/3` escape.
+//!
 //! The bound requires an odd cofactor: an order-2 part `T` has `2*T = 0`, so
 //! `c * T` escapes with probability `2/3` per combination. A curve whose
 //! cofactor is even (e.g. BLS12-377 G1, with `2^92 | h`) cannot use this
