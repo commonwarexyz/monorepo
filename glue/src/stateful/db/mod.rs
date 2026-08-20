@@ -221,9 +221,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Create a new unmerkleized batch rooted at the database's applied
     /// state.
     ///
-    /// The batch keeps `reader` and takes read access through it on every
+    /// The batch keeps `database` and takes read access through it on every
     /// read, so it stays valid across applies of compatible batches.
-    fn new_batch(reader: Reader<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
+    fn new_batch(database: Reader<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Return true if a merkleized batch matches a sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;

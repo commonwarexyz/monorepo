@@ -62,7 +62,7 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
-    reader: Reader<AnyDb<F, E, C, I, H, U, S>>,
+    db: Reader<AnyDb<F, E, C, I, H, U, S>>,
     metadata: Option<U::Value>,
 }
 
@@ -83,7 +83,7 @@ where
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, S>,
-    reader: Reader<AnyDb<F, E, C, I, H, U, S>>,
+    db: Reader<AnyDb<F, E, C, I, H, U, S>>,
     metadata: Option<U::Value>,
 }
 
@@ -108,7 +108,7 @@ where
 
     /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
@@ -116,7 +116,7 @@ where
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
@@ -129,18 +129,18 @@ where
     ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, E, C, I, H, U, S>), Error<F>> {
         let Self {
             batch,
-            reader,
+            db,
             metadata,
         } = self;
         let (values, staged) = {
-            let guard = reader.read().await;
+            let guard = db.read().await;
             batch.stage(keys, &guard).await?
         };
         Ok((
             values,
             AnyStaged {
                 staged,
-                reader,
+                db,
                 metadata,
             },
         ))
@@ -166,7 +166,7 @@ where
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    reader: Reader<AnyDb<F, E, C, I, H, U, S>>,
+    db: Reader<AnyDb<F, E, C, I, H, U, S>>,
 }
 
 impl<F, E, C, I, H, U, S> Clone for AnyMerkleized<F, E, C, I, H, U, S>
@@ -183,7 +183,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            reader: self.reader.clone(),
+            db: self.db.clone(),
         }
     }
 }
@@ -255,11 +255,11 @@ where
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
         let Self {
             staged,
-            reader,
+            db,
             metadata,
         } = self;
         let (range, values, staged) = {
-            let guard = reader.read().await;
+            let guard = db.read().await;
             staged.expand(keys, &guard).await?
         };
         Ok((
@@ -267,7 +267,7 @@ where
             values,
             Self {
                 staged,
-                reader,
+                db,
                 metadata,
             },
         ))
@@ -307,14 +307,14 @@ where
     ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
-            reader,
+            db,
             metadata,
         } = self;
         let inner = {
-            let guard = reader.read().await;
+            let guard = db.read().await;
             staged.merkleize(updates, upserts, metadata, &guard).await?
         };
-        Ok(AnyMerkleized { inner, reader })
+        Ok(AnyMerkleized { inner, db })
     }
 }
 
@@ -351,14 +351,14 @@ where
     ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
-            reader,
+            db,
             metadata,
         } = self;
         let inner = {
-            let guard = reader.read().await;
+            let guard = db.read().await;
             staged.merkleize(updates, upserts, metadata, &guard).await?
         };
-        Ok(AnyMerkleized { inner, reader })
+        Ok(AnyMerkleized { inner, db })
     }
 }
 
@@ -376,7 +376,7 @@ where
 {
     /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
@@ -384,7 +384,7 @@ where
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
     }
 }
@@ -407,11 +407,11 @@ where
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         let merkleized = self.batch.merkleize(&db, self.metadata).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
-            reader: self.reader.clone(),
+            db: self.db.clone(),
         })
     }
 }
@@ -434,11 +434,11 @@ where
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         let merkleized = self.batch.merkleize(&db, self.metadata).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
-            reader: self.reader.clone(),
+            db: self.db.clone(),
         })
     }
 }
@@ -465,7 +465,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         AnyUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            reader: self.reader.clone(),
+            db: self.db.clone(),
             metadata: None,
         }
     }
@@ -529,11 +529,11 @@ where
         )
     }
 
-    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
-        let batch = reader.read().await.new_batch();
+    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
+        let batch = database.read().await.new_batch();
         AnyUnmerkleized {
             batch,
-            reader,
+            db: database,
             metadata: None,
         }
     }
@@ -649,11 +649,11 @@ where
         )
     }
 
-    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
-        let batch = reader.read().await.new_batch();
+    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
+        let batch = database.read().await.new_batch();
         AnyUnmerkleized {
             batch,
-            reader,
+            db: database,
             metadata: None,
         }
     }

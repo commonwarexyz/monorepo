@@ -54,7 +54,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
-    reader: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
+    db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
 }
@@ -105,7 +105,7 @@ where
 
     /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
@@ -113,7 +113,7 @@ where
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
@@ -139,7 +139,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-    reader: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
+    db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
 }
 
 impl<F, E, K, V, C, H, T, S> Clone for ImmutableMerkleized<F, E, K, V, C, H, T, S>
@@ -157,7 +157,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            reader: self.reader.clone(),
+            db: self.db.clone(),
         }
     }
 }
@@ -195,7 +195,7 @@ where
 {
     /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
@@ -203,7 +203,7 @@ where
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
     }
 }
@@ -224,14 +224,14 @@ where
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.reader.read().await;
+        let db = self.db.read().await;
         let merkleized = self
             .batch
             .merkleize(&db, self.metadata, self.inactivity_floor)
             .await?;
         Ok(ImmutableMerkleized {
             inner: merkleized,
-            reader: self.reader.clone(),
+            db: self.db.clone(),
         })
     }
 }
@@ -258,7 +258,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            reader: self.reader.clone(),
+            db: self.db.clone(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
         }
@@ -311,14 +311,14 @@ where
         )
     }
 
-    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
+    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = reader.read().await;
+            let db = database.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         ImmutableUnmerkleized {
             batch,
-            reader,
+            db: database,
             metadata: None,
             inactivity_floor,
         }
@@ -417,14 +417,14 @@ where
         )
     }
 
-    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
+    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = reader.read().await;
+            let db = database.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         ImmutableUnmerkleized {
             batch,
-            reader,
+            db: database,
             metadata: None,
             inactivity_floor,
         }
