@@ -106,6 +106,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bmt_range_update"
+path = "fuzz_targets/bmt_range_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "freezer_operations"
 path = "fuzz_targets/freezer_operations.rs"
 test = false

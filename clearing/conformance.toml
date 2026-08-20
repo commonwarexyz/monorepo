@@ -1,0 +1,175 @@
+["conformance::CodecConformance<AccountLookup<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "65d8e162d549a438a08f5e814fd75a5504695232acca8f998b8914441a270348"
+
+["conformance::CodecConformance<AccountRow<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "9ecf981316442651d7936b1a783a3e8992578ff60ae6c864bb3f3269fc2d3cec"
+
+["conformance::CodecConformance<AccountState>"]
+n_cases = 65536
+hash = "942be3642ee576433c32b2b66d2a4da2a49092b77ab223986a99b5ebc4b0848b"
+
+["conformance::CodecConformance<Assignment<Sha256Digest>>"]
+n_cases = 65536
+hash = "51eab16198763f7168636a0331d0f2f5cc31b41ff934de83755adbb4ea093ead"
+
+["conformance::CodecConformance<BatchId<Sha256Digest>>"]
+n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
+
+["conformance::CodecConformance<Certificate>"]
+n_cases = 1024
+hash = "c917b3306066acf8d6fc7d3ba3e30953efc93735662317d08d61c56000be98b8"
+
+["conformance::CodecConformance<Challenge<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "ac5993be865df14d7a2ff9b289ac0d9db901a233dc6c08b013cc28fe5337b4d6"
+
+["conformance::CodecConformance<ChangeRange<VerifyingKey,Sha256Digest>>"]
+n_cases = 256
+hash = "e6102f76359ae2a5eac6500fd904fce71192372a8245006121f04615ac2631ca"
+
+["conformance::CodecConformance<Close<VerifyingKey,Sha256Digest>>"]
+n_cases = 256
+hash = "b1227175c9e3d57525e11c8e8d9987406ef3c4789c93e5eba544d7cdbc6cb8c1"
+
+["conformance::CodecConformance<CloseLimits>"]
+n_cases = 65536
+hash = "a3f55b2ab73dcfc49213e4530067477459fbadcedf7d40e3309566d3fb719d75"
+
+["conformance::CodecConformance<Committee<VerifyingKey>>"]
+n_cases = 1024
+hash = "426925d8c67463fabea235deda443c8b64c06b95ae4b93f2718d4174385ff9ed"
+
+["conformance::CodecConformance<CreditRoot<Sha256Digest>>"]
+n_cases = 65536
+hash = "8b1549d56d0538d5eb6c1ed96340256f2165b28d96b3b562e71ab085acc4bcb2"
+
+["conformance::CodecConformance<DepositBatch<VerifyingKey>>"]
+n_cases = 1024
+hash = "8973626be91874610dfa69f992db96424f214992cd0a73a390cf201f11c295c6"
+
+["conformance::CodecConformance<DepositRecord<VerifyingKey>>"]
+n_cases = 1024
+hash = "060003f12ed50968457d4afefd4cca693aa7aa0310ff1849e7bf4f0dde0e671a"
+
+["conformance::CodecConformance<Header<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "d4b4ef216ed9f84d4243932db340fa6dbfb9a874885c5f4004d58ad973877d75"
+
+["conformance::CodecConformance<MultiOpening<Sha256Digest>>"]
+n_cases = 1024
+hash = "c95f2404ec0cf89de917747d4275716b3e82ebbc52bc5b5f66455aeeac469c74"
+
+["conformance::CodecConformance<Opening<Sha256Digest>>"]
+n_cases = 1024
+hash = "3a4731633fdcded169f01b320d3d8791db38fbd5fddfc96ddc9620d20ffee04b"
+
+["conformance::CodecConformance<Payment<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "bf6393ef9dd8ba5fb3972d76749ce3b25fe197d3f5b058999d4174fa6cee2f27"
+
+["conformance::CodecConformance<PaymentContext<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "f6e292e19650641dec26ffa3b96bec19a42e70460887f1264a6a4106a7fd468d"
+
+["conformance::CodecConformance<Prefix>"]
+n_cases = 65536
+hash = "91d0ec1001e16ca6ad20b833cc62f0b959b797990cfb7cc5d1a38ac43b43a8a8"
+
+["conformance::CodecConformance<RangeLower<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "cbdbb572cb13099aefc88c5a4ddd4aebaa6e0d2c05860959f6710d5928a9472a"
+
+["conformance::CodecConformance<RangeOpening<Sha256Digest>>"]
+n_cases = 1024
+hash = "3a4731633fdcded169f01b320d3d8791db38fbd5fddfc96ddc9620d20ffee04b"
+
+["conformance::CodecConformance<RangeUpdate<Sha256Digest>>"]
+n_cases = 1024
+hash = "4d70eb7a7c951dc2334a8337f1470abc442d5837ec95ca1d2d623aa81665f7e8"
+
+["conformance::CodecConformance<ReceiptBody<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "b1e3e679736db3163417f45419115200129309db16f469f1765dc81193fdbac7"
+
+["conformance::CodecConformance<RowOpening<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "cfd31f48fa8fbe80457075ab098e56ae9cf39cb15516ddcdb16d2b4d3edd2431"
+
+["conformance::CodecConformance<SendBody<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "ce474ae56397d052c9516f991bf346f574a587550dbb494036e809ee80bc28cd"
+
+["conformance::CodecConformance<ShardHead<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "907bc52db7337b06ea2907d15aac6332f55566d98b0d69160d71c5633e1d635c"
+
+["conformance::CodecConformance<ShardLookup<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "7b06293f0045ff9336cc8492e4428585299f098b95b729fc1d16296c9a64332f"
+
+["conformance::CodecConformance<ShardOpening<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "92c87bd2048e9b3c62e7313ba41b1b7c8269d3fdd2a7fd8603fe353e8f4928de"
+
+["conformance::CodecConformance<ShardSet<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "ea884b490f035efb9a9cec8f99a50ad295f43a02e8529216f1f06b15761aa150"
+
+["conformance::CodecConformance<SignedReceipt<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "f8940495b5969098e7291b15e634605d916225f5550e7942664c0ea4951eda6a"
+
+["conformance::CodecConformance<SignedSend<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "dbfdc280ffc416aaad3744bdb2e1c483e78bdbb10fee48036ffe32ff2cb85ba5"
+
+["conformance::CodecConformance<SignedWithdrawal<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "ff0faf3046fafa85805df061e759b5d1d64c2228891ba6953d093be3b44aec7a"
+
+["conformance::CodecConformance<SparseUpdate<Sha256Digest>>"]
+n_cases = 1024
+hash = "8d176e8171e6adba710116d819c28801d8bb0df6d7f1c163b2a668dc136ce95d"
+
+["conformance::CodecConformance<StateBounds<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "9ebfed33ef79b215c9eb80a062cf6af1793538ee48865ccf7b4f79c5c230b508"
+
+["conformance::CodecConformance<StateLeaf<VerifyingKey>>"]
+n_cases = 1024
+hash = "8f729df62afe6e28bbb32c573020976be2fc2d63b34670a696f59cc05f298503"
+
+["conformance::CodecConformance<StateOpening<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "185e28b87c570ae9d7d879e5174529c197e6d38e280a6d4eb604184dff0c7a4a"
+
+["conformance::CodecConformance<ProofSlice<VerifyingKey,Sha256Digest>>"]
+n_cases = 256
+hash = "af8276b4325943d8b9946c6a2bc590d5ae968aefb3080ed02413bcfcc1e873cc"
+
+["conformance::CodecConformance<TxId<Sha256Digest>>"]
+n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
+
+["conformance::CodecConformance<VectorKind>"]
+n_cases = 65536
+hash = "9cbdf44b5d249051dfc90f4d49cbbb67fcecae8ad9d081290aa91869d5efe7cf"
+
+["conformance::CodecConformance<VectorRoot<Sha256Digest>>"]
+n_cases = 65536
+hash = "2ff3f31952ae5ec4d8513f8722c12b7c54969a7ed812fc9c638e6a8b2d50bc68"
+
+["conformance::CodecConformance<WithdrawalBatch<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "047e0b83336edbc0dfdbd6cf4a02194f03c1fce0cb2d5786c068e8750a6f91ef"
+
+["conformance::CodecConformance<WithdrawalBody<Sha256Digest>>"]
+n_cases = 65536
+hash = "2a2fc913a5963de601565a169631face7b73f82ef37d48bb117005ae404fc913"
+
+["conformance::CodecConformance<WithdrawalId<Sha256Digest>>"]
+n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"

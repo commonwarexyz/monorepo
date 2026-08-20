@@ -3,6 +3,7 @@ members = [
     "actor",
     "bench",
     "broadcast",
+    "clearing",
     "codec",
     "codec/macros",
     "coding",
@@ -36,6 +37,7 @@ members = [
 
     # Fuzz builds
     "broadcast/fuzz",
+    "clearing/fuzz",
     "codec/fuzz",
     "coding/fuzz",
     "collector/fuzz",
@@ -116,6 +118,7 @@ colored = "3.1.1"
 commonware-actor = { version = "2026.7.0", path = "actor" }
 commonware-bench = { version = "2026.7.0", path = "bench" }
 commonware-broadcast = { version = "2026.7.0", path = "broadcast" }
+commonware-clearing = { version = "2026.7.0", path = "clearing", default-features = false }
 commonware-codec = { version = "2026.7.0", path = "codec", default-features = false }
 commonware-codec-macros = { version = "2026.7.0", path = "codec/macros" }
 commonware-coding = { version = "2026.7.0", path = "coding" }

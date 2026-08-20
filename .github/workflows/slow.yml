@@ -88,6 +88,11 @@ jobs:
           - package: commonware-cryptography-curve25519
             test_flags: ""
             lint_flags: ""
+          - package: commonware-clearing
+            test_flags: ""
+            lint_flags: ""
+            clearing_bench: blog-chain
+            clearing_profile: "0"
           - package: commonware-storage
             test_flags: "--features test-traits"
             lint_flags: "--cfg full_bench"
@@ -133,6 +138,9 @@ jobs:
       with:
         tool: just@1.43.0
     - name: Test benchmarks
+      env:
+        COMMONWARE_CLEARING_BENCH: ${{ matrix.clearing_bench || '' }}
+        COMMONWARE_CLEARING_PROFILE: ${{ matrix.clearing_profile || '' }}
       run: just partition=${{ matrix.partition || '1/1' }} test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
 
   Fuzz:
@@ -145,6 +153,7 @@ jobs:
           - fuzz_dir: broadcast/fuzz
           - fuzz_dir: codec/fuzz
           - fuzz_dir: coding/fuzz
+          - fuzz_dir: clearing/fuzz
           - fuzz_dir: collector/fuzz
           - fuzz_dir: consensus/fuzz
             partition: "1/4"

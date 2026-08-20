@@ -1,0 +1,68 @@
+#![cfg(feature = "arbitrary")]
+
+use commonware_clearing::bajillion::{
+    admission::{Committee, curve25519::Certificate},
+    boundary::{
+        DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalBatch, WithdrawalBody,
+        WithdrawalId,
+    },
+    challenge::{AccountLookup, Challenge, RangeLower, RowOpening, StateOpening},
+    commitment::{
+        MultiOpening, Opening, RangeOpening, RangeUpdate, SparseUpdate, VectorKind, VectorRoot,
+    },
+    credit::{CreditRoot, ShardHead, ShardLookup, ShardOpening, ShardSet},
+    payment::{Payment, PaymentContext, ReceiptBody, SendBody, SignedReceipt, SignedSend, TxId},
+    state::{AccountRow, AccountState, Prefix, StateLeaf},
+    transition::{
+        Assignment, BatchId, ChangeRange, Close, CloseLimits, Header, ProofSlice, StateBounds,
+    },
+};
+use commonware_codec::conformance::CodecConformance;
+use commonware_cryptography::{curve25519::VerifyingKey, sha256::Digest as Sha256Digest};
+
+commonware_conformance::conformance_tests! {
+    CodecConformance<Certificate> => 1024,
+    CodecConformance<Committee<VerifyingKey>> => 1024,
+    CodecConformance<DepositRecord<VerifyingKey>> => 1024,
+    CodecConformance<DepositBatch<VerifyingKey>> => 1024,
+    CodecConformance<WithdrawalId<Sha256Digest>>,
+    CodecConformance<WithdrawalBody<Sha256Digest>>,
+    CodecConformance<SignedWithdrawal<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<WithdrawalBatch<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<RowOpening<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<StateOpening<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<AccountLookup<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<RangeLower<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<Challenge<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<VectorKind>,
+    CodecConformance<VectorRoot<Sha256Digest>>,
+    CodecConformance<Opening<Sha256Digest>> => 1024,
+    CodecConformance<RangeOpening<Sha256Digest>> => 1024,
+    CodecConformance<RangeUpdate<Sha256Digest>> => 1024,
+    CodecConformance<MultiOpening<Sha256Digest>> => 1024,
+    CodecConformance<SparseUpdate<Sha256Digest>> => 1024,
+    CodecConformance<ShardHead<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<CreditRoot<Sha256Digest>>,
+    CodecConformance<ShardSet<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<ShardOpening<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<ShardLookup<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<PaymentContext<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<TxId<Sha256Digest>>,
+    CodecConformance<SendBody<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<SignedSend<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<ReceiptBody<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<SignedReceipt<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<Payment<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<AccountState>,
+    CodecConformance<StateLeaf<VerifyingKey>> => 1024,
+    CodecConformance<Prefix>,
+    CodecConformance<AccountRow<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<Assignment<Sha256Digest>>,
+    CodecConformance<BatchId<Sha256Digest>>,
+    CodecConformance<Header<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<CloseLimits>,
+    CodecConformance<ChangeRange<VerifyingKey, Sha256Digest>> => 256,
+    CodecConformance<StateBounds<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<ProofSlice<VerifyingKey, Sha256Digest>> => 256,
+    CodecConformance<Close<VerifyingKey, Sha256Digest>> => 256,
+}

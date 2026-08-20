@@ -53,6 +53,8 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
 
+    pub mod curve25519;
+
     #[cfg(any(test, feature = "fuzz"))]
     pub mod fuzz;
 
@@ -64,6 +66,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
+    use bytes::Bytes;
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
@@ -188,6 +191,20 @@ commonware_macros::stability_scope!(BETA {
             public_key: &Self::PublicKey,
             signature: &<Self::PublicKey as Verifier>::Signature,
         ) -> bool;
+
+        /// Append an owned message to the batch.
+        ///
+        /// The default implementation delegates to [`Self::add`]. Implementations that retain
+        /// messages until [`Self::verify`] may override this method to avoid copying the message.
+        fn add_owned(
+            &mut self,
+            namespace: &[u8],
+            message: Bytes,
+            public_key: &Self::PublicKey,
+            signature: &<Self::PublicKey as Verifier>::Signature,
+        ) -> bool {
+            self.add(namespace, &message, public_key, signature)
+        }
 
         /// Verify all items added to the batch.
         ///

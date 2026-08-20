@@ -22,6 +22,8 @@ workflows:
         # Only check normal dependencies.
         # Propagating to dev-dependencies leads to compilation issues.
         "--dep-kinds=normal:check,dev:ignore",
+        # Clearing uses only storage's runtime-independent BMT, so its std surface must not activate the storage runtime.
+        "--ignore-missing-propagate=commonware-clearing/std:commonware-storage/std",
         "--show-path",
         "--quiet",
       ]

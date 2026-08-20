@@ -13,3 +13,7 @@ hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
 ["commonware_cryptography_curve25519::signing::tests::conformance::CodecConformance<VerifyingKey>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+
+["commonware_cryptography_curve25519::signing::tests::conformance::CodecConformance<StrictVerifyingKey>"]
+n_cases = 1024
+hash = "6b4ed88501182f7718a58b999b820e6283adc05743c03b9a1a875d6505ca99dd"
