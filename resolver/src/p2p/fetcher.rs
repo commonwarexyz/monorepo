@@ -2109,8 +2109,8 @@ mod tests {
             }
             let score_peer1 = fetcher.participants.get(&peer1).unwrap();
 
-            // peer2 (one fast 5ms useful response from initial 100 → score 52) should be
-            // preferred over peer1 (five 10ms prompt misses → score 150).
+            // peer2 (one fast 5ms useful response from initial 100 -> score 52) should be
+            // preferred over peer1 (five 10ms prompt misses -> score 150).
             assert!(
                 score_peer2_after_useful < score_peer1,
                 "peer2 with useful response ({score_peer2_after_useful}ms) should outrank peer1 with repeated misses ({score_peer1}ms)"
