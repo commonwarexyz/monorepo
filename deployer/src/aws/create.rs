@@ -92,7 +92,7 @@ fn validate_storage_config(config: &Config) -> Result<(), Error> {
 
 /// Runs regional launch queues in parallel, with monitoring first in its region.
 #[boxed]
-async fn run_regional_launches<MF, F, M, T, E>(
+async fn run_launches<MF, F, M, T, E>(
     monitoring_region: String,
     monitoring: MF,
     launches: impl IntoIterator<Item = (String, F)>,
@@ -791,7 +791,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     );
 
     // Wait for all launches to complete (get instance IDs)
-    let (monitoring_instance_id, binary_launches) = run_regional_launches(
+    let (monitoring_instance_id, binary_launches) = run_launches(
         monitoring_region.clone(),
         monitoring_launch_future,
         binary_launch_futures,
@@ -1507,7 +1507,7 @@ fn grouped_subnets(
 #[cfg(test)]
 mod tests {
     use super::{
-        RegionResources, grouped_subnets, run_regional_launches, select_availability_zone_groups,
+        RegionResources, grouped_subnets, run_launches, select_availability_zone_groups,
         select_group_availability_zone, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
@@ -1597,7 +1597,7 @@ mod tests {
             })
         });
 
-        let (_, completed) = run_regional_launches(
+        let (_, completed) = run_launches(
             "monitoring".to_string(),
             async { Ok::<_, ()>(()) },
             launches,
@@ -1642,7 +1642,7 @@ mod tests {
             });
 
         let (monitoring, binaries) =
-            run_regional_launches("us-east-1".to_string(), monitoring, binaries)
+            run_launches("us-east-1".to_string(), monitoring, binaries)
                 .await
                 .expect("launches should succeed");
 
