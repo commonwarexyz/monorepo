@@ -15,10 +15,6 @@ pub(crate) mod mallory;
 #[cfg(feature = "mocks")]
 pub mod marshal;
 pub mod network;
-#[cfg(feature = "mocks")]
-pub mod ordered_broadcast;
-#[cfg(feature = "mocks")]
-pub mod ordered_broadcast_certificate_mock;
 pub mod simplex;
 pub(crate) mod simplex_audit;
 #[cfg(any(feature = "mocks", test))]
@@ -66,7 +62,7 @@ use commonware_runtime::{
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
 };
 use commonware_utils::{
-    FuzzRng, NZU16, NZU32, NZUsize,
+    FuzzRng, NZU16, NZU32, NZUsize, Probability,
     channel::mpsc::{self, Receiver},
     sequence::U64,
     sync::Once,
@@ -191,7 +187,7 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: 0.6,
+        success_rate: Probability!(0.6),
     };
     for (peer_idx, peer) in participants.iter().enumerate() {
         if peer_idx == victim_idx {
@@ -671,7 +667,7 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
     let link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     };
     link_peers(
         &mut oracle,
@@ -1682,7 +1678,7 @@ fn default_link() -> Link {
     Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     }
 }
 
@@ -3106,7 +3102,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             Action::Update(Link {
                 latency: Duration::from_millis(500),
                 jitter: Duration::from_millis(500),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             }),
             self.input.partition.set_partition(),
         )

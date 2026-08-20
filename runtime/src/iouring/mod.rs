@@ -399,6 +399,7 @@ impl Handle {
         offset: u64,
         len: usize,
         buf: IoBufMut,
+        cache: Cache,
     ) -> Result<IoBufMut, (IoBufMut, Error)> {
         assert!(len <= buf.capacity(), "read_at len exceeds buffer capacity");
         let (tx, rx) = oneshot::channel();
@@ -408,6 +409,7 @@ impl Handle {
             len,
             read: 0,
             buf,
+            cache,
             result: None,
             sender: tx,
         });
@@ -3108,6 +3110,7 @@ mod tests {
                 len: 8,
                 read: 0,
                 buf: IoBufMut::with_capacity(8),
+                cache: Cache::Enabled,
                 result: None,
                 sender: tx,
             }))

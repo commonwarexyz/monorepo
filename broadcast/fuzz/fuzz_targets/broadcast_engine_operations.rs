@@ -16,7 +16,8 @@ use commonware_runtime::{
     Buf, BufMut, Clock, IoBuf, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
-    FuzzRng, NZUsize, TestRng, channel::oneshot, futures::Pool, ordered::Set, vec::Bounded,
+    FuzzRng, NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, ordered::Set,
+    vec::Bounded,
 };
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
@@ -45,13 +46,13 @@ const MIN_PEERS: u64 = 1;
 const MAX_PEERS: u64 = 5;
 
 /// Minimum simulated network success rate, as a percentage.
-const MIN_NETWORK_SUCCESS_PERCENT: u8 = 30;
+const MIN_NETWORK_SUCCESS_PERCENT: u64 = 30;
 
 /// Maximum simulated network success rate, as a percentage.
-const MAX_NETWORK_SUCCESS_PERCENT: u8 = 100;
+const MAX_NETWORK_SUCCESS_PERCENT: u64 = 100;
 
 /// Scale factor for percentage values.
-const PERCENT_DENOMINATOR: f64 = 100.0;
+const PERCENT_DENOMINATOR: u64 = 100;
 
 /// Minimum simulated network latency in milliseconds.
 const MIN_NETWORK_LATENCY_MS: u64 = 1;
@@ -273,7 +274,7 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
 pub struct FuzzInput {
     raw_fuzz_bytes: Vec<u8>,
     peer_seeds: Vec<u64>,
-    network_success_rate: f64,
+    network_success_rate: Probability,
     network_latency_ms: u64,
     network_jitter_ms: u64,
     cache_size: usize,
@@ -293,9 +294,10 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         };
         let num_peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)?;
         let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
-        let network_success_rate =
-            u.int_in_range(MIN_NETWORK_SUCCESS_PERCENT..=MAX_NETWORK_SUCCESS_PERCENT)? as f64
-                / PERCENT_DENOMINATOR;
+        let network_success_rate = Probability!(
+            u.int_in_range(MIN_NETWORK_SUCCESS_PERCENT..=MAX_NETWORK_SUCCESS_PERCENT)?,
+            PERCENT_DENOMINATOR
+        );
         let network_latency_ms = u.int_in_range(MIN_NETWORK_LATENCY_MS..=MAX_NETWORK_LATENCY_MS)?;
         let network_jitter_ms = u.int_in_range(MIN_NETWORK_JITTER_MS..=MAX_NETWORK_JITTER_MS)?;
         let cache_size = u.int_in_range(MIN_CACHE_SIZE..=MAX_CACHE_SIZE)?;

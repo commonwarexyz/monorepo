@@ -20,7 +20,7 @@ use commonware_resolver::{
 use commonware_runtime::{
     Clock, Quota, Runner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{FuzzRng, NZUsize, ordered::Set, vec::NonEmptyVec};
+use commonware_utils::{FuzzRng, NZUsize, Probability, ordered::Set, vec::NonEmptyVec};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -45,7 +45,7 @@ const MAX_LINK_LATENCY_MS: u64 = 100;
 const MAX_LINK_JITTER_MS: u64 = 50;
 const MIN_SUCCESS_RATE_PERCENT: u8 = 0;
 const MAX_SUCCESS_RATE_PERCENT: u8 = 100;
-const PERCENT_DENOMINATOR: f64 = 100.0;
+const PERCENT_DENOMINATOR: u64 = 100;
 const MAX_NETWORK_SIZE: u32 = 1024 * 1024;
 const MIN_MAILBOX_SIZE: usize = 1;
 const MAX_MAILBOX_SIZE: usize = 128;
@@ -394,7 +394,7 @@ fn link(latency_ms: u64, jitter_ms: u64, success_rate_percent: u8) -> Link {
     Link {
         latency: Duration::from_millis(latency_ms),
         jitter: Duration::from_millis(jitter_ms),
-        success_rate: f64::from(success_rate_percent) / PERCENT_DENOMINATOR,
+        success_rate: Probability!(u64::from(success_rate_percent), PERCENT_DENOMINATOR),
     }
 }
 

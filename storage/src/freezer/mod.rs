@@ -288,7 +288,8 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+        Blob, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
+        deterministic,
     };
     use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
     use rand::{Rng, RngExt as _};
@@ -916,7 +917,7 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Read the first entry
-                let entry_data = blob.read_at(0, 24).await.unwrap();
+                let entry_data = blob.read_at(0, 24, ReadOptions::default()).await.unwrap();
                 let mut corrupted = entry_data.coalesce();
                 // Corrupt the CRC (last 4 bytes of the entry)
                 corrupted.as_mut()[20] ^= 0xFF;

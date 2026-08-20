@@ -226,13 +226,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "ordered_broadcast_cert_mock"
-path = "fuzz_targets/ordered_broadcast_cert_mock.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "aggregation_cert_mock"
 path = "fuzz_targets/aggregation_cert_mock.rs"
 test = false

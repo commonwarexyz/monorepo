@@ -12,7 +12,7 @@
 //! recoverable.
 
 use super::Error;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use futures::{Stream, StreamExt as _, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
@@ -191,11 +191,14 @@ pub trait Contiguous: Send + Sync {
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
-    /// `buffer` controls the replay byte budget for each chunk.
+    /// `buffer` controls the replay byte budget for each chunk. Every backing blob read from
+    /// sealed history uses `read_options`. Backing reads from the live writable tip instead use
+    /// [ReadOptions::DONT_CACHE] on page-cache misses because the cache retains the fetched pages.
     fn replay(
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
     > + Send;

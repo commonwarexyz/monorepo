@@ -65,7 +65,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::{Link, Oracle};
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::FuzzRng;
+use commonware_utils::{FuzzRng, Probability};
 use std::{collections::BTreeSet, time::Duration};
 
 /// View the byzantine node leads and alone notarizes. The round-robin elector
@@ -715,7 +715,7 @@ async fn apply_action<K: PublicKey, D: commonware_cryptography::Digest>(
             let link = Link {
                 latency: Duration::from_millis(latency_ms.min(MAX_LATENCY_MILLIS).into()),
                 jitter: LINK.jitter,
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             topology.set(from.index(), to.index(), link).await;
         }

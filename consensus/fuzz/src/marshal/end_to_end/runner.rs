@@ -87,7 +87,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
+use commonware_utils::{FuzzRng, NZUsize, Probability, sync::Mutex};
 use std::{
     fmt::{self, Write as _},
     num::NonZeroUsize,
@@ -150,7 +150,7 @@ async fn apply_degraded_network<P: Simplex>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: 0.6,
+        success_rate: Probability!(0.6),
     };
     for peer in participants
         .iter()

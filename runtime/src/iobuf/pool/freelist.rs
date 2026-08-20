@@ -69,7 +69,7 @@
 //! outstanding buffer that never returns leaks. Buffer-pool leases keep the
 //! owning size class and this freelist alive until valid returns complete.
 
-use super::owner::{PooledBuffer, PooledOwner};
+use crate::iobuf::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,

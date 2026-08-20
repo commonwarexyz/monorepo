@@ -85,6 +85,9 @@ jobs:
           - package: commonware-cryptography
             test_flags: ""
             lint_flags: ""
+          - package: commonware-cryptography-curve25519
+            test_flags: ""
+            lint_flags: ""
           - package: commonware-storage
             test_flags: "--features test-traits"
             lint_flags: "--cfg full_bench"
@@ -155,6 +158,7 @@ jobs:
             partition: "1/2"
           - fuzz_dir: cryptography/fuzz
             partition: "2/2"
+          - fuzz_dir: cryptography/curve25519/fuzz
           - fuzz_dir: math/fuzz
           - fuzz_dir: p2p/fuzz
           - fuzz_dir: runtime/fuzz
