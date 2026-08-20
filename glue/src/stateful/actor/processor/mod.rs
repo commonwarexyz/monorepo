@@ -83,7 +83,7 @@ struct ReplayFlight {
 pub(in crate::stateful::actor) enum VerificationResult {
     /// A verdict to return to the caller.
     Decided(bool),
-    /// The caller left, so there is nothing left to answer.
+    /// The request future was dropped, so there is nothing left to answer.
     Cancelled,
 }
 
@@ -156,10 +156,7 @@ where
     compatible
 }
 
-/// Read capability and speculative state, shared by every verification job.
-///
-/// Deliberately carries no authority to mutate the database set. Jobs holding
-/// one are therefore `'static` and can outlive any number of applies.
+/// Readers and speculative state shared by every verification job.
 struct Execution<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -201,12 +198,6 @@ impl<D: Copy + Ord> Default for ReplayFlights<D> {
 }
 
 impl<D: Copy + Ord> ReplayFlights<D> {
-    /// Whether no replay is in flight.
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.entries.lock().is_empty()
-    }
-
     fn waiter(&self, digest: D, flight: &mut ReplayFlight) -> ReplayWaiter<D> {
         let (sender, completion) = oneshot::channel();
         let waiters = &mut flight.waiters;
@@ -574,23 +565,6 @@ where
     }
 
     #[cfg(test)]
-    fn readers(&self) -> ReadersOf<A::Databases, E> {
-        self.execution.readers.clone()
-    }
-
-    #[cfg(test)]
-    fn cache_pending(
-        &self,
-        digest: PendingDigest<A, E>,
-        parent: PendingDigest<A, E>,
-        round: Round,
-        merkleized: PendingBatches<A, E>,
-    ) -> bool {
-        self.execution
-            .cache_pending(digest, parent, round, merkleized)
-    }
-
-    #[cfg(test)]
     fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
         self.execution.last_processed()
     }
@@ -675,15 +649,12 @@ where
         // Marshal finalization is ordered. A pending miss means we can replay
         // this block on top of finalized state.
         //
-        // The entry stays in the pending map until the retention sweep below.
-        // Verification jobs run throughout this call, and one that forks from
-        // this block must find it rather than rebuild it on top of itself.
-        //
-        // Safety contract. Replayed `Application::apply` output must match the
-        // block commitments previously enforced by `Application::verify`.
-        // Every path from here must reach `advance_to_finalized` (which closes
-        // the window) or take the actor down, because a stranded window parks every
-        // later verification forever.
+        // The entry stays in the pending map until the retention sweep below,
+        // so a job forking from this block finds it instead of rebuilding it
+        // on top of itself. Replayed `apply` output must match the block's
+        // commitments, and every path from here must reach
+        // `advance_to_finalized` or take the actor down -- a stranded window
+        // parks every later verification forever.
         self.execution.state.lock().finalizing = true;
         let batch = match self.execution.pending_batch(&digest) {
             Some(merkleized) => merkleized,
@@ -823,9 +794,8 @@ where
                     );
                     return;
                 }
-                // Unreachable, since the actor admits no finalization while a
-                // proposal runs (it becomes the FIFO barrier), so nothing can
-                // go stale. Decline loudly rather than hide a broken barrier.
+                // Unreachable, since the actor admits no finalization while
+                // a proposal runs (it becomes the FIFO barrier).
                 Err(PrepareBatchesError::Stale) => {
                     warn!(?parent_digest, "proposal went stale during prepare_batches");
                     debug_assert!(false, "no finalization can interleave a proposal");
@@ -930,9 +900,8 @@ where
             return true;
         }
 
-        // Verification runs across finalizations, so a verdict can land against
-        // a newer anchor and pending set than the one it started from. This is
-        // where such a result is refused because its branch is no longer reachable.
+        // A verdict can land after the anchor moved past its branch. This is
+        // where it is refused.
         let compatible = round > state.last_processed.round
             && (parent == state.last_processed.digest || state.pending.contains_key(&parent));
         if !compatible {
@@ -1003,10 +972,9 @@ where
 
     /// Wait until no finalization is mid-flight and the anchor differs from `seen`.
     ///
-    /// Returns immediately when that already holds. Used by stale verification
-    /// attempts, whose staleness proves a finalization opened its window, and that
-    /// finalization either moves the anchor or takes the actor down, so parking
-    /// here (instead of retrying immediately) cannot outlive it.
+    /// Returns immediately when that already holds. A stale attempt parks
+    /// here until the in-flight finalization moves the anchor or takes the
+    /// actor down.
     async fn anchor_past(&self, seen: &Anchor<PendingDigest<A, E>>) {
         loop {
             let waiter = {
@@ -1370,9 +1338,37 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Applied, PrepareBatchesError, Processor, Prune, Pruning, ReplayClaim, ReplayFlights,
-        fetch_ancestor,
+        Applied, Clock, Metrics, PendingBatches, PendingDigest, PrepareBatchesError, Processor,
+        Prune, Pruning, ReplayClaim, ReplayFlights, Rng, Spawner, fetch_ancestor,
     };
+
+    impl<D: Copy + Ord> ReplayFlights<D> {
+        /// Whether no replay is in flight.
+        fn is_empty(&self) -> bool {
+            self.entries.lock().is_empty()
+        }
+    }
+
+    impl<E, A> Processor<E, A>
+    where
+        E: Rng + Spawner + Metrics + Clock,
+        A: Application<E>,
+    {
+        fn readers(&self) -> ReadersOf<A::Databases, E> {
+            self.execution.readers.clone()
+        }
+
+        fn cache_pending(
+            &self,
+            digest: PendingDigest<A, E>,
+            parent: PendingDigest<A, E>,
+            round: Round,
+            merkleized: PendingBatches<A, E>,
+        ) -> bool {
+            self.execution
+                .cache_pending(digest, parent, round, merkleized)
+        }
+    }
     use crate::stateful::{
         Application, ExecutionError, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
@@ -2310,10 +2306,9 @@ mod tests {
         });
     }
 
-    /// A verification job holds an [`Execution`] and keeps running while a
-    /// block is applied. The block being finalized must stay reachable as a
-    /// parent for that whole window, otherwise a job that forks from it
-    /// mid-apply rebuilds it on top of itself and rejects a valid descendant.
+    /// The block being finalized stays reachable as a parent while it
+    /// applies, so a job forking from it mid-apply does not rebuild it on top
+    /// of itself.
     #[test]
     fn finalized_block_stays_forkable_while_it_applies() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {

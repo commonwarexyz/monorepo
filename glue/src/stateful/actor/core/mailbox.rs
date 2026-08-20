@@ -229,9 +229,8 @@ where
         });
         match receiver.await {
             Ok(valid) => valid,
-            // The actor exited or discarded the request while shutting down.
-            // Never fabricate a verdict. Park until the caller loses interest
-            // and drops this future.
+            // The actor exited without answering. Never fabricate a verdict.
+            // Park until this future is dropped.
             Err(_) => std::future::pending().await,
         }
     }

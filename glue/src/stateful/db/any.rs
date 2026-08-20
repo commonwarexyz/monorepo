@@ -2,9 +2,7 @@
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
 //! read-through to applied state. The wrapper types here hold a [`Reader`]
-//! to their database and take read access through it for each such call, so a batch stays usable
-//! across applies of compatible batches and never delays a mutation by more
-//! than one storage call.
+//! to their database and take a read guard per such call.
 
 use crate::stateful::db::{
     LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,

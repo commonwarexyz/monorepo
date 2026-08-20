@@ -66,9 +66,6 @@ where
 }
 
 /// Executes one independently-polled verification request.
-///
-/// Carries only read capability and speculative state, so a job outlives any
-/// number of applies. Its batch operations pause while one is running.
 pub(in crate::stateful::actor) struct Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -139,13 +136,10 @@ where
 
         // Each iteration classifies the candidate against the canonical chain,
         // then executes it. A stale or invalid-looking attempt means a
-        // finalization landed while this one ran, and re-classifying answers
-        // correctly whether the finalized block was the candidate itself, an
-        // ancestor, or a competitor. The loop is bounded because each retry
-        // consumes an anchor move, and classification decides outright once the
-        // anchor reaches the candidate's height. Each attempt consumes its own
-        // ancestry clone, so a retry starts from the same position after the
-        // candidate.
+        // finalization landed mid-attempt, and re-classifying answers correctly
+        // whether the finalized block was the candidate, an ancestor, or a
+        // competitor. Each retry consumes an anchor move, so the loop is
+        // bounded.
         loop {
             let seen = self.execution.last_processed();
 
@@ -279,7 +273,7 @@ where
                 );
 
                 // Incomplete ancestry is not an invalid verdict. Keep the job
-                // parked until its caller leaves.
+                // parked until its request future is dropped.
                 verification.cancelled().await;
                 ProcessedBlock::Cancelled
             }
@@ -311,8 +305,8 @@ where
                     "verification request waiting on incomplete parent ancestry"
                 );
 
-                // As with incomplete candidate ancestry, only the caller
-                // leaving should release this pending request.
+                // As with incomplete candidate ancestry, only dropping the
+                // request future should release this pending request.
                 verification.cancelled().await;
                 return Err(PrepareFailure::Cancelled);
             }

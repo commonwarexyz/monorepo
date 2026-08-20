@@ -363,10 +363,10 @@ where
 ///
 /// If the databases are found to be inconsistent with the marshal floor, this
 /// function will attempt to repair by rewinding the databases which are ahead. If the
-/// databases are entirely inconsistent, this function will panic. That covers a crash
-/// between marshal installing a sync floor and the sync metadata recording it, so the
-/// operator's sync request must persist across such a restart so startup re-enters the
-/// sync path instead of asking a fresh database set to reach the installed floor.
+/// databases are entirely inconsistent, this function panics. That covers a crash
+/// between marshal installing a sync floor and the sync metadata recording it. The
+/// operator's sync request must survive that restart, so startup re-enters the sync
+/// path instead of asking a fresh database set to reach the installed floor.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,

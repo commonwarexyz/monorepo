@@ -1,33 +1,13 @@
-//! Separates read access to a live database from the authority to mutate it.
+//! Splits access to a live database: a unique [`Writer`] runs consuming
+//! mutations, and cloneable [`Reader`]s hand out short read guards, one per
+//! storage call.
 //!
-//! [`split`] wraps a database and returns two capabilities over it. The
-//! [`Writer`] is unique and runs consuming mutations. The [`Reader`] is
-//! freely cloned into batches, and hands out short read guards, each covering
-//! exactly one storage call.
-//!
-//! Neither value owns the database. The cell does, and both capabilities keep
-//! it alive. What distinguishes them is what they permit.
-//!
-//! The cell is a tokio read-write lock, whose documented policy is fair and
-//! write-preferring, so a waiting mutation blocks new read guards and cannot be
-//! starved, while guards already granted finish first. The write side covers
-//! the whole take-and-restore of a mutation, so a reader can never observe the
-//! database missing. A mutation that is interrupted mid-flight leaves the cell
-//! poisoned, and the only thing that interrupts one here is the owning task
-//! being torn down, so later reads park forever and are dropped along with
-//! the tasks holding them.
-//!
-//! A read guard guarantees the database is present and unchanging for one call,
-//! not that the caller's batch is still current. A batch operation holding one
-//! can still refuse because a competing batch was applied (see
-//! [`commonware_storage::qmdb::Error::StaleRead`]).
-//!
-//! Two rules keep callers out of trouble. The lock is not reentrant, so never
-//! hold a read guard while acquiring another. On the same cell a mutation queued
-//! between the two deadlocks both, and across cells the same habit invites
-//! order-inversion deadlocks. And a [`Writer`] should outlive the
-//! readers from the same cell. Dropping the writer closes the cell, and later
-//! reads park instead of answering from a database that can never advance.
+//! The cell is a fair, write-preferring read-write lock: a waiting mutation
+//! blocks new read guards but cannot be starved, and guards already granted
+//! finish first. A guard proves the database is present for one call, not
+//! that the caller's batch is still current (see
+//! [`commonware_storage::qmdb::Error::StaleRead`]). The lock is not
+//! reentrant: never hold two read guards at once.
 
 use commonware_utils::sync::{AsyncRwLockReadGuard, TracedAsyncRwLock};
 use futures::future;
@@ -48,9 +28,7 @@ enum State<T> {
 
 struct Cell<T> {
     state: TracedAsyncRwLock<State<T>>,
-    /// Latched when the writer drops. A one-way flag, so a relaxed load
-    /// suffices, and a read guard that races the drop is indistinguishable
-    /// from one granted a moment earlier.
+    /// Set when the writer drops. One-way, so a relaxed load suffices.
     closed: AtomicBool,
 }
 
@@ -58,8 +36,7 @@ impl<T> Cell<T> {
     async fn read(&self) -> ReadGuard<'_, T> {
         let guard = self.state.read().await;
         if self.closed.load(Ordering::Relaxed) {
-            // The writer is gone, so the database can never advance. Serving
-            // would hand out frozen state. Park like the poisoned case.
+            // The writer is gone. Park rather than serve frozen state.
             drop(guard);
             tracing::error!("database cell closed, parking reader");
             return future::pending().await;
@@ -70,9 +47,8 @@ impl<T> Cell<T> {
         }) {
             Ok(guard) => ReadGuard(guard),
             Err(guard) => {
-                // Poisoning is only reachable during writer teardown. Park until
-                // this task is dropped with the rest of the actor, and the trace
-                // separates that from a bug if the process outlives the cell.
+                // Poisoning only happens during actor teardown. Park until
+                // this task is dropped with it.
                 drop(guard);
                 tracing::error!("database cell poisoned, parking reader");
                 future::pending().await
@@ -81,20 +57,17 @@ impl<T> Cell<T> {
     }
 }
 
-/// Split access to `db` into the sole mutation authority and a cloneable
-/// read capability.
+/// Split `db` into its unique [`Writer`] and a cloneable [`Reader`].
 pub fn split<T>(db: T) -> (Writer<T>, Reader<T>) {
     let writer = Writer::new(db);
     let reader = writer.reader();
     (writer, reader)
 }
 
-/// The unique capability to mutate the database behind a cell.
+/// The unique handle that mutates the database behind a cell.
 ///
-/// This is the only value with [`mutate`](Self::mutate), and it is deliberately
-/// not [`Clone`], so at most one exists per cell. It does not own the database.
-/// Dropping it closes the cell, since the database can never advance again, and
-/// later reads park instead of serving frozen state.
+/// Not [`Clone`], so at most one exists. Dropping it closes the cell, and
+/// later reads park rather than serve frozen state.
 pub struct Writer<T>(Arc<Cell<T>>);
 
 impl<T> Drop for Writer<T> {
@@ -104,7 +77,7 @@ impl<T> Drop for Writer<T> {
 }
 
 impl<T> Writer<T> {
-    /// Wrap `db` in a fresh cell, returning its sole mutation authority.
+    /// Put `db` in a fresh cell and return its writer.
     pub fn new(db: T) -> Self {
         Self(Arc::new(Cell {
             state: TracedAsyncRwLock::new("database_cell", State::Live(db)),
@@ -112,24 +85,16 @@ impl<T> Writer<T> {
         }))
     }
 
-    /// A read capability over the writer's cell.
+    /// A reader over the writer's cell.
     pub fn reader(&self) -> Reader<T> {
         Reader(self.0.clone())
     }
 
-    /// Run one consuming mutation to completion, returning the capability.
+    /// Run one consuming mutation to completion, returning the writer.
     ///
-    /// New read guards queue behind the mutation and guards already granted
-    /// finish first, so this waits at most one storage call before starting.
-    ///
-    /// Consume/produce at both levels. `mutation` takes the database by value and
-    /// must produce it back, the contract mutable storage operations already use.
-    /// This method does the same with the capability. An interrupted mutation
-    /// takes the writer with it, and if the database was already taken out it
-    /// also poisons the cell, so a second mutation of a poisoned cell is
-    /// unreachable rather than merely documented. Reads taken afterward park
-    /// forever. (Dropped while still queued for the lock, the writer's own drop
-    /// closes the cell the same way.)
+    /// Waits at most one storage call to start, since new read guards queue
+    /// behind it. Dropping the future mid-flight poisons the cell, and later
+    /// reads park.
     pub async fn mutate<F, Fut, R>(self, mutation: F) -> (Self, R)
     where
         F: FnOnce(T) -> Fut,
@@ -146,7 +111,7 @@ impl<T> Writer<T> {
     }
 }
 
-/// A cloneable read capability over the database behind a cell.
+/// A cloneable read handle over the database behind a cell.
 pub struct Reader<T>(Arc<Cell<T>>);
 
 impl<T> Clone for Reader<T> {
@@ -196,7 +161,6 @@ mod tests {
                     loop {
                         {
                             let guard = reader.read().await;
-                            // Every observation is a full, live value.
                             assert!(*guard == 0 || *guard == 1);
                             if *guard == 1 {
                                 return;
@@ -255,8 +219,7 @@ mod tests {
         });
     }
 
-    /// Dropping the writer closes the cell. Later reads park instead of
-    /// answering from a database that can never advance.
+    /// Dropping the writer closes the cell, and later reads park.
     #[test]
     fn dropped_writer_parks_readers() {
         deterministic::Runner::default().start(|_context| async move {
@@ -273,9 +236,8 @@ mod tests {
         });
     }
 
-    /// Dropping a mutation mid-flight poisons the cell, and takes the writer
-    /// with it. Later reads park forever instead of observing missing state.
-    /// A second mutation is unrepresentable, so there is nothing to assert.
+    /// Dropping a mutation mid-flight poisons the cell, and later reads park.
+    /// The type rules out a second mutation, so there is nothing to assert.
     #[test]
     fn interrupted_mutation_poisons() {
         deterministic::Runner::default().start(|_context| async move {

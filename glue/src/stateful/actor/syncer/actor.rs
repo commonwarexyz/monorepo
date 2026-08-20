@@ -121,9 +121,8 @@ where
     }
 
     pub async fn run(mut self) {
-        // Everything before the select loop runs outside shutdown handling, so a
-        // stop during this await tears the task down crash-style, which the
-        // durable InProgress metadata makes recoverable.
+        // A stop during this await tears the task down as a crash would.
+        // The durable InProgress metadata makes that recoverable.
         let (marshal, floor) = &self.marshal;
         let resolved_floor =
             resolve_state_sync_floor::<E, A, S, V>(marshal, *floor, &self.finalization).await;
@@ -716,12 +715,13 @@ mod tests {
         });
     }
 
-    /// A tip update stranded in the ring buffer by sync completion must resolve through the
-    /// caller's retry with the completed artifact, not wedge its observation forever.
+    /// A tip update stranded in the ring buffer by sync completion resolves
+    /// through the caller's retry with the completed artifact instead of
+    /// parking its observation forever.
     #[test]
     fn stranded_tip_update_resolves_to_artifact() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-            let fixture = scheme_mocks::fixture(&mut context, b"syncer-wedge", 1);
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-stranded-update", 1);
             let block = TestBlock::new(0, 0);
             let finalization = fixtures::finalization(&fixture, 0, Sha256::fill(0));
             let MarshalFixture {
@@ -730,7 +730,7 @@ mod tests {
                 guards: _guards,
             } = fixtures::marshal_fixture(
                 context.child("marshal"),
-                "syncer-wedge",
+                "syncer-stranded-update",
                 fixture.schemes[0].clone(),
                 Some((&block, finalization.clone())),
                 NZUsize!(1),

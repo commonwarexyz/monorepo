@@ -75,8 +75,8 @@ mod single_db_app;
 
 const NUM_VALIDATORS: u32 = 5;
 
-/// Storage errors never masquerade as shutdown. Only a refused stale read maps
-/// to Stale, and every other storage failure is fatal.
+/// Only a refused stale read maps to Stale. Every other storage failure is
+/// fatal.
 #[test]
 fn storage_errors_map_to_fatal() {
     use commonware_runtime::Error as RuntimeError;

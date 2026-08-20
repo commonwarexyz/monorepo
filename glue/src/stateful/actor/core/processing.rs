@@ -1,25 +1,17 @@
 //! The post-sync processing loop of the stateful actor.
 //!
 //! The loop owns the database set and is the only thing that mutates it.
-//! Verification jobs hold readers instead, so nothing short of actor shutdown
-//! cancels one. A job that is mid-read when a finalized block arrives finishes
-//! that read, the
-//! apply runs, and the job continues against the state it installs. A job on
-//! the losing side of that apply is refused at its next batch operation
+//! Verification jobs hold readers, so an apply never cancels one: a job
+//! mid-read finishes that read and continues against the new state. A job on
+//! the losing side of the apply is refused at its next batch operation
 //! ([`ExecutionError::Stale`](crate::stateful::ExecutionError::Stale)) and
 //! answered from the canonical chain.
 //!
-//! Each finalized block is applied to the databases, its flush deferred to a
-//! pool, and a snapshot of the applied state published for serving as soon as
-//! the apply completes. Served state may run ahead of disk, which is safe
-//! because peers verify what they fetch against a finalized root. The block is
-//! acknowledged to marshal only once its flush is durable, so marshal's floor
-//! never gets ahead of disk.
-//!
-//! Pruning is maintenance, run only while the mailbox is idle. A prune waits
-//! until the pruned range is durable, prunes, and publishes fresh snapshots
-//! right away, since the served snapshots pin the pruned storage (see
-//! [`Publisher`]).
+//! Each finalized block is applied, its flush deferred to a pool, and its
+//! snapshots published at apply (see [`Publisher`]). The block is
+//! acknowledged to marshal only once its flush is durable. Pruning runs
+//! while the mailbox is idle, waits until the pruned range is durable, and
+//! publishes fresh snapshots right away.
 
 use crate::stateful::{
     Application, Input,
@@ -142,8 +134,7 @@ where
             }
 
             // Publish completed verdicts before admitting another message, so
-            // continuous mailbox traffic cannot starve them under the biased
-            // `select!`.
+            // mailbox traffic cannot starve them.
             verifications.complete_ready();
 
             // A message deferred by an active proposal is the FIFO barrier
@@ -314,13 +305,10 @@ where
                         continue;
                     }
 
-                    // The apply owns mutation. Live verification jobs pause at
-                    // their next batch operation and resume afterward, so they
-                    // keep being polled throughout. The stop signal covers the
-                    // await: an application parked mid-apply cannot wedge
-                    // shutdown, and exiting just drops un-applied batches. The
-                    // block stays unacknowledged, and marshal redelivers it
-                    // after a restart.
+                    // Verification jobs keep running during the apply,
+                    // pausing at their next batch read. Exiting on stop drops
+                    // the un-applied batches, and marshal redelivers the
+                    // unacknowledged block after restart.
                     let applied;
                     select! {
                         _ = &mut shutdown => {
@@ -1020,9 +1008,7 @@ mod tests {
     }
 
     /// A stale attempt whose candidate is still above the new anchor re-executes
-    /// against the post-finalization state and completes with a verdict. (The
-    /// staleness is injected through the mock, while the storage-refused shape is
-    /// pinned by `fork_refuses_inside_the_finalize_window`.)
+    /// against the post-finalization state and completes with a verdict.
     #[test]
     fn stale_verification_reexecutes_and_answers_true() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -2045,9 +2031,7 @@ mod tests {
     }
 
     /// A valid descendant whose parent replay crosses the parent's own
-    /// finalization is retried against the new anchor, not answered false. The
-    /// interrupted attempt resolves as stale or invalid ancestry, and either way
-    /// the verifier re-runs and forks the candidate from applied state.
+    /// finalization is retried against the new anchor, not answered false.
     #[test]
     fn parent_finalized_during_replay_retries_and_answers_true() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -2108,9 +2092,9 @@ mod tests {
             assert!(poll!(&mut verify).is_pending());
             apply_started.await.expect("parent replay should start");
 
-            // The PARENT finalizes while the replay is parked, moving the anchor
-            // past the walk this attempt started from. The candidate remains a
-            // valid, unfinalized descendant of the new anchor.
+            // The parent finalizes while the replay is parked, moving the
+            // anchor past the walk this attempt started from. The candidate
+            // remains a valid, unfinalized descendant of the new anchor.
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(parent), acknowledgement));
             waiter
@@ -3166,9 +3150,8 @@ mod tests {
         (Mailbox::new(sender), started, marshal.guards, actor)
     }
 
-    /// The stop signal interrupting a finalize replay parked in the application
-    /// exits the actor loop instead of wedging it. The block stays
-    /// unacknowledged so marshal redelivers it after a restart.
+    /// A stop mid-replay exits the actor loop. The block stays unacknowledged
+    /// so marshal redelivers it after a restart.
     #[test]
     fn shutdown_interrupts_a_parked_finalize() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -3204,8 +3187,8 @@ mod tests {
         });
     }
 
-    /// A verification still in flight at shutdown never resolves for the
-    /// caller and never panics it, before or after the actor exits.
+    /// A verification in flight at shutdown never resolves for its caller,
+    /// before or after the actor exits.
     #[test]
     fn verify_caller_parks_across_shutdown() {
         deterministic::Runner::default().start(|context| async move {

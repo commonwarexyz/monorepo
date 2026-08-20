@@ -18,25 +18,10 @@
 //!
 //! # Read access and mutation
 //!
-//! Each database is split ([`split`]) into two capabilities over one shared
-//! cell. The set holds the only [`Writer`], which is not [`Clone`], so
-//! mutation is uniquely permitted. Batches hold a [`Reader`], which is freely
-//! cloned and grants a [`ReadGuard`] covering exactly one storage call.
-//!
-//! Because a read guard never spans application code, a mutation waits at most one
-//! storage call to start, and no mutation ever cancels work holding a reader, so it
-//! pauses at its next read and resumes once the mutation completes. A mutation
-//! that is interrupted leaves the cell poisoned, which is reachable only while
-//! the mutating task is being torn down.
-//!
-//! Two invariants keep this sound. A batch handed to [`ManagedDb::finalize`]
-//! must not read through its own reader, because that call runs while the write
-//! side is held. And a [`Writer`] should outlive the readers from the same
-//! cell. Dropping the writer closes the cell, and later reads park instead of
-//! answering from a database that can never advance. The set holds the
-//! [`Writer`]; readers live in batches, in verification jobs, and in the
-//! [`Application::finalized`](crate::stateful::Application::finalized) hook,
-//! which may keep one past the actor's exit, where its reads park.
+//! Each database is split ([`split`]) into the set's sole [`Writer`] and
+//! cloneable [`Reader`]s. Batches hold a reader and take a [`ReadGuard`] per
+//! storage call. A batch handed to [`ManagedDb::finalize`] must not read
+//! through its own reader, because that call holds the write side.
 //!
 //! # State Sync
 //!
@@ -142,8 +127,7 @@ pub use snapshot::{Publisher, Subscriber};
 /// Concrete types provide key-value operations (`get`, `write`, `set`,
 /// `append`, etc.) as inherent methods; the generic wrapper only needs
 /// [`merkleize`](Self::merkleize). Batches carry a [`Reader`] to the
-/// database they were created from, so every operation reads the right
-/// database and no operation can delay a mutation by more than one call.
+/// database they were created from.
 pub trait Unmerkleized: Sized + Send {
     /// The merkleized batch produced by [`merkleize`](Self::merkleize).
     type Merkleized: Merkleized;
@@ -197,8 +181,7 @@ pub trait Merkleized: Clone + Sized + Send + Sync {
 /// Mutating methods take the database by value and return it on success. If a mutating
 /// method returns an error, or its future is dropped before it finishes, the database is
 /// gone: state that was not yet durable is discarded, but everything already on disk stays
-/// recoverable. The cell is left poisoned, so later reads park
-/// rather than observe a database that is missing.
+/// recoverable. The cell is left poisoned and later reads park.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
     type Unmerkleized: Unmerkleized<Merkleized = Self::Merkleized>;

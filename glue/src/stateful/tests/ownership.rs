@@ -1,4 +1,4 @@
-//! Causal ownership tests for the by-value database set. Readers and the writer
+//! Ownership tests for the by-value database set. Readers and the writer
 //! share nothing that can block either side.
 //!
 //! - a parked flush holds back neither the writer nor publication

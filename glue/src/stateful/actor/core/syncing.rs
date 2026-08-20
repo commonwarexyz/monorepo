@@ -362,9 +362,8 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    // The stop signal covers the apply await, so an application
-                    // parked mid-apply cannot wedge shutdown. The block stays
-                    // unacknowledged, and marshal redelivers it after a restart.
+                    // Exiting on stop leaves the block unacknowledged, and
+                    // marshal redelivers it after a restart.
                     let applied;
                     select! {
                         _ = &mut shutdown => {

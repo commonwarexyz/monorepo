@@ -118,13 +118,11 @@ mod tests;
 /// each case means for the block being executed.
 #[derive(Debug, Error)]
 pub enum ExecutionError {
-    /// Applied state left the executing block's branch because a competing block was
-    /// finalized mid-execution and the batches refused their next read. The wrapper
-    /// re-checks the block against the new canonical state.
+    /// A competing finalization invalidated the batch's reads mid-execution.
+    /// The wrapper re-checks the block against the new canonical state.
     #[error("stale execution: a competing block was finalized")]
     Stale,
-    /// Any other storage failure. Storage errors are unrecoverable, so the
-    /// wrapper panics on this everywhere.
+    /// Any other storage failure. The wrapper panics.
     #[error("storage failure: {0}")]
     Fatal(String),
 }
@@ -301,14 +299,10 @@ where
     /// batch operation running when a finalized block is applied waits for that
     /// apply and then continues. Actor shutdown drops it with everything else.
     ///
-    /// `batches` is a branch-scoped view, not a historical snapshot. Retained
-    /// ancestor overlays preserve same-branch state, while unresolved reads fall
-    /// through to the batch's own database. Once a block from a competing branch
-    /// is finalized, every batch operation refuses with a stale error instead of
-    /// answering across branches. Implementations propagate storage errors with
-    /// `?` as [`ExecutionError`] and never interpret them. On
-    /// [`ExecutionError::Stale`] the wrapper re-checks the block against the new
-    /// canonical state and retries or answers from there.
+    /// Once a block from a competing branch is finalized, every batch
+    /// operation refuses with [`ExecutionError::Stale`]. The wrapper then
+    /// re-checks the block against the new canonical state and retries or
+    /// answers from it.
     fn verify(
         &mut self,
         context: (E, Self::Context),
