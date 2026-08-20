@@ -98,9 +98,9 @@ where
     }
 
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
-        // Acquire an independent cursor for this active attempt. Canceled callers cannot provide
+        // Upgrade to an independent cursor for this active attempt. Canceled callers cannot provide
         // one, while queued requests remain non-owning.
-        let Some(ancestry) = request.ancestry.acquire() else {
+        let Some(ancestry) = request.ancestry.upgrade() else {
             return;
         };
 

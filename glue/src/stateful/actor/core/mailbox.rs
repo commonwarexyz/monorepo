@@ -45,10 +45,10 @@ impl<B: Block> WeakAncestry<B> {
         (owner, reference)
     }
 
-    /// Acquires an independent cursor while the caller still owns the ancestry.
+    /// Upgrades to an independent cursor while the caller still owns the ancestry.
     ///
     /// Returns `None` once caller cancellation releases the strong owner.
-    pub(in crate::stateful::actor) fn acquire(&self) -> Option<BoxedAncestry<B>> {
+    pub(in crate::stateful::actor) fn upgrade(&self) -> Option<BoxedAncestry<B>> {
         self.0.upgrade().map(|ancestry| ancestry.lock().clone())
     }
 }
