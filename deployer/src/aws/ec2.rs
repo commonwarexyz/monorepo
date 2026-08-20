@@ -30,9 +30,9 @@ use tokio::time::sleep;
 use tracing::{debug, warn};
 
 #[cfg(not(test))]
-const CAPACITY_RETRY_INTERVAL: Duration = RETRY_INTERVAL;
+const LAUNCH_RETRY_INTERVAL: Duration = RETRY_INTERVAL;
 #[cfg(test)]
-const CAPACITY_RETRY_INTERVAL: Duration = Duration::ZERO;
+const LAUNCH_RETRY_INTERVAL: Duration = Duration::ZERO;
 
 type LaunchSdkError = SdkError<RunInstancesError>;
 
@@ -563,6 +563,8 @@ async fn try_launch_instances(
         ebs = ebs.throughput(storage_throughput);
     }
 
+    // Send one request because `launch_instances` owns subnet selection, retry classification,
+    // and retry cadence.
     let resp = client
         .run_instances()
         .image_id(ami_id)
@@ -594,8 +596,6 @@ async fn try_launch_instances(
                 .ebs(ebs.build())
                 .build(),
         )
-        // Subnet selection and retry policy are owned by `launch_instances`. An SDK retry would
-        // repeat this same subnet before that policy can advance to another availability zone.
         .customize()
         .config_override(aws_sdk_ec2::config::Builder::new().retry_config(RetryConfig::disabled()))
         .send()
@@ -713,7 +713,6 @@ pub async fn launch_instances(
 
             // A probe owns one client token across ambiguous retries. Moving to another subnet
             // changes the request parameters and starts a new probe with a new token.
-            let mut attempt = 0u32;
             let client_token = uuid::Uuid::new_v4().to_string();
             loop {
                 match try_launch_instances(
@@ -764,13 +763,10 @@ pub async fn launch_instances(
                     Err(e) => {
                         debug!(
                             name = name,
-                            attempt = attempt + 1,
                             error = %e,
                             "launch_instances failed, retrying"
                         );
-                        attempt = attempt.saturating_add(1);
-                        let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
-                        sleep(backoff).await;
+                        sleep(LAUNCH_RETRY_INTERVAL).await;
                     }
                 }
             }
@@ -784,7 +780,7 @@ pub async fn launch_instances(
             name,
             scan, "capacity unavailable in every usable AZ, waiting before retry"
         );
-        sleep(CAPACITY_RETRY_INTERVAL).await;
+        sleep(LAUNCH_RETRY_INTERVAL).await;
     }
 
     Err(last_error.map_or(super::Error::NoSubnetsAvailable, super::Error::AwsEc2))
