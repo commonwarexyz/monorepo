@@ -319,17 +319,20 @@ mod tests {
     use futures::poll;
     use std::{convert::Infallible, sync::Arc, time::Duration};
 
+    /// Blocks startup before the actor begins polling its mailbox.
     struct StartupGate {
         started: oneshot::Sender<()>,
         release: oneshot::Receiver<()>,
     }
 
+    /// Resolver that can pause database attachment during startup.
     #[derive(Clone, Default)]
     struct NoopResolver {
         startup_gate: Arc<Mutex<Option<StartupGate>>>,
     }
 
     impl NoopResolver {
+        /// Creates a resolver with handles to observe and release its next database attachment.
         fn gated() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
             let (started, started_rx) = oneshot::channel();
             let (release, release_rx) = oneshot::channel();
@@ -348,6 +351,7 @@ mod tests {
 
     impl AttachableResolver<TestDb> for NoopResolver {
         async fn attach_database(&self, _db: Shared<TestDb>) {
+            // Consume the single-use gate before waiting so the wait does not hold the gate lock.
             let Some(StartupGate {
                 started,
                 mut release,
@@ -438,6 +442,7 @@ mod tests {
     #[test]
     fn startup_recovery_releases_cancelled_verify_ancestries() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
+            // Hold startup after database recovery but before processing polls the mailbox.
             let prefix = "startup-recovery-cancelled-verifications";
             let scheme = scheme_mocks::fixture(&mut context, prefix.as_bytes(), 1);
             let genesis = TestBlock::new(0, 0);
@@ -479,6 +484,7 @@ mod tests {
                 .await
                 .expect("startup should reach resolver attachment before processing");
 
+            // Fill the single ready slot and reliable overflow with independently owned ancestries.
             let owners = [
                 Arc::new(TestBlock::new(2, 2)),
                 Arc::new(TestBlock::new(3, 3)),
@@ -507,6 +513,7 @@ mod tests {
             ));
             assert!(poll!(&mut third).is_pending());
 
+            // Queue a finalization behind the verifications, then cancel every caller.
             let (acknowledgement, mut acknowledgement_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
 
@@ -516,6 +523,7 @@ mod tests {
             drop(owners);
             context.sleep(Duration::from_millis(10)).await;
 
+            // Startup remains blocked while cancellation releases every ancestry block.
             assert!(poll!(&mut acknowledgement_waiter).is_pending());
             for (index, owner) in weak_owners.iter().enumerate() {
                 assert!(
@@ -524,6 +532,7 @@ mod tests {
                 );
             }
 
+            // Resuming startup drains the queue and acknowledges the later finalization.
             startup_release
                 .send(())
                 .expect("startup should remain gated");

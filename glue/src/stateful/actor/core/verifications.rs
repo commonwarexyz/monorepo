@@ -18,7 +18,9 @@ use rand_core::Rng;
 use std::{collections::BTreeMap, future::Future};
 use tracing::{Instrument as _, Span, info_span};
 
-/// A verification request that can be deferred or retried.
+/// A caller-scoped verification request that can be deferred or retried.
+///
+/// The request remains non-owning while each active attempt uses an independent cursor.
 pub(super) struct Request<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -95,9 +97,13 @@ where
     }
 
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
+        // Give the active attempt an independent cursor. Requests whose callers already canceled
+        // cannot provide one, while deferred and retryable requests remain non-owning.
         let Some(ancestry) = request.ancestry.clone_cursor() else {
             return;
         };
+
+        // Register the attempt before polling it so invalidation and progress share one lifecycle.
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -117,6 +123,8 @@ where
                 .is_none()
         );
 
+        // Move only the independent cursor into active work. The original request returns with
+        // its weak ancestry handle intact for completion or retry.
         let marshal = self.marshal.clone();
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
         self.jobs.push(

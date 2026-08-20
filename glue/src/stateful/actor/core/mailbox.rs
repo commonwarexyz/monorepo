@@ -26,18 +26,27 @@ use std::{
 };
 use tracing::{Span, info_span};
 
+/// Re-enqueues verification requests invalidated by finalization or pruning.
 type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
-/// Non-owning access to verification ancestry whose lifetime is scoped to its caller.
+/// A non-owning reference to ancestry owned by the verification caller.
+///
+/// Queued, deferred, and retry requests carry this handle so caller cancellation
+/// releases the ancestry's backing blocks. Each active attempt clones an
+/// independent cursor while the caller remains live.
 pub(in crate::stateful::actor) struct VerificationAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
 
 impl<B: Block> VerificationAncestry<B> {
+    /// Returns the caller-owned ancestry and a non-owning request handle.
     fn new(ancestry: impl Ancestry<B>) -> (Arc<Mutex<BoxedAncestry<B>>>, Self) {
         let owner = Arc::new(Mutex::new(BoxedAncestry::new(ancestry)));
         let reference = Self(Arc::downgrade(&owner));
         (owner, reference)
     }
 
+    /// Clones an independent cursor while the caller still owns the ancestry.
+    ///
+    /// Returns `None` once caller cancellation releases the strong owner.
     pub(in crate::stateful::actor) fn clone_cursor(&self) -> Option<BoxedAncestry<B>> {
         self.0.upgrade().map(|ancestry| ancestry.lock().clone())
     }
@@ -117,6 +126,9 @@ where
     }
 }
 
+/// FIFO overflow for reliable messages that do not fit in the bounded mailbox.
+///
+/// Caller-scoped requests are discarded after their response channel closes.
 pub(super) struct Pending<E, A>(VecDeque<Message<E, A>>)
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -284,7 +296,8 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        // Actor availability cannot override the application's decision.
+        // Scope the strong ancestry owner to this caller. Queued work receives only a weak
+        // handle, so cancellation releases backing blocks before the actor drains the request.
         let (response, receiver) = oneshot::channel();
         let (ancestry_owner, ancestry) = VerificationAncestry::new(ancestry);
         let span = info_span!(
@@ -298,6 +311,8 @@ where
             ancestry,
             verification: Verification { response },
         });
+
+        // Retain ancestry through the application verdict. Actor shutdown remains an error.
         let result = receiver
             .await
             .expect("stateful actor dropped during verify");
