@@ -463,10 +463,25 @@ where
 
     /// Processes a response indicating that the peer does not have the requested data.
     ///
-    /// Missing data is scored like a timeout because it did not resolve the request.
+    /// Missing data is scored by the observed elapsed time, capped at the configured
+    /// timeout. A prompt negative response is penalized less than silence, while
+    /// still reducing the peer's selection priority on repeated misses.
     pub fn pop_missing(&mut self, id: ID, peer: &P) -> Option<Key> {
         let req = self.pop_request(id, peer)?;
-        self.update_performance(&req.peer, self.timeout);
+        let elapsed = self
+            .context
+            .current()
+            .duration_since(req.start)
+            .unwrap_or_default();
+        // Unlike useful responses (which apply an EMA), missing replies add the
+        // observed elapsed time directly to the peer's current score, capped at
+        // the timeout.  This guarantees the score never decreases for a missing
+        // reply while still rewarding prompt negatives over silence.
+        if let Some(past) = self.participants.get(&req.peer) {
+            let next = past.saturating_add(elapsed.as_millis()).min(self.timeout.as_millis());
+            self.participants.put(req.peer.clone(), next);
+            let _ = self.performance.get_or_create_by(&req.peer).try_set(next);
+        }
         Some(req.key)
     }
 
@@ -2015,6 +2030,90 @@ mod tests {
             assert!(
                 found_different_order,
                 "Shuffling should produce different orders"
+            );
+        });
+    }
+
+    #[test]
+    fn test_pop_missing_scored_by_elapsed_not_full_timeout() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher =
+                create_test_fetcher::<SuccessMockSender>(context.child("fetcher"));
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
+            // Pre-penalize peer2 so fetch() deterministically picks peer1.
+            fetcher.update_performance(&peer2, Duration::from_secs(600));
+
+            // Record score before the miss, then simulate a prompt missing reply (10ms).
+            let score_before = fetcher.participants.get(&peer1).unwrap();
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender);
+            let id1 = *fetcher.active.iter().next().unwrap().0;
+            context.sleep(Duration::from_millis(10)).await;
+            fetcher.pop_missing(id1, &peer1);
+            let score_after_prompt_miss = fetcher.participants.get(&peer1).unwrap();
+
+            // A prompt miss must increase the score (peer becomes less preferred).
+            assert!(
+                score_after_prompt_miss > score_before,
+                "prompt miss should increase score (make peer less preferred)"
+            );
+
+            // A full timeout via update_performance uses the EMA formula:
+            // (past + timeout_ms) / 2 = (100 + 5000) / 2 = 2550.
+            // Our 10ms prompt miss (past + 10 = 110) must be far less severe.
+            let hypothetical_timeout_score = score_before.saturating_add(5000) / 2;
+            assert!(
+                score_after_prompt_miss < hypothetical_timeout_score,
+                "prompt miss ({score_after_prompt_miss}ms) should be less severe than timeout ({hypothetical_timeout_score}ms)"
+            );
+        });
+    }
+
+    #[test]
+    fn test_pop_missing_repeated_misses_worse_than_useful_response() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher =
+                create_test_fetcher::<SuccessMockSender>(context.child("fetcher"));
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer1 = PrivateKey::from_seed(1).public_key(); // will accumulate prompt misses
+            let peer2 = PrivateKey::from_seed(2).public_key(); // simulated useful response
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
+            // Pre-penalize peer2 heavily so fetch() always picks peer1 for the miss loop.
+            // Separately compute what peer2's score would be after one fast 5ms useful
+            // response from the initial score of 100ms (EMA: (100 + 5) / 2 = 52).
+            let score_peer2_after_useful: u128 = (100 + 5) / 2;
+            fetcher.update_performance(&peer2, Duration::from_secs(600));
+
+            // peer1: five prompt missing replies (~10ms each).
+            // With the direct-addition formula each miss adds 10ms to the score:
+            //   100 -> 110 -> 120 -> 130 -> 140 -> 150
+            for key in 0u8..5 {
+                fetcher.add_ready(MockKey(key));
+                fetcher.fetch(&mut sender);
+                let id = *fetcher.active.iter().next().unwrap().0;
+                context.sleep(Duration::from_millis(10)).await;
+                fetcher.pop_missing(id, &peer1);
+            }
+            let score_peer1 = fetcher.participants.get(&peer1).unwrap();
+
+            // peer2 (one fast 5ms useful response from initial 100 → score 52) should be
+            // preferred over peer1 (five 10ms prompt misses → score 150).
+            assert!(
+                score_peer2_after_useful < score_peer1,
+                "peer2 with useful response ({score_peer2_after_useful}ms) should outrank peer1 with repeated misses ({score_peer1}ms)"
             );
         });
     }
