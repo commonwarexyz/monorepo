@@ -456,8 +456,9 @@ impl Write for Bitmap {
         // Preserve the codec's big-endian word order while collapsing 1024 small
         // `put_slice` calls into one bulk write.
         let mut bytes = [0u8; ENCODED_BYTES];
-        for (dst, &word) in bytes.chunks_exact_mut(8).zip(self.words.iter()) {
-            dst.copy_from_slice(&word.to_be_bytes());
+        let (chunks, _) = bytes.as_chunks_mut::<8>();
+        for (dst, &word) in chunks.iter_mut().zip(self.words.iter()) {
+            *dst = word.to_be_bytes();
         }
         buf.put_slice(&bytes);
     }
@@ -476,10 +477,9 @@ impl Read for Bitmap {
         let bytes = <[u8; ENCODED_BYTES]>::read(buf)?;
 
         let mut words = [0u64; WORDS];
-        for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
-            let mut word_bytes = [0u8; 8];
-            word_bytes.copy_from_slice(chunk);
-            *word = u64::from_be_bytes(word_bytes);
+        let (chunks, _) = bytes.as_chunks::<8>();
+        for (word, chunk) in words.iter_mut().zip(chunks) {
+            *word = u64::from_be_bytes(*chunk);
         }
         Ok(Self::from(words))
     }

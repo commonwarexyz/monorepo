@@ -64,8 +64,9 @@ const IV: [u32; 8] = [
 #[inline]
 fn digest_from_state(state: [u32; 8]) -> [u8; DIGEST_LENGTH] {
     let mut out = [0u8; DIGEST_LENGTH];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(state) {
-        chunk.copy_from_slice(&word.to_be_bytes());
+    let (chunks, _) = out.as_chunks_mut::<4>();
+    for (chunk, word) in chunks.iter_mut().zip(state) {
+        *chunk = word.to_be_bytes();
     }
     out
 }
