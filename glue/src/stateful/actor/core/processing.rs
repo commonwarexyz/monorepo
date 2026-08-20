@@ -3024,7 +3024,7 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Err(RuntimeError::WriteFailed));
 
-            // The pooled flush future panics when the loop next polls it.
+            // The active sync panics when the loop next polls it.
             loop {
                 context.sleep(Duration::from_millis(100)).await;
             }

@@ -3716,7 +3716,7 @@ mod tests {
             pin_mut!(reader2);
             assert!(
                 reader2.as_mut().now_or_never().is_some(),
-                "finalization must not hold one writer while waiting for another database's reader",
+                "tuple apply must not hold one writer while waiting for another database's reader",
             );
 
             drop(reader1);
