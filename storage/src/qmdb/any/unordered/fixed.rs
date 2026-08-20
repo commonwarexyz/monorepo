@@ -155,13 +155,13 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
-        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        Clock as _, Metrics as _, ReadOptions, Runner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, TestRng};
     use core::num::NonZeroUsize;
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
@@ -904,7 +904,7 @@ pub(crate) mod test {
             // across configs, never cached pages), so replay's first item forces a storage read,
             // and with far fewer ops than the routing batch size no batch reaches a worker, so
             // workers never read the log themselves.
-            context.storage_fault_config().write().read_rate = Some(1.0);
+            context.storage_fault_config().write().read_rate = Some(Probability!(1.0));
             let result = index
                 .build_snapshot(
                     context.child("build"),
@@ -964,13 +964,14 @@ pub(crate) mod test {
             &self,
             start_pos: u64,
             buffer: NonZeroUsize,
+            read_options: ReadOptions,
         ) -> impl Future<
             Output = Result<
                 impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
                 JournalError,
             >,
         > + Send {
-            self.0.replay(start_pos, buffer)
+            self.0.replay(start_pos, buffer, read_options)
         }
     }
 

@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, IoBuf, WriteOptions, buffer,
+    Blob, Buf, BufMut, BufferPooler, IoBuf, ReadOptions, WriteOptions, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -450,7 +450,9 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// Read entries from the table blob.
     async fn read_table(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
         let offset = Self::table_offset(table_index);
-        let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
+        let read_buf = blob
+            .read_at(offset, Entry::FULL_SIZE, ReadOptions::default())
+            .await?;
 
         Self::parse_entries(read_buf)
     }
@@ -1013,7 +1015,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
+        let mut read_buf = self
+            .table
+            .read_at(read_offset, chunk_bytes, ReadOptions::default())
+            .await?;
 
         // Process each entry in the chunk
         let mut writes = self.context.storage_buffer_pool().alloc(chunk_bytes);
@@ -1330,7 +1335,11 @@ mod tests {
             freezer.close().await.unwrap();
 
             let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
-            let table_data = blob.read_at(0, size as usize).await.unwrap().coalesce();
+            let table_data = blob
+                .read_at(0, size as usize, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
 
             // Verify resize happened (table doubled from 4 to 8)
             let num_entries = size as usize / Entry::FULL_SIZE;
@@ -1390,7 +1399,10 @@ mod tests {
             // Corrupt the CRC in both slots of the table entry
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
-                let entry_data = blob.read_at(0, Entry::FULL_SIZE).await.unwrap();
+                let entry_data = blob
+                    .read_at(0, Entry::FULL_SIZE, ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut corrupted = entry_data.coalesce();
                 // Corrupt CRC of first slot (last 4 bytes of first slot)
                 corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
@@ -1735,7 +1747,10 @@ mod tests {
                     .open(&cfg.value_partition, &checkpoint.section.to_be_bytes())
                     .await
                     .unwrap();
-                let byte = blob.read_at(len - 1, 1).await.unwrap();
+                let byte = blob
+                    .read_at(len - 1, 1, ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut corrupted = byte.coalesce();
                 corrupted.as_mut()[0] ^= 0xFF;
                 blob.write_at(len - 1, corrupted, WriteOptions::SYNC)

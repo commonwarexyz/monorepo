@@ -91,12 +91,6 @@ pub(crate) fn is_block_in_expected_epoch<ES: Epocher>(
         .is_some_and(|bounds| bounds.epoch() == expected_epoch)
 }
 
-/// Returns true when `block_height` is exactly the successor of `parent_height`.
-#[inline]
-pub(crate) fn has_contiguous_height(parent_height: Height, block_height: Height) -> bool {
-    parent_height.next() == block_height
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,11 +177,5 @@ mod tests {
             Height::new(u64::MAX),
             Epoch::new(0)
         ));
-    }
-
-    #[test]
-    fn test_has_contiguous_height() {
-        assert!(has_contiguous_height(Height::new(6), Height::new(7)));
-        assert!(!has_contiguous_height(Height::new(6), Height::new(8)));
     }
 }

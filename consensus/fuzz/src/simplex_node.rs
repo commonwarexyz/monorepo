@@ -24,7 +24,7 @@ use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256
 use commonware_p2p::{Receiver as _, Recipients, Sender as _, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Runner, Supervisor, deterministic};
-use commonware_utils::{NZUsize, channel::mpsc::Receiver};
+use commonware_utils::{NZUsize, Probability, channel::mpsc::Receiver};
 use futures::FutureExt;
 use rand::RngExt as _;
 use std::{
@@ -1666,7 +1666,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             crate::utils::Action::Link(simulated::Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             }),
             None,
         )

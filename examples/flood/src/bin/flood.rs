@@ -16,7 +16,7 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_utils::{TryCollect, ordered::Set, union};
+use commonware_utils::{Probability, TryCollect, ordered::Set, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
@@ -82,7 +82,7 @@ fn main() {
             Some(tokio::tracing::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring.private),
                 name: public_key.to_string(),
-                rate: 1.0,
+                rate: Probability!(1.0),
             })
         } else {
             None

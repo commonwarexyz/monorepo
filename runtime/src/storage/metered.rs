@@ -1,5 +1,5 @@
 use crate::{
-    Buf, Error, Handle, IoBufs, IoBufsMut, WriteOptions,
+    Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     telemetry::{
         metrics::{Counter, Gauge, Register, raw},
         traces::TracedExt as _,
@@ -153,10 +153,15 @@ impl Drop for MetricsHandle {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(len as u64);
-        self.inner.read_at(offset, len).await
+        self.inner.read_at(offset, len, options).await
     }
 
     async fn read_at_buf(
@@ -164,10 +169,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(len as u64);
-        self.inner.read_at_buf(offset, len, bufs).await
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
     #[tracing::instrument(
@@ -240,7 +246,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob, BufferPool, BufferPoolConfig, Storage as _,
+        Blob, BufferPool, BufferPoolConfig, IoBufMut, Storage as _,
+        mocks::RecordingContext,
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -256,6 +263,35 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         run_storage_tests(storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_metered_blob_forwards_read_options_and_counts_reads() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let (inner, recordings) = RecordingContext::new(inner);
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"data", WriteOptions::default())
+            .await
+            .unwrap();
+        recordings.clear();
+
+        // Both read entry points forward DONT_CACHE while contributing to the same metrics.
+        let read = blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(read.coalesce(), b"data");
+        let read = blob
+            .read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::DONT_CACHE)
+            .await
+            .unwrap();
+        assert_eq!(read.coalesce(), b"data");
+
+        assert_eq!(
+            recordings.snapshot().reads,
+            vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE]
+        );
+        assert_eq!(storage.metrics.storage_reads.get(), 2);
+        assert_eq!(storage.metrics.storage_read_bytes.get(), 8);
     }
 
     /// Test that a failed open does not count an open blob.
@@ -316,7 +352,7 @@ mod tests {
         );
 
         // Read data from the blob
-        let read = blob.read_at(0, 11).await.unwrap();
+        let read = blob.read_at(0, 11, ReadOptions::default()).await.unwrap();
         assert_eq!(read.coalesce(), b"hello world");
         let reads = storage.metrics.storage_reads.get();
         let read_bytes = storage.metrics.storage_read_bytes.get();
@@ -468,8 +504,8 @@ mod tests {
             .write_at(5, b"world", WriteOptions::default())
             .await
             .unwrap();
-        let _ = clone1.read_at(0, 10).await.unwrap();
-        let _ = clone2.read_at(0, 10).await.unwrap();
+        let _ = clone1.read_at(0, 10, ReadOptions::default()).await.unwrap();
+        let _ = clone2.read_at(0, 10, ReadOptions::default()).await.unwrap();
 
         // Verify that operations on clones update the shared metrics
         assert_eq!(
