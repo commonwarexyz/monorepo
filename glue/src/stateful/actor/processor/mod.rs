@@ -92,14 +92,15 @@ enum VerificationPhase<D> {
 pub(super) enum Disposition {
     /// Continue polling work proven to descend from the finalized block.
     Retain,
-    /// Re-evaluate work whose branch is unknown or whose active phase cannot cross finalization.
+    /// Restart the same request when its branch is unknown or its active phase
+    /// cannot cross finalization.
     Retry,
     /// Return false for work already proven to use an incompatible parent.
     Reject,
 }
 
-/// Progress needed to decide whether an active verification remains valid
-/// across an incoming finalization.
+/// Progress used to classify an active verification attempt across an incoming
+/// finalization.
 #[derive(Clone)]
 pub(super) struct VerificationProgress<D: Copy>(Arc<Mutex<VerificationPhase<D>>>);
 
