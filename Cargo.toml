@@ -11,6 +11,7 @@ members = [
     "conformance/macros",
     "consensus",
     "cryptography",
+    "cryptography/curve25519",
     "deployer",
     "formatting",
     "glue",
@@ -40,6 +41,7 @@ members = [
     "collector/fuzz",
     "consensus/fuzz",
     "cryptography/fuzz",
+    "cryptography/curve25519/fuzz",
     "math/fuzz",
     "p2p/fuzz",
     "runtime/fuzz",
@@ -103,7 +105,7 @@ aws-sdk-s3 = { version = "1.138.0", default-features = false, features = [
 	"sigv4a",
 ] }
 axum = "0.8.9"
-blake3 = { version = "1.8.5", default-features = false }
+blake3 = { version = "1.8.7", default-features = false }
 blst = { version = "0.3.16", default-features = false }
 bytes = { version = "1.12.1", default-features = false }
 cfg-if = "1.0.4"
@@ -122,6 +124,7 @@ commonware-conformance = { version = "2026.7.0", path = "conformance" }
 commonware-conformance-macros = { version = "2026.7.0", path = "conformance/macros" }
 commonware-consensus = { version = "2026.7.0", path = "consensus" }
 commonware-cryptography = { version = "2026.7.0", path = "cryptography", default-features = false }
+commonware-cryptography-curve25519 = { version = "2026.7.0", path = "cryptography/curve25519", default-features = false }
 commonware-deployer = { version = "2026.7.0", path = "deployer", default-features = false }
 commonware-formatting = { version = "2026.7.0", path = "formatting", default-features = false }
 commonware-glue = { version = "2026.7.0", path = "glue" }
@@ -196,6 +199,7 @@ serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 sha2 = { version = "0.11.0", default-features = false }
 shlex = "2.0.1"
+subtle = { version = "2.6.1", default-features = false }
 syn = "2.0.119"
 sysinfo = "0.39.6"
 thiserror = { version = "2.0.18", default-features = false }
