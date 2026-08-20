@@ -2928,7 +2928,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_fast_skip_budget_uses_ordinary_deadline() {
+    fn zero_fast_skip_budget_defers_inactivity_to_leader_deadline() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, state) = setup_state(&mut context, 4, 7, 10, 1);
