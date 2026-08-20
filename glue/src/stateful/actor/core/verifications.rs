@@ -98,9 +98,9 @@ where
     }
 
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
-        // Clone the caller's ancestry for this active attempt. Canceled callers cannot provide a
-        // cursor, while queued requests remain non-owning.
-        let Some(ancestry) = request.ancestry.clone_cursor() else {
+        // Acquire an independent cursor for this active attempt. Canceled callers cannot provide
+        // one, while queued requests remain non-owning.
+        let Some(ancestry) = request.ancestry.acquire() else {
             return;
         };
 

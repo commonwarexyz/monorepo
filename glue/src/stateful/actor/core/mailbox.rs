@@ -45,10 +45,10 @@ impl<B: Block> VerificationAncestry<B> {
         (owner, reference)
     }
 
-    /// Clones an independent cursor while the caller still owns the ancestry.
+    /// Acquires an independent cursor while the caller still owns the ancestry.
     ///
     /// Returns `None` once caller cancellation releases the strong owner.
-    pub(in crate::stateful::actor) fn clone_cursor(&self) -> Option<BoxedAncestry<B>> {
+    pub(in crate::stateful::actor) fn acquire(&self) -> Option<BoxedAncestry<B>> {
         self.0.upgrade().map(|ancestry| ancestry.lock().clone())
     }
 }
