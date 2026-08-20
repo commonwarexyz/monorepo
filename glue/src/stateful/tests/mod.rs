@@ -3,10 +3,10 @@
 use self::{
     common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
     multi_db_app::{
-        App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine, QmdbB,
+        App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine,
         qmdb_config as multi_qmdb_config,
     },
-    single_db_app::{App, Block, Qmdb, SingleDatabaseSet, SingleDbEngine, qmdb_config},
+    single_db_app::{App, Block, SingleDatabaseSet, SingleDbEngine, qmdb_config},
 };
 use crate::{
     simulate::{
@@ -20,7 +20,7 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
-        db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
+        db::{DatabaseSet, Merkleized as _, Publisher, SyncEngineConfig},
     },
 };
 use commonware_actor::Feedback;
@@ -857,10 +857,6 @@ impl QmdbSource for NoopQmdbResolver {
     }
 }
 
-impl AttachableResolver<Qmdb<deterministic::Context>> for NoopQmdbResolver {
-    async fn attach_database(&self, _db: Shared<Qmdb<deterministic::Context>>) {}
-}
-
 #[derive(Clone)]
 struct NoopCompactQmdbResolver;
 
@@ -879,10 +875,6 @@ impl QmdbSource for NoopCompactQmdbResolver {
     + 'a {
         std::future::pending()
     }
-}
-
-impl AttachableResolver<QmdbB<deterministic::Context>> for NoopCompactQmdbResolver {
-    async fn attach_database(&self, _db: Shared<QmdbB<deterministic::Context>>) {}
 }
 
 #[derive(Clone)]
@@ -1196,6 +1188,8 @@ fn out_of_order_certifications_complete_on_qmdb() {
         );
 
         let plan = SyncPlan::init(&context, "certify-qmdb-stateful".to_string()).await;
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
@@ -1214,6 +1208,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                     max_retained_roots: 1,
                 },
                 prune_config: None,
+                snapshot_publisher,
             },
         );
         let stateful_actor = stateful.start();
@@ -1326,6 +1321,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(&context, "certify-multi-qmdb-stateful".to_string()).await;
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
@@ -1344,6 +1341,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                     max_retained_roots: 1,
                 },
                 prune_config: None,
+                snapshot_publisher,
             },
         );
         let stateful_actor = stateful.start();
@@ -1580,6 +1578,8 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(&context, "prune-overlap-multi-qmdb-stateful".to_string()).await;
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
@@ -1604,6 +1604,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                     retained_marshal_blocks: 2,
                     retained_qmdb_blocks: 0,
                 }),
+                snapshot_publisher,
             },
         );
         let stateful_actor = stateful.start();

@@ -90,6 +90,7 @@ impl FlushControl {
 pub(crate) struct TestDb {
     finalize: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
+    finalized: u64,
 }
 
 impl TestDb {
@@ -97,6 +98,7 @@ impl TestDb {
         Self {
             finalize: Mutex::new(Some(handle)),
             control: None,
+            finalized: 0,
         }
     }
 
@@ -105,6 +107,7 @@ impl TestDb {
         Self {
             finalize: Mutex::new(None),
             control: Some(control),
+            finalized: 0,
         }
     }
 }
@@ -115,6 +118,12 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Error = Infallible;
     type Config = ();
     type SyncTarget = u64;
+    type Snapshot = u64;
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+        let snapshot = self.finalized;
+        Ok((self, snapshot))
+    }
 
     fn initial_sync_target() -> Self::SyncTarget {
         unreachable!("TestDb is constructed directly in tests")
@@ -132,18 +141,23 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+    async fn finalize(
+        mut self,
+        _batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+        self.finalized += 1;
+        let snapshot = self.finalized;
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
-            return Ok((self, Handle::from_receiver(released)));
+            return Ok((self, snapshot, Handle::from_receiver(released)));
         }
         let handle = self
             .finalize
             .lock()
             .take()
             .unwrap_or_else(|| Handle::ready(Ok(())));
-        Ok((self, handle))
+        Ok((self, snapshot, handle))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {

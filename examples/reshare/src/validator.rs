@@ -31,7 +31,7 @@ use commonware_glue::{
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
-        db::{DatabaseSet, p2p as qmdb_resolver},
+        db::{DatabaseSet, Publisher, p2p as qmdb_resolver},
     },
 };
 use commonware_macros::boxed;
@@ -230,12 +230,13 @@ pub async fn run(context: tokio::Context, args: Validator) {
     )
     .await;
 
+    let publication_context = context.child("publication");
+    let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
     let (qmdb_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
         context.child("qmdb_resolver"),
         qmdb_resolver::Config {
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
-            database: None,
             mailbox_size: MAILBOX_SIZE,
             me: Some(local.clone()),
             initial: Duration::from_secs(1),
@@ -245,6 +246,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             priority_requests: false,
             priority_responses: false,
         },
+        snapshot_subscriber,
     );
     let qmdb_handle = qmdb_actor.start(qmdb_network);
 
@@ -307,6 +309,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             mailbox_size: MAILBOX_SIZE,
             plan,
             resolvers: qmdb_sync_resolver,
+            snapshot_publisher,
             sync_config: types::sync_config(),
             prune_config: None,
         },

@@ -74,10 +74,10 @@ where
         retry_mailbox: RetryMailbox<E, A>,
     },
 
-    /// Requests the attached database set.
+    /// Requests the database set.
     ///
-    /// The actor replies once the database set has been attached to the
-    /// serving stateful actor, or immediately if that has already happened.
+    /// The actor replies once startup handoff has produced the database set,
+    /// or immediately if that has already happened.
     SubscribeDatabases {
         response: oneshot::Sender<A::Databases>,
     },
@@ -203,11 +203,10 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Wait for the attached database set.
+    /// Wait for the database set.
     ///
-    /// This resolves once startup handoff has attached the database set to the
-    /// serving actor. Late callers receive the current database set
-    /// immediately.
+    /// This resolves once startup handoff has produced the database set. Late
+    /// callers receive the current database set immediately.
     ///
     /// ## Safety
     ///
