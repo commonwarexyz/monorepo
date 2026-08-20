@@ -1,12 +1,12 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::mailbox::Verification,
+        core::mailbox::{Verification, VerificationAncestry},
         processor::{Disposition, PendingDigest, VerificationProgress, Verifier},
     },
 };
 use commonware_consensus::marshal::{
-    ancestry::{BlockProvider, BoxedAncestry},
+    ancestry::BlockProvider,
     core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -26,7 +26,7 @@ where
 {
     pub(super) span: Span,
     pub(super) context: (E, A::Context),
-    pub(super) ancestry: BoxedAncestry<A::Block>,
+    pub(super) ancestry: VerificationAncestry<A::Block>,
     pub(super) verification: Verification,
 }
 
@@ -95,6 +95,9 @@ where
     }
 
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
+        let Some(ancestry) = request.ancestry.clone_cursor() else {
+            return;
+        };
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -118,7 +121,6 @@ where
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
         self.jobs.push(
             async move {
-                let ancestry = request.ancestry.clone();
                 select! {
                     _ = invalidated => JobResult::Invalidated { id, request },
                     valid = verifier.run(

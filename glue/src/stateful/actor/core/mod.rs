@@ -303,20 +303,63 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, marshal::ancestry,
+        Application as _, CertifiableBlock as _, Reporter as _,
+        marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{NZU64, NZUsize, channel::mpsc};
-    use std::{convert::Infallible, time::Duration};
+    use commonware_utils::{
+        Acknowledgement as _, NZU64, NZUsize,
+        acknowledgement::Exact,
+        channel::{mpsc, oneshot},
+        sync::Mutex,
+    };
+    use futures::poll;
+    use std::{convert::Infallible, sync::Arc, time::Duration};
 
-    #[derive(Clone)]
-    struct NoopResolver;
+    struct StartupGate {
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    }
+
+    #[derive(Clone, Default)]
+    struct NoopResolver {
+        startup_gate: Arc<Mutex<Option<StartupGate>>>,
+    }
+
+    impl NoopResolver {
+        fn gated() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (started, started_rx) = oneshot::channel();
+            let (release, release_rx) = oneshot::channel();
+            (
+                Self {
+                    startup_gate: Arc::new(Mutex::new(Some(StartupGate {
+                        started,
+                        release: release_rx,
+                    }))),
+                },
+                started_rx,
+                release,
+            )
+        }
+    }
 
     impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Shared<TestDb>) {}
+        async fn attach_database(&self, _db: Shared<TestDb>) {
+            let Some(StartupGate {
+                started,
+                mut release,
+            }) = self.startup_gate.lock().take()
+            else {
+                return;
+            };
+            started
+                .send(())
+                .expect("test should await the startup gate");
+            let _ = (&mut release).await;
+        }
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
@@ -362,7 +405,7 @@ mod tests {
                     marshal: (marshal.mailbox, marshal.floor),
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
-                    resolvers: NoopResolver,
+                    resolvers: NoopResolver::default(),
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
@@ -389,6 +432,112 @@ mod tests {
             }
 
             handle.abort();
+        });
+    }
+
+    #[test]
+    fn startup_recovery_releases_cancelled_verify_ancestries() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
+            let prefix = "startup-recovery-cancelled-verifications";
+            let scheme = scheme_mocks::fixture(&mut context, prefix.as_bytes(), 1);
+            let genesis = TestBlock::new(0, 0);
+            let finalized = TestBlock::child(&genesis, 1);
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                prefix,
+                scheme.schemes[0].clone(),
+                None,
+                NZUsize!(8),
+                true,
+            )
+            .await;
+
+            let (resolver, startup_started, startup_release) = NoopResolver::gated();
+            let plan = SyncPlan::init(&context, format!("{prefix}-stateful")).await;
+            let (stateful, mut mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestApp,
+                    db_config: (),
+                    provider: (),
+                    marshal: (marshal.mailbox.clone(), marshal.floor),
+                    mailbox_size: NZUsize!(1),
+                    plan,
+                    resolvers: resolver,
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                    prune_config: None,
+                },
+            );
+            let actor = stateful.start();
+            startup_started
+                .await
+                .expect("startup should reach resolver attachment before processing");
+
+            let owners = [
+                Arc::new(TestBlock::new(2, 2)),
+                Arc::new(TestBlock::new(3, 3)),
+                Arc::new(TestBlock::new(4, 4)),
+            ];
+            let weak_owners = owners.iter().map(Arc::downgrade).collect::<Vec<_>>();
+
+            let mut first_mailbox = mailbox.clone();
+            let mut first = Box::pin(first_mailbox.verify(
+                (context.child("verify_first"), owners[0].context()),
+                ancestry::from_iter([Arc::clone(&owners[0])]),
+            ));
+            assert!(poll!(&mut first).is_pending());
+
+            let mut second_mailbox = mailbox.clone();
+            let mut second = Box::pin(second_mailbox.verify(
+                (context.child("verify_second"), owners[1].context()),
+                ancestry::from_iter([Arc::clone(&owners[1])]),
+            ));
+            assert!(poll!(&mut second).is_pending());
+
+            let mut third_mailbox = mailbox.clone();
+            let mut third = Box::pin(third_mailbox.verify(
+                (context.child("verify_third"), owners[2].context()),
+                ancestry::from_iter([Arc::clone(&owners[2])]),
+            ));
+            assert!(poll!(&mut third).is_pending());
+
+            let (acknowledgement, mut acknowledgement_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
+
+            drop(first);
+            drop(second);
+            drop(third);
+            drop(owners);
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(poll!(&mut acknowledgement_waiter).is_pending());
+            for (index, owner) in weak_owners.iter().enumerate() {
+                assert!(
+                    owner.upgrade().is_none(),
+                    "cancelled startup verification {index} retained its ancestry owner",
+                );
+            }
+
+            startup_release
+                .send(())
+                .expect("startup should remain gated");
+            select! {
+                result = acknowledgement_waiter => {
+                    result.expect("finalized block should be acknowledged after startup");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("finalized acknowledgement stalled after startup");
+                },
+            }
+
+            actor.abort();
+            drop(marshal.guards);
         });
     }
 }

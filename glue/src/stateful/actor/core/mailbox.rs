@@ -6,7 +6,7 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter, Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Reporter, Viewable,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
@@ -17,12 +17,31 @@ use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt a
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
+    sync::Mutex,
 };
 use rand_core::Rng;
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Weak},
+};
 use tracing::{Span, info_span};
 
 type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
+
+/// Non-owning access to verification ancestry whose lifetime is scoped to its caller.
+pub(in crate::stateful::actor) struct VerificationAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
+
+impl<B: Block> VerificationAncestry<B> {
+    fn new(ancestry: impl Ancestry<B>) -> (Arc<Mutex<BoxedAncestry<B>>>, Self) {
+        let owner = Arc::new(Mutex::new(BoxedAncestry::new(ancestry)));
+        let reference = Self(Arc::downgrade(&owner));
+        (owner, reference)
+    }
+
+    pub(in crate::stateful::actor) fn clone_cursor(&self) -> Option<BoxedAncestry<B>> {
+        self.0.upgrade().map(|ancestry| ancestry.lock().clone())
+    }
+}
 
 /// A verification is scoped to its caller.
 pub(in crate::stateful::actor) struct Verification {
@@ -62,7 +81,7 @@ where
     Verify {
         span: Span,
         context: (E, A::Context),
-        ancestry: BoxedAncestry<A::Block>,
+        ancestry: VerificationAncestry<A::Block>,
         verification: Verification,
     },
 
@@ -267,6 +286,7 @@ where
     ) -> bool {
         // Actor availability cannot override the application's decision.
         let (response, receiver) = oneshot::channel();
+        let (ancestry_owner, ancestry) = VerificationAncestry::new(ancestry);
         let span = info_span!(
             "stateful.mailbox.verify",
             epoch = context.1.epoch().traced(),
@@ -275,12 +295,14 @@ where
         let _ = self.sender.enqueue(Message::Verify {
             span,
             context,
-            ancestry: BoxedAncestry::new(ancestry),
+            ancestry,
             verification: Verification { response },
         });
-        receiver
+        let result = receiver
             .await
-            .expect("stateful actor dropped during verify")
+            .expect("stateful actor dropped during verify");
+        drop(ancestry_owner);
+        result
     }
 }
 
