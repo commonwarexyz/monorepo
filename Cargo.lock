@@ -1582,6 +1582,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-ec2",
  "aws-sdk-s3",
+ "aws-smithy-runtime-api",
  "cfg-if",
  "chrono",
  "clap",
