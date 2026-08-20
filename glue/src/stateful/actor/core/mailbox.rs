@@ -35,9 +35,9 @@ type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 /// Queued and deferred requests carry this handle so caller cancellation
 /// releases the ancestry's backing blocks. Each active attempt clones an
 /// independent cursor from the same caller-owned ancestry.
-pub(in crate::stateful::actor) struct VerificationAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
+pub(in crate::stateful::actor) struct WeakAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
 
-impl<B: Block> VerificationAncestry<B> {
+impl<B: Block> WeakAncestry<B> {
     /// Returns the caller-owned ancestry and a non-owning request handle.
     fn new(ancestry: impl Ancestry<B>) -> (Arc<Mutex<BoxedAncestry<B>>>, Self) {
         let owner = Arc::new(Mutex::new(BoxedAncestry::new(ancestry)));
@@ -91,7 +91,7 @@ where
     Verify {
         span: Span,
         context: (E, A::Context),
-        ancestry: VerificationAncestry<A::Block>,
+        ancestry: WeakAncestry<A::Block>,
         verification: Verification,
     },
 
@@ -300,7 +300,7 @@ where
         // Scope the strong ancestry owner to this caller. Queued work receives only a weak
         // handle, so cancellation releases backing blocks before the actor drains the request.
         let (response, receiver) = oneshot::channel();
-        let (ancestry_owner, ancestry) = VerificationAncestry::new(ancestry);
+        let (ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
         let span = info_span!(
             "stateful.mailbox.verify",
             epoch = context.1.epoch().traced(),

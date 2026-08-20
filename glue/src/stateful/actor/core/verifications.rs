@@ -1,7 +1,7 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::mailbox::{Verification, VerificationAncestry},
+        core::mailbox::{Verification, WeakAncestry},
         processor::{Disposition, PendingDigest, VerificationProgress, Verifier},
     },
 };
@@ -29,7 +29,7 @@ where
 {
     pub(super) span: Span,
     pub(super) context: (E, A::Context),
-    pub(super) ancestry: VerificationAncestry<A::Block>,
+    pub(super) ancestry: WeakAncestry<A::Block>,
     pub(super) verification: Verification,
 }
 
