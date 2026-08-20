@@ -11,6 +11,7 @@ use crate::aws::{
     utils::*,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_macros::boxed;
 use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
@@ -90,7 +91,8 @@ fn validate_storage_config(config: &Config) -> Result<(), Error> {
 }
 
 /// Runs regional launch queues in parallel, with monitoring first in its region.
-async fn try_join_region_launches<MF, F, M, T, E>(
+#[boxed]
+async fn run_regional_launches<MF, F, M, T, E>(
     monitoring_region: String,
     monitoring: MF,
     launches: impl IntoIterator<Item = (String, F)>,
@@ -789,11 +791,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     );
 
     // Wait for all launches to complete (get instance IDs)
-    let (monitoring_instance_id, binary_launches) = Box::pin(try_join_region_launches(
+    let (monitoring_instance_id, binary_launches) = run_regional_launches(
         monitoring_region.clone(),
         monitoring_launch_future,
         binary_launch_futures,
-    ))
+    )
     .await?;
     info!("instances requested");
 
@@ -1505,8 +1507,8 @@ fn grouped_subnets(
 #[cfg(test)]
 mod tests {
     use super::{
-        RegionResources, grouped_subnets, select_availability_zone_groups,
-        select_group_availability_zone, try_join_region_launches, validate_storage_config,
+        RegionResources, grouped_subnets, run_regional_launches, select_availability_zone_groups,
+        select_group_availability_zone, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
     use std::{
@@ -1595,7 +1597,7 @@ mod tests {
             })
         });
 
-        let (_, completed) = try_join_region_launches(
+        let (_, completed) = run_regional_launches(
             "monitoring".to_string(),
             async { Ok::<_, ()>(()) },
             launches,
@@ -1640,7 +1642,7 @@ mod tests {
             });
 
         let (monitoring, binaries) =
-            try_join_region_launches("us-east-1".to_string(), monitoring, binaries)
+            run_regional_launches("us-east-1".to_string(), monitoring, binaries)
                 .await
                 .expect("launches should succeed");
 
