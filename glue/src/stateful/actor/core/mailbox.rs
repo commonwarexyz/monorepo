@@ -26,14 +26,15 @@ use std::{
 };
 use tracing::{Span, info_span};
 
-/// Re-enqueues verification requests invalidated by finalization or pruning.
+/// Re-enqueues live verification requests after finalization or pruning stops
+/// their active attempt.
 type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
 /// A non-owning reference to ancestry owned by the verification caller.
 ///
-/// Queued, deferred, and retry requests carry this handle so caller cancellation
+/// Queued and deferred requests carry this handle so caller cancellation
 /// releases the ancestry's backing blocks. Each active attempt clones an
-/// independent cursor while the caller remains live.
+/// independent cursor from the same caller-owned ancestry.
 pub(in crate::stateful::actor) struct VerificationAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
 
 impl<B: Block> VerificationAncestry<B> {

@@ -18,9 +18,10 @@ use rand_core::Rng;
 use std::{collections::BTreeMap, future::Future};
 use tracing::{Instrument as _, Span, info_span};
 
-/// A caller-scoped verification request that can be deferred or retried.
+/// A caller-scoped verification request that can be deferred or restarted.
 ///
-/// The request remains non-owning while each active attempt uses an independent cursor.
+/// The request retains the same non-owning ancestry handle while each active
+/// attempt uses an independent cursor.
 pub(super) struct Request<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -97,13 +98,14 @@ where
     }
 
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
-        // Give the active attempt an independent cursor. Requests whose callers already canceled
-        // cannot provide one, while deferred and retryable requests remain non-owning.
+        // Clone the caller's ancestry for this active attempt. Canceled callers cannot provide a
+        // cursor, while queued requests remain non-owning.
         let Some(ancestry) = request.ancestry.clone_cursor() else {
             return;
         };
 
-        // Register the attempt before polling it so invalidation and progress share one lifecycle.
+        // Register the attempt before polling it so actor invalidation and progress share one
+        // lifecycle.
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -124,7 +126,7 @@ where
         );
 
         // Move only the independent cursor into active work. The original request returns with
-        // its weak ancestry handle intact for completion or retry.
+        // its weak ancestry handle intact for completion or another attempt.
         let marshal = self.marshal.clone();
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
         self.jobs.push(
@@ -169,7 +171,8 @@ where
     /// Cancels every active attempt and waits for verification work to stop.
     ///
     /// Pruning uses this full barrier because it can remove history needed by
-    /// every branch. Live requests are returned for rescheduling afterward.
+    /// every branch. Live requests retain their ancestry and are returned for
+    /// a new attempt.
     pub(super) async fn quiesce(&mut self) -> Vec<Request<E, A>> {
         let (retry, reject) = self.quiesce_where(|_| Disposition::Retry).await;
         assert!(reject.is_empty());
