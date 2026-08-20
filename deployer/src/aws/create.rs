@@ -1641,10 +1641,9 @@ mod tests {
                 })
             });
 
-        let (monitoring, binaries) =
-            run_launches("us-east-1".to_string(), monitoring, binaries)
-                .await
-                .expect("launches should succeed");
+        let (monitoring, binaries) = run_launches("us-east-1".to_string(), monitoring, binaries)
+            .await
+            .expect("launches should succeed");
 
         assert_eq!(monitoring, "monitoring");
         assert_eq!(binaries, [0]);
