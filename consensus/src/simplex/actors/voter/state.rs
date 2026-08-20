@@ -2945,6 +2945,32 @@ mod tests {
     }
 
     #[test]
+    fn zero_fast_skip_budget_defers_leader_nullify() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (_, state) = setup_state(&mut context, 4, 7, 10, 1);
+            let mut state = state.with_fast_skip_budget(0);
+            let view = state.current_view();
+            let now = context.current();
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([124u8; 32]),
+            );
+            assert!(state.set_proposal(view, proposal));
+
+            state.trigger_timeout(view, TimeoutReason::LeaderNullify);
+            assert_eq!(
+                state.next_timeout(),
+                (
+                    now + Duration::from_secs(2),
+                    TimeoutReason::CertificationTimeout
+                )
+            );
+        });
+    }
+
+    #[test]
     fn nullify_only_records_metric_once() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
