@@ -1464,12 +1464,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .map(|group_hits| group_hits as u64)
             .sum();
 
-        #[allow(unknown_lints)]
-        #[allow(
-            clippy::chunks_exact_to_as_chunks,
-            reason = "generic associated sizes are not accepted as const-generic arguments"
-        )]
-        for slice in reusable_buf.chunks_exact(A::SIZE) {
+        for slice in reusable_buf.chunks(A::SIZE) {
             result.push(A::decode(slice).map_err(Error::Codec)?);
         }
 
@@ -1543,12 +1538,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let misses =
                 blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
             let mut misses = misses.into_iter().peekable();
-            #[allow(unknown_lints)]
-            #[allow(
-                clippy::chunks_exact_to_as_chunks,
-                reason = "generic associated sizes are not accepted as const-generic arguments"
-            )]
-            for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
+            for (idx, slice) in buf.chunks(A::SIZE).enumerate() {
                 if misses.peek() == Some(&idx) {
                     misses.next();
                     continue;
