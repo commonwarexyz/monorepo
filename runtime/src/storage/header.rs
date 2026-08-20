@@ -414,6 +414,25 @@ stability_scope!(BETA {
         }
     }
 
+    /// A V0 header with the given blob version, for compatibility and recovery tests.
+    #[cfg(all(
+        any(test, feature = "test-utils"),
+        not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ))
+    ))]
+    pub(crate) const fn v0_header(blob_version: u16) -> Header {
+        Header {
+            magic: Layout::V0.magic(),
+            runtime_version: Layout::V0.runtime_version(),
+            blob_version,
+        }
+    }
+
     /// Resolves a blob's header from its leading bytes.
     ///
     /// Returns `Some((logical_size, blob_version, data_offset))` for a valid header and
@@ -478,17 +497,8 @@ impl arbitrary::Arbitrary<'_> for Header {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Header, HeaderError, Layout};
+    use super::{Header, HeaderError, Layout, v0_header};
     use commonware_codec::{DecodeExt, Encode};
-
-    /// A V0 header with the given blob version, for direct field manipulation in tests.
-    fn v0_header(blob_version: u16) -> Header {
-        Header {
-            magic: Layout::V0.magic(),
-            runtime_version: Layout::V0.runtime_version(),
-            blob_version,
-        }
-    }
 
     /// Raw bytes of a legacy V0 blob: an 8-byte header followed immediately by `payload`, as a
     /// pre-V1 writer laid them out.

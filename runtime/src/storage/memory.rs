@@ -106,6 +106,28 @@ impl Storage {
 
         hasher.finalize()
     }
+
+    /// Return a copy of a blob's durable raw contents without interpreting its container header.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn raw_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.partitions.lock().get(partition)?.get(name).cloned()
+    }
+
+    /// Install durable raw contents without validating the blob's container header.
+    ///
+    /// This test-only hook retires any live generation so a later open observes only the supplied
+    /// crash image.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_raw_blob(&self, partition: &str, name: &[u8], content: Vec<u8>) {
+        let key = (partition.to_string(), name.to_vec());
+        let mut generations = self.generations.lock();
+        let mut partitions = self.partitions.lock();
+        generations.current.remove(&key);
+        partitions
+            .entry(partition.into())
+            .or_default()
+            .insert(name.into(), content);
+    }
 }
 
 impl crate::Storage for Storage {
@@ -589,12 +611,14 @@ mod tests {
     }
 
     async fn assert_subset_write_preserves_header(layout: Layout, cut: SubsetWriteCut) {
+        // Alternating case makes a retained subset distinguishable from a contiguous prefix.
         const ORIGINAL: &[u8] = b"abcdefghijklmnop";
         const REPLACEMENT: &[u8] = b"ABCDEFGHIJKLMNOP";
         const RETAINED: &[u8] = b"AbCdEfGhIjKlMnOp";
         const PARTITION: &str = "partition";
         const NAME: &[u8] = b"blob";
 
+        // Seed a canonical image so both layouts enter the same logical blob interface.
         let inner = Storage::new(test_pool());
         let raw = match layout {
             Layout::V0 => crate::storage::header::tests::v0_blob_bytes(0, ORIGINAL),
@@ -609,6 +633,8 @@ mod tests {
             .or_default()
             .insert(NAME.to_vec(), raw);
 
+        // Select whether the subset is retained by a failed write or by a later crash, and script
+        // alternating per-byte retention decisions for an exact expected image.
         let failure_rate = match cut {
             SubsetWriteCut::FailedWrite => Probability!(1.0),
             SubsetWriteCut::Crash => Probability!(0.0),
@@ -626,6 +652,7 @@ mod tests {
             }))),
         );
 
+        // Apply the overwrite through the faulty wrapper and assert the selected write boundary.
         let (blob, size, version) = faulty.open_versioned(PARTITION, NAME, 0..=0).await.unwrap();
         assert_eq!(size, ORIGINAL.len() as u64);
         assert_eq!(version, 0);
@@ -638,6 +665,8 @@ mod tests {
         }
         drop(blob);
 
+        // Failed writes retain their subset immediately, while successful unsynchronized writes
+        // remain volatile. Neither path may address bytes in the container header.
         {
             let partitions = inner.partitions.lock();
             let raw = partitions.get(PARTITION).unwrap().get(NAME).unwrap();
@@ -649,6 +678,8 @@ mod tests {
             assert_eq!(&raw[data_offset..], expected_payload);
         }
 
+        // Simulating a crash applies the snapshotted retention policy to the durable payload while
+        // leaving the complete container header unchanged.
         faulty.crash().unwrap();
         drop(faulty);
         let snapshot = inner.take_snapshot();
@@ -658,6 +689,8 @@ mod tests {
             assert_eq!(&raw[data_offset..], RETAINED);
         }
 
+        // Reopen the crashed image through the versioned API to prove the retained subset remains
+        // a valid logical blob under both layouts.
         let recovered = Storage::from_snapshot(snapshot, test_pool());
         let (blob, size, version) = recovered
             .open_versioned(PARTITION, NAME, 0..=0)

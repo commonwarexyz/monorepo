@@ -1941,6 +1941,7 @@ dependencies = [
  "arbitrary",
  "commonware-runtime",
  "commonware-utils",
+ "futures",
  "libfuzzer-sys",
 ]
 

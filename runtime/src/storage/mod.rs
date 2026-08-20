@@ -49,6 +49,9 @@ stability_scope!(ALPHA {
     pub mod audited;
     pub mod faulty;
     pub mod memory;
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) use header::v0_header;
 });
 stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
     pub mod iouring;
