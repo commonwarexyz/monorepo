@@ -245,8 +245,7 @@ where
     /// This timeout must be greater than the certification timeout and timeout retry.
     pub skip_timeout: Duration,
 
-    /// Maximum unfinalized term distance that permits event-driven timeouts to
-    /// bypass ordinary round deadlines.
+    /// Policy governing fast skips.
     pub fast_skip_budget: FastSkipBudget,
 
     /// Timeout to wait for a peer to respond to a request.

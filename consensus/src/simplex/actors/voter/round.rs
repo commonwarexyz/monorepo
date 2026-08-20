@@ -476,10 +476,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// latching is ignored once a nullify broadcast began (retry cadence
     /// governs the round from then on).
     ///
-    /// A latched timeout makes [`Self::next_timeout`] fire immediately (and
-    /// stably across polls, carrying the latched reason) without touching any
-    /// deadline: in particular, the stall deadline anchors term-level
-    /// stall protection and must not be reset by a per-view timeout.
+    /// When allowed, [`Self::next_timeout`] returns the latch immediately and
+    /// stably across polls. Latching does not modify any deadline. In particular,
+    /// a per-view timeout must not reset the term-level stall deadline.
     pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
         if self.latched_timeout.is_none() && !self.broadcast_nullify {
             self.latched_timeout = Some((now, reason));
@@ -509,8 +508,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns the next round-local timeout and its reason.
     ///
-    /// When `allow_latched_timeout` is false, this method retains the
-    /// event-driven timeout and returns an ordinary deadline.
+    /// When `allow_latched_timeout` is false, this method ignores the latch
+    /// without clearing it.
     pub fn next_timeout(
         &mut self,
         now: SystemTime,
