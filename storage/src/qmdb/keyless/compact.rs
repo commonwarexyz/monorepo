@@ -32,7 +32,7 @@ use crate::{
     qmdb::{
         self, Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, Commitment},
+        batch_chain::{self, Bounds, Commitment, OnChain},
         compact::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
@@ -184,6 +184,24 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
+    /// Prove the live database is on this chain's own states, returning the witness
+    /// committed reads require (see [`Bounds::on_chain`]).
+    #[allow(clippy::type_complexity)]
+    fn on_chain<'a, E, C>(
+        &self,
+        db: &'a Db<F, E, V, H, C, S>,
+    ) -> Result<OnChain<'a, Db<F, E, V, H, C, S>>, Error<F>>
+    where
+        E: Context,
+        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: Read<Cfg = C>,
+    {
+        self.parent.as_ref().map_or_else(
+            || self.base.on_chain(db, db.commitment()),
+            |parent| parent.bounds.on_chain(db, db.commitment()),
+        )
+    }
+
     pub fn append(mut self, value: V::Value) -> Self {
         self.appends.push(value);
         self
@@ -201,18 +219,20 @@ where
         level = "info",
         skip_all
     )]
+    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C>(
         self,
         db: &Db<F, E, V, H, C, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, V, S>>, Error<F>>
     where
         F: Family,
         E: Context,
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
+        let db = self.on_chain(db)?;
         let live_ancestors: Vec<_> =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
@@ -244,7 +264,7 @@ where
             |batch| batch.commitment(),
         );
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
             commit_metadata: metadata,
             parent: self.parent.as_ref().map(Arc::downgrade),
@@ -255,7 +275,7 @@ where
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 
@@ -671,7 +691,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let n = db.target().size;
@@ -764,7 +785,8 @@ mod tests {
             .new_batch()
             .append(U64::new(seed))
             .merkleize(&db, Some(U64::new(seed)), floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).unwrap();
         db
     }
@@ -1242,7 +1264,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&source, Some(meta_b.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (source, _) = source.apply_batch(batch).unwrap();
                 let source = source.sync().await.unwrap();
                 source.target()
@@ -1260,7 +1283,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&seeded, Some(meta_a), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (seeded, _) = seeded.apply_batch(batch).unwrap();
                 let seeded = seeded.sync().await.unwrap();
                 assert_ne!(seeded.target(), target_b);
@@ -1302,16 +1326,25 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let batch_b = db
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
 
+            let stale = db.new_batch().append(U64::new(3));
             let expected_root = batch_a.root();
             let (db, _) = db.apply_batch(batch_a).unwrap();
             assert_eq!(db.root(), expected_root);
+            // A fork from the pre-apply state can no longer merkleize, and the
+            // merkleized sibling can no longer apply.
+            assert!(matches!(
+                stale.merkleize(&db, Some(U64::new(33)), floor).await,
+                Err(Error::StaleRead)
+            ));
             assert!(matches!(db.apply_batch(batch_b), Err(Error::StaleBatch)));
         });
     }
@@ -1326,16 +1359,18 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let b = a
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let c = b.new_batch::<Sha256>().append(U64::new(3));
 
             let (db, _) = db.apply_batch(a).unwrap();
-            let c = c.merkleize(&db, None, floor).await;
+            let c = c.merkleize(&db, None, floor).await.unwrap();
             let expected_root = c.root();
             let (db, _) = db.apply_batch(c).unwrap();
 
@@ -1363,7 +1398,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
 
             // Leave the witness cache behind the live Merkle state.
@@ -1394,17 +1430,20 @@ mod tests {
                 .new_batch()
                 .append(U64::new(10))
                 .merkleize(&db, Some(U64::new(110)), floor)
-                .await;
+                .await
+                .unwrap();
             let sibling_a = common_parent
                 .new_batch::<Sha256>()
                 .append(U64::new(11))
                 .merkleize(&db, Some(U64::new(111)), floor)
-                .await;
+                .await
+                .unwrap();
             let sibling_b = common_parent
                 .new_batch::<Sha256>()
                 .append(U64::new(12))
                 .merkleize(&db, Some(U64::new(112)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(sibling_a).unwrap();
             assert!(matches!(
                 db.validate_batch(&sibling_b),
@@ -1415,17 +1454,20 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let parent_b = db
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let child_b = parent_b
                 .new_batch::<Sha256>()
                 .append(U64::new(3))
                 .merkleize(&db, Some(U64::new(33)), floor)
-                .await;
+                .await
+                .unwrap();
 
             let (db, _) = db.apply_batch(parent_a).unwrap();
             assert!(matches!(
@@ -1447,12 +1489,14 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
 
             let (db, _) = db.apply_batch(child).unwrap();
             assert!(matches!(db.apply_batch(parent), Err(Error::StaleBatch)));
@@ -1469,12 +1513,14 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let expected_root = child.root();
 
             let (db, _) = db.apply_batch(parent).unwrap();
@@ -1493,7 +1539,10 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-floor-regressed").await;
 
             let advance_floor = db.new_batch().append(U64::new(1));
-            let advance_floor = advance_floor.merkleize(&db, None, Location::new(1)).await;
+            let advance_floor = advance_floor
+                .merkleize(&db, None, Location::new(1))
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(advance_floor).unwrap();
             let db = db.sync().await.unwrap();
             let target = db.target();
@@ -1502,7 +1551,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(regressed),
@@ -1532,13 +1582,15 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(2))
-                .await;
+                .await
+                .unwrap();
             // child: append + commit at loc 4 with floor=1 (regressed from parent's floor=2).
             let child = parent
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
 
             let target = db.target();
             assert!(matches!(
@@ -1567,7 +1619,8 @@ mod tests {
                 .new_batch()
                 .append(v1)
                 .merkleize(&db, Some(meta1.clone()), floor1)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -1580,7 +1633,8 @@ mod tests {
                 .new_batch()
                 .append(v2)
                 .merkleize(&db, Some(meta2.clone()), floor2)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             assert_eq!(db.get_metadata(), Some(meta2));
@@ -1610,7 +1664,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&db, Some(meta1.clone()), floor1)
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).unwrap();
                 let db = db.sync().await.unwrap();
                 let root = db.root();
@@ -1620,7 +1675,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&db, Some(meta2), floor2)
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).unwrap();
                 let db = db.sync().await.unwrap();
 
@@ -1650,7 +1706,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&db, Some(meta1), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -1658,7 +1715,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&db, Some(meta2.clone()), Location::new(1))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).unwrap();
                 let db = db.commit().await.unwrap();
                 db.root()
@@ -1686,7 +1744,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&db, Some(meta1.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).unwrap();
                 let db = db.commit().await.unwrap();
                 let root_a = db.root();
@@ -1696,7 +1755,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&db, Some(meta2), Location::new(1))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).unwrap();
                 let _db = db.commit().await.unwrap();
                 (root_a, size_a)
@@ -1724,7 +1784,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&db, Some(meta.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).unwrap();
                 let db = db.commit().await.unwrap();
                 // The commit already made the state durable, so this is a no-op.
@@ -1755,7 +1816,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .merkleize(&source, Some(meta_b.clone()), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (source, _) = source.apply_batch(batch).unwrap();
                 let source = source.sync().await.unwrap();
                 let target = source.target();
@@ -1779,7 +1841,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .merkleize(&seeded, Some(meta_a), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (seeded, _) = seeded.apply_batch(batch).unwrap();
                 let seeded = seeded.sync().await.unwrap();
                 assert_ne!(seeded.target(), target_b);
@@ -1820,7 +1883,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -1852,7 +1916,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let rewind_target = db.target().size;
@@ -1860,7 +1925,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let tip_target = db.target();
@@ -1916,7 +1982,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -1950,7 +2017,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -1991,7 +2059,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let tampered_target = db.target();
@@ -2027,7 +2096,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let root = db.root();
@@ -2049,7 +2119,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let target = db.target();
@@ -2099,7 +2170,8 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let root_a = db.root();
@@ -2111,7 +2183,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(3))
                 .merkleize(&db, Some(U64::new(22)), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let root_b = db.root();
@@ -2153,7 +2226,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let target_a = db.target();
@@ -2184,7 +2258,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let root_a = db.root();
@@ -2197,7 +2272,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(i))
                     .merkleize(&db, Some(U64::new(i * 11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).unwrap();
                 db = db.sync().await.unwrap();
             }
@@ -2239,7 +2315,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(i))
                     .merkleize(&db, Some(U64::new(i * 11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).unwrap();
                 db = db.sync().await.unwrap();
                 sizes.push(db.size());
@@ -2281,7 +2358,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -2291,14 +2369,16 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             // Advance past that state and commit, then rewind back to it.
             let batch = db
                 .new_batch()
                 .append(U64::new(3))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let db = db.rewind(size_after_first).await.unwrap();
@@ -2321,7 +2401,8 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -2348,7 +2429,8 @@ mod tests {
                     .append(U64::new(1))
                     .append(U64::new(2))
                     .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).unwrap();
                 let db = db.sync().await.unwrap();
                 let root = db.root();
@@ -2379,7 +2461,8 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(11)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -2388,7 +2471,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(3))
                 .merkleize(&db, Some(U64::new(22)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
 
@@ -2415,7 +2499,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -2424,7 +2509,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
 
@@ -2433,7 +2519,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(3))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             let db = db.rewind(size_after_first).await.unwrap();
 
@@ -2448,7 +2535,11 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-floor-beyond").await;
 
-            let batch = db.new_batch().merkleize(&db, None, Location::new(2)).await;
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, Location::new(2))
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(batch),
@@ -2471,13 +2562,15 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, None, Location::new(3))
-                .await;
+                .await
+                .unwrap();
             // child: valid on its own (floor=0), but parent's floor is bad.
             let child = parent
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(child),
