@@ -66,9 +66,9 @@
 //!                    data base
 //! ```
 //!
-//! The freelist bitmap records which slots are globally available. The slot
-//! entry is the single state record for refcounting, class liveness, data
-//! pointer, and return routing.
+//! The freelist stores slot ids for globally available buffers in striped
+//! vectors. The slot entry is the single state record for refcounting, class
+//! liveness, the data pointer, and return routing.
 //!
 //! Returning to heap allocations: low-alignment mutable buffers use the
 //! front-block layout instead of the tail layout above:
@@ -495,8 +495,8 @@ impl OwnerRef {
         // handles, ordering their payload accesses before the release.
         fence(Ordering::Acquire);
         // Restore the sentinel before releasing. No other handle exists, so
-        // Relaxed is sufficient. Pooled reuse synchronizes through the
-        // freelist's own Release/Acquire bit transitions.
+        // Relaxed is sufficient. Pooled reuse has exclusive ownership in a
+        // thread-local cache or synchronizes through a freelist stripe mutex.
         refs.store(1, Ordering::Relaxed);
         // SAFETY: guaranteed by the caller.
         unsafe { self.release_unique() };
@@ -1043,8 +1043,8 @@ impl PooledOwner {
     /// Creates an empty side-table entry for a stable slot id.
     ///
     /// The data pointer is filled when the freelist first creates the pooled
-    /// allocation for this slot. Until the slot is created, no free bit points
-    /// at it and no [`PooledBuffer`] may be built from it.
+    /// allocation for this slot. Until then, its id cannot appear in a
+    /// freelist stripe and no [`PooledBuffer`] may be built from it.
     #[inline]
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(slot: u32, capacity: usize) -> Self {
@@ -1129,7 +1129,7 @@ impl PooledBuffer {
     ///
     /// The caller must own `owner` initialization for this size class. No other
     /// thread may read it until the returned buffer is published through the
-    /// freelist bitmap or handed to a checked-out owner. The side-table entry
+    /// freelist or handed to a checked-out owner. The side-table entry
     /// must outlive the returned buffer and every operation on it.
     #[inline]
     pub unsafe fn new(owner: NonNull<PooledOwner>, layout: Layout, zeroed: bool) -> Self {
@@ -1196,6 +1196,12 @@ impl PooledBuffer {
         unsafe { self.owner.as_ref().slot }
     }
 
+    /// Consumes this unique handle and returns its compact slot id.
+    #[inline(always)]
+    pub(crate) const fn into_slot(self) -> u32 {
+        self.slot()
+    }
+
     /// Initializes the pooled lease for a buffer leaving global state.
     ///
     /// # Safety
@@ -1260,11 +1266,11 @@ impl PooledBuffer {
 
     /// Asserts the parked-slot sentinel invariant on a freshly claimed buffer.
     ///
-    /// A buffer leaving the global freelist must observe the refcount
-    /// sentinel of 1: the final release restores the sentinel before the
-    /// bitmap bit's Release publication, and the claimant's Acquire clear
-    /// pairs with it. A Relaxed load suffices because the assertion is on the
-    /// value. Loom explores every interleaving that could expose a stale one.
+    /// A buffer leaving the global freelist must observe the refcount sentinel
+    /// of 1. The final release restores the sentinel before the return unlocks
+    /// its stripe mutex, and the claimant acquires that mutex before taking the
+    /// buffer. A Relaxed load suffices because the assertion is on the value.
+    /// Loom explores every interleaving that could expose a stale one.
     #[cfg(feature = "loom")]
     pub(crate) fn assert_parked_sentinel(&self) {
         // SAFETY: the caller just claimed the slot, so the side-table entry

@@ -7,7 +7,7 @@
 //! This module benchmarks that global freelist directly and compares three
 //! implementations behind the same batch-oriented take/put interface:
 //!
-//! - [`Freelist`]: a striped atomic bitmap freelist
+//! - [`Freelist`]: the production striped mutex freelist
 //! - `Mutex<Vec<_>>`: a simple locked batched baseline
 //! - `ArrayQueue<_>`: a bounded lock-free queue baseline
 //!
@@ -19,7 +19,7 @@
 //! benchmark slots, keeping the baseline container shape close to the real
 //! freelist.
 
-use super::utils::{Threading, measure};
+use super::utils::{Pattern, Threading, measure};
 use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer, PooledOwner};
 use commonware_utils::sync::Mutex;
 use criterion::Criterion;
@@ -36,6 +36,7 @@ use std::{
 
 const SLOTS: &[usize] = &[16, 64, 512];
 const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
+const EMPTY_SLOTS: usize = 4_096;
 
 const BENCH_BUFFER_CAPACITY: usize = 256;
 const BENCH_BUFFER_ALIGNMENT: usize = 64;
@@ -132,6 +133,42 @@ pub fn bench(c: &mut Criterion) {
             }
         }
     }
+
+    let threading = Threading::Multi {
+        threads: 8,
+        pattern: Pattern::Lockstep,
+    };
+    for parallelism in [8, EMPTY_SLOTS] {
+        bench_empty(c, threading, parallelism);
+    }
+}
+
+fn bench_empty(c: &mut Criterion, threading: Threading, parallelism: usize) {
+    let threads = threading.threads();
+    let name = format!(
+        "{}/impl=freelist slots={EMPTY_SLOTS} threads={threads} parallelism={parallelism} pattern=empty",
+        module_path!(),
+    );
+
+    c.bench_function(&name, |b| {
+        b.iter_custom(|iters| {
+            let shared = Arc::new(Freelist::new(
+                NonZeroU32::new(EMPTY_SLOTS as u32).expect("positive capacity"),
+                NonZeroUsize::new(parallelism).expect("positive parallelism"),
+                BENCH_LAYOUT,
+                false,
+            ));
+            measure(
+                iters,
+                threading,
+                move || Arc::clone(&shared),
+                |freelist| {
+                    // SAFETY: no buffer can escape an empty freelist.
+                    assert!(unsafe { freelist.take() }.is_none());
+                },
+            )
+        })
+    });
 }
 
 fn bench_case<S: FreelistImplementation>(

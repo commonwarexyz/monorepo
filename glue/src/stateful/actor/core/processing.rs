@@ -170,8 +170,8 @@ fn requeue_verifications<E, A>(
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    // FIFO puts each retry behind work accepted while the mutation ran and
-    // ahead of later arrivals, without waiting for the mailbox to become idle.
+    // Re-enter each live request through FIFO. Work accepted during the mutation
+    // precedes its next attempt, while later arrivals remain behind it.
     for VerificationRequest {
         span,
         context,

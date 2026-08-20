@@ -34,34 +34,6 @@ hash = "5a263f4dbf20f9ebc64a81bc0dfbf487055b136074809d8c01aa725e28b86f17"
 n_cases = 65536
 hash = "481cd68f2e6452c0dda512c75d74ddd2e19ac6c9fb19c642c1a152a0d830c1b2"
 
-["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Ack<PublicKey,Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "19a763ac953319b94f4b9c81615eafa99807393198ba398e63270796e72695cd"
-
-["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Activity<PublicKey,Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "2567380ac17bd2e09d0610a7b9c37eeac568536c8dae3823d6d5f5e87d554f04"
-
-["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Chunk<PublicKey,Sha256Digest>>"]
-n_cases = 65536
-hash = "43624c9e7ce355baebf32ab6e76db21cb5bf08005396ba43dae96b3a86f3a535"
-
-["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Lock<PublicKey,Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "0b501fb047ce26f876bc45041a237a145177bb6a5979bc7ef2a4c26f7531853f"
-
-["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Node<PublicKey,Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "ac52cbf4d43a886454c2008e6c3baf5fc9dbde39a2db8ef3734286aca3746ee4"
-
-["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Parent<Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "f1bb7460f40a9b5ffbe2a7db22a491121834771b24503af56338ba1241d7f4fb"
-
-["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Proposal<PublicKey,Sha256Digest>>"]
-n_cases = 65536
-hash = "6fc6f17d8734a14fb841a8acc1a39cda7519bdd025700663e260d3b000c9c5c6"
-
 ["commonware_consensus::simplex::elector::tests::conformance::RandomSelectLeaderConformance"]
 n_cases = 512
 hash = "b67e7a2a61c54156c0422160a6dbc096b01f518c26784505def8b5849c597b74"

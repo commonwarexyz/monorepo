@@ -1,5 +1,8 @@
 use super::Header;
-use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::AuditHasher};
+use crate::{
+    Buf, BufferPool, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    deterministic::AuditHasher,
+};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
@@ -15,19 +18,71 @@ fn resolve_header(
     super::header::resolve(raw, content.len() as u64, versions, partition, name)
 }
 
+type BlobKey = (String, Vec<u8>);
+type Partition = BTreeMap<Vec<u8>, Vec<u8>>;
+
+/// Durable contents detached from all live storage and blob handles.
+pub(crate) struct Snapshot(BTreeMap<String, Partition>);
+
+#[derive(Default)]
+struct Generations {
+    next: u64,
+    current: BTreeMap<BlobKey, u64>,
+}
+
+impl Generations {
+    fn get_or_insert(&mut self, key: &BlobKey) -> u64 {
+        if let Some(generation) = self.current.get(key) {
+            return *generation;
+        }
+        self.rotate(key)
+    }
+
+    fn rotate(&mut self, key: &BlobKey) -> u64 {
+        let generation = self.next;
+        self.next = self.next.checked_add(1).expect("blob generation overflow");
+        self.current.insert(key.clone(), generation);
+        generation
+    }
+
+    fn remove_partition(&mut self, partition: &str) {
+        self.current
+            .retain(|(current_partition, _), _| current_partition != partition);
+    }
+}
+
 /// In-memory storage implementation for the commonware runtime.
 #[derive(Clone)]
 pub struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
+    generations: Arc<Mutex<Generations>>,
     pool: BufferPool,
 }
 
 impl Storage {
     pub fn new(pool: BufferPool) -> Self {
+        Self::with_partitions(BTreeMap::new(), pool)
+    }
+
+    fn with_partitions(partitions: BTreeMap<String, Partition>, pool: BufferPool) -> Self {
         Self {
-            partitions: Arc::new(Mutex::new(BTreeMap::new())),
+            partitions: Arc::new(Mutex::new(partitions)),
+            generations: Arc::new(Mutex::new(Generations::default())),
             pool,
         }
+    }
+
+    /// Transfer durable contents and retire every live blob generation.
+    pub(crate) fn take_snapshot(&self) -> Snapshot {
+        let mut generations = self.generations.lock();
+        generations.current.clear();
+        let mut partitions = self.partitions.lock();
+        Snapshot(std::mem::take(&mut *partitions))
+    }
+
+    /// Rebuild storage from detached durable contents.
+    pub(crate) fn from_snapshot(snapshot: Snapshot, pool: BufferPool) -> Self {
+        Self::with_partitions(snapshot.0, pool)
     }
 }
 
@@ -64,6 +119,8 @@ impl crate::Storage for Storage {
     ) -> Result<(Self::Blob, u64, u16), crate::Error> {
         super::validate_partition_name(partition)?;
 
+        let key = (partition.to_string(), name.to_vec());
+        let mut generations = self.generations.lock();
         let mut partitions = self.partitions.lock();
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
@@ -71,22 +128,31 @@ impl crate::Storage for Storage {
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
         let existing = resolve_header(content, &versions, partition, name)?;
-        let (logical_size, blob_version, data_offset) = existing.unwrap_or_else(|| {
-            let (region, blob_version) = Header::create(&versions);
-            let data_offset = region.len() as u64;
-            content.clear();
-            content.extend_from_slice(&region);
-            (0, blob_version, data_offset)
-        });
+        let (logical_size, blob_version, data_offset, generation) = match existing {
+            Some((logical_size, blob_version, data_offset)) => (
+                logical_size,
+                blob_version,
+                data_offset,
+                generations.get_or_insert(&key),
+            ),
+            None => {
+                let (region, blob_version) = Header::create(&versions);
+                let data_offset = region.len() as u64;
+                content.clear();
+                content.extend_from_slice(&region);
+                (0, blob_version, data_offset, generations.rotate(&key))
+            }
+        };
 
         Ok((
             Blob::new(
                 self.partitions.clone(),
-                partition.into(),
-                name,
+                self.generations.clone(),
+                key,
                 content.clone(),
                 self.pool.clone(),
                 data_offset,
+                generation,
             ),
             logical_size,
             blob_version,
@@ -96,6 +162,7 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
         super::validate_partition_name(partition)?;
 
+        let mut generations = self.generations.lock();
         let mut partitions = self.partitions.lock();
         match name {
             Some(name) => {
@@ -104,11 +171,15 @@ impl crate::Storage for Storage {
                     .ok_or(crate::Error::PartitionMissing(partition.into()))?
                     .remove(name)
                     .ok_or(crate::Error::BlobMissing(partition.into(), hex(name)))?;
+                generations
+                    .current
+                    .remove(&(partition.to_string(), name.to_vec()));
             }
             None => {
                 partitions
                     .remove(partition)
                     .ok_or(crate::Error::PartitionMissing(partition.into()))?;
+                generations.remove_partition(partition);
             }
         }
         Ok(())
@@ -130,36 +201,51 @@ impl crate::Storage for Storage {
     }
 }
 
-type Partition = BTreeMap<Vec<u8>, Vec<u8>>;
-
 #[derive(Clone)]
 pub struct Blob {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
+    generations: Arc<Mutex<Generations>>,
     partition: String,
     name: Vec<u8>,
     content: Arc<RwLock<Vec<u8>>>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Namespace generation captured when this handle was opened.
+    generation: u64,
 }
 
 impl Blob {
     fn new(
         partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
-        partition: String,
-        name: &[u8],
+        generations: Arc<Mutex<Generations>>,
+        (partition, name): BlobKey,
         content: Vec<u8>,
         pool: BufferPool,
         data_offset: u64,
+        generation: u64,
     ) -> Self {
         Self {
             partitions,
+            generations,
             partition,
-            name: name.into(),
+            name,
             content: Arc::new(RwLock::new(content)),
             pool,
             data_offset,
+            generation,
         }
+    }
+
+    fn ensure_current(&self, generations: &Generations) -> Result<(), crate::Error> {
+        let key = (self.partition.clone(), self.name.clone());
+        if generations.current.get(&key) == Some(&self.generation) {
+            return Ok(());
+        }
+        Err(crate::Error::BlobMissing(
+            self.partition.clone(),
+            hex(&self.name),
+        ))
     }
 
     fn sync_inner(&self) -> Result<(), crate::Error> {
@@ -167,6 +253,8 @@ impl Blob {
         let new_content = self.content.read().clone();
 
         // Update partition content
+        let generations = self.generations.lock();
+        self.ensure_current(&generations)?;
         let mut partitions = self.partitions.lock();
         let partition = partitions
             .get_mut(&self.partition)
@@ -180,11 +268,116 @@ impl Blob {
         *content = new_content;
         Ok(())
     }
+
+    fn sync_range_inner(&self, offset: usize, buf: &[u8]) -> Result<(), crate::Error> {
+        let end = offset
+            .checked_add(buf.len())
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let generations = self.generations.lock();
+        self.ensure_current(&generations)?;
+        let mut partitions = self.partitions.lock();
+        let content = partitions
+            .get_mut(&self.partition)
+            .and_then(|partition| partition.get_mut(&self.name))
+            .expect("a current blob generation has durable content");
+        if end > content.len() {
+            content.resize(end, 0);
+        }
+        content[offset..end].copy_from_slice(buf);
+        Ok(())
+    }
+
+    /// Merge selected bytes into durable storage without changing this handle's live contents.
+    pub(crate) fn retain_crash_write(
+        &self,
+        offset: u64,
+        mut bufs: IoBufs,
+        mut keep: impl FnMut() -> bool,
+    ) -> Result<(), crate::Error> {
+        let offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let offset: usize = offset
+            .try_into()
+            .map_err(|_| crate::Error::OffsetOverflow)?;
+        offset
+            .checked_add(bufs.remaining())
+            .ok_or(crate::Error::OffsetOverflow)?;
+
+        let generations = self.generations.lock();
+        if self.ensure_current(&generations).is_err() {
+            return Ok(());
+        }
+        let mut partitions = self.partitions.lock();
+        let content = partitions
+            .get_mut(&self.partition)
+            .and_then(|partition| partition.get_mut(&self.name))
+            .expect("a current blob generation has durable content");
+
+        let mut position = 0usize;
+        while bufs.has_remaining() {
+            let chunk = bufs.chunk();
+            let chunk_len = chunk.len();
+            let mut run_start = None;
+
+            let mut retain_run = |run_start: usize, run_end: usize| {
+                let physical_start = offset + position + run_start;
+                let physical_end = offset + position + run_end;
+                if physical_end > content.len() {
+                    content.resize(physical_end, 0);
+                }
+                content[physical_start..physical_end].copy_from_slice(&chunk[run_start..run_end]);
+            };
+
+            for index in 0..chunk_len {
+                if keep() {
+                    if run_start.is_none() {
+                        run_start = Some(index);
+                    }
+                } else if let Some(start) = run_start.take() {
+                    retain_run(start, index);
+                }
+            }
+            if let Some(start) = run_start {
+                retain_run(start, chunk_len);
+            }
+
+            position += chunk_len;
+            bufs.advance(chunk_len);
+        }
+        Ok(())
+    }
+
+    /// Apply a retained resize to durable storage without changing this handle's live contents.
+    pub(crate) fn retain_crash_resize(&self, len: u64) -> Result<(), crate::Error> {
+        let len = len
+            .checked_add(self.data_offset)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let len: usize = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
+
+        let generations = self.generations.lock();
+        if self.ensure_current(&generations).is_err() {
+            return Ok(());
+        }
+        let mut partitions = self.partitions.lock();
+        let content = partitions
+            .get_mut(&self.partition)
+            .and_then(|partition| partition.get_mut(&self.name))
+            .expect("a current blob generation has durable content");
+        content.resize(len, 0);
+        Ok(())
+    }
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, crate::Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len)).await
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, crate::Error> {
+        self.read_at_buf(offset, len, self.pool.alloc(len), options)
+            .await
     }
 
     async fn read_at_buf(
@@ -192,6 +385,7 @@ impl crate::Blob for Blob {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        _options: ReadOptions,
     ) -> Result<IoBufsMut, crate::Error> {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via copy_from_slice below.
@@ -229,15 +423,21 @@ impl crate::Blob for Blob {
         let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
+        let required = offset
+            .checked_add(buf.len())
+            .ok_or(crate::Error::OffsetOverflow)?;
         {
             let mut content = self.content.write();
-            let required = offset + buf.len();
             if required > content.len() {
                 content.resize(required, 0);
             }
             content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
         }
-        if sync { self.sync().await } else { Ok(()) }
+        if sync {
+            self.sync_range_inner(offset, buf.as_ref())
+        } else {
+            Ok(())
+        }
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
@@ -303,6 +503,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_crash_write_merges_durable_bytes_only() {
+        let storage = Storage::new(test_pool());
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"abcdefgh", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        blob.write_at(0, b"ABCDEFGH", WriteOptions::default())
+            .await
+            .unwrap();
+
+        let mut index = 0usize;
+        blob.retain_crash_write(0, IoBufs::from(&b"12345678"[..]), || {
+            let keep = index % 2 == 1;
+            index += 1;
+            keep
+        })
+        .unwrap();
+
+        let live = blob.read_at(0, 8, ReadOptions::default()).await.unwrap();
+        assert_eq!(live.coalesce(), b"ABCDEFGH");
+        let (reopened, len) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(len, 8);
+        let durable = reopened
+            .read_at(0, 8, ReadOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(durable.coalesce(), b"a2c4e6g8");
+
+        let (sparse, _) = storage.open("partition", b"sparse").await.unwrap();
+        let mut index = 0usize;
+        sparse
+            .retain_crash_write(4, IoBufs::from(&b"xyz"[..]), || {
+                let keep = index == 1;
+                index += 1;
+                keep
+            })
+            .unwrap();
+        let (sparse, len) = storage.open("partition", b"sparse").await.unwrap();
+        assert_eq!(len, 6);
+        assert_eq!(
+            sparse
+                .read_at(0, 6, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"\0\0\0\0\0y"
+        );
+
+        let (removed, _) = storage.open("partition", b"removed").await.unwrap();
+        storage.remove("partition", Some(b"removed")).await.unwrap();
+        let (replacement, _) = storage.open("partition", b"removed").await.unwrap();
+        replacement
+            .write_at(0, b"new!", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        removed
+            .retain_crash_write(0, IoBufs::from(&b"lost"[..]), || true)
+            .unwrap();
+        let (replacement, len) = storage.open("partition", b"removed").await.unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(
+            replacement
+                .read_at(0, 4, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"new!"
+        );
+    }
+
+    #[tokio::test]
     async fn test_blob_header_handling() {
         let storage = Storage::new(test_pool());
 
@@ -341,7 +613,10 @@ mod tests {
         }
 
         // Read at logical offset 0 returns data from the data offset
-        let read_buf = blob.read_at(0, data.len()).await.unwrap();
+        let read_buf = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
         // A legacy V0 blob (fabricated raw: creation is always V1) places data immediately
@@ -357,7 +632,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(size, data.len() as u64);
-        let read_buf = blob.read_at(0, data.len()).await.unwrap();
+        let read_buf = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(read_buf.coalesce(), data);
         blob.write_at(data.len() as u64, b"!", WriteOptions::default())
             .await
@@ -471,7 +749,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size, 4);
-            let read = blob.read_at(0, 4).await.unwrap();
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
             assert_eq!(read.coalesce(), b"data");
             drop(blob);
         }

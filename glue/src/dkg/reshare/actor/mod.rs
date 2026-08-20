@@ -101,8 +101,9 @@
 //! # Follower Mode
 //!
 //! The actor follows instead of participating when setup cannot read the boundary
-//! [`EpochInfo`] for the epoch containing marshal's next unprocessed height. This can occur during
-//! state-sync handoff because marshal may not retain the preceding boundary block.
+//! [`EpochInfo`] for the epoch containing marshal's next unprocessed height, or
+//! when a state-sync floor skips part of the inclusion window. In either
+//! case the actor lacks the public history needed to reconstruct the ceremony.
 //!
 //! ```text
 //! processed height + 1 = H
@@ -112,6 +113,7 @@
 //!        |
 //!        v
 //! boundary EpochInfo(N) unavailable locally
+//! or state-sync floor skipped inclusion blocks
 //!        |
 //!        v
 //! follower mode until final(N)
@@ -144,6 +146,7 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
+    Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher},
@@ -172,7 +175,7 @@ mod dkg;
 mod follower;
 mod inclusion;
 mod setup;
-use setup::Setup;
+use setup::{Setup, StateSyncStart};
 
 /// Configuration for the crate-private one-shot DKG mode.
 pub(crate) struct DkgConfig<V, P, D>
@@ -418,28 +421,39 @@ where
                 recovered_epoch,
             )
             .await;
-        if let Some(state_sync) = &state_sync {
+
+        // Install the recovered epoch scheme, then materialize the certified
+        // floor commitment and retain its height with the epoch metadata. Setup
+        // uses that bound to decide whether the public dealer-log window is
+        // replayable.
+        let mut state_sync = if let Some(state_sync) = state_sync {
             let share = self.recovered_share(&mut store, &state_sync.info).await;
             self.register_epoch(&state_sync.info, share).await;
-            self.marshal
+            let floor = self
+                .marshal
                 .subscribe_by_commitment(
                     state_sync.floor.proposal.payload,
                     CommitmentFallback::Wait,
                 )
                 .await
                 .expect("marshal must yield state sync floor block");
-        }
+            Some(StateSyncStart {
+                info: state_sync.info,
+                floor: floor.height(),
+            })
+        } else {
+            None
+        };
 
         if matches!(self.mode, Mode::Dkg { .. }) {
             self.run_dkg(&mut store, &mut dealing_mux).await;
             return;
         }
 
-        let mut current_epoch = state_sync.as_ref().map(|state_sync| state_sync.info.epoch);
-        let mut state_sync_info = state_sync.map(|state_sync| state_sync.info);
+        let mut current_epoch = state_sync.as_ref().map(|start| start.info.epoch);
         loop {
             let Some(prepared) = self
-                .setup(&mut store, current_epoch.take(), state_sync_info.take())
+                .setup(&mut store, current_epoch.take(), state_sync.take())
                 .await
             else {
                 return;

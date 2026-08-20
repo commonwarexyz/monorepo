@@ -88,14 +88,16 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
+        BufferPooler, Clock, Metrics, Quota, Runner, Spawner, Storage, Supervisor as _,
+        deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
         reschedule,
-        telemetry::traces::collector::TraceStorage,
+        telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{NZU16, NZU32, NZUsize, sync::Mutex};
+    use commonware_utils::{NZU16, NZU32, NZUsize, Probability, sync::Mutex};
     use futures::FutureExt;
+    use rand_core::CryptoRng;
     use std::{
         num::{NonZeroU16, NonZeroU32},
         sync::Arc,
@@ -192,6 +194,10 @@ mod tests {
         local_index: usize,
         /// Mock application propose latency, in milliseconds.
         propose_latency_ms: f64,
+        /// Views whose proposal requests reached the mock application.
+        propose_requests: Option<Arc<Mutex<Vec<View>>>>,
+        /// Whether proposal responses should remain pending indefinitely.
+        stall_proposals: bool,
         /// Mock application verify latency, in milliseconds.
         verify_latency_ms: f64,
         /// Mock application certify latency, in milliseconds.
@@ -213,6 +219,8 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 local_index: 0,
                 propose_latency_ms: 1.0,
+                propose_requests: None,
+                stall_proposals: false,
                 verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
                 verify_requests: None,
@@ -223,8 +231,8 @@ mod tests {
     }
 
     /// Helper to set up a voter actor for tests.
-    async fn setup_voter<S, L>(
-        context: &mut deterministic::Context,
+    async fn setup_voter<E, S, L>(
+        context: &E,
         oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
         participants: &[S::PublicKey],
         schemes: &[S],
@@ -235,9 +243,10 @@ mod tests {
         mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
         mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
         Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
-        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
+        mocks::reporter::Reporter<E, S, L, Sha256Digest>,
     )
     where
+        E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         L: elector::Config<S>,
     {
@@ -251,6 +260,7 @@ mod tests {
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
+        let propose_requests = options.propose_requests;
         let verify_requests = options.verify_requests;
 
         let application_cfg = mocks::application::Config::<Sha256, _> {
@@ -263,7 +273,13 @@ mod tests {
         };
         let (mut actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
+        actor.set_stall_proposals(options.stall_proposals);
         actor.set_fail_verification(options.fail_verification);
+        if let Some(propose_requests) = propose_requests {
+            actor.set_propose_observer(Box::new(move |context| {
+                propose_requests.lock().push(context.view());
+            }));
+        }
         if let Some(verify_requests) = verify_requests {
             actor.set_verify_observer(Box::new(move |context, _| {
                 verify_requests.lock().push(context.view());
@@ -322,6 +338,41 @@ mod tests {
             relay,
             reporter,
         )
+    }
+
+    async fn wait_for_request(
+        context: &deterministic::Context,
+        requests: &Arc<Mutex<Vec<View>>>,
+        view: View,
+    ) {
+        let deadline = context.current() + Duration::from_secs(1);
+        while !requests.lock().contains(&view) {
+            if context.current() >= deadline {
+                panic!("application did not receive request for {view}");
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn trace_position(
+        events: &RecordedEvents,
+        content: &str,
+        span_name: &str,
+        view: View,
+    ) -> usize {
+        let view = view.to_string();
+        events
+            .iter()
+            .position(|event| {
+                event.metadata.content == content
+                    && event
+                        .expect_span_at_index(0, |span| {
+                            span.expect_content_exact(span_name)?;
+                            span.expect_field_exact("view", &view)
+                        })
+                        .is_ok()
+            })
+            .unwrap_or_else(|| panic!("missing {content} trace for view {view}"))
     }
 
     async fn seed_voter_journal<S>(
@@ -1352,7 +1403,7 @@ mod tests {
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
-                    &mut context,
+                    &context,
                     &oracle,
                     &participants,
                     &schemes,
@@ -1470,7 +1521,7 @@ mod tests {
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
-                    &mut context,
+                    &context,
                     &oracle,
                     &participants,
                     &schemes,
@@ -1601,7 +1652,7 @@ mod tests {
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
-                    &mut context,
+                    &context,
                     &oracle,
                     &participants,
                     &schemes,
@@ -2521,14 +2572,14 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
                 .unwrap();
 
             let (mut mailbox, mut batcher, _, _, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -2655,7 +2706,7 @@ mod tests {
             let leader_idx = built_elector.elect(first_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -2760,7 +2811,7 @@ mod tests {
             let elector =
                 RoundRobin::<Sha256>::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(20), ViewDelta::new(0));
             let (mut mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -2903,7 +2954,7 @@ mod tests {
                 usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
 
             let (_mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -2965,10 +3016,212 @@ mod tests {
         });
     }
 
-    /// Regression: same-term optimistic future verification may run after a
-    /// local parent notarize, without waiting for parent certification.
+    /// The next view's proposal request reaches the application while the
+    /// current view's notarize is waiting for journal sync.
     #[test_traced]
-    fn test_optimistic_future_verify_uses_local_parent_notarize() {
+    fn test_next_propose_dispatches_before_sync() {
+        let n = 5;
+        let namespace = b"next_propose_dispatches_before_sync".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(5));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+
+            let pending_syncs = PendingSyncs::default();
+            let voter_context = DelayedSyncContext {
+                inner: context.child("voter"),
+                pending: pending_syncs.clone(),
+            };
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+            let (_mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
+                &voter_context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    local_index,
+                    propose_latency_ms: 200.0,
+                    propose_requests: Some(propose_requests.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // Once the view 1 propose request is in flight, gate the journal so
+            // the sync covering the view 1 notarize blocks until released.
+            wait_for_request(&context, &propose_requests, View::new(1)).await;
+            pending_syncs.arm();
+
+            // The voter appends the view 1 notarize and blocks on the gated
+            // sync. The view 2 propose request must still reach the application.
+            let deferred = next_pending_sync(&pending_syncs);
+            deferred
+                .blocked
+                .await
+                .expect("view 1 journal sync was dropped");
+            wait_for_request(&context, &propose_requests, View::new(2)).await;
+
+            // Nothing constructed for view 1 may reach the batcher while its
+            // sync is blocked.
+            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+                assert!(
+                    !matches!(
+                        msg,
+                        batcher::Message::Constructed(Vote::Notarize(ref notarize))
+                            if notarize.view() == View::new(1)
+                    ),
+                    "view 1 notarize reached the batcher before journal sync"
+                );
+            }
+            assert_eq!(
+                pending_syncs.calls(),
+                1,
+                "expected one journal sync after the gate was armed"
+            );
+
+            // Release the sync. The view 1 notarize must now be published.
+            deferred.release.send(Ok(())).unwrap();
+            pending_syncs.unblock();
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
+                            && notarize.view() == View::new(1)
+                        {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected notarize for view 1 after journal sync");
+                    }
+                }
+            }
+        });
+    }
+
+    /// An exited view's pending proposal must not suppress replacement work.
+    #[test_collect_traces]
+    fn test_stale_propose_does_not_block_replacement_dispatch(traces: TraceStorage) {
+        let n = 1;
+        let namespace = b"stale_propose_does_not_block_replacement_dispatch".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(2)),
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+            let (mut mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_millis(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    propose_requests: Some(propose_requests.clone()),
+                    stall_proposals: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            assert!(matches!(
+                batcher_receiver.recv().await.unwrap(),
+                batcher::Message::Update { .. }
+            ));
+            // The view 1 propose request stalls forever, occupying the pending
+            // request slot.
+            wait_for_request(&context, &propose_requests, View::new(1)).await;
+
+            // The leader timeout fires while the request is still outstanding.
+            let nullify = loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Nullify(nullify)) = msg.unwrap()
+                            && nullify.view() == View::new(1)
+                        {
+                            break nullify;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected nullify for view 1");
+                    }
+                }
+            };
+            let nullification = Nullification::from_nullifies(&schemes[0], &[nullify], &Sequential)
+                .expect("one signer forms quorum");
+
+            // The nullification exits view 1. A mid-term view requires its
+            // immediate parent, so view 2 can never propose. The voter skips to
+            // view 3, the term start, which builds on genesis. The stalled
+            // view 1 request must not suppress the view 3 request.
+            mailbox.resolved(Certificate::Nullification(nullification));
+            wait_for_request(&context, &propose_requests, View::new(3)).await;
+
+            // The replacement must dispatch at the same-iteration checkpoint,
+            // before the nullification broadcast.
+            let events = traces.get_by_level(Level::DEBUG);
+            let replacement = trace_position(
+                &events,
+                "requested proposal from automaton",
+                "simplex.voter.propose",
+                View::new(3),
+            );
+            let broadcast = trace_position(
+                &events,
+                "broadcasting nullification",
+                "simplex.voter.notify",
+                View::new(1),
+            );
+            assert!(
+                replacement < broadcast,
+                "replacement proposal must dispatch before the view 1 nullification broadcast \
+                 (replacement at {replacement}, broadcast at {broadcast})"
+            );
+        });
+    }
+
+    /// A buffered optimistic child starts verification as soon as the local
+    /// parent notarize makes its ancestry available.
+    #[test_collect_traces]
+    fn test_optimistic_future_verify_uses_local_parent_notarize(traces: TraceStorage) {
         let n = 5;
         let namespace = b"optimistic_future_verify_uses_local_parent_notarize".to_vec();
         let epoch = Epoch::new(333);
@@ -2995,9 +3248,10 @@ mod tests {
             let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
             let local_index = (usize::from(leader_idx) + 1) % participants.len();
             let leader = participants[usize::from(leader_idx)].clone();
+            let verify_requests = Arc::new(Mutex::new(Vec::new()));
 
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -3010,7 +3264,8 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     local_index,
-                    propose_latency_ms: 10.0,
+                    verify_latency_ms: 200.0,
+                    verify_requests: Some(verify_requests.clone()),
                     ..Default::default()
                 },
             )
@@ -3031,25 +3286,7 @@ mod tests {
             let contents_1 = (proposal_1.round, genesis, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal_1.payload, contents_1));
             mailbox.proposal(proposal_1.clone());
-
-            loop {
-                select! {
-                    msg = batcher_receiver.recv() => {
-                        match msg.unwrap() {
-                            batcher::Message::Update { .. } => {}
-                            batcher::Message::Constructed(Vote::Notarize(notarize))
-                                if notarize.view() == View::new(1) =>
-                            {
-                                break;
-                            }
-                            _ => {}
-                        }
-                    },
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("expected local notarize for view 1 before testing optimistic future verify");
-                    }
-                }
-            }
+            wait_for_request(&context, &verify_requests, View::new(1)).await;
 
             let proposal_2 = Proposal::new(
                 Round::new(epoch, View::new(2)),
@@ -3080,6 +3317,27 @@ mod tests {
                     }
                 }
             }
+
+            // Verification for view 2 must dispatch at the same-iteration
+            // checkpoint, before the view 1 notarize broadcast.
+            let events = traces.get_by_level(Level::DEBUG);
+            let verify_next = trace_position(
+                &events,
+                "requested proposal verification",
+                "simplex.voter.verify",
+                View::new(2),
+            );
+            let broadcast = trace_position(
+                &events,
+                "broadcasting notarize",
+                "simplex.voter.notify",
+                View::new(1),
+            );
+            assert!(
+                verify_next < broadcast,
+                "view 2 verification must dispatch before the view 1 notarize broadcast \
+                 (verify at {verify_next}, broadcast at {broadcast})"
+            );
         });
     }
 
@@ -3119,7 +3377,7 @@ mod tests {
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
 
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -3298,7 +3556,7 @@ mod tests {
             // Setup application mock and voter
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -3393,7 +3651,7 @@ mod tests {
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
-                    &mut context,
+                    &context,
                     &oracle,
                     &participants,
                     &schemes,
@@ -3501,7 +3759,7 @@ mod tests {
             );
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _reporter) =
                 setup_voter(
-                    &mut context,
+                    &context,
                     &oracle,
                     &participants,
                     &schemes,
@@ -4382,7 +4640,7 @@ mod tests {
             let local_index = (leader_index + 1) % schemes.len();
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -4477,7 +4735,7 @@ mod tests {
                     .await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -4691,7 +4949,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -6943,7 +7201,7 @@ mod tests {
                     .await;
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -7218,7 +7476,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -7332,7 +7590,7 @@ mod tests {
                 .clone()
                 .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -7451,7 +7709,7 @@ mod tests {
                 .clone()
                 .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -7603,7 +7861,7 @@ mod tests {
                 .clone()
                 .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -7746,7 +8004,7 @@ mod tests {
 
             // Set up voter with Certifier::Cancel
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -7882,7 +8140,7 @@ mod tests {
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -8296,7 +8554,7 @@ mod tests {
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -8496,7 +8754,7 @@ mod tests {
             // Set up voter with Certifier::Custom that always returns false
             // This simulates coding marshal's deferred_verify finding context mismatch
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -8634,7 +8892,7 @@ mod tests {
 
             // Set up voter with Certifier::Pending (certify hangs indefinitely).
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -8786,7 +9044,7 @@ mod tests {
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -8931,7 +9189,7 @@ mod tests {
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -9063,7 +9321,7 @@ mod tests {
             .await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -9215,7 +9473,7 @@ mod tests {
             let leader = participants[usize::from(leader_idx)].clone();
 
             let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(
-                &mut context,
+                &context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -9467,7 +9725,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await

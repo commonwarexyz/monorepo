@@ -1605,9 +1605,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
                 if let Some((anchor, targets)) = self.latest_tip.take() {
                     let generation = self.current_generation + 1;
                     self.current_generation = generation;
-                    for db in &mut self.dbs {
-                        *db = DbSyncState::Seeking { generation };
-                    }
+                    self.dbs.fill(DbSyncState::Seeking { generation });
                     self.generation_state
                         .insert(generation, (anchor, targets.clone()));
                     self.last_dispatched_anchor = anchor;

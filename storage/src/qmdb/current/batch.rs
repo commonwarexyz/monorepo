@@ -161,7 +161,7 @@ struct BatchStorageAdapter<
     'a,
     F: Graftable,
     D: Digest,
-    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+    R: Readable<Family = F, Digest = D>,
     S: MerkleStorage<F, Digest = D>,
 > {
     batch: &'a R,
@@ -173,7 +173,7 @@ impl<
     'a,
     F: Graftable,
     D: Digest,
-    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+    R: Readable<Family = F, Digest = D>,
     S: MerkleStorage<F, Digest = D>,
 > BatchStorageAdapter<'a, F, D, R, S>
 {
@@ -186,12 +186,8 @@ impl<
     }
 }
 
-impl<
-    F: Graftable,
-    D: Digest,
-    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
-    S: MerkleStorage<F, Digest = D>,
-> MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
+impl<F: Graftable, D: Digest, R: Readable<Family = F, Digest = D>, S: MerkleStorage<F, Digest = D>>
+    MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
 {
     type Digest = D;
 
@@ -203,6 +199,31 @@ impl<
             return Ok(Some(node));
         }
         self.base.get_node(pos).await
+    }
+
+    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, merkle::Error<F>> {
+        let mut nodes = vec![None; positions.len()];
+        let mut base_positions = Vec::with_capacity(positions.len());
+
+        // Look up nodes already in the batch chain.
+        for (slot, &pos) in nodes.iter_mut().zip(positions) {
+            match self.batch.get_node(pos) {
+                Some(node) => *slot = Some(node),
+                None => base_positions.push(pos),
+            }
+        }
+
+        // Look up remaining nodes from the base.
+        let base_nodes = if base_positions.is_empty() {
+            Vec::new()
+        } else {
+            self.base.get_nodes(&base_positions).await?
+        };
+        let mut base_nodes = base_nodes.into_iter();
+        Ok(nodes
+            .into_iter()
+            .map(|node| node.unwrap_or_else(|| base_nodes.next().expect("one node per base read")))
+            .collect())
     }
 }
 
@@ -218,7 +239,6 @@ struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy> {
 impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S> {
     type Family = F;
     type Digest = D;
-    type Error = merkle::Error<F>;
 
     fn size(&self) -> Position<F> {
         self.batch.size()
@@ -229,10 +249,6 @@ impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S
             return Some(d);
         }
         self.mem.get_node(pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        self.batch.pruning_boundary()
     }
 }
 

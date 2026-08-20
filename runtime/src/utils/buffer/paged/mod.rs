@@ -42,7 +42,7 @@
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
 
-use crate::{Blob, Buf, BufMut, Error, IoBuf};
+use crate::{Blob, Buf, BufMut, Error, IoBuf, ReadOptions};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{Crc32, crc32};
 use std::num::NonZeroU16;
@@ -202,8 +202,10 @@ async fn get_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     page_size: u64,
+    read_options: ReadOptions,
 ) -> Result<IoBuf, Error> {
-    let (page, _) = get_page_with_checksum_from_blob(blob, page_num, page_size).await?;
+    let (page, _) =
+        get_page_with_checksum_from_blob(blob, page_num, page_size, read_options).await?;
     Ok(page)
 }
 
@@ -212,6 +214,7 @@ async fn get_page_with_checksum_from_blob(
     blob: &impl Blob,
     page_num: u64,
     page_size: u64,
+    read_options: ReadOptions,
 ) -> Result<(IoBuf, ActiveChecksum), Error> {
     let physical_page_size = page_size
         .checked_add(CHECKSUM_SIZE)
@@ -221,7 +224,11 @@ async fn get_page_with_checksum_from_blob(
         .ok_or(Error::OffsetOverflow)?;
 
     let page = blob
-        .read_at(physical_page_start, physical_page_size as usize)
+        .read_at(
+            physical_page_start,
+            physical_page_size as usize,
+            read_options,
+        )
         .await?
         .coalesce();
 
