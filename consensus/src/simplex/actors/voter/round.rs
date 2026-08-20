@@ -55,14 +55,17 @@ pub struct Round<S: Scheme, D: Digest> {
     // Leader is set as soon as we know the seed for the view (if any).
     leader: Option<Leader<S::PublicKey>>,
 
+    // Proposal lifecycle for this round.
     proposal: ProposalSlot<D>,
+
     // Deadlines armed when entering a view.
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
     stall_deadline: Option<SystemTime>,
     retry_deadline: Option<SystemTime>,
-    // First explicit timeout latched for this round (see latch_timeout).
-    // Unlike retry_deadline, this is first-wins and never moves.
+
+    // Pending explicit timeout for this round (see latch_timeout). While
+    // present, later signals preserve its deadline and reason.
     latched_timeout: Option<(SystemTime, TimeoutReason)>,
 
     // Certificates received from batcher (constructed or from network).
@@ -256,6 +259,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the elected leader (if any) for this round.
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()
+    }
+
+    /// Returns the elected leader's participant index, if known.
+    pub const fn leader_index(&self) -> Option<Participant> {
+        match self.leader.as_ref() {
+            Some(leader) => Some(leader.idx),
+            None => None,
+        }
     }
 
     /// Returns true when the local participant controls `signer`.
@@ -471,27 +482,30 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.stall_deadline = stall_deadline;
     }
 
-    /// Latches the first explicit timeout for this round, pinning the moment it
-    /// expired. Later latches preserve the original deadline and reason, and
+    /// Latches an explicit timeout when none is pending, pinning the moment it
+    /// expired. Later latches preserve the pending deadline and reason, and
     /// latching is ignored once a nullify broadcast began (retry cadence
     /// governs the round from then on).
     ///
-    /// A latched timeout makes [`Self::next_timeout`] fire immediately (and
-    /// stably across polls, carrying the latched reason) without touching any
-    /// deadline: in particular, the stall deadline anchors term-level
-    /// stall protection and must not be reset by a per-view timeout.
+    /// [`Self::next_timeout`] may discard an ineligible latch. A later signal
+    /// can then become the new pending timeout.
+    ///
+    /// An eligible latch makes [`Self::next_timeout`] fire immediately without
+    /// touching any deadline: in particular, the stall deadline anchors
+    /// term-level stall protection and must not be reset by a per-view timeout.
     pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
         if self.latched_timeout.is_none() && !self.broadcast_nullify {
             self.latched_timeout = Some((now, reason));
         }
     }
 
-    /// Returns a nullify vote if we should timeout/retry.
+    /// Prepares the round to broadcast a nullify if it should timeout or retry.
     ///
-    /// Returns `Some(true)` if this is a retry (we've already broadcast nullify before),
-    /// `Some(false)` if this is the first timeout for this round, and `None` if we
-    /// should not timeout (e.g. because we have already finalized).
-    pub const fn construct_nullify(&mut self) -> Option<bool> {
+    /// Returns `Some((is_retry, consumed_latch))`, where `is_retry` is true if
+    /// we've already broadcast nullify and `consumed_latch` is true if an
+    /// explicit timeout caused the first broadcast. Returns `None` if we should
+    /// not timeout (e.g. because we have already finalized).
+    pub const fn construct_nullify(&mut self) -> Option<(bool, bool)> {
         // Ensure we haven't already broadcast a finalize vote.
         if self.broadcast_finalize {
             return None;
@@ -500,18 +514,18 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.leader_deadline = None;
         self.certification_deadline = None;
         self.retry_deadline = None;
-        // The latch governed the first timeout, which has now fired; clear it
-        // so no stale (deadline, reason) outlives the transition (re-latching
-        // is blocked by `broadcast_nullify` in `latch_timeout`).
-        self.latched_timeout = None;
-        Some(retry)
+        let had_latch = self.latched_timeout.take().is_some();
+        Some((retry, !retry && had_latch))
     }
 
-    /// Returns the next round-local timeout and its reason.
+    /// Returns the next round-local timeout and its reason. If
+    /// `allow_latched_timeout` is false, discards an explicit timeout before
+    /// considering the round's existing deadlines.
     pub fn next_timeout(
         &mut self,
         now: SystemTime,
         retry_interval: Duration,
+        allow_latched_timeout: bool,
     ) -> Option<(SystemTime, TimeoutReason)> {
         if self.broadcast_finalize || self.finalization().is_some() {
             return None;
@@ -528,7 +542,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return Some((next, TimeoutReason::Retry));
         }
         if let Some(latched) = self.latched_timeout {
-            return Some(latched);
+            if allow_latched_timeout {
+                return Some(latched);
+            }
+            self.latched_timeout = None;
         }
         if self.proposal().is_none()
             && let Some(deadline) = self.leader_deadline
@@ -1234,8 +1251,14 @@ mod tests {
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
+
+        // A pending latch cannot make a replayed nullify's next broadcast a
+        // latch-driven first vote.
+        round.latch_timeout(SystemTime::UNIX_EPOCH, TimeoutReason::FailedCertification);
         round.replay(&Artifact::Nullify(nullify_local));
         assert!(round.broadcast_nullify);
+        assert_eq!(round.construct_nullify(), Some((true, false)));
+
         round.replay(&Artifact::Finalize(finalize_local));
         assert!(round.broadcast_finalize);
         round.replay(&Artifact::Notarization(notarization.clone()));

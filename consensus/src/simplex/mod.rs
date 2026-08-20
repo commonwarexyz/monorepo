@@ -32,12 +32,8 @@
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active for `skip_timeout` while a quorum of participants
-//!       has been, set both `t_l` and `t_a` to 0.
-//!     * Each participant can only be fast-skipped once between finalizations. Any later
-//!       fast-skip of `l` (inactivity, `l`'s own `nullify`, a missing proposal, or a failed
-//!       verification or certification) leaves `t_l` and `t_a` armed, so a stall in which no
-//!       leader can make progress advances views on their deadlines rather than as fast as
-//!       nullifications circulate.
+//!       has been, set both `t_l` and `t_a` to 0. A participant can trigger this at most once
+//!       between finalizations. Later signals leave the round's remaining deadlines unchanged.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
