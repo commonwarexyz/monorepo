@@ -98,6 +98,7 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
                 strategy,
                 page_cache: page_cache.clone(),
+                node_cache_size: None,
             },
             log: JournalConfig {
                 partition: format!("fixed-log-journal-{suffix}"),

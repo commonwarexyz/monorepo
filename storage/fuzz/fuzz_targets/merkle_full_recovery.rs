@@ -23,7 +23,7 @@ use commonware_storage_fuzz::{
     bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{Entropy, NZU64, Probability, sync::RwLock};
+use commonware_utils::{Entropy, NZU64, NZUsize, Probability, sync::RwLock};
 use libfuzzer_sys::fuzz_target;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -103,6 +103,7 @@ fn merkle_config(
         write_buffer,
         replay_buffer,
         strategy: Sequential,
+        node_cache_size: Some(NZUsize!(64)),
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
 }

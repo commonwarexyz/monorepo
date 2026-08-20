@@ -289,6 +289,7 @@ pub(crate) mod test {
                 replay_buffer: NZUsize!(1024),
                 strategy,
                 page_cache: page_cache.clone(),
+                node_cache_size: None,
             },
             journal_config: FConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -343,6 +344,7 @@ pub(crate) mod test {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             journal_config: VConfig {

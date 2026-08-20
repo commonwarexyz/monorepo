@@ -195,6 +195,7 @@ pub(crate) mod test {
                 write_buffer: NZUsize!(64),
                 replay_buffer: NZUsize!(64),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             journal_config: crate::journal::contiguous::variable::Config {

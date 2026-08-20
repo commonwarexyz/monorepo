@@ -51,6 +51,7 @@ fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential>
         write_buffer: WRITE_BUFFER_SIZE,
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: Sequential,
+        node_cache_size: None,
         page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
