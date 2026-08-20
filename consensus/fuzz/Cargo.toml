@@ -79,78 +79,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519"
-path = "fuzz_targets/simplex_ed25519.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_shuffled_twins_mutator"
-path = "fuzz_targets/simplex_ed25519_shuffled_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minsig"
-path = "fuzz_targets/simplex_bls12381_threshold_minsig.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minpk"
-path = "fuzz_targets/simplex_bls12381_multisig_minpk.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_secp256r1"
-path = "fuzz_targets/simplex_secp256r1.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_node"
-path = "fuzz_targets/simplex_id_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_node_recovery"
-path = "fuzz_targets/simplex_id_node_recovery.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_node_recovery_stable_term"
-path = "fuzz_targets/simplex_id_node_recovery_stable_term.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_cert_mock_node"
-path = "fuzz_targets/simplex_cert_mock_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_cert_mock_node_recovery"
-path = "fuzz_targets/simplex_cert_mock_node_recovery.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_cert_mock_faulty_msg"
-path = "fuzz_targets/simplex_cert_mock_faulty_msg.rs"
+name = "simplex_cert_mock_shuffled_twins_mutator"
+path = "fuzz_targets/simplex_cert_mock_shuffled_twins_mutator.rs"
 test = false
 doc = false
 bench = false
@@ -170,64 +100,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id"
-path = "fuzz_targets/simplex_id.rs"
+name = "simplex_cert_mock_audit_notarize_omission"
+path = "fuzz_targets/simplex_cert_mock_audit_notarize_omission.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_audit"
-path = "fuzz_targets/simplex_id_audit.rs"
+name = "simplex_cert_mock_twins_mutator_audit"
+path = "fuzz_targets/simplex_cert_mock_twins_mutator_audit.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_audit_notarize_omission"
-path = "fuzz_targets/simplex_id_audit_notarize_omission.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_faulty_msg"
-path = "fuzz_targets/simplex_id_faulty_msg.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_faulty_net"
-path = "fuzz_targets/simplex_id_faulty_net.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_twins_mutator"
-path = "fuzz_targets/simplex_id_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_twins_mutator_audit"
-path = "fuzz_targets/simplex_id_twins_mutator_audit.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_twins_campaign"
-path = "fuzz_targets/simplex_id_twins_campaign.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_twins_campaign_audit"
-path = "fuzz_targets/simplex_id_twins_campaign_audit.rs"
+name = "simplex_cert_mock_twins_campaign_audit"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign_audit.rs"
 test = false
 doc = false
 bench = false
@@ -268,36 +156,29 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_state_cov"
-path = "fuzz_targets/simplex_id_state_cov.rs"
+name = "simplex_cert_mock_hb"
+path = "fuzz_targets/simplex_cert_mock_hb.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_hb"
-path = "fuzz_targets/simplex_id_hb.rs"
+name = "simplex_cert_mock_hb_state_cov"
+path = "fuzz_targets/simplex_cert_mock_hb_state_cov.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_hb_state_cov"
-path = "fuzz_targets/simplex_id_hb_state_cov.rs"
+name = "simplex_cert_mock_twins_mutator_hb"
+path = "fuzz_targets/simplex_cert_mock_twins_mutator_hb.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_twins_mutator_hb"
-path = "fuzz_targets/simplex_id_twins_mutator_hb.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_twins_campaign_hb"
-path = "fuzz_targets/simplex_id_twins_campaign_hb.rs"
+name = "simplex_cert_mock_twins_campaign_hb"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign_hb.rs"
 test = false
 doc = false
 bench = false
@@ -305,20 +186,6 @@ bench = false
 [[bin]]
 name = "simplex_cert_mock_state_cov"
 path = "fuzz_targets/simplex_cert_mock_state_cov.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_twins_campaign_state_cov"
-path = "fuzz_targets/simplex_id_twins_campaign_state_cov.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_twins_mutator_state_cov"
-path = "fuzz_targets/simplex_id_twins_mutator_state_cov.rs"
 test = false
 doc = false
 bench = false
@@ -338,20 +205,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_byzzfuzz"
-path = "fuzz_targets/simplex_id_byzzfuzz.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_mallory"
-path = "fuzz_targets/simplex_id_mallory.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_cert_mock_mallory"
 path = "fuzz_targets/simplex_cert_mock_mallory.rs"
 test = false
@@ -359,22 +212,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_id_chaos"
-path = "fuzz_targets/simplex_id_chaos.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_cert_mock_chaos"
 path = "fuzz_targets/simplex_cert_mock_chaos.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_id_chaos_twins"
-path = "fuzz_targets/simplex_id_chaos_twins.rs"
 test = false
 doc = false
 bench = false
@@ -450,22 +289,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "marshal_e2e_coding_app_id_twins"
-path = "fuzz_targets/marshal_e2e_coding_app_id_twins.rs"
+name = "marshal_e2e_standard_deferred_cert_mock_twins_split_header"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_twins_split_header.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_e2e_standard_deferred_id_twins_split_header"
-path = "fuzz_targets/marshal_e2e_standard_deferred_id_twins_split_header.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "marshal_e2e_standard_inline_id_twins_split_header"
-path = "fuzz_targets/marshal_e2e_standard_inline_id_twins_split_header.rs"
+name = "marshal_e2e_standard_inline_cert_mock_twins_split_header"
+path = "fuzz_targets/marshal_e2e_standard_inline_cert_mock_twins_split_header.rs"
 test = false
 doc = false
 bench = false
@@ -473,13 +305,6 @@ bench = false
 [[bin]]
 name = "marshal_e2e_coding_cert_mock_disrupter"
 path = "fuzz_targets/marshal_e2e_coding_cert_mock_disrupter.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "marshal_e2e_coding_id_disrupter"
-path = "fuzz_targets/marshal_e2e_coding_id_disrupter.rs"
 test = false
 doc = false
 bench = false

@@ -564,13 +564,16 @@ pub(crate) fn genesis_backed_mock_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simplex_certificate_mock as cert_mock;
     use commonware_p2p::Recipients;
+    use commonware_utils::test_rng;
 
     #[test]
     fn broadcast_with_tag_exposes_sender_tag_to_filter() {
         let relay = Relay::new();
-        let sender = crate::id_mock::PublicKey::from_index(0);
-        let recipient = crate::id_mock::PublicKey::from_index(1);
+        let fixture = cert_mock::fixture(&mut test_rng(), b"block-relay", 2);
+        let sender = fixture.participants[0].clone();
+        let recipient = fixture.participants[1].clone();
         let (_primary, mut primary_rx) =
             relay.register_with_tag(recipient.clone(), RELAY_TAG_TWIN_PRIMARY);
         let (_secondary, mut secondary_rx) =

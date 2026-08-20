@@ -16,12 +16,12 @@
 //!   over the reporters' append-only finalize-vote maps (loss-free across
 //!   polls).
 //!
-//! Both `SimplexId` and `SimplexCertificateMock` targets ship, and both run the
-//! finalized-payload-uniqueness check: the harness reports individual finalize
-//! votes to the reporter directly (no `AttributableReporter` wrapper), so the
-//! append-only `finalizes` map is populated regardless of scheme
-//! attributability, and a conflicting finalization landing between two polls is
-//! never lost (unlike the overwrite-only certificate map).
+//! The `SimplexCertificateMock` targets run the finalized-payload-uniqueness
+//! check. The harness reports individual finalize votes to the reporter directly
+//! (no `AttributableReporter` wrapper), so the append-only `finalizes` map is
+//! populated regardless of scheme attributability, and a conflicting
+//! finalization landing between two polls is never lost (unlike the
+//! overwrite-only certificate map).
 //!
 //! Vocabulary, mapped onto the mechanisms it reuses:
 //!

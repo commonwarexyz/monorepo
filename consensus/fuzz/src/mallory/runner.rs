@@ -1544,8 +1544,8 @@ fn run_inner<P: Simplex>(
 mod tests {
     use super::*;
     use crate::{
-        BlockFilterChoice, CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
-        strategy::StrategyChoice, utils::Partition,
+        BlockFilterChoice, CertifyChoice, FuzzInput, N4F0C4, ReporterWiring,
+        simplex::SimplexCertificateMock, strategy::StrategyChoice, utils::Partition,
     };
     use commonware_consensus::{simplex::ForwardingPolicy, types::TermLength};
     use std::num::NonZeroUsize;
@@ -1570,7 +1570,6 @@ mod tests {
             configuration: N4F0C4,
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
-            messaging_faults: Vec::new(),
             mailbox_size: NonZeroUsize::new(1024).unwrap(),
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
@@ -1583,7 +1582,7 @@ mod tests {
     /// a same-seed outcome is captured identically, and drain the decision log.
     fn mallory_trace(input: FuzzInput, chooser: Chooser) -> (bool, Vec<String>) {
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_with::<SimplexId>(input, chooser, TEST_STEPS);
+            run_with::<SimplexCertificateMock>(input, chooser, TEST_STEPS);
         }))
         .is_ok();
         (ok, log::take())
@@ -1841,7 +1840,7 @@ mod tests {
         policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
         for seed in [1u64, 2, 3] {
-            run_with::<SimplexId>(mallory_input(seed), Chooser::Learned, TEST_STEPS);
+            run_with::<SimplexCertificateMock>(mallory_input(seed), Chooser::Learned, TEST_STEPS);
         }
         assert!(
             !policy::campaign(fault::N_FAULTS).lock().policy.is_empty(),
@@ -1892,7 +1891,7 @@ mod tests {
         policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
         for seed in 1u64..=8 {
-            run_inner::<SimplexId>(
+            run_inner::<SimplexCertificateMock>(
                 mallory_input(seed),
                 Chooser::Learned,
                 MALLORY_EPISODE_STEPS,

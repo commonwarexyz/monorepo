@@ -428,10 +428,6 @@ impl Strategy for ByzzFuzzMutator {
         unreachable!("ByzzFuzz samples network faults in byzzfuzz::sampling")
     }
 
-    fn messaging_faults(&self, _required_containers: u64, _rng: &mut impl Rng) -> Vec<(View, u8)> {
-        unreachable!("ByzzFuzz samples process faults in byzzfuzz::sampling")
-    }
-
     fn disrupter_faults(
         &self,
         _required_containers: u64,

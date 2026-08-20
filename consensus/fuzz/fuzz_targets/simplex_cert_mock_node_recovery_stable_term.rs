@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_consensus::types::TermLength;
 use commonware_consensus_fuzz::{
-    SimplexId, fuzz_node,
+    SimplexCertificateMock, fuzz_node,
     simplex_node::{NodeFuzzInput, WithRecovery},
 };
 use libfuzzer_sys::fuzz_target;
@@ -26,5 +26,5 @@ fuzz_target!(|data: &[u8]| {
     };
     input.term_length =
         TermLength::new(NonZeroU32::new(term_length).expect("sampled range is non-zero"));
-    fuzz_node::<SimplexId, WithRecovery>(input);
+    fuzz_node::<SimplexCertificateMock, WithRecovery>(input);
 });

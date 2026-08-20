@@ -47,7 +47,7 @@ use super::{
 use crate::{
     network::{
         ByzantineFirstReceiver, ByzantinePolicy, Router, Wedge, WedgeChannel, WedgeDrop,
-        WedgeEvent, WedgeNode, WedgePhase, WedgeReceiver, WedgeRequest, WedgeRole, drop_rate_cell,
+        WedgeEvent, WedgeNode, WedgePhase, WedgeReceiver, WedgeRequest, WedgeRole,
     },
     simplex::Simplex,
     utils::apply_partition,
@@ -483,11 +483,7 @@ pub fn run_scenario<P: Simplex>(
         // message and a correct message are both ready, the byzantine one is
         // serviced first. Ordering is legal at every point in the run, so this
         // is never disarmed.
-        let router = Router::new(
-            context.child("byzantine_router"),
-            [participants[Role::Byzantine.index()].clone()],
-            drop_rate_cell(),
-        );
+        let router = Router::new([participants[Role::Byzantine.index()].clone()]);
 
         let mut apps: Vec<(usize, &'static str, Application<B<P>>)> = Vec::new();
         for (idx, validator) in participants.iter().enumerate() {
