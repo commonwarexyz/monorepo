@@ -22,8 +22,6 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::{Span, info_span};
 
-type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
-
 /// A verification is scoped to its caller.
 pub(in crate::stateful::actor) struct Verification {
     response: oneshot::Sender<bool>,
@@ -71,15 +69,6 @@ where
         span: Span,
         block: Arc<A::Block>,
         acknowledgement: Exact,
-        retry_mailbox: RetryMailbox<E, A>,
-    },
-
-    /// Requests the database set.
-    ///
-    /// The actor replies once startup handoff has produced the database set,
-    /// or immediately if that has already happened.
-    SubscribeDatabases {
-        response: oneshot::Sender<A::Databases>,
     },
 }
 
@@ -92,7 +81,6 @@ where
         match self {
             Self::Propose { response, .. } => response.is_closed(),
             Self::Verify { verification, .. } => verification.is_cancelled(),
-            Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
         }
     }
@@ -164,7 +152,6 @@ where
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
-    retry_mailbox: RetryMailbox<E, A>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -175,7 +162,6 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
-            retry_mailbox: self.retry_mailbox.clone(),
         }
     }
 }
@@ -186,44 +172,8 @@ where
     A: Application<E>,
 {
     /// Create a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
-        let retry_sender = sender.clone();
-        let retry_mailbox = Arc::new(move |message| {
-            let _ = retry_sender.enqueue(message);
-        });
-        Self {
-            sender,
-            retry_mailbox,
-        }
-    }
-}
-
-impl<E, A> Mailbox<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    /// Wait for the database set.
-    ///
-    /// This resolves once startup handoff has produced the database set. Late
-    /// callers receive the current database set immediately.
-    ///
-    /// ## Safety
-    ///
-    /// Holders must never manually prune these databases. Stateful uses
-    /// [`Config::prune_config`](crate::stateful::Config::prune_config) to
-    /// schedule safe pruning without pruning past the rewind window needed for
-    /// crash reconciliation. With pruning enabled, glue keeps a
-    /// `max_pending_acks + 1` finalized-target window plus the configured
-    /// extra block windows before pruning.
-    pub async fn subscribe_databases(&self) -> A::Databases {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::SubscribeDatabases { response });
-        receiver
-            .await
-            .expect("stateful actor dropped during subscribe_databases")
+    pub(super) const fn new(sender: Sender<Message<E, A>>) -> Self {
+        Self { sender }
     }
 }
 
@@ -277,9 +227,12 @@ where
             ancestry: BoxedAncestry::new(ancestry),
             verification: Verification { response },
         });
-        receiver
-            .await
-            .expect("stateful actor dropped during verify")
+        match receiver.await {
+            Ok(valid) => valid,
+            // The actor exited without answering. Never fabricate a verdict.
+            // Park until this future is dropped.
+            Err(_) => std::future::pending().await,
+        }
     }
 }
 
@@ -305,7 +258,6 @@ where
                     span,
                     block,
                     acknowledgement,
-                    retry_mailbox: self.retry_mailbox.clone(),
                 }
             }
         };

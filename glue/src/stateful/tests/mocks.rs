@@ -1,6 +1,9 @@
 use crate::stateful::{
-    Application, Input, Proposed,
-    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    Application, ExecutionError, Input, Proposed,
+    db::{
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, Single, Unmerkleized,
+        UnmerkleizedOf, Writer,
+    },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,11 +15,11 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{convert::Infallible, sync::Arc};
 
-pub(crate) type TestDatabases = Shared<TestDb>;
+pub(crate) type TestDatabases = Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -51,39 +54,12 @@ impl Merkleized for TestMerkleized {
 /// Completes one parked flush when released by the test.
 pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
 
-/// Signals that pruning has started, then blocks it until the test releases it.
-struct PruneGate {
-    started: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-}
-
 /// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
 /// prune targets.
 #[derive(Clone, Default)]
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
-    prune_gate: Arc<Mutex<Option<PruneGate>>>,
-}
-
-impl FlushControl {
-    /// Gates the next prune. The receiver reports entry, and sending on the
-    /// returned sender lets pruning continue. Only one gate may be active.
-    pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = oneshot::channel();
-        assert!(
-            self.prune_gate
-                .lock()
-                .replace(PruneGate {
-                    started,
-                    release: release_rx,
-                })
-                .is_none(),
-            "prune gate already installed",
-        );
-        (started_rx, release)
-    }
 }
 
 #[derive(Default)]
@@ -133,7 +109,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+    async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -162,11 +138,6 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
         if let Some(control) = &self.control {
-            let gate = control.prune_gate.lock().take();
-            if let Some(mut gate) = gate {
-                gate.started.send(()).expect("test must await prune");
-                let _ = (&mut gate.release).await;
-            }
             control.pruned.lock().push(*target);
         }
         Ok(self)
@@ -307,33 +278,52 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
-        None
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+        Ok(None)
     }
 
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        None
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
+        Ok(None)
     }
 
     async fn apply(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        TestMerkleized
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
+        Ok(TestMerkleized)
     }
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb::default())
+    TestDb::default().into()
+}
+
+/// Finalize `batch` through the cell, returning the snapshot and flush handle.
+///
+/// Tests that drive [`ManagedDb`] directly split their database and use this
+/// instead of the set layer.
+pub(crate) async fn finalize<D: ManagedDb<deterministic::Context>>(
+    writer: Writer<D>,
+    batch: D::Merkleized,
+) -> (Writer<D>, D::Snapshot, Handle<()>) {
+    let (writer, (snapshot, handle)) = writer
+        .mutate(|db| async move {
+            let (db, snapshot, handle) = D::finalize(db, batch)
+                .await
+                .unwrap_or_else(|err| panic!("finalize failed: {err:?}"));
+            (db, (snapshot, handle))
+        })
+        .await;
+    (writer, snapshot, handle)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {
