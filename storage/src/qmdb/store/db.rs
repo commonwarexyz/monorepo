@@ -92,7 +92,7 @@ use crate::{
             VariableValue,
             unordered::{Update, variable::Operation},
         },
-        build_snapshot_from_log, delete_key,
+        build_index_from_log, delete_key,
         operation::{Committable as _, Floored as _, Key},
         update_key,
     },
@@ -117,7 +117,7 @@ pub struct Config<T: Translator, C> {
     /// The [Translator] used by the [Index].
     pub translator: T,
 
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve index
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
@@ -224,13 +224,13 @@ where
     /// - The log is never pruned beyond the inactivity floor.
     log: Journal<E, Operation<crate::mmr::Family, K, V>>,
 
-    /// A snapshot of all currently active operations in the form of a map from each key to the
-    /// location containing its most recent update.
+    /// An index of all currently active operations, mapping each key to the location
+    /// containing its most recent update.
     ///
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Update].
-    snapshot: Index<T, Location>,
+    index: Index<T, Location>,
 
     /// The number of active keys in the store.
     active_keys: usize,
@@ -271,7 +271,7 @@ where
 {
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        for &loc in self.snapshot.get(key) {
+        for &loc in self.index.get(key) {
             let Operation::Update(Update(k, v)) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
@@ -334,7 +334,7 @@ where
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
+    /// or current index.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -398,10 +398,10 @@ where
         let last_commit_loc =
             Location::new(log.size().checked_sub(1).expect("commit should exist"));
 
-        // Build the snapshot.
+        // Build the index.
         let cache_size = cfg.init_cache_size;
         let init_buffer = cfg.init_buffer;
-        let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
+        let mut index = Index::new(context.child("index"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
             let op = log.read(*last_commit_loc).await?;
             let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
@@ -410,10 +410,10 @@ where
                     "inactivity floor exceeds last commit",
                 ));
             }
-            let active_keys = build_snapshot_from_log(
+            let active_keys = build_index_from_log(
                 inactivity_floor_loc,
                 &log,
-                &mut snapshot,
+                &mut index,
                 init_buffer,
                 cache_size,
                 |_, _| {},
@@ -424,7 +424,7 @@ where
 
         Ok(Self {
             log,
-            snapshot,
+            index,
             active_keys,
             inactivity_floor_loc,
             last_commit_loc,
@@ -466,7 +466,7 @@ where
                 let updated = {
                     let new_loc = self.log.bounds().end;
                     update_key::<crate::mmr::Family, _, _>(
-                        &mut self.snapshot,
+                        &mut self.index,
                         &self.log,
                         &key,
                         Location::new(new_loc),
@@ -484,13 +484,9 @@ where
                     .append(&Operation::Update(Update(key, value)))
                     .await?;
             } else {
-                let deleted = delete_key::<crate::mmr::Family, _, _>(
-                    &mut self.snapshot,
-                    &self.log,
-                    &key,
-                    None,
-                )
-                .await?;
+                let deleted =
+                    delete_key::<crate::mmr::Family, _, _>(&mut self.index, &self.log, &key, None)
+                        .await?;
                 if deleted.is_some() {
                     (self.log, _) = self.log.append(&Operation::Delete(key)).await?;
                     self.steps += 1;
@@ -507,7 +503,7 @@ where
         } else {
             let steps_to_take = self.steps + 1;
             let mut helper = FloorHelper {
-                snapshot: &mut self.snapshot,
+                index: &mut self.index,
                 log: self.log,
             };
             let mut inactivity_floor_loc = self.inactivity_floor_loc;
@@ -988,7 +984,7 @@ mod test {
                 (db, _) = apply_entries(db, [(k, Some(v.clone()))]).await;
             }
 
-            let iter = db.snapshot.get(&k);
+            let iter = db.index.get(&k);
             assert_eq!(iter.count(), 1);
 
             let db = db.commit().await.unwrap();
@@ -999,7 +995,7 @@ mod test {
             let floor = db.inactivity_floor_loc();
             let db = db.prune(floor).await.unwrap();
 
-            let iter = db.snapshot.get(&k);
+            let iter = db.index.get(&k);
             assert_eq!(iter.count(), 1);
 
             // First apply_entries: Update + 1 move + CommitFloor = 3 ops. Subsequent 99: Update + 2
@@ -1018,7 +1014,7 @@ mod test {
     }
 
     #[test_traced("DEBUG")]
-    fn test_store_build_snapshot_keys_with_shared_prefix() {
+    fn test_store_build_index_keys_with_shared_prefix() {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
@@ -1039,7 +1035,7 @@ mod test {
             let db = db.commit().await.unwrap();
             db.sync().await.unwrap();
 
-            // Re-open the store to ensure it builds the snapshot for the conflicting
+            // Re-open the store to ensure it builds the index for the conflicting
             // keys correctly.
             let db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
 
@@ -1092,7 +1088,7 @@ mod test {
             // Commit the changes
             db.commit().await.unwrap();
 
-            // Re-open the store and ensure the snapshot restores the key, after processing
+            // Re-open the store and ensure the index restores the key, after processing
             // the delete and the subsequent set.
             let db = create_test_store(ctx.child("store").with_attribute("index", 2)).await;
             let fetched_value = db.get(&k).await.unwrap();
@@ -1232,7 +1228,7 @@ mod test {
                 (db, _) = apply_entries(db, [(k, Some(v.clone()))]).await;
             }
             let mut db = db.commit().await.unwrap();
-            assert_eq!(db.snapshot.items(), 1000);
+            assert_eq!(db.index.items(), 1000);
 
             // Delete every 7th key and commit.
             for i in 0u64..ELEMENTS {
@@ -1255,7 +1251,7 @@ mod test {
             let floor = db.inactivity_floor_loc();
             let db = db.prune(floor).await.unwrap();
             assert_eq!(db.log.bounds().start, *final_floor - *final_floor % 7);
-            assert_eq!(db.snapshot.items(), 857);
+            assert_eq!(db.index.items(), 857);
 
             db.destroy().await.unwrap();
         });
