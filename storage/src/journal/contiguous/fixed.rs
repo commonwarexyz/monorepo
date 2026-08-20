@@ -1464,7 +1464,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .map(|group_hits| group_hits as u64)
             .sum();
 
-        for slice in reusable_buf.chunks(A::SIZE) {
+        #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+        for slice in reusable_buf.chunks_exact(A::SIZE) {
             result.push(A::decode(slice).map_err(Error::Codec)?);
         }
 
@@ -1538,7 +1539,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let misses =
                 blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
             let mut misses = misses.into_iter().peekable();
-            for (idx, slice) in buf.chunks(A::SIZE).enumerate() {
+            #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+            for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
                 if misses.peek() == Some(&idx) {
                     misses.next();
                     continue;
