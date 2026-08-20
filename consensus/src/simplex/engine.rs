@@ -58,6 +58,9 @@ impl<
     pub fn new(mut context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert(&mut context);
+        let fast_skip_budget = cfg
+            .fast_skip_budget
+            .resolve(cfg.scheme.participants().len());
         let elector = cfg.elector.build(cfg.scheme.participants());
         let terms = elector.terms();
         let term_length = terms.length();
@@ -105,6 +108,7 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
+                fast_skip_budget,
                 view_retention: cfg.view_retention,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,

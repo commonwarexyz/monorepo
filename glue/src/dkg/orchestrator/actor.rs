@@ -127,6 +127,9 @@ pub struct SimplexConfig<L> {
     /// Time a leader may remain inactive before triggering immediate nullification.
     pub skip_timeout: Duration,
 
+    /// Maximum unfinalized term distance that permits fast-skips.
+    pub fast_skip_budget: simplex::FastSkipBudget,
+
     /// Track individual votes after certification.
     ///
     /// By default, full vote evidence is released when the corresponding certificate
@@ -759,6 +762,7 @@ where
                 fetch_timeout: self.simplex.fetch_timeout,
                 view_retention: self.simplex.view_retention,
                 skip_timeout: self.simplex.skip_timeout,
+                fast_skip_budget: self.simplex.fast_skip_budget,
                 forwarding: self.simplex.forwarding,
                 track_historical_votes: self.simplex.track_historical_votes,
             },

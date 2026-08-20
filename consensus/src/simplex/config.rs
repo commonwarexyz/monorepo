@@ -13,6 +13,43 @@ use commonware_runtime::buffer::paged::CacheRef;
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 
+/// Maximum unfinalized term distance that permits event-driven timeouts to
+/// bypass ordinary round deadlines.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum FastSkipBudget {
+    /// Set the budget to the number of participants.
+    #[default]
+    Participants,
+    /// Use a budget independent of the number of participants.
+    ///
+    /// A budget of zero prevents event-driven timeouts from bypassing ordinary
+    /// round deadlines.
+    Fixed(u64),
+}
+
+impl FastSkipBudget {
+    /// Resolves the configured budget for a participant count.
+    pub(crate) const fn resolve(self, participants: usize) -> u64 {
+        match self {
+            Self::Participants => participants as u64,
+            Self::Fixed(budget) => budget,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FastSkipBudget;
+
+    #[test]
+    fn fast_skip_budget_resolves() {
+        assert_eq!(FastSkipBudget::default().resolve(4), 4);
+        assert_eq!(FastSkipBudget::Participants.resolve(7), 7);
+        assert_eq!(FastSkipBudget::Fixed(0).resolve(4), 0);
+        assert_eq!(FastSkipBudget::Fixed(9).resolve(4), 9);
+    }
+}
+
 /// Controls whether and how the engine proactively forwards blocks when
 /// entering the next view.
 ///
@@ -207,6 +244,10 @@ where
     ///
     /// This timeout must be greater than the certification timeout and timeout retry.
     pub skip_timeout: Duration,
+
+    /// Maximum unfinalized term distance that permits event-driven timeouts to
+    /// bypass ordinary round deadlines.
+    pub fast_skip_budget: FastSkipBudget,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,

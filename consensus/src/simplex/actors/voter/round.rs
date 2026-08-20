@@ -508,10 +508,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns the next round-local timeout and its reason.
+    ///
+    /// When `allow_latched_timeout` is false, this method retains the
+    /// event-driven timeout and returns an ordinary deadline.
     pub fn next_timeout(
         &mut self,
         now: SystemTime,
         retry_interval: Duration,
+        allow_latched_timeout: bool,
     ) -> Option<(SystemTime, TimeoutReason)> {
         if self.broadcast_finalize || self.finalization().is_some() {
             return None;
@@ -527,7 +531,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             self.retry_deadline = Some(next);
             return Some((next, TimeoutReason::Retry));
         }
-        if let Some(latched) = self.latched_timeout {
+        if allow_latched_timeout && let Some(latched) = self.latched_timeout {
             return Some(latched);
         }
         if self.proposal().is_none()

@@ -18,7 +18,7 @@ use commonware_consensus::{
     marshal::{
         self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
     },
-    simplex::{config::ForwardingPolicy, elector::RoundRobin},
+    simplex::{FastSkipBudget, config::ForwardingPolicy, elector::RoundRobin},
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{ed25519, sha256::Sha256};
@@ -345,6 +345,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 fetch_timeout: Duration::from_secs(2),
                 view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(5),
+                fast_skip_budget: FastSkipBudget::Participants,
                 forwarding: ForwardingPolicy::Disabled,
                 track_historical_votes: false,
             },

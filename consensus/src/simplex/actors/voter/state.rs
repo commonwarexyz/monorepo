@@ -137,6 +137,7 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     leader_timeout: Duration,
     certification_timeout: Duration,
     timeout_retry: Duration,
+    fast_skip_budget: u64,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
@@ -230,6 +231,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let nullifications = context.family("nullifications", "nullifications");
 
         let lookahead = Lookahead::new(&cfg.elector.terms());
+        let fast_skip_budget = cfg.scheme.participants().len() as u64;
 
         Self {
             context,
@@ -241,6 +243,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             leader_timeout: cfg.leader_timeout,
             certification_timeout: cfg.certification_timeout,
             timeout_retry: cfg.timeout_retry,
+            fast_skip_budget,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
@@ -257,6 +260,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             timeouts,
             nullifications,
         }
+    }
+
+    /// Sets the maximum unfinalized term distance that permits event-driven
+    /// timeouts to bypass ordinary round deadlines.
+    pub const fn with_fast_skip_budget(mut self, fast_skip_budget: u64) -> Self {
+        self.fast_skip_budget = fast_skip_budget;
+        self
     }
 
     /// Seeds the state machine with the genesis payload and advances into view 1.
@@ -441,6 +451,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn next_timeout(&mut self) -> (SystemTime, TimeoutReason) {
         let now = self.context.current();
         let timeout_retry = self.timeout_retry;
+        let allow_latched_timeout = self.fast_skip_eligible();
         let round_timeout = {
             // The current round always has a pending timeout:
             // `Round::next_timeout` only returns `None` for rounds that are
@@ -452,7 +463,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 .get_mut(&self.view)
                 .expect("current round must exist");
             round
-                .next_timeout(now, timeout_retry)
+                .next_timeout(now, timeout_retry, allow_latched_timeout)
                 .expect("current round must always have a timeout")
         };
 
@@ -471,6 +482,18 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .filter(|&deadline| deadline <= round_timeout.0 && now < round_timeout.0)
             .map(|deadline| (deadline, TimeoutReason::StallTimeout))
             .unwrap_or(round_timeout)
+    }
+
+    /// Returns whether an event-driven timeout may bypass the current round's
+    /// ordinary deadlines.
+    const fn fast_skip_eligible(&self) -> bool {
+        let term_length = self.term_length();
+        let first_unfinalized = self.last_finalized.next().term_index(term_length);
+        let current = self.view.term_index(term_length);
+        let spent = current
+            .checked_sub(first_unfinalized)
+            .expect("current term must not precede the first unfinalized term");
+        spent < self.fast_skip_budget
     }
 
     /// Returns the oldest entered, unfinalized view's stall deadline in
@@ -1823,16 +1846,21 @@ mod tests {
             validators.try_into().expect("validator count fits in u32"),
         );
         let scheme = fixture.schemes[signer].clone();
+        let elector = if term_length == TermLength::ONE {
+            round_robin(&scheme)
+        } else {
+            round_robin_with_term(
+                &scheme,
+                term_length,
+                Duration::from_secs(4),
+                optimistic_views,
+            )
+        };
         let mut state = State::new(
             context.child("state"),
             Config {
-                scheme: scheme.clone(),
-                elector: round_robin_with_term(
-                    &scheme,
-                    term_length,
-                    Duration::from_secs(4),
-                    optimistic_views,
-                ),
+                scheme,
+                elector,
                 epoch: Epoch::new(epoch),
                 view_retention: ViewDelta::new(view_retention),
                 leader_timeout: Duration::from_secs(1),
@@ -2769,6 +2797,149 @@ mod tests {
             assert_ne!(
                 next_deadline, retry_deadline,
                 "next view must not inherit the previous view retry deadline"
+            );
+        });
+    }
+
+    #[test]
+    fn fast_skip_budget_allows_repeated_leaders() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, state) = setup_state_with(
+                &mut context,
+                2,
+                0,
+                7,
+                10,
+                TermLength::ONE,
+                ViewDelta::zero(),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+            let mut state = state.with_fast_skip_budget(3);
+            let first_leader = state.leader_index(View::new(1));
+
+            for view in 1..=3 {
+                let view = View::new(view);
+                assert_eq!(state.current_view(), view);
+                let now = context.current();
+                state.trigger_timeout(view, TimeoutReason::Inactivity);
+                assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+                assert!(
+                    !state
+                        .construct_nullify(view, TimeoutReason::Inactivity)
+                        .expect("fast-skip nullify")
+                        .0
+                );
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+
+            assert_eq!(state.leader_index(View::new(3)), first_leader);
+
+            let view = View::new(4);
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    #[test]
+    fn fast_skip_budget_counts_terms() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                7,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::zero(),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+            let mut state = state.with_fast_skip_budget(2);
+
+            for view in [View::new(1), View::new(6)] {
+                assert_eq!(state.current_view(), view);
+                let now = context.current();
+                state.trigger_timeout(view, TimeoutReason::Inactivity);
+                assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+                assert!(
+                    state
+                        .construct_nullify(view, TimeoutReason::Inactivity)
+                        .is_some()
+                );
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+
+            let view = View::new(11);
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    #[test]
+    fn finalization_restores_pending_fast_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, state) = setup_state(&mut context, 4, 9, 10, 1);
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+            let mut state = state.with_fast_skip_budget(1);
+
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([123u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &proposal);
+            assert!(state.add_notarization(notarization).0);
+            assert_eq!(state.certify_candidates().0, vec![proposal.clone()]);
+            assert!(state.certified(View::new(1), true).is_some());
+            assert_eq!(state.current_view(), View::new(2));
+
+            let now = context.current();
+            state.trigger_timeout(View::new(2), TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+
+            let finalization = build_finalization(&verifier, &schemes, &proposal);
+            assert!(state.add_finalization(finalization).0);
+            assert_eq!(state.current_view(), View::new(2));
+            assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+        });
+    }
+
+    #[test]
+    fn zero_fast_skip_budget_uses_ordinary_deadline() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (_, state) = setup_state(&mut context, 4, 7, 10, 1);
+            let mut state = state.with_fast_skip_budget(0);
+            let view = state.current_view();
+            let now = context.current();
+
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
             );
         });
     }

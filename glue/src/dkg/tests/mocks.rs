@@ -730,6 +730,7 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         fetch_timeout: Duration::from_millis(100),
         view_retention: ViewDelta::new(8),
         skip_timeout: Duration::from_secs(1),
+        fast_skip_budget: simplex::FastSkipBudget::Participants,
         forwarding: simplex::ForwardingPolicy::Disabled,
         track_historical_votes: false,
     }
