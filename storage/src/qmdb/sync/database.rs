@@ -168,6 +168,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, NZU16!(111), NZUsize!(5)),
+            node_cache_size: None,
         }
     }
 

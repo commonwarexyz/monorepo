@@ -474,6 +474,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequ
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
+            node_cache_size: None,
             page_cache: page_cache.clone(),
         },
         journal_config: FixedLogConfig {
