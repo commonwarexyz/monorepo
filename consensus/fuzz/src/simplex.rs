@@ -1,6 +1,6 @@
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 use crate::N4F1C3;
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 use crate::simplex_certificate_mock as cert_mock;
 use crate::{BYZANTINE_IDX, Configuration};
 use commonware_codec::Read;
@@ -11,7 +11,7 @@ use commonware_consensus::{
     },
     types::{Participant, Round, TermLength, View, ViewDelta},
 };
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 use commonware_cryptography::ed25519::PublicKey as Ed25519PublicKey;
 use commonware_cryptography::{Sha256, certificate, sha256::Digest as Sha256Digest};
 use commonware_runtime::deterministic;
@@ -137,10 +137,10 @@ where
     }
 }
 
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 pub struct SimplexCertificateMock;
 
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 impl Simplex for SimplexCertificateMock {
     type Scheme = cert_mock::Scheme<Ed25519PublicKey, false>;
 
@@ -167,10 +167,10 @@ impl Simplex for SimplexCertificateMock {
     }
 }
 
-#[cfg(all(test, feature = "mocks"))]
+#[cfg(test)]
 pub(crate) struct SimplexCertificateMockAttributable;
 
-#[cfg(all(test, feature = "mocks"))]
+#[cfg(test)]
 impl Simplex for SimplexCertificateMockAttributable {
     type Scheme = cert_mock::Scheme<Ed25519PublicKey, true>;
     type Elector = RoundRobin;
@@ -196,10 +196,10 @@ impl Simplex for SimplexCertificateMockAttributable {
     }
 }
 
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 pub struct SimplexCertificateMockCustomRoundRobin;
 
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 impl Simplex for SimplexCertificateMockCustomRoundRobin {
     type Scheme = cert_mock::Scheme<Ed25519PublicKey, false>;
     type Elector = CustomRoundRobinShuffled;
@@ -224,10 +224,10 @@ impl Simplex for SimplexCertificateMockCustomRoundRobin {
     }
 }
 
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 pub struct SimplexCertificateMockByzantineFirstLeader;
 
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 impl Simplex for SimplexCertificateMockByzantineFirstLeader {
     type Scheme = cert_mock::Scheme<Ed25519PublicKey, false>;
 

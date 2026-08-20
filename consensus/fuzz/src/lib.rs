@@ -21,8 +21,8 @@ pub mod ordered_broadcast;
 pub mod ordered_broadcast_certificate_mock;
 pub mod simplex;
 pub(crate) mod simplex_audit;
-#[cfg(feature = "mocks")]
-pub mod simplex_certificate_mock;
+#[cfg(any(feature = "mocks", test))]
+pub use commonware_consensus::simplex::mocks::scheme as simplex_certificate_mock;
 pub mod state_cov;
 pub mod strategy;
 mod twins_network;
@@ -72,7 +72,7 @@ use commonware_utils::{
     sync::Once,
 };
 use futures::future::join_all;
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 pub use simplex::{
     SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader,
     SimplexCertificateMockCustomRoundRobin,
