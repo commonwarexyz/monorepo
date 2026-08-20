@@ -181,7 +181,7 @@ pub trait Merkleized: Clone + Sized + Send + Sync {
 /// Mutating methods take the database by value and return it on success. If a mutating
 /// method returns an error, or its future is dropped before it finishes, the database is
 /// gone: state that was not yet durable is discarded, but everything already on disk stays
-/// recoverable. The cell is left poisoned and later reads park.
+/// recoverable.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
     type Unmerkleized: Unmerkleized<Merkleized = Self::Merkleized>;
@@ -204,9 +204,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Typically a database-specific state commitment plus the operation range needed to reach it.
     type SyncTarget: Clone + PartialEq + Send + Sync;
 
-    /// Owned immutable snapshot of the applied operation log and its proof
-    /// state, for serving state sync. Not a queryable key-value view -- only the
-    /// live database answers key reads.
+    /// Owned immutable snapshot of applied state.
     type Snapshot: Clone + Send + Sync + 'static;
 
     /// Construct a new database from its configuration.
@@ -362,19 +360,18 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// for tuple sets.
     type Unmerkleized: Send;
 
-    /// One [`ManagedDb::Merkleized`] per database, shaped like [`Self::Unmerkleized`].
+    /// One [`ManagedDb::Merkleized`] per database.
     ///
     /// [`Clone`] is cheap (see [`Merkleized`]) and the wrapper uses it to keep a
     /// block forkable while that block is being applied.
     type Merkleized: Clone + Send + Sync;
 
-    /// One [`Reader`] per database, shaped like [`Self::Unmerkleized`].
+    /// One [`Reader`] per database.
     ///
-    /// Readers are cloned into batches, and hooks that read applied state
-    /// directly acquire read guards through them.
+    /// Cloned into batches and into hooks that read applied state.
     type Readers: Clone + Send + Sync + 'static;
 
-    /// One [`ManagedDb::Snapshot`] per database, shaped like [`Self::Unmerkleized`].
+    /// One [`ManagedDb::Snapshot`] per database.
     type Snapshots: Send + Sync + 'static;
 
     /// Configuration needed to construct every database in the set -- the database's
@@ -382,8 +379,7 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// tuple sets.
     type Config: Send;
 
-    /// Per-database sync targets extracted from a finalized block, shaped like
-    /// [`Self::Config`].
+    /// Per-database sync targets extracted from a finalized block.
     type SyncTargets: Clone + PartialEq + Send + Sync;
 
     /// Construct the database set from its configuration.
