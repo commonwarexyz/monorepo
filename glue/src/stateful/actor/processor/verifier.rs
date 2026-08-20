@@ -173,30 +173,15 @@ where
             {
                 Ok(parent) => parent,
                 Err(PrepareFailure::Invalid) => {
-                    // A finalization that completed while this attempt waited can
-                    // make valid ancestry look invalid (the parent swept below the
-                    // new anchor), so classify once more before answering false.
-                    match self
-                        .check_processed(marshal.clone(), block.as_ref(), verification)
-                        .await
-                    {
-                        ProcessedBlock::Accepted => {
-                            timer.observe(context);
-                            return VerificationResult::Decided(true);
-                        }
-                        ProcessedBlock::Cancelled => return VerificationResult::Cancelled,
-                        ProcessedBlock::Rejected => return VerificationResult::Decided(false),
-                        // The candidate still sits above the anchor. An anchor
-                        // that moved during this attempt may have invalidated the
-                        // walk itself, so retry against the new anchor. A stable
-                        // anchor means the ancestry is genuinely invalid.
-                        ProcessedBlock::Continue => {
-                            if self.execution.last_processed().digest != seen.digest {
-                                continue;
-                            }
-                            return VerificationResult::Decided(false);
-                        }
+                    // An anchor that moved during this attempt can make valid
+                    // ancestry look invalid (the parent swept below the new
+                    // anchor), so retry and let the loop's classification
+                    // decide. A stable anchor means the ancestry is genuinely
+                    // invalid.
+                    if self.execution.last_processed().digest != seen.digest {
+                        continue;
                     }
+                    return VerificationResult::Decided(false);
                 }
                 Err(PrepareFailure::Cancelled) => return VerificationResult::Cancelled,
                 Err(PrepareFailure::Stale) => {

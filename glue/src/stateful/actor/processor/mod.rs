@@ -20,6 +20,34 @@
 //!
 //! - Maintenance -- [`Processor::prune`] runs due prunes and
 //!   [`Processor::publish_snapshot`] publishes fresh snapshots afterwards.
+//!
+//! # How verification races finalization
+//!
+//! Finalization never waits for verification. When a block finalizes, the
+//! actor applies it immediately. Verification jobs keep running through the
+//! apply and are never cancelled, so a job can race any number of applies,
+//! and the pieces here make that race safe:
+//!
+//! - Jobs share an [`Execution`]: readers over the databases plus, under one
+//!   lock, the speculative world-view -- the pending map of verified blocks,
+//!   the applied anchor, and the finalizing window below.
+//!
+//! - A job whose branch an apply invalidated is refused at its next read
+//!   ([`ExecutionError::Stale`], enforced by storage). The job waits for the
+//!   anchor to move past what it saw ([`Execution::anchor_past`]), then
+//!   re-classifies the candidate against the new canonical chain: the
+//!   candidate itself finalized means true, swept away means false, and still
+//!   open means execute again (the loop in `verifier::Verifier::run`).
+//!
+//! - An apply mutates the databases before the anchor moves. A fork taken
+//!   from the anchor in that window could mix pre- and post-apply databases,
+//!   so forks refuse while a finalization is mid-flight (the `finalizing`
+//!   flag), and the sweep, the anchor move, and the window close happen under
+//!   one lock ([`Execution::advance_to_finalized`]).
+//!
+//! - The finalized block stays in the pending map until that sweep, so a job
+//!   forking from it mid-apply finds it instead of rebuilding it on top of
+//!   itself.
 
 use crate::stateful::{
     Application, ExecutionError, Input, Proposed, PruneConfig,
@@ -79,7 +107,7 @@ struct ReplayFlight {
     vacant_slots: Vec<usize>,
 }
 
-/// What one verification attempt concluded.
+/// The verification's final answer.
 pub(in crate::stateful::actor) enum VerificationResult {
     /// A verdict to return to the caller.
     Decided(bool),
@@ -337,7 +365,7 @@ enum PrepareBatchesError {
     Invalid,
     /// Parent ancestry ended before validity could be proven.
     Incomplete,
-    /// The attempt was cancelled while waiting.
+    /// The request future was dropped while waiting.
     Cancelled,
     /// A competing finalization landed mid-preparation. The caller re-checks
     /// against the new canonical state.

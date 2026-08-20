@@ -31,9 +31,6 @@ where
 }
 
 /// Owns independently-polled verification jobs.
-///
-/// A job runs to its own conclusion. The only thing that ends one early is
-/// its request future being dropped.
 pub(super) struct Handler<S: Scheme, V: Variant> {
     marshal: MarshalMailbox<S, V>,
     jobs: Pool<(Verification, VerificationResult)>,
