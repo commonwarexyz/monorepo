@@ -194,6 +194,7 @@ pub(crate) mod test {
                 items_per_blob: NZU64!(12), // intentionally small and janky size
                 write_buffer: NZUsize!(64),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             journal_config: crate::journal::contiguous::variable::Config {

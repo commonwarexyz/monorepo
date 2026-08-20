@@ -130,6 +130,7 @@ fn merkle_config(suffix: &str, page_cache: &CacheRef) -> MerkleConfig<Sequential
         items_per_blob: NZU64!(11),
         write_buffer: NZUsize!(1024),
         strategy: Sequential,
+        node_cache_size: Some(NZUsize!(64)),
         page_cache: page_cache.clone(),
     }
 }

@@ -123,6 +123,7 @@ fn merkle_cfg(
         items_per_blob,
         write_buffer: WRITE_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
+        node_cache_size: None,
         page_cache,
     }
 }

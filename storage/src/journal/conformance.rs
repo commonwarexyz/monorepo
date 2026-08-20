@@ -34,6 +34,7 @@ fn authenticated_merkle_config(
         items_per_blob: NZU64!(11),
         write_buffer: WRITE_BUFFER,
         strategy: Sequential,
+        node_cache_size: Some(NZUsize!(64)),
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }

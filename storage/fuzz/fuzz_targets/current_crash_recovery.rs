@@ -105,6 +105,7 @@ fn make_config(
             items_per_blob: NZU64!(merkle_items_per_blob),
             write_buffer,
             strategy: Sequential,
+            node_cache_size: Some(NZUsize!(64)),
             page_cache: page_cache.clone(),
         },
         journal_config: VConfig {

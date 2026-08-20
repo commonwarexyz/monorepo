@@ -59,6 +59,7 @@ fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Co
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
+        node_cache_size: None,
         page_cache: pc,
     }
 }

@@ -122,6 +122,12 @@ pub struct Config<S: Strategy> {
 
     /// The page cache to use for caching data.
     pub page_cache: CacheRef,
+
+    /// Capacity (in entries, rounded up to a multiple of the shard count and preallocated
+    /// eagerly) of the position-keyed node cache serving historical node reads that escape
+    /// the in-memory structure; `None` disables it. Experimental: entry-count sizing is
+    /// for evaluation only and is replaced by a byte-bounded knob before stabilization.
+    pub node_cache_size: Option<NonZeroUsize>,
 }
 
 /// Configuration for initializing a full Merkle structure for synchronization.
@@ -173,6 +179,12 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
 
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
+
+    /// A position-keyed cache of node digests read from the journal; `None` when disabled.
+    /// Journal node positions are written exactly once (append-only), so entries need no
+    /// coherence protocol; rewind (which lets new appends reuse truncated positions) clears
+    /// the cache wholesale.
+    pub(crate) node_cache: Option<node_cache::NodeCache<D>>,
 }
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> std::fmt::Debug for Merkle<F, E, D, S> {
@@ -300,6 +312,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 metadata,
                 journal_dirty: false,
                 strategy: cfg.strategy,
+                node_cache: cfg.node_cache_size.map(node_cache::NodeCache::new),
             });
         }
 
@@ -440,6 +453,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             metadata,
             journal_dirty: false,
             strategy: cfg.strategy,
+            node_cache: cfg.node_cache_size.map(node_cache::NodeCache::new),
         })
     }
 
@@ -589,6 +603,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             metadata,
             journal_dirty: false,
             strategy: cfg.config.strategy,
+            node_cache: cfg.config.node_cache_size.map(node_cache::NodeCache::new),
         })
     }
 
@@ -632,8 +647,25 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Ok(Some(node));
         }
 
+        // Probe the cache only for retained positions: entries below the pruning
+        // boundary linger until CLOCK eviction, and serving one would return
+        // `Ok(Some(..))` where the contract (and any cold instance) returns `Ok(None)`.
+        if *position >= self.journal.bounds().start {
+            if let Some(node) = self
+                .node_cache
+                .as_ref()
+                .and_then(|cache| cache.get(*position))
+            {
+                return Ok(Some(node));
+            }
+        }
         match self.journal.read(*position).await {
-            Ok(item) => Ok(Some(item)),
+            Ok(item) => {
+                if let Some(cache) = &self.node_cache {
+                    cache.insert(*position, item);
+                }
+                Ok(Some(item))
+            }
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::Journal(e)),
         }
@@ -666,15 +698,39 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             }
         }
 
+        // Serve node-cache hits directly; only the residue pays a journal read. Hits fill
+        // their `nodes` slots here, identified by walking the None slots in order (the
+        // journal subsequence preserves position order).
+        let mut journal_misses = journal_positions;
+        if let Some(cache) = &self.node_cache {
+            let mut misses = Vec::with_capacity(journal_misses.len());
+            let mut probe = journal_misses.iter();
+            for slot in nodes.iter_mut().filter(|slot| slot.is_none()) {
+                let position = *probe.next().expect("one journal position per empty slot");
+                match cache.get(position) {
+                    Some(node) => *slot = Some(node),
+                    None => misses.push(position),
+                }
+            }
+            journal_misses = misses;
+        }
+
         // Within-bounds reads are guaranteed not to return `ItemPruned` (see
         // [`crate::journal::contiguous::Contiguous::read`]).
-        let items = if journal_positions.is_empty() {
+        let items = if journal_misses.is_empty() {
             Vec::new()
         } else {
-            self.journal
-                .read_many(&journal_positions)
+            let items = self
+                .journal
+                .read_many(&journal_misses)
                 .await
-                .map_err(Error::Journal)?
+                .map_err(Error::Journal)?;
+            if let Some(cache) = &self.node_cache {
+                for (&position, &node) in journal_misses.iter().zip(&items) {
+                    cache.insert(position, node);
+                }
+            }
+            items
         };
 
         // The unfilled slots are exactly the journal subsequence, in the order it was built.
@@ -972,6 +1028,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let journal_size = Position::<F>::new(self.journal.size());
         if new_size < journal_size {
             self.journal = self.journal.rewind(*new_size).await?.sync().await?;
+
+            // Truncated positions can be reused by new appends, which breaks the
+            // position-immutability rule the node cache relies on: drop every entry.
+            if let Some(cache) = &self.node_cache {
+                cache.clear();
+            }
         }
 
         // Truncate the in-memory structure to the target size.
@@ -1192,6 +1254,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
+            node_cache_size: None,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -1856,6 +1919,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
+            node_cache_size: None,
             page_cache: cfg_pruned.page_cache.clone(),
         };
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -2215,6 +2279,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -2279,6 +2344,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -2308,6 +2374,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -3043,6 +3110,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(64),
             strategy: Sequential,
+            node_cache_size: None,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
@@ -3796,5 +3864,134 @@ mod tests {
     fn test_update_leaf_after_sync_returns_pruned_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_update_leaf_after_sync_returns_pruned_inner::<mmb::Family>);
+    }
+
+    #[test]
+    fn test_node_cache_cleared_on_rewind_mmr() {
+        deterministic::Runner::default().start(node_cache_cleared_on_rewind_inner::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_node_cache_cleared_on_rewind_mmb() {
+        deterministic::Runner::default().start(node_cache_cleared_on_rewind_inner::<mmb::Family>);
+    }
+
+    /// A cached node at a truncated position would serve a STALE digest after new
+    /// appends reuse the position; rewind must clear the cache.
+    async fn node_cache_cleared_on_rewind_inner<F2: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let mut cfg = test_config(&context);
+        cfg.node_cache_size = Some(NZUsize!(1024));
+        let mut merkle =
+            Merkle::<F2, _, Digest, Sequential>::init(context.child("cached"), &hasher, cfg)
+                .await
+                .unwrap();
+
+        // Two epochs of different leaves over the same positions.
+        let epoch = |salt: u8| {
+            (0..20u8)
+                .map(move |i| Sha256::hash(&[&[salt, i][..]]))
+                .collect::<Vec<_>>()
+        };
+        let mut batch = merkle.new_batch();
+        for leaf in epoch(1) {
+            batch = batch.add(&hasher, &leaf);
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        let leaves = *merkle.leaves();
+
+        // Warm the node cache over every journal-resident position.
+        let positions: Vec<_> = (0..*merkle.size()).map(Position::new).collect();
+        let epoch1: Vec<_> = merkle.get_nodes(&positions).await.unwrap();
+
+        // Rewind everything, re-append DIFFERENT leaves at the same positions.
+        let mut merkle = merkle.rewind(leaves as usize).await.unwrap();
+        let mut batch = merkle.new_batch();
+        for leaf in epoch(2) {
+            batch = batch.add(&hasher, &leaf);
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        let epoch2: Vec<_> = merkle.get_nodes(&positions).await.unwrap();
+
+        assert_ne!(
+            epoch1, epoch2,
+            "different leaves must yield different nodes"
+        );
+
+        // Cross-check against a cache-free instance over the same storage.
+        drop(merkle);
+        let mut cfg = test_config(&context);
+        cfg.node_cache_size = None;
+        let reopened =
+            Merkle::<F2, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(
+            reopened.get_nodes(&positions).await.unwrap(),
+            epoch2,
+            "cached reads diverged from storage after rewind"
+        );
+    }
+}
+/// A sharded, position-keyed cache of node digests read from the merkle journal.
+///
+/// Journal node positions are append-only and written exactly once, so entries need no
+/// coherence protocol; hot bitmap chunks re-read the same subtree-root nodes every block,
+/// which makes historical node reads overwhelmingly re-reads (measured ~98% on the eth
+/// workload). The two lifecycle events are handled by the owner: rewind (positions can be
+/// reused) clears wholesale, and reads gate cache probes on the journal's retained bounds
+/// (entries below the pruning boundary linger until CLOCK eviction but are unreachable).
+pub(crate) mod node_cache {
+    use commonware_cryptography::Digest;
+    use commonware_utils::{cache::Clock, sync::RwLock};
+    use core::num::NonZeroUsize;
+
+    /// Shard count; matches the geometry of the qmdb record cache.
+    const SHARDS: usize = 16;
+
+    /// See the module docs.
+    pub(crate) struct NodeCache<D> {
+        shards: Box<[RwLock<Clock<u64, D>>]>,
+    }
+
+    impl<D: Digest> NodeCache<D> {
+        /// Creates a cache holding at most `capacity` entries, rounded up to a multiple
+        /// of the shard count and preallocated eagerly.
+        pub(crate) fn new(capacity: NonZeroUsize) -> Self {
+            let per_shard = NonZeroUsize::new(capacity.get().div_ceil(SHARDS).max(1)).unwrap();
+            Self {
+                shards: (0..SHARDS)
+                    .map(|_| RwLock::new(Clock::new(per_shard)))
+                    .collect(),
+            }
+        }
+
+        /// The digest cached at `position`, if any.
+        pub(crate) fn get(&self, position: u64) -> Option<D> {
+            self.shards[(position as usize) % SHARDS]
+                .read()
+                .get(&position)
+                .copied()
+        }
+
+        /// Caches the digest at `position` unless already present.
+        pub(crate) fn insert(&self, position: u64, node: D) {
+            let mut shard = self.shards[(position as usize) % SHARDS].write();
+            if shard.get(&position).is_none() {
+                shard.put(position, node);
+            }
+        }
+
+        /// Removes every entry. Called on rewind: truncated positions can be reused by
+        /// new appends, the one event that breaks position immutability.
+        pub(crate) fn clear(&self) {
+            for shard in self.shards.iter() {
+                shard.write().retain(|_, _| false);
+            }
+        }
     }
 }

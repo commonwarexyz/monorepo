@@ -347,6 +347,7 @@ fn main() {
             items_per_blob: ITEMS_PER_BLOB,
             write_buffer: WRITE_BUFFER,
             strategy: ctx.strategy(threads),
+            node_cache_size: None,
             page_cache: pc.clone(),
         };
         let journal_config = FConfig {

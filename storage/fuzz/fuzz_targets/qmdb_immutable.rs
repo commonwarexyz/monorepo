@@ -108,6 +108,7 @@ fn db_config(
             items_per_blob: NZU64!(ITEMS_PER_BLOB),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
+            node_cache_size: None,
             page_cache: page_cache.clone(),
         },
         log: VConfig {

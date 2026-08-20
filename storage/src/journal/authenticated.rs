@@ -1135,6 +1135,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             strategy,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            node_cache_size: None,
         }
     }
 

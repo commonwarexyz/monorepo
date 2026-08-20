@@ -13,7 +13,7 @@ use commonware_storage::merkle::{
     Bagging::ForwardFold, Family as MerkleFamily, Location, full::Config,
     hasher::Standard as StandardHasher, mmb, mmr,
 };
-use commonware_utils::{NZU64, Probability};
+use commonware_utils::{NZU64, NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -101,6 +101,7 @@ fn merkle_config(
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         strategy: Sequential,
+        node_cache_size: Some(NZUsize!(64)),
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
 }
