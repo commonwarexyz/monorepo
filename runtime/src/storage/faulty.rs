@@ -32,6 +32,7 @@ enum Op {
 }
 
 /// Selects how submitted bytes are retained from a write.
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PartialWriteMode {
     /// Retain bytes from the beginning of the write until the first omitted byte.
@@ -43,6 +44,7 @@ pub enum PartialWriteMode {
 
 /// Fault configuration for `write_at` operations and byte retention from failed writes or
 /// successful unsynchronized writes when a crash is simulated.
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WriteConfig {
     /// Probability that `write_at` returns an injected failure.

@@ -80,9 +80,8 @@ struct FuzzInput {
     /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
-    /// Failure rate for write operations (0, 1].
-    #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: Probability,
+    /// Failure and byte-retention configuration for write operations.
+    write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
 }
@@ -226,7 +225,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
-    let write_failure_rate = input.write_failure_rate;
+    let write_config = input.write_config;
 
     // Phase 1: Execute operations with fault injection until crash
     let (bounds, checkpoint) = runner.start_and_recover(|ctx| {
@@ -252,11 +251,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let storage_fault_cfg = ctx.storage_fault_config();
             *storage_fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: write_failure_rate,
-                    retention_rate: Probability!(0.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                }),
+                write_rate: Some(write_config),
                 ..Default::default()
             };
 

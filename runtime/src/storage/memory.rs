@@ -464,9 +464,17 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob, BufferPoolConfig, Storage as _,
-        storage::{Layout, tests::run_storage_tests},
+        deterministic::BoxDynRng,
+        storage::{
+            Layout,
+            faulty::{
+                Config as FaultConfig, PartialWriteMode, Storage as FaultyStorage, WriteConfig,
+            },
+            tests::run_storage_tests,
+        },
         telemetry::metrics::Registry,
     };
+    use commonware_utils::{Probability, ScriptedRng};
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -572,6 +580,107 @@ mod tests {
                 .coalesce(),
             b"new!"
         );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SubsetWriteCut {
+        FailedWrite,
+        Crash,
+    }
+
+    async fn assert_subset_write_preserves_header(layout: Layout, cut: SubsetWriteCut) {
+        const ORIGINAL: &[u8] = b"abcdefghijklmnop";
+        const REPLACEMENT: &[u8] = b"ABCDEFGHIJKLMNOP";
+        const RETAINED: &[u8] = b"AbCdEfGhIjKlMnOp";
+        const PARTITION: &str = "partition";
+        const NAME: &[u8] = b"blob";
+
+        let inner = Storage::new(test_pool());
+        let raw = match layout {
+            Layout::V0 => crate::storage::header::tests::v0_blob_bytes(0, ORIGINAL),
+            Layout::V1 => crate::storage::header::tests::v1_blob_bytes(0, ORIGINAL),
+        };
+        let data_offset = layout.data_offset() as usize;
+        let expected_header = raw[..data_offset].to_vec();
+        inner
+            .partitions
+            .lock()
+            .entry(PARTITION.into())
+            .or_default()
+            .insert(NAME.to_vec(), raw);
+
+        let failure_rate = match cut {
+            SubsetWriteCut::FailedWrite => Probability!(1.0),
+            SubsetWriteCut::Crash => Probability!(0.0),
+        };
+        let rng: BoxDynRng = Box::new(ScriptedRng::new(
+            (0..REPLACEMENT.len()).map(|index| if index % 2 == 0 { 0 } else { u64::MAX }),
+        ));
+        let faulty = FaultyStorage::new(
+            inner.clone(),
+            Arc::new(Mutex::new(rng)),
+            Arc::new(RwLock::new(FaultConfig::default().write(WriteConfig {
+                failure_rate,
+                retention_rate: Probability!(0.5),
+                mode: PartialWriteMode::Subset,
+            }))),
+        );
+
+        let (blob, size, version) = faulty.open_versioned(PARTITION, NAME, 0..=0).await.unwrap();
+        assert_eq!(size, ORIGINAL.len() as u64);
+        assert_eq!(version, 0);
+        let result = blob.write_at(0, REPLACEMENT, WriteOptions::default()).await;
+        match cut {
+            SubsetWriteCut::FailedWrite => {
+                assert!(matches!(result, Err(crate::Error::Io(_))));
+            }
+            SubsetWriteCut::Crash => result.unwrap(),
+        }
+        drop(blob);
+
+        {
+            let partitions = inner.partitions.lock();
+            let raw = partitions.get(PARTITION).unwrap().get(NAME).unwrap();
+            assert_eq!(&raw[..data_offset], expected_header);
+            let expected_payload = match cut {
+                SubsetWriteCut::FailedWrite => RETAINED,
+                SubsetWriteCut::Crash => ORIGINAL,
+            };
+            assert_eq!(&raw[data_offset..], expected_payload);
+        }
+
+        faulty.crash().unwrap();
+        drop(faulty);
+        let snapshot = inner.take_snapshot();
+        {
+            let raw = snapshot.0.get(PARTITION).unwrap().get(NAME).unwrap();
+            assert_eq!(&raw[..data_offset], expected_header);
+            assert_eq!(&raw[data_offset..], RETAINED);
+        }
+
+        let recovered = Storage::from_snapshot(snapshot, test_pool());
+        let (blob, size, version) = recovered
+            .open_versioned(PARTITION, NAME, 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, ORIGINAL.len() as u64);
+        assert_eq!(version, 0);
+        assert_eq!(
+            blob.read_at(0, ORIGINAL.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            RETAINED
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subset_write_preserves_v0_and_v1_headers() {
+        for layout in [Layout::V0, Layout::V1] {
+            for cut in [SubsetWriteCut::FailedWrite, SubsetWriteCut::Crash] {
+                assert_subset_write_preserves_header(layout, cut).await;
+            }
+        }
     }
 
     #[tokio::test]

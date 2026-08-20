@@ -88,9 +88,8 @@ struct FuzzInput {
     /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
-    /// Failure rate for write operations (0, 1].
-    #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: Probability,
+    /// Failure and byte-retention configuration for write operations.
+    write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
 }
@@ -462,7 +461,7 @@ fn fuzz(input: FuzzInput) {
     let partition_name = format!("queue-crash-recovery-{}", input.seed);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
-    let write_failure_rate = input.write_failure_rate;
+    let write_config = input.write_config;
 
     let runner = deterministic::Runner::new(cfg);
 
@@ -486,11 +485,7 @@ fn fuzz(input: FuzzInput) {
             // Enable fault injection
             let fault_config = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: write_failure_rate,
-                    retention_rate: Probability!(0.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                }),
+                write_rate: Some(write_config),
                 ..Default::default()
             };
             let faults = ctx.storage_fault_config();
