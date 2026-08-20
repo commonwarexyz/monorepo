@@ -33,6 +33,8 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Replay, Writer},
@@ -415,6 +417,153 @@ struct Inner<E: Context, V: Codec> {
     /// only ever takes this joint value: a one-sided size could exceed the other journal's
     /// surviving data after a crash, which init rejects as corruption.
     barrier: Barrier,
+}
+
+/// Read one fixed-size offset entry for `pos` from the offsets journal's sealed blobs.
+#[commonware_macros::stability(ALPHA)]
+async fn read_offset<B: RBlob>(
+    off_sealed: &[Sealed<B>],
+    off_oldest: u64,
+    off_ipb: u64,
+    off_start: u64,
+    pos: u64,
+) -> Option<u64> {
+    let blob = position_to_blob(pos, off_ipb);
+    let idx = usize::try_from(blob.checked_sub(off_oldest)?).ok()?;
+    let sealed = off_sealed.get(idx)?;
+    // Entries in the oldest retained blob are relative to the first retained position.
+    let within = pos - super::first_in_blob(off_start, blob, off_ipb).ok()?;
+    let buf = sealed
+        .read_at(within * size_of::<u64>() as u64, size_of::<u64>())
+        .await
+        .ok()?;
+    let mut bytes = [0u8; size_of::<u64>()];
+    bytes.copy_from_slice(buf.coalesce().as_ref());
+    Some(u64::from_be_bytes(bytes))
+}
+
+/// Read the byte ranges holding positions `[start, end)` from sealed data blobs through
+/// the page cache, resolving each blob segment's byte boundaries from the offsets
+/// journal's sealed blobs. Best effort: the first failed read ends the pass.
+#[commonware_macros::stability(ALPHA)]
+#[allow(clippy::too_many_arguments)]
+async fn prefetch_ranges<B: RBlob>(
+    start: u64,
+    end: u64,
+    items_per_blob: u64,
+    data_oldest: u64,
+    data_sealed: Vec<Sealed<B>>,
+    off_oldest: u64,
+    off_sealed: Vec<Sealed<B>>,
+    off_ipb: u64,
+    off_start: u64,
+    mut budget: u64,
+) {
+    // Interleave per data segment: warm the segment's offsets entries, then its data
+    // bytes. Position reads (and sync probes) resolve through offsets before data, and
+    // interleaving means budget exhaustion leaves a fully resident prefix of items
+    // (offsets and data) instead of offsets-only coverage of the whole window.
+    let first_blob = position_to_blob(start, items_per_blob);
+    let last_blob = position_to_blob(end - 1, items_per_blob);
+    for blob in first_blob..=last_blob {
+        let Some(sealed) = blob
+            .checked_sub(data_oldest)
+            .and_then(|idx| usize::try_from(idx).ok())
+            .and_then(|idx| data_sealed.get(idx))
+        else {
+            continue;
+        };
+        let (Ok(blob_start_pos), Ok(next_blob_pos)) = (
+            blob_first_position(blob, items_per_blob),
+            blob_first_position(blob + 1, items_per_blob),
+        ) else {
+            continue;
+        };
+        let seg_start = start.max(blob_start_pos);
+        let seg_end = end.min(next_blob_pos);
+
+        // Warm in bounded item batches, interleaving each batch's offsets entries with
+        // its data bytes: a budget smaller than one segment's offsets still leaves fully
+        // resident leading items. The batch size is derived from the budget so one
+        // batch's offsets consume at most a quarter of it, reserving the rest for data.
+        // The entry at an interior batch end resolves the batch's end byte.
+        let item_batch = (budget / 32).clamp(8, 1024);
+        let mut bstart = seg_start;
+        while bstart < seg_end {
+            let bend = bstart.saturating_add(item_batch).min(seg_end);
+            let off_last = if bend == next_blob_pos {
+                bend - 1
+            } else {
+                bend
+            };
+            if !warm_offsets(
+                &off_sealed,
+                off_oldest,
+                off_ipb,
+                off_start,
+                bstart,
+                off_last,
+                &mut budget,
+            )
+            .await
+            {
+                return;
+            }
+            let Some(start_off) =
+                read_offset(&off_sealed, off_oldest, off_ipb, off_start, bstart).await
+            else {
+                break;
+            };
+            let end_off = if bend == next_blob_pos {
+                sealed.size()
+            } else {
+                read_offset(&off_sealed, off_oldest, off_ipb, off_start, bend)
+                    .await
+                    .unwrap_or_else(|| sealed.size())
+            };
+            if !super::warm_range(sealed, start_off, end_off, &mut budget).await {
+                return;
+            }
+            bstart = bend;
+        }
+    }
+}
+
+/// Warm the offsets entries for positions `[from_pos, to_pos]` (inclusive) across their
+/// sealed blobs. Entries are fixed-size, so the byte ranges need no reads to compute.
+#[commonware_macros::stability(ALPHA)]
+async fn warm_offsets<B: RBlob>(
+    off_sealed: &[Sealed<B>],
+    off_oldest: u64,
+    off_ipb: u64,
+    off_start: u64,
+    from_pos: u64,
+    to_pos: u64,
+    budget: &mut u64,
+) -> bool {
+    const OFFSET_SIZE: u64 = size_of::<u64>() as u64;
+    for blob in position_to_blob(from_pos, off_ipb)..=position_to_blob(to_pos, off_ipb) {
+        let Some(sealed) = blob
+            .checked_sub(off_oldest)
+            .and_then(|idx| usize::try_from(idx).ok())
+            .and_then(|idx| off_sealed.get(idx))
+        else {
+            continue;
+        };
+        // Entries in the oldest retained blob are relative to the first retained position.
+        let Ok(blob_first) = super::first_in_blob(off_start, blob, off_ipb) else {
+            continue;
+        };
+        let seg_from = from_pos.max(blob_first);
+        let seg_to =
+            blob_first_position(blob + 1, off_ipb).map_or(to_pos, |next| to_pos.min(next - 1));
+        let from = (seg_from - blob_first) * OFFSET_SIZE;
+        let to = ((seg_to - blob_first + 1) * OFFSET_SIZE).min(sealed.size());
+        if !super::warm_range(sealed, from, to, budget).await {
+            return false;
+        }
+    }
+    true
 }
 
 /// A reader over a variable journal.
@@ -1523,6 +1672,61 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         })
     }
 
+    /// Return a future that warms the page cache for up to `max_items` items starting at
+    /// position `start`, or None when nothing in the range is prefetchable. Only items in
+    /// sealed blobs are covered (for both the data and offsets journals): tail items are
+    /// served by write buffers. Reads are best effort: failures end the pass, and a
+    /// concurrent prune invalidates them harmlessly.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+        let items_per_blob = self.items_per_blob.get();
+        let (data_oldest, data_len) = self.blobs.sealed_bounds();
+        if data_len == 0 {
+            return None;
+        }
+        let sealed_end = blob_first_position(data_oldest + data_len as u64, items_per_blob).ok()?;
+        let start = start.max(self.bounds.start);
+        let end = start
+            .saturating_add(max_items)
+            .min(self.bounds.end)
+            .min(sealed_end);
+        if start >= end {
+            return None;
+        }
+
+        // Clone only the blob handles the clamped range intersects. The offsets range
+        // includes the entry at `end`, read when a segment stops short of a blob boundary.
+        let first_blob = position_to_blob(start, items_per_blob);
+        let last_blob = position_to_blob(end - 1, items_per_blob);
+        let (data_oldest, data_sealed) = self
+            .blobs
+            .sealed_range(first_blob..last_blob.saturating_add(1));
+        let (_, _, off_ipb, off_start) = self.offsets.sealed_geometry();
+        let (off_oldest, off_sealed) = self.offsets.sealed_range(
+            position_to_blob(start, off_ipb)..position_to_blob(end, off_ipb).saturating_add(1),
+        );
+
+        // Cap the warmed bytes at a fraction of the page cache so a large window cannot
+        // evict its own critical prefix (warming runs floor-first and stops at the budget,
+        // keeping the scan's start resident).
+        Some(prefetch_ranges(
+            start,
+            end,
+            items_per_blob,
+            data_oldest,
+            data_sealed,
+            off_oldest,
+            off_sealed,
+            off_ipb,
+            off_start,
+            self.blobs.prefetch_budget(),
+        ))
+    }
+
     /// A reader borrowing the journal's live state.
     fn reader(&self) -> Reader<'_, E, V> {
         Reader {
@@ -2305,6 +2509,20 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok((self, position))
     }
 
+    /// Return a future that warms the page cache for up to `max_items` items starting at
+    /// position `start`, or None when nothing in the range is prefetchable. Only items in
+    /// sealed blobs are covered. The future is owned and best effort: the caller chooses
+    /// where to run it, the first failed read ends the pass, and a concurrent prune
+    /// invalidates the work harmlessly.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+        self.0.start_prefetch(start, max_items)
+    }
+
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
@@ -2419,6 +2637,16 @@ impl<E: Context, V: CodecShared> Contiguous for Inner<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
+    #[commonware_macros::stability(ALPHA)]
+    fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<futures::future::BoxFuture<'static, ()>> {
+        Self::start_prefetch(self, start, max_items)
+            .map(|fut| Box::pin(fut) as futures::future::BoxFuture<'static, ()>)
+    }
+
     type Item = V;
 
     fn bounds(&self) -> Range<u64> {
@@ -7796,6 +8024,161 @@ mod tests {
             assert_eq!(bounds.start, 100);
             for i in 100..105u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_start_prefetch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections span several pages so init's backward page scan (which warms each
+            // blob's last valid page) leaves earlier pages cold.
+            let cfg = Config {
+                partition: "prefetch".into(),
+                items_per_section: NZU64!(50),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(64)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // An empty journal has nothing to prefetch.
+            assert!(journal.start_prefetch(0, 10).is_none());
+
+            // Fill three sections plus a partial tail, then persist and reopen with a
+            // fresh page cache so sealed items are cold.
+            for i in 0..160u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(64)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+
+            // Early sealed items are cold: the sync probe declines.
+            assert!(journal.try_read_sync(0).is_none());
+            assert!(journal.try_read_sync(60).is_none());
+
+            // Prefetch a range spanning two sealed sections and drive it to completion.
+            let fut = journal
+                .start_prefetch(0, 100)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+
+            // The prefetched range is now served synchronously from the page cache, with
+            // the correct contents.
+            for i in 0..100u64 {
+                assert_eq!(journal.try_read_sync(i), Some(i * 100), "position {i}");
+            }
+
+            // A range entirely in the tail blob is not prefetchable.
+            assert!(journal.start_prefetch(150, 10).is_none());
+
+            // Clamping: a range starting past the end yields nothing.
+            assert!(journal.start_prefetch(200, 10).is_none());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A budget smaller than the window still leaves a fully resident prefix: offsets and
+    /// data warm interleaved per segment, so early items serve sync probes while items
+    /// past the budget stay cold.
+    #[test_traced]
+    fn test_variable_start_prefetch_budget() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // 16 pages of 101 bytes: a ~404-byte budget against a window whose single
+            // section's offsets alone (100 entries = 800 bytes) exceed it. Batch-level
+            // interleaving must still leave leading items fully resident. Sections span
+            // several pages so init's backward scan leaves early pages cold.
+            let cfg = Config {
+                partition: "prefetch-budget".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..100u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.try_read_sync(0).is_none());
+
+            let fut = journal
+                .start_prefetch(0, 50)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+
+            // The prefix is fully resident (offsets and data); the window's tail past the
+            // budget stays cold.
+            assert_eq!(journal.try_read_sync(0), Some(0));
+            assert!(journal.try_read_sync(45).is_none());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Prefetch offsets math respects a mid-blob retained boundary from init_at_size.
+    #[test_traced]
+    fn test_variable_start_prefetch_unaligned_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prefetch-unaligned".into(),
+                items_per_section: NZU64!(25),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 7..80u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.try_read_sync(7).is_none());
+
+            let fut = journal
+                .start_prefetch(7, 43)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+            for i in 7..50u64 {
+                assert_eq!(journal.try_read_sync(i), Some(i * 100), "position {i}");
             }
 
             journal.destroy().await.unwrap();
