@@ -13,17 +13,16 @@ use commonware_runtime::buffer::paged::CacheRef;
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 
-/// Maximum unfinalized term distance that permits event-driven timeouts to
-/// bypass ordinary round deadlines.
+/// Limits fast skips to a configured number of unfinalized terms.
+/// Ordinary round deadlines remain active when fast skips are unavailable.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum FastSkipBudget {
-    /// Set the budget to the number of participants.
+    /// Uses the participant count as the budget.
     #[default]
     Participants,
-    /// Use a budget independent of the number of participants.
+    /// Uses the specified budget.
     ///
-    /// A budget of zero prevents event-driven timeouts from bypassing ordinary
-    /// round deadlines.
+    /// Zero prevents fast skips.
     Fixed(u64),
 }
 

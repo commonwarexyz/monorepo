@@ -61,8 +61,8 @@ pub struct Round<S: Scheme, D: Digest> {
     certification_deadline: Option<SystemTime>,
     stall_deadline: Option<SystemTime>,
     retry_deadline: Option<SystemTime>,
-    // First explicit timeout latched for this round (see latch_timeout).
-    // Unlike retry_deadline, this is first-wins and never moves.
+    // First event-driven timeout latched for this round (see latch_timeout).
+    // Later timeouts do not replace the latch.
     latched_timeout: Option<(SystemTime, TimeoutReason)>,
 
     // Certificates received from batcher (constructed or from network).
@@ -471,14 +471,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.stall_deadline = stall_deadline;
     }
 
-    /// Latches the first explicit timeout for this round, pinning the moment it
-    /// expired. Later latches preserve the original deadline and reason, and
-    /// latching is ignored once a nullify broadcast began (retry cadence
-    /// governs the round from then on).
+    /// Latches the first event-driven timeout for this round. Later calls
+    /// preserve its deadline and reason. Calls after a nullify broadcast do
+    /// nothing because the retry schedule governs the round.
     ///
-    /// When allowed, [`Self::next_timeout`] returns the latch immediately and
-    /// stably across polls. Latching does not modify any deadline. In particular,
-    /// a per-view timeout must not reset the term-level stall deadline.
+    /// When allowed, [`Self::next_timeout`] returns the same latch on every poll.
+    /// Latching does not modify deadlines. A per-view timeout must not reset the
+    /// term-level stall deadline.
     pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
         if self.latched_timeout.is_none() && !self.broadcast_nullify {
             self.latched_timeout = Some((now, reason));

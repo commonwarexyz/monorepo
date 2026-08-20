@@ -127,7 +127,7 @@ pub struct SimplexConfig<L> {
     /// Time a leader may remain inactive before triggering immediate nullification.
     pub skip_timeout: Duration,
 
-    /// Maximum unfinalized term distance that permits fast-skips.
+    /// Policy governing fast skips.
     pub fast_skip_budget: simplex::FastSkipBudget,
 
     /// Track individual votes after certification.

@@ -483,7 +483,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .unwrap_or(round_timeout)
     }
 
-    /// Returns whether the current term is within the fast-skip budget.
+    /// Returns whether fast skips are available in the current term.
     const fn fast_skip_eligible(&self) -> bool {
         let term_length = self.term_length();
         let first_unfinalized = self.last_finalized.next().term_index(term_length);
@@ -873,8 +873,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Latches the first event-driven timeout for `view`.
     ///
     /// For the current view, [`Self::next_timeout`] returns the latch immediately
-    /// while the fast-skip budget remains. Otherwise, the latch remains pending
-    /// behind ordinary round deadlines. An existing nullify keeps its retry schedule.
+    /// while fast skips are available. When the budget is exhausted,
+    /// [`Self::next_timeout`] returns an ordinary deadline and retains the latch.
+    /// An existing nullify keeps its retry schedule.
     ///
     /// Past and untracked views are ignored. A latch for a tracked future view
     /// waits until that view becomes current.
