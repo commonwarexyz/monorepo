@@ -1262,6 +1262,31 @@ mod tests {
     use std::{thread::sleep, time::Duration};
 
     #[test]
+    fn test_memory_storage_v0_fixture() {
+        const PARTITION: &str = "raw-storage";
+        const NAME: &[u8] = b"blob";
+        const BLOB_VERSION: u16 = 7;
+
+        let storage = memory_storage();
+        let header = v0_header(BLOB_VERSION);
+        storage.set_raw_blob(PARTITION, NAME, header.clone());
+        assert_eq!(
+            storage.raw_blob(PARTITION, NAME).as_deref(),
+            Some(header.as_slice())
+        );
+        assert!(memory_storage().raw_blob(PARTITION, NAME).is_none());
+
+        let (_, size, version) = futures::executor::block_on(storage.open_versioned(
+            PARTITION,
+            NAME,
+            BLOB_VERSION..=BLOB_VERSION,
+        ))
+        .unwrap();
+        assert_eq!(size, 0);
+        assert_eq!(version, BLOB_VERSION);
+    }
+
+    #[test]
     fn recording_context_preserves_data_and_records_options() {
         deterministic::Runner::default().start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);

@@ -626,12 +626,7 @@ mod tests {
         };
         let data_offset = layout.data_offset() as usize;
         let expected_header = raw[..data_offset].to_vec();
-        inner
-            .partitions
-            .lock()
-            .entry(PARTITION.into())
-            .or_default()
-            .insert(NAME.to_vec(), raw);
+        inner.set_raw_blob(PARTITION, NAME, raw);
 
         // Select whether the subset is retained by a failed write or by a later crash, and script
         // alternating per-byte retention decisions for an exact expected image.
@@ -667,31 +662,25 @@ mod tests {
 
         // Failed writes retain their subset immediately, while successful unsynchronized writes
         // remain volatile. Neither path may address bytes in the container header.
-        {
-            let partitions = inner.partitions.lock();
-            let raw = partitions.get(PARTITION).unwrap().get(NAME).unwrap();
-            assert_eq!(&raw[..data_offset], expected_header);
-            let expected_payload = match cut {
-                SubsetWriteCut::FailedWrite => RETAINED,
-                SubsetWriteCut::Crash => ORIGINAL,
-            };
-            assert_eq!(&raw[data_offset..], expected_payload);
-        }
+        let raw = inner.raw_blob(PARTITION, NAME).unwrap();
+        assert_eq!(&raw[..data_offset], expected_header);
+        let expected_payload = match cut {
+            SubsetWriteCut::FailedWrite => RETAINED,
+            SubsetWriteCut::Crash => ORIGINAL,
+        };
+        assert_eq!(&raw[data_offset..], expected_payload);
 
         // Simulating a crash applies the snapshotted retention policy to the durable payload while
         // leaving the complete container header unchanged.
         faulty.crash().unwrap();
         drop(faulty);
-        let snapshot = inner.take_snapshot();
-        {
-            let raw = snapshot.0.get(PARTITION).unwrap().get(NAME).unwrap();
-            assert_eq!(&raw[..data_offset], expected_header);
-            assert_eq!(&raw[data_offset..], RETAINED);
-        }
+        let recovered = Storage::from_snapshot(inner.take_snapshot(), test_pool());
+        let raw = recovered.raw_blob(PARTITION, NAME).unwrap();
+        assert_eq!(&raw[..data_offset], expected_header);
+        assert_eq!(&raw[data_offset..], RETAINED);
 
         // Reopen the crashed image through the versioned API to prove the retained subset remains
         // a valid logical blob under both layouts.
-        let recovered = Storage::from_snapshot(snapshot, test_pool());
         let (blob, size, version) = recovered
             .open_versioned(PARTITION, NAME, 0..=0)
             .await
