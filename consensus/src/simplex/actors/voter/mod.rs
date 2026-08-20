@@ -95,9 +95,7 @@ mod tests {
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{
-        NZU16, NZU32, NZUsize, Probability, channel::oneshot, sync::Mutex,
-    };
+    use commonware_utils::{NZU16, NZU32, NZUsize, Probability, channel::oneshot, sync::Mutex};
     use futures::FutureExt;
     use rand_core::CryptoRng;
     use std::{
