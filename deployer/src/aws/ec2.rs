@@ -608,6 +608,7 @@ async fn try_launch_instances(
         .collect())
 }
 
+/// Extracts the structured EC2 code from a RunInstances service error.
 fn launch_error_code(error: &LaunchSdkError) -> Option<&str> {
     match error {
         SdkError::ServiceError(context) => context.err().code(),
@@ -694,15 +695,13 @@ pub async fn launch_instances(
         return Err(super::Error::UnsupportedInstanceType(instance_type_str));
     }
 
-    // Try each subnet starting at start_idx offset (for round-robin distribution across instances).
-    // Capacity can change while a fleet is launching, so rescan the eligible AZs until the caller
-    // cancels or a launch succeeds. A subnet without free addresses remains excluded from later
-    // scans.
     let len = eligible.len();
     let mut last_error = None;
     let mut unavailable = vec![false; len];
     let mut scan = 0u64;
     loop {
+        // Each scan probes every usable subnet once. Capacity errors keep a subnet eligible for the
+        // next scan, while address exhaustion permanently removes it.
         scan = scan.saturating_add(1);
         let mut retry_capacity = false;
         for i in 0..len {
@@ -711,9 +710,10 @@ pub async fn launch_instances(
                 continue;
             }
             let (az, subnet_id) = eligible[eligible_index];
+
+            // A probe owns one client token across ambiguous retries. Moving to another subnet
+            // changes the request parameters and starts a new probe with a new token.
             let mut attempt = 0u32;
-            // A capacity response ends this probe, but ambiguous retries of the same request must
-            // retain EC2 idempotency. Another subnet uses different parameters and a new token.
             let client_token = uuid::Uuid::new_v4().to_string();
             loop {
                 match try_launch_instances(
@@ -776,7 +776,8 @@ pub async fn launch_instances(
             }
         }
 
-        if !retry_capacity || unavailable.iter().all(|unavailable| *unavailable) {
+        // Start another scan only after a capacity failure. All other completed scans are terminal.
+        if !retry_capacity {
             break;
         }
         debug!(

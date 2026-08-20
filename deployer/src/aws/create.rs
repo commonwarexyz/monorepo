@@ -89,40 +89,8 @@ fn validate_storage_config(config: &Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// Runs one launch at a time per region while allowing independent regions to progress in parallel.
-async fn try_join_region_launches<F, T, E>(
-    launches: impl IntoIterator<Item = (String, F)>,
-) -> Result<Vec<T>, E>
-where
-    F: Future<Output = Result<T, E>>,
-{
-    let mut launches_by_region: BTreeMap<String, Vec<(usize, F)>> = BTreeMap::new();
-    for (index, (region, launch)) in launches.into_iter().enumerate() {
-        launches_by_region
-            .entry(region)
-            .or_default()
-            .push((index, launch));
-    }
-
-    let region_futures = launches_by_region.into_values().map(|launches| async {
-        let mut completed = Vec::with_capacity(launches.len());
-        for (index, launch) in launches {
-            completed.push((index, launch.await?));
-        }
-        Ok::<Vec<(usize, T)>, E>(completed)
-    });
-
-    let mut completed: Vec<_> = try_join_all(region_futures)
-        .await?
-        .into_iter()
-        .flatten()
-        .collect();
-    completed.sort_unstable_by_key(|(index, _)| *index);
-    Ok(completed.into_iter().map(|(_, result)| result).collect())
-}
-
-/// Launches monitoring before binaries in its region while other regions progress in parallel.
-async fn try_join_region_launches_with_monitoring<MF, F, M, T, E>(
+/// Runs regional launch queues in parallel, with monitoring first in its region.
+async fn try_join_region_launches<MF, F, M, T, E>(
     monitoring_region: String,
     monitoring: MF,
     launches: impl IntoIterator<Item = (String, F)>,
@@ -131,31 +99,37 @@ where
     MF: Future<Output = Result<M, E>>,
     F: Future<Output = Result<T, E>>,
 {
-    let mut colocated = Vec::new();
-    let mut remote = Vec::new();
+    // Group launches by region and preserve input positions for the final result.
+    let mut launches_by_region: BTreeMap<String, Vec<(usize, F)>> = BTreeMap::new();
     for (index, (region, launch)) in launches.into_iter().enumerate() {
-        let indexed = async move {
-            let result = launch.await?;
-            Ok::<(usize, T), E>((index, result))
-        };
-        if region == monitoring_region {
-            colocated.push((region, indexed));
-        } else {
-            remote.push((region, indexed));
-        }
+        launches_by_region
+            .entry(region)
+            .or_default()
+            .push((index, launch));
     }
 
+    // Serialize launches within each region, with monitoring first in its region.
+    let colocated = launches_by_region
+        .remove(&monitoring_region)
+        .unwrap_or_default();
+    let run_region = |launches: Vec<(usize, F)>| async move {
+        let mut completed = Vec::with_capacity(launches.len());
+        for (index, launch) in launches {
+            completed.push((index, launch.await?));
+        }
+        Ok::<Vec<(usize, T)>, E>(completed)
+    };
+    let colocated = run_region(colocated);
+    let remote_regions = launches_by_region.into_values().map(run_region);
     let monitoring_and_colocated = async move {
         let monitoring = monitoring.await?;
-        let mut completed = Vec::with_capacity(colocated.len());
-        for (_, launch) in colocated {
-            completed.push(launch.await?);
-        }
-        Ok::<_, E>((monitoring, completed))
+        Ok::<_, E>((monitoring, colocated.await?))
     };
+
+    // Execute independent regional queues concurrently and restore the input order.
     let ((monitoring, mut completed), remote) =
-        tokio::try_join!(monitoring_and_colocated, try_join_region_launches(remote),)?;
-    completed.extend(remote);
+        tokio::try_join!(monitoring_and_colocated, try_join_all(remote_regions),)?;
+    completed.extend(remote.into_iter().flatten());
     completed.sort_unstable_by_key(|(index, _)| *index);
     Ok((
         monitoring,
@@ -815,13 +789,12 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     );
 
     // Wait for all launches to complete (get instance IDs)
-    let (monitoring_instance_id, binary_launches) =
-        Box::pin(try_join_region_launches_with_monitoring(
-            monitoring_region.clone(),
-            monitoring_launch_future,
-            binary_launch_futures,
-        ))
-        .await?;
+    let (monitoring_instance_id, binary_launches) = Box::pin(try_join_region_launches(
+        monitoring_region.clone(),
+        monitoring_launch_future,
+        binary_launch_futures,
+    ))
+    .await?;
     info!("instances requested");
 
     // Group binary instances by region for batched DescribeInstances calls
@@ -1533,8 +1506,7 @@ fn grouped_subnets(
 mod tests {
     use super::{
         RegionResources, grouped_subnets, select_availability_zone_groups,
-        select_group_availability_zone, try_join_region_launches,
-        try_join_region_launches_with_monitoring, validate_storage_config,
+        select_group_availability_zone, try_join_region_launches, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
     use std::{
@@ -1623,9 +1595,13 @@ mod tests {
             })
         });
 
-        let completed = try_join_region_launches(launches)
-            .await
-            .expect("launches should succeed");
+        let (_, completed) = try_join_region_launches(
+            "monitoring".to_string(),
+            async { Ok::<_, ()>(()) },
+            launches,
+        )
+        .await
+        .expect("launches should succeed");
 
         assert_eq!(completed, [0, 1, 2, 3]);
         assert_eq!(east_max.load(Ordering::SeqCst), 1);
@@ -1664,7 +1640,7 @@ mod tests {
             });
 
         let (monitoring, binaries) =
-            try_join_region_launches_with_monitoring("us-east-1".to_string(), monitoring, binaries)
+            try_join_region_launches("us-east-1".to_string(), monitoring, binaries)
                 .await
                 .expect("launches should succeed");
 
