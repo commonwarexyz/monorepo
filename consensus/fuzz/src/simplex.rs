@@ -1,6 +1,8 @@
 #[cfg(feature = "mocks")]
+use crate::N4F1C3;
+#[cfg(feature = "mocks")]
 use crate::simplex_certificate_mock as cert_mock;
-use crate::{BYZANTINE_IDX, Configuration, N4F1C3};
+use crate::{BYZANTINE_IDX, Configuration};
 use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
@@ -9,9 +11,9 @@ use commonware_consensus::{
     },
     types::{Participant, Round, TermLength, View, ViewDelta},
 };
-use commonware_cryptography::{
-    Sha256, certificate, ed25519::PublicKey as Ed25519PublicKey, sha256::Digest as Sha256Digest,
-};
+#[cfg(feature = "mocks")]
+use commonware_cryptography::ed25519::PublicKey as Ed25519PublicKey;
+use commonware_cryptography::{Sha256, certificate, sha256::Digest as Sha256Digest};
 use commonware_runtime::deterministic;
 use std::time::Duration;
 
@@ -165,10 +167,10 @@ impl Simplex for SimplexCertificateMock {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mocks"))]
 pub(crate) struct SimplexCertificateMockAttributable;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mocks"))]
 impl Simplex for SimplexCertificateMockAttributable {
     type Scheme = cert_mock::Scheme<Ed25519PublicKey, true>;
     type Elector = RoundRobin;
