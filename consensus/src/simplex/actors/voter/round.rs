@@ -1259,6 +1259,7 @@ mod tests {
         assert!(round.broadcast_nullify);
         assert_eq!(round.construct_nullify(), Some((true, false)));
 
+        // Each remaining local artifact restores its matching broadcast flag.
         round.replay(&Artifact::Finalize(finalize_local));
         assert!(round.broadcast_finalize);
         round.replay(&Artifact::Notarization(notarization.clone()));

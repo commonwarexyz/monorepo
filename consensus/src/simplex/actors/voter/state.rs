@@ -826,10 +826,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Replays a journaled artifact into the appropriate round during recovery.
     ///
-    /// Restores round-level broadcast flags (via [`Round::replay`]), tracking
-    /// sets (`nullify_views`, `nullification_views`, and
-    /// `failed_certifications`), and conservative fast-skip eligibility so
-    /// term-safety, ancestry, and timeout accounting work after a restart.
+    /// Restores round-level broadcast flags (via [`Round::replay`]) and
+    /// tracking sets (`nullify_views`, `nullification_views`, and
+    /// `failed_certifications`) so that term-safety and ancestry checks work
+    /// correctly after a restart.
+    ///
     /// Replaying a local notarize vote also restores the optimistic successor
     /// prepared by live vote construction. Unlike
     /// [`Self::add_nullification`] (which the actor's replay loop also calls,
@@ -848,18 +849,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             self.failed_certifications.insert(artifact.view());
         }
         self.create_round(artifact.view()).replay(artifact);
-
-        // Nullify artifacts do not retain whether a natural or explicit
-        // timeout caused them. Charge recovered votes conservatively so a
-        // restart cannot restore a participant's fast-skip.
-        if let Artifact::Nullify(n) = artifact
-            && n.view() > self.last_finalized
-        {
-            let leader = self
-                .leader_index(n.view())
-                .expect("replayed local nullify must have an elected leader");
-            self.fast_skipped.set(leader.get().into(), true);
-        }
         if matches!(artifact, Artifact::Notarize(_)) {
             self.prepare_optimistic_successor(artifact.view());
         }
@@ -2914,72 +2903,6 @@ mod tests {
             let now = context.current();
             state.trigger_timeout(view, TimeoutReason::Inactivity);
             assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
-        });
-    }
-
-    /// Recovery preserves fast-skips that already produced durable nullifies.
-    #[test]
-    fn replay_preserves_spent_fast_skip() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let (fixture, mut uninterrupted) = setup_state_with(
-                &mut context,
-                4,
-                0,
-                7,
-                10,
-                TermLength::ONE,
-                ViewDelta::zero(),
-            );
-            let Fixture {
-                schemes, verifier, ..
-            } = fixture;
-
-            let first = View::new(1);
-            uninterrupted.trigger_timeout(first, TimeoutReason::Inactivity);
-            let (_, nullify) = uninterrupted
-                .construct_nullify(first, TimeoutReason::Inactivity)
-                .expect("first nullify");
-
-            let mut nullifications = Vec::new();
-            for view in 1..=4 {
-                let nullification = build_nullification(
-                    &verifier,
-                    &schemes,
-                    Rnd::new(uninterrupted.epoch(), View::new(view)),
-                );
-                assert!(uninterrupted.add_nullification(nullification.clone()));
-                nullifications.push(nullification);
-            }
-
-            let mut restarted = State::new(
-                context.child("restarted"),
-                Config {
-                    scheme: schemes[0].clone(),
-                    elector: round_robin(&schemes[0]),
-                    epoch: Epoch::new(7),
-                    view_retention: ViewDelta::new(10),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_secs(2),
-                    timeout_retry: Duration::from_secs(3),
-                },
-            );
-            restarted.set_genesis(test_genesis());
-            restarted.replay(&Artifact::Nullify(nullify));
-            for nullification in nullifications {
-                restarted.replay(&Artifact::Nullification(nullification.clone()));
-                assert!(restarted.add_nullification(nullification));
-            }
-
-            let view = View::new(5);
-            assert_eq!(uninterrupted.current_view(), view);
-            assert_eq!(restarted.current_view(), view);
-            let now = context.current();
-            uninterrupted.trigger_timeout(view, TimeoutReason::Inactivity);
-            restarted.trigger_timeout(view, TimeoutReason::Inactivity);
-            let expected = (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout);
-            assert_eq!(uninterrupted.next_timeout(), expected);
-            assert_eq!(restarted.next_timeout(), expected);
         });
     }
 
