@@ -11,6 +11,7 @@ use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 
 const PARTITION: &str = "blob_creation";
+const PAYLOAD: &[u8] = b"payload!";
 const V0_NAME: &[u8] = b"v0";
 const V1_NAME: &[u8] = b"v1";
 
@@ -19,7 +20,6 @@ struct FuzzInput {
     blob_version: u16,
     retained_prefix: u16,
     persisted_tail: u16,
-    payload: u64,
 }
 
 /// Verify that a recoverable creation crash image heals into an empty, usable blob.
@@ -28,7 +28,6 @@ async fn assert_recovers(
     name: &[u8],
     blob_version: u16,
     expected_header: &[u8],
-    payload: [u8; 8],
 ) {
     let versions = blob_version..=blob_version;
 
@@ -47,7 +46,7 @@ async fn assert_recovers(
     assert_eq!(healed, expected_header);
 
     // A synced logical-offset-zero write and another reopen verify the recovered data offset.
-    blob.write_at(0, payload.to_vec(), WriteOptions::SYNC)
+    blob.write_at(0, PAYLOAD, WriteOptions::SYNC)
         .await
         .expect("write after creation recovery failed");
     drop(blob);
@@ -55,13 +54,13 @@ async fn assert_recovers(
         .open_versioned(PARTITION, name, versions)
         .await
         .expect("reopening healed blob failed");
-    assert_eq!(size, payload.len() as u64);
+    assert_eq!(size, PAYLOAD.len() as u64);
     assert_eq!(version, blob_version);
     let read = blob
-        .read_at(0, payload.len(), ReadOptions::default())
+        .read_at(0, PAYLOAD.len(), ReadOptions::default())
         .await
         .expect("reading healed blob failed");
-    assert_eq!(read.coalesce().as_ref(), payload.as_slice());
+    assert_eq!(read.coalesce().as_ref(), PAYLOAD);
 }
 
 fn fuzz(input: FuzzInput) {
@@ -69,7 +68,6 @@ fn fuzz(input: FuzzInput) {
 
     block_on(async move {
         let versions = input.blob_version..=input.blob_version;
-        let payload = input.payload.to_be_bytes();
 
         // Create the canonical V1 region through the same storage path used in production.
         let (blob, size, version) = storage
@@ -91,14 +89,7 @@ fn fuzz(input: FuzzInput) {
         let mut interrupted = vec![0u8; persisted];
         interrupted[..retained].copy_from_slice(&canonical_v1[..retained]);
         storage.set_raw_blob(PARTITION, V1_NAME, interrupted);
-        assert_recovers(
-            &storage,
-            V1_NAME,
-            input.blob_version,
-            &canonical_v1,
-            payload,
-        )
-        .await;
+        assert_recovers(&storage, V1_NAME, input.blob_version, &canonical_v1).await;
 
         // A pre-V1 writer could leave only a prefix of its 8-byte prelude. A complete prelude is
         // still a valid V0 blob; every shorter prefix is treated as a new blob and recreated V1.
@@ -110,14 +101,7 @@ fn fuzz(input: FuzzInput) {
         } else {
             canonical_v1.as_slice()
         };
-        assert_recovers(
-            &storage,
-            V0_NAME,
-            input.blob_version,
-            expected_header,
-            payload,
-        )
-        .await;
+        assert_recovers(&storage, V0_NAME, input.blob_version, expected_header).await;
     });
 }
 

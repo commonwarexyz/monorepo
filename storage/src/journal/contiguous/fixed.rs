@@ -314,11 +314,9 @@ enum BlobFill {
     Overfull { len: u64, capacity: u64 },
 }
 
-/// The recovered journal bounds and any pending tail repair, reconciled from the checkpoint hints
-/// and the on-disk blob lengths.
+/// The recovered journal size, durability floor, and any pending tail repair derived from the
+/// reconciled pruning boundary and on-disk blob lengths.
 struct RecoveredBounds {
-    /// First retained position.
-    pruning_boundary: u64,
     /// Size: one past the last recovered item.
     size: u64,
     /// Recovery watermark to persist (a floor on durable size).
@@ -441,11 +439,67 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             cfg.write_buffer,
         );
         let mut pending = partition.open_many(names).await?;
+        let items_per_blob = cfg.items_per_blob.get();
+        let pruning_boundary = Self::recover_pruning_boundary(
+            checkpoint.boundary_hint(),
+            pending.keys().next().copied(),
+            items_per_blob,
+        )?;
 
-        // Truncate any trailing non-chunk-aligned bytes on every blob before recovery. Items
-        // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
-        // from an incomplete write (the page-CRC layer surfaces it as a partial logical tail).
-        // The truncation is synced before `recover_bounds` queries lengths.
+        // Check the two newest blobs for interior holes before any resize. Only they can hold
+        // non-durable data, and a crash during an in-flight fsync can lose an interior page while
+        // later pages survive. `Writer::new` sizes a blob by its last valid page, so it cannot see
+        // such a hole. An item-aligned resize can land within a page, which `Writer::resize` must
+        // read and validate before rewriting its partial tip. Above the watermark, first move the
+        // target below any hole and round it down to whole items so `recover_bounds` sees only
+        // intact data. Beneath the watermark the covering fsync completed, so a hole is external
+        // corruption: fail and preserve the evidence (`recover_bounds` would reject the truncated
+        // result anyway).
+        let floor = checkpoint.watermark().unwrap_or(0);
+        let floor_blob = super::position_to_blob(floor, items_per_blob);
+        let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
+        for blob in suspects {
+            let writer = pending.get_mut(&blob).expect("suspect blob is present");
+            let recoverable = writer.recoverable_prefix_len().await?;
+            let valid = Self::items_to_bytes(recoverable / Self::CHUNK_SIZE_U64)?;
+            if valid == writer.size() {
+                continue;
+            }
+
+            // Bytes this blob must retain: everything in a blob below the watermark's blob, the
+            // watermark's in-blob prefix in the blob containing it, and nothing above.
+            let acknowledged = if blob < floor_blob {
+                writer.size()
+            } else if blob == floor_blob {
+                Self::items_to_bytes(floor.saturating_sub(first_in_blob(
+                    pruning_boundary,
+                    blob,
+                    items_per_blob,
+                )?))?
+            } else {
+                0
+            };
+            if valid < acknowledged {
+                return Err(Error::Corruption(format!(
+                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
+                     of size {}",
+                    writer.size()
+                )));
+            }
+            warn!(
+                blob,
+                valid,
+                size = writer.size(),
+                "truncating to recoverable item prefix"
+            );
+            writer.resize(valid).await?;
+            writer.sync().await?;
+        }
+
+        // With the suspect pages resolved, truncate any trailing non-chunk-aligned bytes on every
+        // blob. Items are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is
+        // junk from an incomplete write. The truncation is synced before `recover_bounds` queries
+        // lengths.
         for (&blob, writer) in &mut pending {
             let size = writer.size();
             let valid_size = Self::items_to_bytes(size / Self::CHUNK_SIZE_U64)?;
@@ -461,61 +515,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             }
         }
 
-        // Check the two newest blobs for interior holes. Only they can hold non-durable data, and
-        // a crash during an in-flight fsync can lose an interior page while later pages survive.
-        // `Writer::new` sizes a blob by its last valid page, so it cannot see such a hole. Above
-        // the watermark, truncate at the first bad page (rounded down to whole items) so
-        // `recover_bounds` sees only intact data. Beneath the watermark the covering fsync
-        // completed, so a hole is external corruption: fail and preserve the evidence
-        // (`recover_bounds` would reject the truncated result anyway).
-        let floor = checkpoint.watermark().unwrap_or(0);
-        let floor_blob = super::position_to_blob(floor, cfg.items_per_blob.get());
-        let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
-        for blob in suspects {
-            let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let valid = writer.recoverable_prefix_len().await?;
-            let valid = Self::items_to_bytes(valid / Self::CHUNK_SIZE_U64)?;
-            if valid == writer.size() {
-                continue;
-            }
-
-            // Bytes this blob must retain: everything in a blob below the watermark's blob, the
-            // watermark's in-blob prefix in the blob containing it, and nothing above.
-            let acknowledged = if blob < floor_blob {
-                writer.size()
-            } else if blob == floor_blob {
-                Self::items_to_bytes(
-                    floor - super::blob_first_position(blob, cfg.items_per_blob.get())?,
-                )?
-            } else {
-                0
-            };
-            if valid < acknowledged {
-                return Err(Error::Corruption(format!(
-                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
-                     of size {}",
-                    writer.size()
-                )));
-            }
-            warn!(
-                blob,
-                valid,
-                size = writer.size(),
-                "truncating to last well-formed page"
-            );
-            writer.resize(valid).await?;
-            writer.sync().await?;
-        }
-
         let RecoveredBounds {
-            pruning_boundary,
             size,
             recovery_watermark,
             repair,
         } = Self::recover_bounds(
             &pending,
-            cfg.items_per_blob.get(),
-            checkpoint.boundary_hint(),
+            items_per_blob,
+            pruning_boundary,
             checkpoint.watermark(),
         )?;
 
@@ -599,23 +606,18 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         ))
     }
 
-    /// Recover the journal bounds and any tail repair from the checkpoint and blob state.
+    /// Recover the journal bounds and any tail repair from the reconciled pruning boundary and
+    /// blob state.
     ///
-    /// A boundary hint that lags blob state is repaired from the blob boundary; a hint ahead of
-    /// blob state or a watermark beyond the recovered size is corruption. The caller persists the
-    /// checkpoint before applying the returned repair (see comment at the call site).
+    /// Blob lengths recover the contiguous size from the supplied boundary. A watermark beyond
+    /// that size is corruption. The caller persists the checkpoint before applying the returned
+    /// repair (see comment at the call site).
     fn recover_bounds(
         pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
-        boundary_hint: Option<u64>,
+        pruning_boundary: u64,
         watermark_hint: Option<u64>,
     ) -> Result<RecoveredBounds, Error> {
-        let pruning_boundary = Self::recover_pruning_boundary(
-            boundary_hint,
-            pending.keys().next().copied(),
-            items_per_blob,
-        )?;
-
         let (size, repair) =
             Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary)?;
 
@@ -646,7 +648,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         };
 
         Ok(RecoveredBounds {
-            pruning_boundary,
             size,
             recovery_watermark,
             repair,
@@ -3922,6 +3923,101 @@ mod tests {
             (journal, appended) = journal.append(&test_digest(42)).await.unwrap();
             assert_eq!(appended, 2);
             assert_eq!(journal.read(2).await.unwrap(), test_digest(42));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Recovery establishes a contiguous valid page prefix before truncating to whole items.
+    #[test_traced]
+    fn test_fixed_recovery_validates_pages_before_trailing_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const LOGICAL_PAGE_SIZE: u64 = 5;
+
+            let cfg = Config {
+                partition: "fixed-validate-before-tail-trim".into(),
+                items_per_blob: NZU64!(10),
+                page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(LOGICAL_PAGE_SIZE as u16),
+                    NZUsize!(4),
+                ),
+                write_buffer: NZUsize!(128),
+            };
+            let partition = blob_partition(&cfg);
+            let (blob, size) = context.open(&partition, &0u64.to_be_bytes()).await.unwrap();
+            let mut writer = Writer::new(blob, size, 128, cfg.page_cache.clone())
+                .await
+                .unwrap();
+            let values = [11u64, 22, 33, 44];
+            let mut bytes = Vec::new();
+            for value in values {
+                bytes.extend_from_slice(&value.to_be_bytes());
+            }
+            writer.append(&bytes).await.unwrap();
+            writer.resize(30).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            // Five-byte integrity pages crossed by eight-byte journal items:
+            //
+            // pages: [0..5) [5..10) [10..15) [15..20) [20..25) [25..30)
+            // state:    ok      ok       ok       ok       torn      ok
+            // items: [0......8) [8.......16) [16......24) [24..30 tail)
+            //
+            // Backward sizing stops at valid page 5 and reports 30 logical bytes. Rounding that
+            // size to a whole item selects 24, inside torn page 4. `Writer::resize(24)` must read
+            // page 4 to preserve bytes 20..24 and rewrite its partial-page checksum, so it cannot
+            // perform that truncation. Forward validation instead stops at 20, rounds down to 16,
+            // and safely resizes within valid page 3.
+            corrupt_page(&context, &partition, 0, 4, LOGICAL_PAGE_SIZE).await;
+
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), 11);
+            assert_eq!(journal.read(1).await.unwrap(), 22);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The oldest retained blob can begin after its natural start. Watermark validation must
+    /// measure acknowledged bytes from that retained start before repairing a partial item.
+    #[test_traced]
+    fn test_fixed_recovery_watermark_uses_retained_blob_start() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for (offset, value) in [11u64, 22].into_iter().enumerate() {
+                let position;
+                (journal, position) = journal.append(&value).await.unwrap();
+                assert_eq!(position, 7 + offset as u64);
+            }
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let partition = blob_partition(&cfg);
+            let (blob, size) = context.open(&partition, &0u64.to_be_bytes()).await.unwrap();
+            let mut writer =
+                Writer::new(blob, size, cfg.write_buffer.get(), cfg.page_cache.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(writer.size(), 16);
+            writer.resize(20).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 7..9);
+            assert_eq!(journal.read(7).await.unwrap(), 11);
+            assert_eq!(journal.read(8).await.unwrap(), 22);
             journal.destroy().await.unwrap();
         });
     }

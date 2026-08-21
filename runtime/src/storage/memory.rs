@@ -533,6 +533,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_set_raw_blob_retires_live_generation() {
+        const PARTITION: &str = "partition";
+        const NAME: &[u8] = b"blob";
+        const INSTALLED: &[u8] = b"current";
+
+        let storage = Storage::new(test_pool());
+        let (stale, _) = storage.open(PARTITION, NAME).await.unwrap();
+        stale
+            .write_at(0, b"stale", WriteOptions::default())
+            .await
+            .unwrap();
+
+        let installed = crate::storage::header::tests::v1_blob_bytes(0, INSTALLED);
+        storage.set_raw_blob(PARTITION, NAME, installed.clone());
+
+        assert!(matches!(
+            stale.sync().await,
+            Err(crate::Error::BlobMissing(_, _))
+        ));
+        assert_eq!(
+            storage.raw_blob(PARTITION, NAME).as_deref(),
+            Some(installed.as_slice())
+        );
+
+        let (fresh, size, version) = storage
+            .open_versioned(PARTITION, NAME, 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, INSTALLED.len() as u64);
+        assert_eq!(version, 0);
+        assert_eq!(
+            fresh
+                .read_at(0, INSTALLED.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            INSTALLED
+        );
+    }
+
+    #[tokio::test]
     async fn test_crash_write_merges_durable_bytes_only() {
         let storage = Storage::new(test_pool());
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
