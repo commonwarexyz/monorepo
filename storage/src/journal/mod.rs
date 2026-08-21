@@ -58,6 +58,14 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
+    #[error(
+        "decompressed output exceeds limit: compressed_len={compressed_len}, decompressed_len={decompressed_len}, limit={limit}"
+    )]
+    DecompressionLimitExceeded {
+        compressed_len: usize,
+        decompressed_len: usize,
+        limit: usize,
+    },
     #[error("value too large (> u32::MAX)")]
     ValueTooLarge,
     #[error("corruption detected: {0}")]
