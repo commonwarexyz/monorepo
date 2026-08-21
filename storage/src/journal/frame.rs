@@ -109,11 +109,11 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
 }
 /// Maximum ratio between decompressed and compressed size. Payloads that
 /// expand beyond this factor are rejected as potential decompression bombs.
-const MAX_DECOMPRESSION_RATIO: usize = 16;
+pub(crate) const MAX_DECOMPRESSION_RATIO: usize = 16;
 
 /// Minimum decompressed size cap so that very small compressed frames
 /// still have a reasonable budget for decompression.
-const MIN_DECOMPRESSED_CAP: usize = 64 * 1024;
+pub(crate) const MIN_DECOMPRESSED_CAP: usize = 64 * 1024;
 
 /// Decode a frame's payload into an item, decompressing if needed.
 ///
