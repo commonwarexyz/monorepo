@@ -6,7 +6,12 @@ The shipping implementation is `bls12381::primitives::subgroup::batch_in_g1`
 (Strategy C below); a naive-bucketing prototype (Strategy B) is preserved on
 `gv/subgroup-bucketed-prototype`.
 
-All timings in this document are from an 18-core Apple Silicon machine.
+Timings come from two machines: the first-generation measurements (Strategies
+A/B/C as originally shipped) from an 18-core Apple Silicon machine, and the
+wide-round revision from a 4-core Intel Xeon @ 2.80 GHz (1 MiB L2/core) —
+each table says which. Ratios against per-point checking are the portable
+signal; absolute times are not comparable across the two machines (blst's
+field multiplication is roughly twice as fast on the Apple Silicon parts).
 
 ## The problem
 
@@ -80,12 +85,14 @@ trits = a base-3 bucket id in `[0, 3^m)`), and evaluate all m combinations
    together — `3^m` buckets, but still only `n` point additions total (each
    point lands in exactly one bucket). This is the key: *one accumulation pass
    serves m combinations.*
-2. **Batch-affine accumulation (the inversion trick).** Each pass pairs up the
-   remaining points of every bucket and completes all pairs with a single
-   shared field inversion (Montgomery's trick): ~6 field multiplications per
-   addition instead of an inversion (~150 ns/point measured, flat in bucket
-   count). Hand-rolled over `blst_fp`; blst's Pippenger does not expose bucket
-   sums.
+2. **Batch-affine accumulation (the inversion trick).** Additions are
+   completed in shared-inversion batches (Montgomery's trick): ~6 field
+   multiplications per addition instead of an inversion. Hand-rolled over
+   `blst_fp`; blst's Pippenger does not expose bucket sums. (The
+   first-generation engine counting-sorted points into per-bucket runs and
+   halved each bucket pass by pass, ~150 ns/point on Apple Silicon, flat in
+   bucket count; the shipping engine streams points through a slot table —
+   see "Widening the rounds" below.)
 3. **Combine deterministically.** `Q_j = Σ_{v_j=1} S_v + 2·Σ_{v_j=2} S_v`,
    where `v_j` is the j-th base-3 digit of the bucket index. The weights are
    deterministic digits — all randomness is in the vector assignment — so this
@@ -96,9 +103,9 @@ trits = a base-3 bucket id in `[0, 3^m)`), and evaluate all m combinations
 
 `m` (and whether to batch at all) is chosen per batch by a cost model;
 soundness holds for every choice, so the model's constants only affect
-performance. In practice: n=1000 → m=3 (27 rounds), n=6000 → m=4 (21 rounds);
-n ≲ 120 falls back to per-point checks (run through the strategy, so they
-still parallelize).
+performance. In practice (wide-round engine): n=1000 → m=5 (17 rounds),
+n=6000 → m=6 (14 rounds), n=100 000 → m=9 (9 rounds); n ≲ 120 falls back to
+per-point checks (run through the strategy, so they still parallelize).
 
 ### Why C dominates B
 
@@ -107,15 +114,79 @@ sums where C checks only `m` combinations — C's total check count stays at
 `r·m ≈ 81–85` for any m (the same as A), while B's grows as `rounds × B`. And
 C's shared-inversion accumulation removes B's per-bucket inversion chains.
 
+## Widening the rounds (second-generation engine)
+
+Strategy C's economics improve with `m` (passes fall as `ceil(81/m)`), but the
+first-generation engine capped `m` at 5: bucket ids were a `u8`, and the
+combine read all `3^m` bucket sums once per combination (`m * 3^m` mixed
+additions), which the cost model priced out of wide rounds. Three changes
+lift the cap to `m = 10` (`u16` ids) and make wide rounds pay:
+
+1. **Slot accumulation.** Instead of counting-sorting the points into
+   per-bucket runs and halving each bucket pass by pass, a round streams the
+   points once through a table of `3^m` slots: a point landing on an empty
+   slot parks there, a point landing on an occupied slot pairs with the
+   parked one (the slot empties until the pair's sum re-enters), and pending
+   pairs are completed 1024 at a time with one shared inversion. The
+   addition count is exactly `n` minus the number of nonempty buckets — it
+   *shrinks* as buckets multiply — and the working set is the slot table,
+   not the full point buffer. Slots for upcoming points are software-
+   prefetched (their ids are already drawn), which matters once the table
+   outgrows L2.
+2. **Digit-peeling combine.** Splitting the `3^m` sums by their top base-3
+   digit gives three contiguous thirds `T0 | T1 | T2`: the top digit's
+   combination inputs are `sum(T1)` and `sum(T2)`, and the element-wise sum
+   `T0 + T1 + T2` is a `3^(m-1)`-entry table with the same remaining digits —
+   recurse, and scan directly once the table is at most 243 entries. This is
+   a pure reassociation of the same per-digit sums (soundness untouched) and
+   costs about `2 * 3^m` batch-affine additions instead of `m * 3^m` mixed
+   ones, which is what makes `m = 8..10` economical.
+3. **Exact-uniform bulk ids.** Coefficient vectors are drawn as whole bucket
+   ids by Lemire rejection on 16-bit values — exactly `floor(2^16 / 3^m)`
+   inputs map to every id (verified exhaustively in a test), replacing the
+   per-trit rejection sampler. Exactness is still load-bearing; see the
+   module docs.
+
+The cost model picks `m` per batch from `rounds * (n * point_cost +
+(n - E[nonempty buckets]) * add_cost + 3^m * bucket_cost + m * check_cost)`,
+with `E[nonempty]` computed in integer fixed point. At n = 100 000 it picks
+m = 9 — nine rounds (81 = 9 x 9 exactly), each ~0.8 additions per point —
+against seventeen rounds for the first-generation cap.
+
 ## Cost accounting (128-bit security)
 
-| quantity                    | A (one RLC) | B naive (B=16) | C (m=4, shipping) |
-|-----------------------------|:-----------:|:--------------:|:-----------------:|
-| accumulation passes over n  | 81          | 32             | **21**            |
-| subgroup checks             | 81          | **512**        | 84                |
-| shared-inversion adds       | yes (blst)  | no             | yes (hand-rolled) |
+| quantity                    | A (one RLC) | B naive (B=16) | C gen-1 (m=4) | C wide (m=9, n=100k) |
+|-----------------------------|:-----------:|:--------------:|:-------------:|:--------------------:|
+| accumulation passes over n  | 81          | 32             | 21            | **9**                |
+| additions per point per pass| 1           | 1              | ~1            | **~0.8**             |
+| subgroup checks             | 81          | **512**        | 84            | 81                   |
+| shared-inversion adds       | yes (blst)  | no             | yes           | yes                  |
 
-## Measured results (criterion medians, same machine)
+## Measured results — wide rounds (criterion medians, 4-core Xeon)
+
+| n       | per-point | plan (m, rounds) | C serial            | C parallel           |
+|---------|-----------|:----------------:|---------------------|----------------------|
+| 100     | 5.25 ms   | fallback         | 5.19 ms (1.0×)      | **1.53 ms (3.4×)**   |
+| 1000    | 51.5 ms   | (5, 17)          | **18.5 ms (2.8×)**  | **6.37 ms (8.1×)**   |
+| 6000    | 305.5 ms  | (6, 14)          | **50.9 ms (6.0×)**  | **17.2 ms (17.8×)**  |
+| 100 000 | 5 225 ms  | (9, 9)           | **497.6 ms (10.5×)**| **197.4 ms (26.5×)** |
+
+Speedups in parentheses are vs per-point serial on the same machine. For
+scale: the first-generation engine measured on this same machine reaches only
+4.3× serial at n = 100 000 (1 237 ms) — the wide rounds are a 2.5× improvement
+of the batch path itself. Small batches are check-bound (the ~81 exact checks
+on combination outputs are a fixed ~4.4 ms serial floor here), so the ratio
+climbs with n.
+
+Where the time goes at n = 100 000 / m = 9 (serial, single-shot): ~325 ms
+accumulating (9 rounds x 100 000 points x ~360 ns), ~140 ms combining
+(9 x ~39 000 additions), ~7 ms drawing ids, ~4.4 ms on the 81 exact checks,
+plus the one-time batch conversion of the inputs to affine. A batch-affine
+addition (six field multiplications plus shares of an inversion) costs
+~400–450 ns on this machine, so the batch path runs within ~25% of its
+field-multiplication floor.
+
+## Measured results — first generation (criterion medians, Apple Silicon)
 
 | n    | per-point | A serial | A parallel | C serial          | C parallel         |
 |------|-----------|----------|------------|-------------------|--------------------|
@@ -127,13 +198,16 @@ Speedups in parentheses are vs per-point serial. (*) A's n=100 numbers predate
 routing the per-point fallback through the parallel strategy; C's 0.31 ms at
 n=100 comes from that routing, not from batching.
 
-Isolated accumulator throughput: 146–178 ns/point, flat across 27–243 buckets
-and n up to 100 000 (confirming accumulation cost is independent of bucket
-count, with no cache cliff at large n).
+First-generation isolated accumulator throughput (Apple Silicon): 146–178
+ns/point, flat across 27–243 buckets and n up to 100 000. The slot
+accumulator on the Xeon runs 364–412 ns/point at n = 100 000 across 243–19 683
+buckets (the same engine at 19 683 buckets is where the per-pass addition
+count starts falling below one per point).
 
-Same-engine strategy comparison (`measure_strategies` harness, single-shot; A
-and B are emulated on the shipped accumulation engine so the comparison
-isolates the strategy — blst's MSM engine runs A's passes ~15% faster):
+Same-engine strategy comparison (first-generation engine, Apple Silicon;
+`measure_strategies` harness, single-shot; A and B are emulated on the shipped
+accumulation engine so the comparison isolates the strategy — blst's MSM
+engine runs A's passes ~15% faster):
 
 | n       | per-point | A (81 passes)   | B (best of 16/64/256) | C (shipping)          |
 |---------|-----------|-----------------|-----------------------|-----------------------|
@@ -142,10 +216,12 @@ isolates the strategy — blst's MSM engine runs A's passes ~15% faster):
 | 100 000 | 2 126 ms  | 1 249 / 138 ms  | 353 / 47.8 (B=256)    | **298 / 49.6 ms**     |
 
 (serial / parallel per cell.) C wins serially at every size — 7.1× over
-per-point and 4.2× over A at n=100 000 (42.8× parallel). One caveat: at
-n=100 000 parallel, B=256 ties C within noise. B's optimal bucket count grows
-with n, and C's width cap (`m ≤ 5`, u8 bucket ids) binds there — the model puts
-m=6 (u16 ids, 729 buckets) ~13% ahead at that size, a possible follow-up.
+per-point and 4.2× over A at n=100 000 (42.8× parallel). The one caveat in
+these first-generation numbers — at n=100 000 parallel, B=256 tied C within
+noise, because C's width cap (`m ≤ 5`, u8 bucket ids) bound exactly where B's
+optimal bucket count kept growing — is resolved by the wide-round engine
+above (`m ≤ 10`, u16 ids), which C's plan exploits at that size (m=9) while B
+would still pay `rounds × B` exact checks.
 
 External reference: zexe's own batched check (Strategy B with shared
 inversions, arkworks field arithmetic, pre-2021 `[r]P` per-bucket check)
@@ -181,23 +257,35 @@ round) reach the target. Points of comparison, from the paper itself:
 
 Strategy C therefore fills exactly the gap their cost model assumes away: it
 makes the no-prefilter multi-combination route cost `⌈81/m⌉` passes instead of
-81 MSMs, which is what turns batch SMT on **unmodified BLS12-381** from "slower
-than naive" (their result) into 3.2–7.1× serial (7.1–7.4 across runs at
-n=100 000) and 18–43× parallel (ours, at a stronger 2⁻¹²⁸ target). Their binary-coefficient variant also shows how C
+81 MSMs — each pass under one addition per point — which is what turns batch
+SMT on **unmodified BLS12-381** from "slower than naive" (their result) into
+6.0–10.5× serial and up to 26.5× parallel on a 4-core x86 machine with the
+wide-round engine (first generation: 3.2–7.1× serial and 18–43× parallel on
+an 18-core Apple Silicon machine), at a stronger 2⁻¹²⁸ target. Their binary-coefficient variant also shows how C
 extends to even-cofactor curves (e.g. BLS12-377): use `{0,1}` coefficient
 vectors (2^m buckets, 1 bit per combination, 128 total) instead of trits.
 
 ## Status
 
-Strategy C is implemented in `subgroup::batch_in_g1` with:
+Strategy C with the wide-round engine is implemented in
+`subgroup::batch_in_g1` with:
 
-- soundness-bearing details in the module docs (odd-cofactor proof, exact-trit
-  requirement, deterministic-combine clarification);
+- soundness-bearing details in the module docs (odd-cofactor proof,
+  exact-uniformity requirement on coefficient ids, and why the digit-peeling
+  combine is a soundness-neutral reassociation of the same combinations);
 - an accumulator oracle test (fuzz vs naive G1 addition over mixed
-  good/bad/identity/negated/duplicated points) plus deterministic tests for
-  every special-case branch (cancelling pairs, doubling chains, identity
-  inputs, odd leftovers, empty buckets);
-- adversarial batch tests (cancelling bad pair, repeated bad point);
+  good/bad/identity/negated/duplicated points, bucket counts 1 through
+  19 683) plus deterministic tests for every special-case branch (cancelling
+  pairs, doubling chains, identity inputs, mid-stream chunk drains, stale
+  displaced slots);
+- a combine oracle test (digit-peeling vs direct scan, every width 1..=9,
+  tables with identities, duplicates, and cancelling pairs) and a wiring test
+  that a single bad point at bucket `d * 3^j` is rejected for every digit
+  position and value at m = 9;
+- an exhaustive id-uniformity test (all 2^16 sampler inputs, every width:
+  each id produced exactly `floor(2^16 / 3^m)` times);
+- adversarial batch tests (cancelling bad pair, repeated bad point, one bad
+  point in wide batches);
 - `cargo miri` cannot run the module (blst FFI is unsupported by miri); the
-  unsafe surface is thin per-call FFI wrappers, with all pass-scheduling logic
-  in safe Rust under the oracle tests.
+  unsafe surface is thin per-call FFI wrappers plus an x86 cache prefetch
+  hint, with all scheduling logic in safe Rust under the oracle tests.

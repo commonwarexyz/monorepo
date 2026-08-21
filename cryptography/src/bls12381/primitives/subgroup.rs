@@ -29,12 +29,30 @@
 //! Summing `n` points into `3^m` buckets costs the same `n` point additions as
 //! summing them into one, so a single accumulation pass over the points serves
 //! all `m` combinations, and only `ceil(81/m)` passes are needed at 128-bit
-//! security instead of 81. The additions are batch-affine: each pass pairs up
-//! the remaining points of every bucket and completes all pairs with one shared
-//! field inversion (Montgomery's trick), about six field multiplications per
-//! addition. The per-batch choice of `m` (and of batching at all, versus
-//! checking each point individually) is a pure performance decision made by a
-//! cost model; soundness holds for every choice.
+//! security instead of 81. Two pieces keep wide rounds (large `m`) cheap:
+//!
+//! - **Slot accumulation.** A pass streams the points once through a table of
+//!   `3^m` slots: a point landing on an empty slot parks there, a point landing
+//!   on an occupied slot pairs with the parked one, and completed sums re-enter
+//!   at their slot. Pending pairs are completed in chunks, all pairs of a chunk
+//!   sharing one field inversion (Montgomery's trick), about six field
+//!   multiplications per addition. The working set is the slot table, not the
+//!   point buffer, and the addition count — `n` minus the number of nonempty
+//!   buckets — *shrinks* as buckets multiply.
+//! - **Digit-peeling combine.** Recovering the `m` combinations by scanning all
+//!   `3^m` sums once per combination would cost `m * 3^m` additions and cap the
+//!   useful width. Instead, the top digit is peeled off: splitting the sums by
+//!   the top digit gives three contiguous thirds `T0 | T1 | T2`, the top
+//!   digit's combination inputs are `sum(T1)` and `sum(T2)`, and the
+//!   element-wise sum `T0 + T1 + T2` is a `3^(m-1)`-entry table with the same
+//!   remaining digits — recurse. This computes exactly the same per-digit sums
+//!   (it merely reassociates them, so soundness is untouched) in about
+//!   `2 * 3^m` batch-affine additions; the last few digits, where the table is
+//!   small, use the direct scan.
+//!
+//! The per-batch choice of `m` (and of batching at all, versus checking each
+//! point individually) is a pure performance decision made by a cost model;
+//! soundness holds for every choice.
 //!
 //! # Soundness
 //!
@@ -62,6 +80,15 @@
 //! combination: in a component of order 3 a coefficient acts through its
 //! residue mod 3, so even full-width random weights leave a cancelling pair a
 //! `1/3` escape.
+//!
+//! Exact coefficient uniformity is load-bearing: the bound leaves a fraction
+//! of a bit of margin over the security target, and a biased shortcut (e.g.
+//! `byte % 3`, max probability `86/256`) compounds across every coefficient
+//! and drops the total below it. Coefficient vectors are drawn as bucket ids
+//! by rejection (Lemire's method): a uniform 16-bit value either maps to a
+//! bucket id or is rejected, with exactly `floor(2^16 / 3^m)` values mapping
+//! to every id, so accepted ids — and therefore all `m` digits of each — are
+//! exactly uniform.
 //!
 //! The bound requires an odd cofactor: an order-2 part `T` has `2*T = 0`, so
 //! `c * T` escapes with probability `2/3` per combination. A curve whose
@@ -100,36 +127,70 @@ const fn combinations_for_security(security: usize) -> usize {
         .div_ceil(LOG2_3_SCALED_LOWER_BOUND)
 }
 
-/// Approximate cost of one [`G1::in_subgroup`] check, in units of one
-/// batch-affine point addition.
-///
-/// Machine-rough (measured ~22us per check against ~150ns per addition); it
-/// only steers the cost model's choice of `m` and the per-point fallback,
-/// never soundness.
-const CHECK_COST: usize = 150;
+/// Widest supported coefficient vector: `3^10 = 59049` bucket ids fit a `u16`.
+const MAX_WIDTH: u32 = 10;
 
-/// Approximate cost of one Jacobian mixed addition (used by the bucket
-/// combine), in units of one batch-affine point addition.
-const MIXED_ADD_COST: usize = 3;
+/// The cost model's unit is one thousandth of a batch-affine point addition.
+/// The constants are machine-rough (calibrated against measurement); they only
+/// steer the choice of `m` and the per-point fallback, never soundness.
+///
+/// Cost of one batch-affine addition.
+const ADD_COST: usize = 1000;
+
+/// Per-point per-round overhead besides the additions: drawing its bucket id,
+/// streaming it through the slot table.
+const POINT_COST: usize = 350;
+
+/// Per-bucket per-round overhead: slot-table initialization plus the two
+/// digit-peeling additions each bucket sum feeds.
+const BUCKET_COST: usize = 2600;
+
+/// Cost of one [`G1::in_subgroup`] check (measured ~150-180x a batch-affine
+/// addition, depending on the machine).
+const CHECK_COST: usize = 150 * ADD_COST;
+
+/// Expected number of nonempty buckets when `n` points land uniformly in `b`
+/// buckets: `b * (1 - (1 - 1/b)^n)`, in Q32 fixed point (integer-only for
+/// no_std; performance model only, so truncation error is irrelevant).
+fn expected_nonempty(n: usize, b: usize) -> usize {
+    debug_assert!(b >= 2);
+    // (1 - 1/b) in Q32, raised to the n-th power by squaring.
+    let mut base = ((b as u64 - 1) << 32) / b as u64;
+    let mut exponent = n;
+    let mut survive = 1u64 << 32;
+    while exponent > 0 {
+        if exponent & 1 == 1 {
+            survive = (survive * base) >> 32;
+        }
+        base = (base * base) >> 32;
+        exponent >>= 1;
+    }
+    // Round to nearest so tiny n (where truncation error is a whole bucket)
+    // stay sensible, and clamp to the trivial bounds.
+    let empty = ((b as u64 * survive + (1 << 31)) >> 32) as usize;
+    (b - empty.min(b)).min(n)
+}
 
 /// Pick the number of parallel combinations per round, or `None` if checking
 /// each point individually is cheaper.
 ///
-/// Returns `(m, rounds)` minimizing the modeled cost
-/// `rounds * (n additions + combine + m checks)` subject to
+/// Returns `(m, rounds)` minimizing the modeled cost subject to
 /// `rounds * m >= combinations`; soundness holds for every choice, so the
 /// constants above only affect performance.
 fn plan(n: usize, combinations: usize) -> Option<(u32, usize)> {
     let mut best_cost = n.saturating_mul(CHECK_COST);
     let mut best = None;
     let mut pow3 = 1usize;
-    for m in 1..=5u32 {
+    for m in 1..=MAX_WIDTH {
         pow3 *= 3;
         let rounds = combinations.div_ceil(m as usize);
-        // Combining bucket sums into output j touches the 2*3^(m-1) buckets
-        // whose j-th digit is nonzero, for each of the m outputs.
-        let combine = MIXED_ADD_COST * 2 * (m as usize) * (pow3 / 3);
-        let cost = rounds.saturating_mul(n + combine + (m as usize) * CHECK_COST);
+        let additions = n.saturating_sub(expected_nonempty(n, pow3));
+        let round_cost = n
+            .saturating_mul(POINT_COST)
+            .saturating_add(additions.saturating_mul(ADD_COST))
+            .saturating_add(pow3.saturating_mul(BUCKET_COST))
+            .saturating_add((m as usize).saturating_mul(CHECK_COST));
+        let cost = rounds.saturating_mul(round_cost);
         if cost < best_cost {
             best_cost = cost;
             best = Some((m, rounds));
@@ -177,9 +238,9 @@ pub fn batch_in_g1(
     // The RNG is sequential, so draw every round's coefficient vectors (as
     // base-3 bucket ids) up front; the rounds themselves are independent and
     // run through the strategy, weighted by the per-round accumulation size.
-    let mut trits = Trits::new(rng);
-    let id_sets: Vec<Vec<u8>> = (0..rounds)
-        .map(|_| (0..points.len()).map(|_| trits.bucket(m)).collect())
+    let num_buckets = 3usize.pow(m);
+    let id_sets: Vec<Vec<u16>> = (0..rounds)
+        .map(|_| draw_ids(rng, points.len(), num_buckets))
         .collect();
     strategy
         .map_collect_vec_with_multiplier(id_sets.iter(), points.len(), |ids| {
@@ -191,26 +252,9 @@ pub fn batch_in_g1(
 
 /// Run one round: sum the points into `3^m` buckets keyed by coefficient
 /// vector, recover the `m` combinations from the bucket sums, and check each.
-fn round_in_g1(affine: &[blst_p1_affine], ids: &[u8], m: u32) -> bool {
-    let sums = sum_buckets(affine, ids, 3usize.pow(m));
-    for j in 0..m {
-        let divisor = 3usize.pow(j);
-        // Output j is (sum of buckets with digit_j = 1) + 2 * (digit_j = 2).
-        let mut ones = blst_p1::default();
-        let mut twos = blst_p1::default();
-        for (v, sum) in sums.iter().enumerate() {
-            if affine_is_inf(sum) {
-                continue;
-            }
-            let acc = match (v / divisor) % 3 {
-                1 => &mut ones,
-                2 => &mut twos,
-                _ => continue,
-            };
-            // SAFETY: acc and sum are valid points; blst_p1_add_or_double_affine
-            // handles identity and equal operands, and permits out == a.
-            unsafe { blst_p1_add_or_double_affine(acc, acc, sum) };
-        }
+fn round_in_g1(affine: &[blst_p1_affine], ids: &[u16], m: u32) -> bool {
+    let mut sums = sum_buckets(affine, ids, 3usize.pow(m));
+    for (ones, twos) in combine(&mut sums, m) {
         let mut combination = blst_p1::default();
         // SAFETY: all operands are valid blst_p1 values (identity included).
         unsafe {
@@ -224,144 +268,364 @@ fn round_in_g1(affine: &[blst_p1_affine], ids: &[u8], m: u32) -> bool {
     true
 }
 
-/// A pending affine addition or doubling. Operands are copied out when the
-/// pass is scheduled so results can be written back without aliasing hazards.
-struct Arith {
+/// Map a uniform 16-bit value to a bucket id in `[0, num_buckets)`, or reject
+/// it (Lemire's method: `value * num_buckets` splits into a high word — the
+/// candidate id — and a low word; low words below `2^16 mod num_buckets` are
+/// rejected). Exactly `floor(2^16 / num_buckets)` values map to every id, so
+/// accepted ids are exactly uniform — see the module docs for why exactness
+/// is load-bearing.
+#[inline]
+fn map_id(value: u16, num_buckets: usize) -> Option<u16> {
+    debug_assert!((2..=59049).contains(&num_buckets));
+    let scaled = (value as u32) * (num_buckets as u32);
+    let threshold = (65536 % num_buckets) as u32;
+    ((scaled & 0xFFFF) >= threshold).then_some((scaled >> 16) as u16)
+}
+
+/// Draw `n` independent uniform bucket ids in `[0, num_buckets)`.
+fn draw_ids(rng: &mut impl CryptoRng, n: usize, num_buckets: usize) -> Vec<u16> {
+    let mut ids = Vec::with_capacity(n);
+    if n == 0 {
+        return ids;
+    }
+    let mut buffer = [0u8; 8192];
+    loop {
+        rng.fill_bytes(&mut buffer);
+        for pair in buffer.chunks_exact(2) {
+            if let Some(id) = map_id(u16::from_le_bytes([pair[0], pair[1]]), num_buckets) {
+                ids.push(id);
+                if ids.len() == n {
+                    return ids;
+                }
+            }
+        }
+    }
+}
+
+/// Pending pairs are completed once this many accumulate, keeping the chunk's
+/// operands and denominators cache-resident while still amortizing the single
+/// field inversion each completion shares.
+const PENDING_CHUNK: usize = 1024;
+
+/// A batch-affine addition awaiting completion. Operands are copied out when
+/// the pair is scheduled, so slots and tables can be freely overwritten while
+/// the pair is in flight.
+struct PendingOp {
     a: blst_p1_affine,
     b: blst_p1_affine,
-    out: usize,
+    tag: u32,
     double: bool,
+}
+
+/// A scheduler completing independent affine additions in shared-inversion
+/// batches (Montgomery's trick): about six field multiplications per addition
+/// instead of an inversion.
+struct Pending {
+    ops: Vec<PendingOp>,
+    denominators: Vec<blst_fp>,
+    scratch: Vec<blst_fp>,
+}
+
+impl Pending {
+    fn new() -> Self {
+        Self {
+            ops: Vec::with_capacity(PENDING_CHUNK),
+            denominators: Vec::with_capacity(PENDING_CHUNK),
+            scratch: Vec::with_capacity(PENDING_CHUNK),
+        }
+    }
+
+    const fn len(&self) -> usize {
+        self.ops.len()
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    /// Schedule `a + b`, tagged for the caller. Sums that need no field
+    /// arithmetic — an identity operand, or a cancelling pair — resolve
+    /// immediately and are returned instead of scheduled.
+    fn schedule(&mut self, a: &blst_p1_affine, b: &blst_p1_affine, tag: u32) -> Option<blst_p1_affine> {
+        if affine_is_inf(a) {
+            return Some(*b);
+        }
+        if affine_is_inf(b) {
+            return Some(*a);
+        }
+        if a.x.l == b.x.l {
+            // Same x: on the curve y is determined up to sign, so this is
+            // either P + (-P) = identity or a doubling.
+            let two_y = fp_add(&a.y, &b.y);
+            if two_y.l == [0u64; 6] {
+                return Some(blst_p1_affine::default());
+            }
+            // y_a == y_b != 0, so two_y = 2*y_a is the doubling denominator.
+            // (y == 0 cannot occur: the group order h * r is odd, so the curve
+            // has no 2-torsion.)
+            self.denominators.push(two_y);
+            self.ops.push(PendingOp {
+                a: *a,
+                b: *b,
+                tag,
+                double: true,
+            });
+        } else {
+            self.denominators.push(fp_sub(&b.x, &a.x));
+            self.ops.push(PendingOp {
+                a: *a,
+                b: *b,
+                tag,
+                double: false,
+            });
+        }
+        None
+    }
+
+    /// Complete every scheduled pair with one shared inversion, writing each
+    /// sum to its tagged index of `table`, and clear the schedule. Sound only
+    /// when the caller guarantees no scheduled pair still needs to *read* a
+    /// written index (operands were copied at scheduling time, so overlap with
+    /// operand positions is fine).
+    fn complete_write(&mut self, table: &mut [blst_p1_affine]) {
+        batch_invert_with_scratch(&mut self.denominators, &mut self.scratch);
+        for (op, inverse) in self.ops.iter().zip(&self.denominators) {
+            table[op.tag as usize] = complete(op, inverse);
+        }
+        self.ops.clear();
+        self.denominators.clear();
+    }
+}
+
+/// Finish one scheduled addition given the inverse of its denominator, using
+/// the affine chord/tangent formulas (curve coefficient a = 0):
+///   add:    lambda = (y_b - y_a) / (x_b - x_a)
+///   double: lambda = 3 * x_a^2 / (2 * y_a)
+///   x_out = lambda^2 - x_a - x_b;  y_out = lambda*(x_a - x_out) - y_a
+#[inline]
+fn complete(op: &PendingOp, inverse: &blst_fp) -> blst_p1_affine {
+    let lambda = if op.double {
+        let x_sq = fp_sqr(&op.a.x);
+        fp_mul(&fp_add(&fp_add(&x_sq, &x_sq), &x_sq), inverse)
+    } else {
+        fp_mul(&fp_sub(&op.b.y, &op.a.y), inverse)
+    };
+    let x_out = fp_sub(&fp_sub(&fp_sqr(&lambda), &op.a.x), &op.b.x);
+    let y_out = fp_sub(&fp_mul(&lambda, &fp_sub(&op.a.x, &x_out)), &op.a.y);
+    blst_p1_affine { x: x_out, y: y_out }
 }
 
 /// Sum `points` into `num_buckets` buckets given by `ids` (each id less than
 /// `num_buckets`), returning one affine sum per bucket (the identity for empty
 /// buckets).
 ///
-/// Each pass pairs up the remaining points within every bucket and completes
-/// all pairs with a single shared field inversion (Montgomery's trick), so an
-/// addition costs about six field multiplications instead of an inversion.
-fn sum_buckets(points: &[blst_p1_affine], ids: &[u8], num_buckets: usize) -> Vec<blst_p1_affine> {
+/// Streams the points once through a slot table: a point landing on an empty
+/// slot parks there, a point landing on an occupied slot pairs with the parked
+/// point, and completed pair sums re-enter at their slot. See [`Pending`] for
+/// the shared-inversion completion.
+fn sum_buckets(points: &[blst_p1_affine], ids: &[u16], num_buckets: usize) -> Vec<blst_p1_affine> {
     debug_assert_eq!(points.len(), ids.len());
-    // Counting sort the points into contiguous per-bucket runs.
-    let mut lens = vec![0usize; num_buckets];
-    for &id in ids {
-        lens[id as usize] += 1;
-    }
-    let mut starts = vec![0usize; num_buckets];
-    let mut acc = 0;
-    for (start, len) in starts.iter_mut().zip(&lens) {
-        *start = acc;
-        acc += len;
-    }
-    let mut buf = vec![blst_p1_affine::default(); points.len()];
-    let mut cursor = starts.clone();
-    for (point, &id) in points.iter().zip(ids) {
-        buf[cursor[id as usize]] = *point;
-        cursor[id as usize] += 1;
+    // A slot's emptiness marker is the affine identity encoding (x = y = 0),
+    // which no real curve point can collide with (y^2 = x^3 + 4 has no root at
+    // the origin). This doubles as the correct semantics: parking an identity
+    // sum leaves the slot empty, exactly as adding zero should.
+    let mut slots = vec![blst_p1_affine::default(); num_buckets];
+    let mut pending = Pending::new();
+    let mut batch = Pending::new();
+
+    /// How many points ahead to prefetch the slot for. The ids are known up
+    /// front, so the (data-dependent, cache-unfriendly) slot reads can be
+    /// requested early enough to hide their latency behind the stream.
+    const PREFETCH_AHEAD: usize = 8;
+
+    #[inline]
+    fn prefetch_slot(slots: &[blst_p1_affine], id: usize) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: prefetch is a pure cache hint with no observable memory
+        // effect; the pointer is in bounds (id indexes slots) and the point
+        // spans two cache lines.
+        unsafe {
+            let line = core::ptr::from_ref(&slots[id]).cast::<i8>();
+            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(line);
+            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(line.add(64));
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (slots, id);
+        }
     }
 
-    // Halve every bucket per pass until each holds at most one point. Copies
-    // (identity-involved pairs and odd leftovers) are deferred alongside the
-    // arithmetic so all reads complete before any write.
-    let mut arith: Vec<Arith> = Vec::new();
-    let mut denominators: Vec<blst_fp> = Vec::new();
-    let mut copies: Vec<(usize, blst_p1_affine)> = Vec::new();
-    loop {
-        arith.clear();
-        denominators.clear();
-        copies.clear();
-        for b in 0..num_buckets {
-            let (start, len) = (starts[b], lens[b]);
-            if len < 2 {
-                continue;
+    /// Merge `point` into its slot: park it if the slot is empty, otherwise
+    /// pair it with the parked point — resolving on the spot when no field
+    /// arithmetic is needed, and emptying the slot until the pending pair sum
+    /// re-enters otherwise.
+    #[inline]
+    fn feed(point: blst_p1_affine, id: usize, slots: &mut [blst_p1_affine], pending: &mut Pending) {
+        let parked = slots[id];
+        if affine_is_inf(&parked) {
+            slots[id] = point;
+            return;
+        }
+        match pending.schedule(&parked, &point, id as u32) {
+            Some(resolved) => slots[id] = resolved,
+            None => slots[id] = blst_p1_affine::default(),
+        }
+    }
+
+    /// Complete all pending pairs (one shared inversion) and re-enter their
+    /// sums, which may schedule follow-up pairs.
+    fn drain(pending: &mut Pending, batch: &mut Pending, slots: &mut [blst_p1_affine]) {
+        core::mem::swap(pending, batch);
+        let (ops, denominators) = (&batch.ops, &mut batch.denominators);
+        batch_invert_with_scratch(denominators, &mut batch.scratch);
+        for (i, (op, inverse)) in ops.iter().zip(denominators.iter()).enumerate() {
+            if let Some(ahead) = ops.get(i + PREFETCH_AHEAD) {
+                prefetch_slot(slots, ahead.tag as usize);
             }
-            for k in 0..len / 2 {
-                let a = buf[start + 2 * k];
-                let c = buf[start + 2 * k + 1];
-                let out = start + k;
-                if affine_is_inf(&a) {
-                    copies.push((out, c));
-                } else if affine_is_inf(&c) {
-                    copies.push((out, a));
-                } else if a.x.l == c.x.l {
-                    // Same x: on the curve y is determined up to sign, so this
-                    // is either P + (-P) = identity or a doubling.
-                    let two_y = fp_add(&a.y, &c.y);
-                    if two_y.l == [0u64; 6] {
-                        copies.push((out, blst_p1_affine::default()));
-                    } else {
-                        // y_a == y_c != 0, so two_y = 2*y_a is the doubling
-                        // denominator. (y == 0 cannot occur: the group order
-                        // h * r is odd, so the curve has no 2-torsion.)
-                        denominators.push(two_y);
-                        arith.push(Arith {
-                            a,
-                            b: c,
-                            out,
-                            double: true,
-                        });
-                    }
-                } else {
-                    denominators.push(fp_sub(&c.x, &a.x));
-                    arith.push(Arith {
-                        a,
-                        b: c,
-                        out,
-                        double: false,
-                    });
+            feed(complete(op, inverse), op.tag as usize, slots, pending);
+        }
+        batch.ops.clear();
+        batch.denominators.clear();
+    }
+
+    for (i, (point, &id)) in points.iter().zip(ids).enumerate() {
+        if let Some(&ahead) = ids.get(i + PREFETCH_AHEAD) {
+            prefetch_slot(&slots, ahead as usize);
+        }
+        feed(*point, id as usize, &mut slots, &mut pending);
+        if pending.len() >= PENDING_CHUNK {
+            drain(&mut pending, &mut batch, &mut slots);
+        }
+    }
+    while !pending.is_empty() {
+        drain(&mut pending, &mut batch, &mut slots);
+    }
+    slots
+}
+
+/// Table sizes at or below this use the direct per-digit scan; above it, the
+/// digit-peeling reduction is cheaper. Also the exact combine path for narrow
+/// rounds (`m <= 5`).
+const SCAN_CUTOFF: usize = 243;
+
+/// Recover, for every digit `j < m`, the pair of sums
+/// `(sum of buckets with digit_j = 1, sum of buckets with digit_j = 2)` from
+/// the `3^m` bucket sums (consumed as scratch).
+///
+/// Digits are peeled from the top: splitting the table by the top digit gives
+/// contiguous thirds `T0 | T1 | T2`; the top digit's pair is
+/// `(sum(T1), sum(T2))`, and the element-wise sum `T0 + T1 + T2` is a table
+/// one digit shorter with all remaining digit sums unchanged. Each peel is a
+/// pure reassociation of the same bucket sums, so the recovered combinations
+/// are exactly those specified in the module docs. Once the table is at most
+/// [`SCAN_CUTOFF`] entries, the remaining digits use the direct scan.
+fn combine(sums: &mut [blst_p1_affine], m: u32) -> Vec<(blst_p1, blst_p1)> {
+    let mut digits = vec![(blst_p1::default(), blst_p1::default()); m as usize];
+    let mut pending = Pending::new();
+
+    /// Schedule one in-place pairwise-halving step over `table[base..base+len]`
+    /// (results land in the region's front half; an odd element carries over),
+    /// returning the reduced length. Safe against the deferred writes because
+    /// every write index is below every operand index still to be read.
+    fn halve(pending: &mut Pending, table: &mut [blst_p1_affine], base: usize, len: usize) -> usize {
+        if len <= 1 {
+            return len;
+        }
+        for k in 0..len / 2 {
+            if let Some(sum) = pending.schedule(&table[base + 2 * k], &table[base + 2 * k + 1], (base + k) as u32)
+            {
+                table[base + k] = sum;
+            }
+            if pending.len() >= PENDING_CHUNK {
+                // Safe mid-pass: writes land at indexes at most base + k, all
+                // strictly below the base + 2k reads still to come (and below
+                // the other third's region, which sits at a disjoint base).
+                pending.complete_write(table);
+            }
+        }
+        if len % 2 == 1 {
+            table[base + len / 2] = table[base + len - 1];
+        }
+        len.div_ceil(2)
+    }
+
+    let mut size = sums.len();
+    let mut remaining = m as usize;
+    while size > SCAN_CUTOFF {
+        size /= 3;
+        remaining -= 1;
+        // Element-wise folds T0 += T1, then T0 += T2 (each completed before
+        // the next reads what it wrote).
+        for third in [size, 2 * size] {
+            for u in 0..size {
+                if let Some(sum) = pending.schedule(&sums[u], &sums[third + u], u as u32) {
+                    sums[u] = sum;
+                }
+                if pending.len() >= PENDING_CHUNK {
+                    // Safe mid-pass: writes land at already-consumed indexes
+                    // (at most the current u), behind the reads still to come.
+                    pending.complete_write(sums);
                 }
             }
-            if len % 2 == 1 {
-                copies.push((start + len / 2, buf[start + len - 1]));
-            }
-            lens[b] = len.div_ceil(2);
+            pending.complete_write(sums);
         }
-        if arith.is_empty() && copies.is_empty() {
-            break;
+        // The middle and top thirds are dead copies now; reduce each to its
+        // sum in place, sharing completion batches between the two trees.
+        let (mut ones_len, mut twos_len) = (size, size);
+        while ones_len > 1 || twos_len > 1 {
+            ones_len = halve(&mut pending, sums, size, ones_len);
+            twos_len = halve(&mut pending, sums, 2 * size, twos_len);
+            pending.complete_write(sums);
         }
-        batch_invert(&mut denominators);
-        for (op, inverse) in arith.iter().zip(&denominators) {
-            // Affine chord/tangent formulas (curve coefficient a = 0):
-            //   add:    lambda = (y_b - y_a) / (x_b - x_a)
-            //   double: lambda = 3 * x_a^2 / (2 * y_a)
-            //   x_out = lambda^2 - x_a - x_b;  y_out = lambda*(x_a - x_out) - y_a
-            let lambda = if op.double {
-                let x_sq = fp_sqr(&op.a.x);
-                fp_mul(&fp_add(&fp_add(&x_sq, &x_sq), &x_sq), inverse)
-            } else {
-                fp_mul(&fp_sub(&op.b.y, &op.a.y), inverse)
-            };
-            let x_out = fp_sub(&fp_sub(&fp_sqr(&lambda), &op.a.x), &op.b.x);
-            let y_out = fp_sub(&fp_mul(&lambda, &fp_sub(&op.a.x, &x_out)), &op.a.y);
-            buf[op.out] = blst_p1_affine { x: x_out, y: y_out };
-        }
-        for &(out, value) in &copies {
-            buf[out] = value;
-        }
+        digits[remaining] = (p1_from_affine(&sums[size]), p1_from_affine(&sums[2 * size]));
     }
 
-    (0..num_buckets)
-        .map(|b| {
-            if lens[b] == 0 {
-                blst_p1_affine::default()
-            } else {
-                buf[starts[b]]
+    // Direct scan for the remaining digits of the folded table.
+    for (j, digit) in digits.iter_mut().enumerate().take(remaining) {
+        let divisor = 3usize.pow(j as u32);
+        let mut ones = blst_p1::default();
+        let mut twos = blst_p1::default();
+        for (v, sum) in sums[..size].iter().enumerate() {
+            if affine_is_inf(sum) {
+                continue;
             }
-        })
-        .collect()
+            let acc = match (v / divisor) % 3 {
+                1 => &mut ones,
+                2 => &mut twos,
+                _ => continue,
+            };
+            // SAFETY: acc and sum are valid points; blst_p1_add_or_double_affine
+            // handles identity and equal operands, and permits out == a.
+            unsafe { blst_p1_add_or_double_affine(acc, acc, sum) };
+        }
+        *digit = (ones, twos);
+    }
+    digits
+}
+
+/// Lift an affine point (identity included) to a Jacobian one.
+fn p1_from_affine(point: &blst_p1_affine) -> blst_p1 {
+    let mut out = blst_p1::default();
+    // SAFETY: out is the identity and point is a valid blst_p1_affine;
+    // blst_p1_add_or_double_affine handles identity and permits out == a.
+    unsafe { blst_p1_add_or_double_affine(&mut out, &out, point) };
+    out
 }
 
 /// Replace every element with its inverse using Montgomery's trick: one field
-/// inversion plus three multiplications per element.
+/// inversion plus three multiplications per element. `prefix` is caller-owned
+/// scratch, so hot paths reuse its allocation across batches.
 ///
 /// Every element MUST be nonzero (`blst_fp_inverse(0) == 0` would silently
-/// poison the shared product); [`sum_buckets`]'s classification guarantees it.
-fn batch_invert(values: &mut [blst_fp]) {
+/// poison the shared product); [`Pending::schedule`]'s classification
+/// guarantees it.
+fn batch_invert_with_scratch(values: &mut [blst_fp], prefix: &mut Vec<blst_fp>) {
     if values.is_empty() {
         return;
     }
     // prefix[i] = values[0] * ... * values[i]
-    let mut prefix = Vec::with_capacity(values.len());
+    prefix.clear();
+    prefix.reserve(values.len());
     let mut acc = values[0];
     prefix.push(acc);
     for value in &values[1..] {
@@ -413,83 +677,11 @@ fn fp_sqr(a: &blst_fp) -> blst_fp {
     out
 }
 
-/// A stream of uniform trits over a cryptographic RNG.
-///
-/// Each accepted byte below `3^5 = 243` yields five independent uniform trits
-/// (its base-3 digits); bytes at or above 243 are rejected so the trits stay
-/// exactly uniform. Bytes are drawn in bulk to amortize RNG calls.
-///
-/// Exact uniformity is load-bearing: the soundness bound leaves a fraction of
-/// a bit of margin over the security target, and the bias of a `byte % 3`
-/// shortcut (max probability `86/256`) compounds across every coefficient,
-/// dropping the total below it.
-struct Trits<'a, R: CryptoRng> {
-    rng: &'a mut R,
-    buffer: [u8; 256],
-    filled: usize,
-    position: usize,
-    current: u8,
-    remaining: u8,
-}
-
-impl<'a, R: CryptoRng> Trits<'a, R> {
-    const fn new(rng: &'a mut R) -> Self {
-        Self {
-            rng,
-            buffer: [0u8; 256],
-            filled: 0,
-            position: 0,
-            current: 0,
-            remaining: 0,
-        }
-    }
-
-    /// Return the next uniform value in `{0, 1, 2}`.
-    fn next(&mut self) -> u8 {
-        if self.remaining == 0 {
-            self.current = self.next_byte();
-            self.remaining = 5;
-        }
-        let trit = self.current % 3;
-        self.current /= 3;
-        self.remaining -= 1;
-        trit
-    }
-
-    /// Return a uniform bucket id in `[0, 3^m)` — the next `m` trits as base-3
-    /// digits. `m` must be at most 5.
-    fn bucket(&mut self, m: u32) -> u8 {
-        debug_assert!((1..=5).contains(&m));
-        let mut id = 0u8;
-        let mut weight = 1u8;
-        for _ in 0..m {
-            id += weight * self.next();
-            weight = weight.wrapping_mul(3);
-        }
-        id
-    }
-
-    /// Return the next byte strictly below 243, refilling the buffer as needed.
-    fn next_byte(&mut self) -> u8 {
-        loop {
-            if self.position == self.filled {
-                self.rng.fill_bytes(&mut self.buffer);
-                self.filled = self.buffer.len();
-                self.position = 0;
-            }
-            let byte = self.buffer[self.position];
-            self.position += 1;
-            if byte < 243 {
-                return byte;
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::{G1, Scalar};
+    use blst::blst_p1_is_equal;
     use commonware_codec::FixedSize;
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
     use commonware_parallel::Sequential;
@@ -499,9 +691,19 @@ mod tests {
     /// Standard soundness target for the tests.
     const SECURITY: usize = 128;
 
+    /// [`batch_invert_with_scratch`] with a throwaway scratch buffer.
+    fn batch_invert(values: &mut [blst_fp]) {
+        let mut scratch = Vec::with_capacity(values.len());
+        batch_invert_with_scratch(values, &mut scratch);
+    }
+
     /// A batch size comfortably above the per-point fallback threshold, so the
     /// batched path is exercised.
     const LARGE: usize = 1000;
+
+    /// A batch size whose plan is wide enough (`3^m > SCAN_CUTOFF`) that the
+    /// digit-peeling combine is exercised end to end.
+    const WIDE: usize = 4000;
 
     fn in_subgroup_point(rng: &mut impl CryptoRng) -> G1 {
         G1::generator() * &Scalar::random(rng)
@@ -527,7 +729,7 @@ mod tests {
     }
 
     /// Assert that [`sum_buckets`] agrees with naive per-bucket G1 addition.
-    fn assert_sums_match(points: &[G1], ids: &[u8], num_buckets: usize) {
+    fn assert_sums_match(points: &[G1], ids: &[u16], num_buckets: usize) {
         let affine = G1::batch_to_affine(points);
         let sums = sum_buckets(&affine, ids, num_buckets);
         assert_eq!(sums.len(), num_buckets);
@@ -560,9 +762,9 @@ mod tests {
             // 3^t >= 2^security must hold at the returned t.
             assert!(f64::from(combinations as u32) * 3f64.log2() >= security as f64);
             // Every plan must cover the required number of combinations.
-            for n in [0usize, 1, 50, 130, 200, 1000, 6000, 100_000] {
+            for n in [0usize, 1, 50, 130, 200, 1000, 6000, 100_000, 1_000_000] {
                 if let Some((m, rounds)) = plan(n, combinations) {
-                    assert!((1..=5).contains(&m));
+                    assert!((1..=MAX_WIDTH).contains(&m));
                     assert!(rounds * m as usize >= combinations, "n={n} s={security}");
                 }
             }
@@ -574,28 +776,52 @@ mod tests {
     }
 
     #[test]
-    fn bucket_ids_are_in_range() {
-        let mut rng = test_rng();
-        let mut trits = Trits::new(&mut rng);
-        for m in 1..=5u32 {
-            for _ in 0..1000 {
-                assert!((trits.bucket(m) as usize) < 3usize.pow(m));
+    fn expected_nonempty_is_sane() {
+        // Exact when n = 1, monotone in n, never exceeding b or n-ish bounds.
+        assert_eq!(expected_nonempty(1, 27), 1);
+        for b in [3usize, 243, 19683] {
+            let mut last = 0;
+            for n in [1usize, 10, 100, 1000, 100_000] {
+                let nonempty = expected_nonempty(n, b);
+                assert!(nonempty <= b);
+                assert!(nonempty <= n);
+                assert!(nonempty >= last);
+                last = nonempty;
+            }
+            // Far more points than buckets: essentially every bucket hit.
+            assert!(expected_nonempty(100 * b, b) >= b - b / 50);
+        }
+    }
+
+    #[test]
+    fn map_id_is_exactly_uniform() {
+        // Sweep the entire 16-bit domain: every id must be produced by exactly
+        // floor(2^16 / num_buckets) inputs — exact uniformity, not statistical.
+        for m in 1..=MAX_WIDTH {
+            let num_buckets = 3usize.pow(m);
+            let per_id = 65536 / num_buckets;
+            let mut counts = vec![0usize; num_buckets];
+            for value in 0..=u16::MAX {
+                if let Some(id) = map_id(value, num_buckets) {
+                    counts[id as usize] += 1;
+                }
+            }
+            for (id, &count) in counts.iter().enumerate() {
+                assert_eq!(count, per_id, "m={m} id={id}");
             }
         }
     }
 
     #[test]
-    fn bucket_ids_are_roughly_uniform() {
+    fn draw_ids_are_in_range() {
         let mut rng = test_rng();
-        let mut trits = Trits::new(&mut rng);
-        let mut counts = [0usize; 9];
-        for _ in 0..9000 {
-            counts[trits.bucket(2) as usize] += 1;
+        for m in [1u32, 5, 9, MAX_WIDTH] {
+            let num_buckets = 3usize.pow(m);
+            let ids = draw_ids(&mut rng, 5000, num_buckets);
+            assert_eq!(ids.len(), 5000);
+            assert!(ids.iter().all(|&id| (id as usize) < num_buckets));
         }
-        // Expected 1000 per id; the window is ~6.7 standard deviations wide.
-        for &count in &counts {
-            assert!((800..1200).contains(&count), "{counts:?}");
-        }
+        assert!(draw_ids(&mut test_rng(), 0, 27).is_empty());
     }
 
     #[test]
@@ -606,28 +832,99 @@ mod tests {
         // cofactor part exactly digit_j(bucket) * T, so each bucket id below
         // deterministically isolates one digit position and value; a wiring
         // bug (a stuck or truncated digit) accepts one of the rejecting cases.
+        // M = 9 forces the digit-peeling combine (table 19683 > SCAN_CUTOFF)
+        // including its scan tail, covering both paths.
         let mut rng = test_rng();
-        const M: u32 = 5;
-        let mut points: Vec<G1> = (0..300).map(|_| in_subgroup_point(&mut rng)).collect();
+        const M: u32 = 9;
+        let num_buckets = 3usize.pow(M);
+        let mut points: Vec<G1> = (0..800).map(|_| in_subgroup_point(&mut rng)).collect();
         let bad_index = points.len();
         points.push(off_subgroup_point(&mut rng));
         let affine = G1::batch_to_affine(&points);
-        // Good points are spread arbitrarily; their in-subgroup parts cannot
-        // mask a cofactor part in any combination.
-        let mut ids: Vec<u8> = (0..points.len()).map(|i| (i % 243) as u8).collect();
+        // Good points are spread arbitrarily (most buckets stay empty); their
+        // in-subgroup parts cannot mask a cofactor part in any combination.
+        let mut ids: Vec<u16> = (0..points.len())
+            .map(|i| ((i * 37) % num_buckets) as u16)
+            .collect();
         // Vector 0 assigns the bad point coefficient 0 in every combination,
         // so the round must accept.
         ids[bad_index] = 0;
         assert!(round_in_g1(&affine, &ids, M));
         // Any nonzero vector leaves a nonzero digit in some combination, which
-        // must reject: 3^j isolates digit j with value 1; 2 and 162 = 2 * 3^4
-        // cover value 2 at the lowest and highest positions.
-        for v in [1u8, 2, 3, 9, 27, 81, 162] {
-            ids[bad_index] = v;
-            assert!(
-                !round_in_g1(&affine, &ids, M),
-                "bad point at bucket {v} escaped"
-            );
+        // must reject: probe digit values 1 and 2 at every position j.
+        for j in 0..M {
+            for value in [1u16, 2] {
+                ids[bad_index] = value * 3u16.pow(j);
+                assert!(
+                    !round_in_g1(&affine, &ids, M),
+                    "bad point at digit {j} value {value} escaped"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn combine_matches_direct_scan() {
+        // The digit-peeling combine must produce exactly the per-digit sums of
+        // the direct scan — same points, same wiring — for every width,
+        // including tables with identities, duplicates, and cancelling pairs.
+        let mut rng = test_rng();
+        for m in 1..=9u32 {
+            let num_buckets = 3usize.pow(m);
+            let base: Vec<G1> = (0..7)
+                .map(|i| {
+                    if i == 0 {
+                        G1::zero()
+                    } else if i % 3 == 0 {
+                        off_subgroup_point(&mut rng)
+                    } else {
+                        in_subgroup_point(&mut rng)
+                    }
+                })
+                .collect();
+            let table: Vec<G1> = (0..num_buckets)
+                .map(|v| match v % 11 {
+                    0 => G1::zero(),
+                    1..=6 => base[v % 7],
+                    7 => -base[v % 7],
+                    _ => in_subgroup_point(&mut rng),
+                })
+                .collect();
+            let affine = G1::batch_to_affine(&table);
+
+            // Reference: the direct scan over the full table.
+            let mut expected = Vec::new();
+            for j in 0..m {
+                let divisor = 3usize.pow(j);
+                let mut ones = blst_p1::default();
+                let mut twos = blst_p1::default();
+                for (v, sum) in affine.iter().enumerate() {
+                    if affine_is_inf(sum) {
+                        continue;
+                    }
+                    let acc = match (v / divisor) % 3 {
+                        1 => &mut ones,
+                        2 => &mut twos,
+                        _ => continue,
+                    };
+                    // SAFETY: valid points; handles identity and out == a.
+                    unsafe { blst_p1_add_or_double_affine(acc, acc, sum) };
+                }
+                expected.push((ones, twos));
+            }
+
+            let mut scratch = affine.clone();
+            let got = combine(&mut scratch, m);
+            assert_eq!(got.len(), expected.len());
+            for (j, ((got_ones, got_twos), (want_ones, want_twos))) in
+                got.iter().zip(&expected).enumerate()
+            {
+                // SAFETY: all operands are valid blst_p1 values.
+                unsafe {
+                    assert!(blst_p1_is_equal(got_ones, want_ones), "m={m} digit={j} ones");
+                    assert!(blst_p1_is_equal(got_twos, want_twos), "m={m} digit={j} twos");
+                }
+            }
         }
     }
 
@@ -658,7 +955,7 @@ mod tests {
         let mut rng = test_rng();
         let p = in_subgroup_point(&mut rng);
         let q = off_subgroup_point(&mut rng);
-        let cases: Vec<(Vec<G1>, Vec<u8>, usize)> = vec![
+        let cases: Vec<(Vec<G1>, Vec<u16>, usize)> = vec![
             // Cancelling pair produces the identity.
             (vec![p, -p], vec![0, 0], 1),
             // Duplicates force the doubling path.
@@ -667,12 +964,14 @@ mod tests {
             // Identity inputs and identity-only buckets.
             (vec![p, G1::zero()], vec![0, 0], 1),
             (vec![G1::zero(), G1::zero()], vec![0, 0], 1),
-            // Cancellation in a later pass: (p+q) + -(p+q).
+            // Cancellation of intermediate sums: (p+q) + -(p+q).
             (vec![p, q, -p, -q], vec![0, 0, 0, 0], 1),
-            // Odd leftovers and cancellation combined.
+            // Odd counts and cancellation combined.
             (vec![p, -p, p], vec![0, 0, 0], 1),
             // Singleton with empty buckets around it.
             (vec![p], vec![1], 3),
+            // A displaced stale slot must read as empty, not as its old point.
+            (vec![p, p, q], vec![4, 4, 4], 19683),
         ];
         for (points, ids, num_buckets) in cases {
             assert_sums_match(&points, &ids, num_buckets);
@@ -682,9 +981,9 @@ mod tests {
     #[test]
     fn sum_buckets_matches_naive() {
         let mut rng = test_rng();
-        for round in 0..20usize {
+        for round in 0..24usize {
             let n = 1 + (round * 37) % 150;
-            let num_buckets = [1usize, 2, 3, 9, 27, 243][round % 6];
+            let num_buckets = [1usize, 2, 3, 9, 27, 243, 2187, 19683][round % 8];
             let mut points: Vec<G1> = Vec::with_capacity(n);
             for i in 0..n {
                 let point = match i % 7 {
@@ -696,14 +995,26 @@ mod tests {
                 };
                 points.push(point);
             }
-            let mut id_bytes = vec![0u8; n];
+            let mut id_bytes = vec![0u8; 2 * n];
             rng.fill_bytes(&mut id_bytes);
-            let ids: Vec<u8> = id_bytes
-                .iter()
-                .map(|&b| (b as usize % num_buckets) as u8)
+            let ids: Vec<u16> = id_bytes
+                .chunks_exact(2)
+                .map(|pair| (u16::from_le_bytes([pair[0], pair[1]]) as usize % num_buckets) as u16)
                 .collect();
             assert_sums_match(&points, &ids, num_buckets);
         }
+    }
+
+    #[test]
+    fn sum_buckets_flushes_mid_stream() {
+        // More same-bucket points than PENDING_CHUNK forces mid-stream drains
+        // whose completed sums re-enter occupied slots.
+        let mut rng = test_rng();
+        let p = in_subgroup_point(&mut rng);
+        let n = 2 * PENDING_CHUNK + 3;
+        let points = vec![p; n];
+        let ids = vec![1u16; n];
+        assert_sums_match(&points, &ids, 3);
     }
 
     #[test]
@@ -742,6 +1053,18 @@ mod tests {
         let mut rng = test_rng();
         let mut points: Vec<G1> = (0..LARGE).map(|_| in_subgroup_point(&mut rng)).collect();
         points[LARGE / 2] = off_subgroup_point(&mut rng);
+        assert!(!batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
+    }
+
+    #[test]
+    fn wide_batch_agrees_end_to_end() {
+        // Wide enough that the plan uses the digit-peeling combine.
+        let mut rng = test_rng();
+        let (m, _) = plan(WIDE, combinations_for_security(SECURITY)).unwrap();
+        assert!(3usize.pow(m) > SCAN_CUTOFF, "plan too narrow to cover the peel");
+        let mut points: Vec<G1> = (0..WIDE).map(|_| in_subgroup_point(&mut rng)).collect();
+        assert!(batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
+        points[WIDE - 1] = off_subgroup_point(&mut rng);
         assert!(!batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
     }
 
@@ -820,12 +1143,8 @@ mod tests {
         for n in [1000usize, 6000, 100_000] {
             let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
             let affine = G1::batch_to_affine(&points);
-            let mut ids = vec![0u8; n];
-            rng.fill_bytes(&mut ids);
-            for num_buckets in [27usize, 81, 243] {
-                for id in &mut ids {
-                    *id %= num_buckets as u8;
-                }
+            for num_buckets in [243usize, 2187, 19683] {
+                let ids = draw_ids(&mut rng, n, num_buckets);
                 let reps = 50;
                 let start = Instant::now();
                 for _ in 0..reps {
@@ -864,6 +1183,152 @@ mod tests {
         }
     }
 
+    /// Stage gate: where one wide round's combine spends its time. Run with:
+    /// `cargo test -p commonware-cryptography --release --features bls12381 \
+    ///   subgroup::tests::measure_combine -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn measure_combine() {
+        use std::time::Instant;
+        let mut rng = test_rng();
+        // One field inversion, amortized across a Pending flush.
+        let xs: Vec<blst_fp> = (0..64)
+            .map(|_| G1::batch_to_affine(&[in_subgroup_point(&mut rng)])[0].x)
+            .collect();
+        let start = Instant::now();
+        for x in &xs {
+            let mut out = blst_fp::default();
+            // SAFETY: valid blst_fp values.
+            unsafe { blst_fp_inverse(&mut out, x) };
+            std::hint::black_box(out);
+        }
+        println!("blst_fp_inverse = {:?}", start.elapsed() / 64);
+
+        // A full m=9 table, timed phase by phase.
+        let m = 9u32;
+        let num_buckets = 3usize.pow(m);
+        let table: Vec<G1> = (0..num_buckets)
+            .map(|_| in_subgroup_point(&mut rng))
+            .collect();
+        let affine = G1::batch_to_affine(&table);
+        for _ in 0..3 {
+            let mut sums = affine.clone();
+            let mut pending = Pending::new();
+            let mut size = sums.len();
+            let mut elementwise = std::time::Duration::ZERO;
+            let mut trees = std::time::Duration::ZERO;
+            while size > SCAN_CUTOFF {
+                size /= 3;
+                let start = Instant::now();
+                for third in [size, 2 * size] {
+                    for u in 0..size {
+                        if let Some(sum) = pending.schedule(&sums[u], &sums[third + u], u as u32) {
+                            sums[u] = sum;
+                        }
+                    }
+                    pending.complete_write(&mut sums);
+                }
+                elementwise += start.elapsed();
+                let start = Instant::now();
+                let (mut ones_len, mut twos_len) = (size, size);
+                while ones_len > 1 || twos_len > 1 {
+                    ones_len = tree_halve(&mut pending, &mut sums, size, ones_len);
+                    twos_len = tree_halve(&mut pending, &mut sums, 2 * size, twos_len);
+                    pending.complete_write(&mut sums);
+                }
+                trees += start.elapsed();
+            }
+            let start = Instant::now();
+            let mut scanned = blst_p1::default();
+            for j in 0..5u32 {
+                let divisor = 3usize.pow(j);
+                for (v, sum) in sums[..size].iter().enumerate() {
+                    if affine_is_inf(sum) || (v / divisor) % 3 != 1 {
+                        continue;
+                    }
+                    // SAFETY: valid points; handles identity and out == a.
+                    unsafe { blst_p1_add_or_double_affine(&mut scanned, &scanned, sum) };
+                }
+            }
+            let scan = start.elapsed();
+            std::hint::black_box(&scanned);
+            println!("elementwise={elementwise:?} trees={trees:?} scan(5 digits, ones only)={scan:?}");
+        }
+
+        /// Test-local copy of combine's halving step.
+        fn tree_halve(
+            pending: &mut Pending,
+            table: &mut [blst_p1_affine],
+            base: usize,
+            len: usize,
+        ) -> usize {
+            if len <= 1 {
+                return len;
+            }
+            for k in 0..len / 2 {
+                if let Some(sum) = pending.schedule(
+                    &table[base + 2 * k],
+                    &table[base + 2 * k + 1],
+                    (base + k) as u32,
+                ) {
+                    table[base + k] = sum;
+                }
+            }
+            if len % 2 == 1 {
+                table[base + len / 2] = table[base + len - 1];
+            }
+            len.div_ceil(2)
+        }
+    }
+
+    /// Stage gate: end-to-end cost of forced round widths, and the split
+    /// between accumulation, combine, and id drawing. Run with:
+    /// `cargo test -p commonware-cryptography --release --features bls12381 \
+    ///   subgroup::tests::measure_widths -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn measure_widths() {
+        use std::time::Instant;
+        let mut rng = test_rng();
+        let n = 100_000;
+        let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+        let affine = G1::batch_to_affine(&points);
+        for m in [7u32, 8, 9, 10] {
+            let num_buckets = 3usize.pow(m);
+            let rounds = 81usize.div_ceil(m as usize);
+            let start = Instant::now();
+            let id_sets: Vec<Vec<u16>> = (0..rounds)
+                .map(|_| draw_ids(&mut rng, n, num_buckets))
+                .collect();
+            let ids_time = start.elapsed();
+            let start = Instant::now();
+            let mut sums_sets: Vec<Vec<blst_p1_affine>> = id_sets
+                .iter()
+                .map(|ids| sum_buckets(&affine, ids, num_buckets))
+                .collect();
+            let accumulate_time = start.elapsed();
+            let start = Instant::now();
+            let mut ok = true;
+            for sums in &mut sums_sets {
+                for (ones, twos) in combine(sums, m) {
+                    let mut combination = blst_p1::default();
+                    // SAFETY: all operands are valid blst_p1 values.
+                    unsafe {
+                        blst_p1_double(&mut combination, &twos);
+                        blst_p1_add_or_double(&mut combination, &combination, &ones);
+                        ok &= blst_p1_in_g1(&combination);
+                    }
+                }
+            }
+            let combine_time = start.elapsed();
+            assert!(ok);
+            println!(
+                "m={m} rounds={rounds}: ids={ids_time:?} accumulate={accumulate_time:?} combine+check={combine_time:?} total={:?}",
+                ids_time + accumulate_time + combine_time
+            );
+        }
+    }
+
     /// Compare the shipping scheme (C) against the two alternatives from
     /// `cryptography/BATCHED_SUBGROUP.md`, all on the same accumulation engine:
     /// A is one combination per round (m = 1, 81 rounds); B is random bucketing
@@ -886,9 +1351,9 @@ mod tests {
             rng: &mut impl CryptoRng,
         ) -> bool {
             let affine = G1::batch_to_affine(points);
-            let mut trits = Trits::new(rng);
-            let id_sets: Vec<Vec<u8>> = (0..rounds)
-                .map(|_| (0..points.len()).map(|_| trits.bucket(m)).collect())
+            let num_buckets = 3usize.pow(m);
+            let id_sets: Vec<Vec<u16>> = (0..rounds)
+                .map(|_| draw_ids(rng, points.len(), num_buckets))
                 .collect();
             strategy
                 .map_collect_vec_with_multiplier(id_sets.iter(), points.len(), |ids| {
@@ -907,15 +1372,15 @@ mod tests {
             rng: &mut impl CryptoRng,
         ) -> bool {
             let affine = G1::batch_to_affine(points);
-            let mask = (num_buckets - 1) as u8;
-            let id_sets: Vec<Vec<u8>> = (0..rounds)
+            let mask = (num_buckets - 1) as u16;
+            let id_sets: Vec<Vec<u16>> = (0..rounds)
                 .map(|_| {
-                    let mut ids = vec![0u8; points.len()];
-                    rng.fill_bytes(&mut ids);
-                    for id in &mut ids {
-                        *id &= mask;
-                    }
-                    ids
+                    let mut bytes = vec![0u8; 2 * points.len()];
+                    rng.fill_bytes(&mut bytes);
+                    bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]) & mask)
+                        .collect()
                 })
                 .collect();
             strategy
