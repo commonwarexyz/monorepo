@@ -599,6 +599,7 @@ impl EngineDefinition for SingleDbEngine {
             timeout_retry: Duration::from_millis(500),
             view_retention: ViewDelta::new(10),
             skip_timeout: Duration::from_secs(5),
+            fast_skip_budget: simplex::FastSkipBudget::Participants,
             fetch_timeout: Duration::from_secs(2),
             forwarding: ForwardingPolicy::Disabled,
             track_historical_votes: false,

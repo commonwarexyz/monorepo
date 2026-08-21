@@ -13,6 +13,42 @@ use commonware_runtime::buffer::paged::CacheRef;
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 
+/// Limits fast skips to a configured number of unfinalized terms.
+/// Ordinary round deadlines remain active when fast skips are unavailable.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum FastSkipBudget {
+    /// Uses the participant count as the budget.
+    #[default]
+    Participants,
+    /// Uses the specified budget.
+    ///
+    /// Zero prevents fast skips.
+    Fixed(u64),
+}
+
+impl FastSkipBudget {
+    /// Resolves the configured budget for a participant count.
+    pub(crate) const fn resolve(self, participants: usize) -> u64 {
+        match self {
+            Self::Participants => participants as u64,
+            Self::Fixed(budget) => budget,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FastSkipBudget;
+
+    #[test]
+    fn fast_skip_budget_resolves() {
+        assert_eq!(FastSkipBudget::default().resolve(4), 4);
+        assert_eq!(FastSkipBudget::Participants.resolve(7), 7);
+        assert_eq!(FastSkipBudget::Fixed(0).resolve(4), 0);
+        assert_eq!(FastSkipBudget::Fixed(9).resolve(4), 9);
+    }
+}
+
 /// Controls whether and how the engine proactively forwards blocks when
 /// entering the next view.
 ///
@@ -207,6 +243,9 @@ where
     ///
     /// This timeout must be greater than the certification timeout and timeout retry.
     pub skip_timeout: Duration,
+
+    /// Policy governing fast skips.
+    pub fast_skip_budget: FastSkipBudget,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,

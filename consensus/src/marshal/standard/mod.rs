@@ -2239,6 +2239,7 @@ mod tests {
                     timeout_retry: Duration::from_secs(3),
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(6),
+                    fast_skip_budget: simplex::FastSkipBudget::Participants,
                     fetch_timeout: Duration::from_secs(1),
                     forwarding: ForwardingPolicy::Disabled,
                     track_historical_votes: false,
