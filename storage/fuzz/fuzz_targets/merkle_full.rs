@@ -86,6 +86,7 @@ fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config<Seq
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         strategy: Sequential,
+        node_cache_size: Some(NZUsize!(64)),
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }

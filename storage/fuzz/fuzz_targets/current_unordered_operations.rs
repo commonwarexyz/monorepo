@@ -136,6 +136,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {

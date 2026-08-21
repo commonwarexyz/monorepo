@@ -114,6 +114,7 @@ mod test {
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             log: JournalConfig {

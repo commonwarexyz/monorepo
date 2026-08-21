@@ -98,6 +98,7 @@ mod tests {
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
+            node_cache_size: Some(NZUsize!(64)),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(1024), NZUsize!(10)),
         }
     }
