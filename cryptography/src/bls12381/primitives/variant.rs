@@ -12,8 +12,9 @@ use alloc::vec::Vec;
 use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
+use commonware_macros::stability;
 use commonware_math::algebra::{CryptoGroup, HashToGroup, Space};
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Participant;
 use core::{
     fmt::{Debug, Formatter},
@@ -65,6 +66,17 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         strategy: &impl Strategy,
     ) -> Result<(), Error>;
 
+    /// Verifies `signature` against pairings of corresponding public keys and message hashes.
+    ///
+    /// Implementations must reject empty inputs and inputs with different lengths.
+    #[stability(ALPHA)]
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error>;
+
     /// Compute the pairing `e(G1, G2) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
 }
@@ -87,7 +99,13 @@ impl Variant for MinPk {
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
-        if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
+        if !G2::multi_pairing_check(
+            &[*hm],
+            &[*public],
+            signature,
+            &-G1::generator(),
+            &Sequential,
+        ) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -143,7 +161,23 @@ impl Variant for MinPk {
             || G2::msm(signatures, &scalars, par),
             || par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s),
         );
-        if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator()) {
+        if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator(), par) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    #[stability(ALPHA)]
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error> {
+        if publics.is_empty()
+            || publics.len() != hms.len()
+            || !G2::multi_pairing_check(hms, publics, signature, &-G1::generator(), strategy)
+        {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -190,7 +224,13 @@ impl Variant for MinSig {
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
-        if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
+        if !G1::multi_pairing_check(
+            &[*hm],
+            &[*public],
+            signature,
+            &-G2::generator(),
+            &Sequential,
+        ) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -246,7 +286,23 @@ impl Variant for MinSig {
             || G1::msm(signatures, &scalars, par),
             || par.map_collect_vec(hms.iter().zip(scalars.iter()), |(&hm, s)| hm * s),
         );
-        if !G1::multi_pairing_check(&scaled_hms, publics, &s_agg, &-G2::generator()) {
+        if !G1::multi_pairing_check(&scaled_hms, publics, &s_agg, &-G2::generator(), par) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    #[stability(ALPHA)]
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error> {
+        if publics.is_empty()
+            || publics.len() != hms.len()
+            || !G1::multi_pairing_check(hms, publics, signature, &-G2::generator(), strategy)
+        {
             return Err(Error::InvalidSignature);
         }
         Ok(())

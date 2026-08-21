@@ -5,8 +5,8 @@
 //!
 //! # Security Considerations
 //!
-//! Aggregate operations ensure the aggregate is valid, but not that the individual elements are valid.
-//! Use [`batch`](super::batch) when you need to ensure each individual signature is valid.
+//! Combining signatures or verifying an aggregate does not establish that each input signature is
+//! valid. Use [`batch`](super::batch) to verify independently supplied signatures.
 //! Aggregating signatures from multiple public keys over the same message additionally requires a
 //! verified proof of possession (PoP) for every public key.
 
@@ -16,6 +16,7 @@ use super::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::stability;
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
 
@@ -92,6 +93,12 @@ impl<V: Variant> Signature<V> {
 
     /// Returns the inner signature value.
     pub(crate) const fn inner(&self) -> &V::Signature {
+        &self.0
+    }
+
+    /// Returns the aggregated group element.
+    #[stability(ALPHA)]
+    pub const fn element(&self) -> &V::Signature {
         &self.0
     }
 
