@@ -633,7 +633,7 @@ pub(super) fn check_scenario_progress(outcome: &ScenarioOutcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SimplexId, id_mock};
+    use crate::{SimplexCertificateMock, simplex_certificate_mock};
     use commonware_consensus::{
         Reporter as _,
         marshal::{
@@ -642,20 +642,30 @@ mod tests {
         },
         types::{Epoch, View},
     };
-    use commonware_cryptography::Sha256;
-    use commonware_utils::{Acknowledgement as _, NZUsize, acknowledgement::Exact};
+    use commonware_cryptography::{Sha256, ed25519::PublicKey as Ed25519PublicKey};
+    use commonware_utils::{Acknowledgement as _, NZUsize, acknowledgement::Exact, test_rng};
 
-    type TestContext = SimplexContext<Sha256Digest, id_mock::PublicKey>;
+    type TestContext = SimplexContext<Sha256Digest, Ed25519PublicKey>;
     type ContextBlock = MockBlock<Sha256Digest, TestContext>;
 
     fn digest(byte: u8) -> Sha256Digest {
         Sha256Digest([byte; 32])
     }
 
+    fn leader() -> Ed25519PublicKey {
+        simplex_certificate_mock::fixture_with::<false, true, true, _>(
+            &mut test_rng(),
+            b"marshal-invariants",
+            1,
+        )
+        .participants
+        .remove(0)
+    }
+
     fn context(view: u64, parent: Sha256Digest) -> TestContext {
         TestContext {
             round: Round::new(Epoch::zero(), View::new(view)),
-            leader: id_mock::PublicKey::from_index(0),
+            leader: leader(),
             parent: (View::new(view.saturating_sub(1)), parent),
         }
     }
@@ -672,10 +682,10 @@ mod tests {
     fn coding_context(
         view: u64,
         parent: Commitment,
-    ) -> SimplexContext<Commitment, id_mock::PublicKey> {
+    ) -> SimplexContext<Commitment, Ed25519PublicKey> {
         SimplexContext {
             round: Round::new(Epoch::zero(), View::new(view)),
-            leader: id_mock::PublicKey::from_index(0),
+            leader: leader(),
             parent: (View::new(view.saturating_sub(1)), parent),
         }
     }
@@ -818,7 +828,7 @@ mod tests {
 
     #[test]
     fn missing_block_context_is_an_incomplete_observation() {
-        let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
+        let invariant = HeaderMismatchInvariant::<SimplexCertificateMock, ()>::new(
             ApplicationChoice::AlwaysAccept,
             (),
             |_, _, _| false,
@@ -837,7 +847,7 @@ mod tests {
         let payload = digest(0xA);
         let embedded = context(2, digest(0xB));
         registry.record(payload, embedded.clone());
-        let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
+        let invariant = HeaderMismatchInvariant::<SimplexCertificateMock, ()>::new(
             ApplicationChoice::AlwaysAccept,
             (),
             |_, _, _| false,
@@ -859,7 +869,7 @@ mod tests {
         let payload = digest(0xA);
         let embedded = context(2, digest(0xB));
         registry.record(payload, embedded.clone());
-        let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
+        let invariant = HeaderMismatchInvariant::<SimplexCertificateMock, ()>::new(
             ApplicationChoice::AlwaysAccept,
             (),
             |_, _, _| false,
@@ -880,7 +890,7 @@ mod tests {
         let payload = digest(0xA);
         let embedded = context(2, digest(0xB));
         registry.record(payload, embedded.clone());
-        let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
+        let invariant = HeaderMismatchInvariant::<SimplexCertificateMock, ()>::new(
             ApplicationChoice::AlwaysAccept,
             (),
             |_, _, _| false,
@@ -901,7 +911,7 @@ mod tests {
         let payload = commitment(0xA);
         let embedded = coding_context(2, commitment(0xB));
         registry.record(payload.block(), embedded.clone());
-        let invariant = HeaderMismatchInvariant::<SimplexId, (), Commitment>::coding(
+        let invariant = HeaderMismatchInvariant::<SimplexCertificateMock, (), Commitment>::coding(
             ApplicationChoice::AlwaysAccept,
             (),
             |_, _, _| false,

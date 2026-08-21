@@ -27,7 +27,7 @@
 //!
 //! Generic over the consensus scheme `P`, so the same driver serves every
 //! certificate scheme (the fuzz targets use the cheap `SimplexCertificateMock`
-//! and `SimplexId` mocks rather than real threshold signatures).
+//! rather than real threshold signatures).
 //!
 //! # Adversary scope
 //!
@@ -687,7 +687,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SimplexId, strategy::StrategyChoice, utils::Partition};
+    use crate::{SimplexCertificateMock, strategy::StrategyChoice, utils::Partition};
     use commonware_consensus::simplex::ForwardingPolicy;
 
     #[cfg(feature = "mocks")]
@@ -713,8 +713,8 @@ mod tests {
     }
 
     #[test]
-    fn coding_disrupter_runs_under_strict_id_certificates() {
-        fuzz_marshal_coding_disrupter::<SimplexId>(MarshalDisrupterInput {
+    fn coding_disrupter_runs_under_certificate_mock() {
+        fuzz_marshal_coding_disrupter::<SimplexCertificateMock>(MarshalDisrupterInput {
             raw_bytes: vec![0],
             required_containers: 1,
             term_length: commonware_consensus::types::TermLength::ONE,

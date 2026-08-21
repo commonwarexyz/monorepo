@@ -457,7 +457,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id_mock;
+    use crate::simplex_certificate_mock as cert_mock;
     use commonware_consensus::{
         simplex::{
             elector::RoundRobin,
@@ -466,14 +466,22 @@ mod tests {
         },
         types::Epoch,
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{
+        ed25519::PublicKey as Ed25519PublicKey, sha256::Digest as Sha256Digest,
+    };
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{ordered::Set, test_rng};
 
     const N: u32 = 4;
     const QUORUM: usize = 3;
 
-    type TestReporter = RecordingReporter<TestRng, id_mock::Scheme, RoundRobin, Sha256Digest>;
+    type MockScheme = cert_mock::Scheme<Ed25519PublicKey>;
+    type TestReporter = RecordingReporter<TestRng, MockScheme, RoundRobin, Sha256Digest>;
+
+    fn fixture(namespace: &[u8]) -> (Vec<Ed25519PublicKey>, Vec<MockScheme>) {
+        let fixture = cert_mock::fixture(&mut test_rng(), namespace, N);
+        (fixture.participants, fixture.schemes)
+    }
 
     fn digest(byte: u8) -> Sha256Digest {
         Sha256Digest([byte; 32])
@@ -483,8 +491,8 @@ mod tests {
         Round::new(Epoch::new(0), View::new(view))
     }
 
-    fn recording_reporter() -> (TestReporter, Vec<id_mock::PublicKey>, Vec<id_mock::Scheme>) {
-        let (participants, schemes) = id_mock::fixture(&mut test_rng(), b"simplex-audit-tests", N);
+    fn recording_reporter() -> (TestReporter, Vec<Ed25519PublicKey>, Vec<MockScheme>) {
+        let (participants, schemes) = fixture(b"simplex-audit-tests");
         let reporter = RecordingReporter::new(
             test_rng(),
             participants[0].clone(),
@@ -583,7 +591,7 @@ mod tests {
     }
 
     impl Automaton for ImmediateAutomaton {
-        type Context = Context<Sha256Digest, id_mock::PublicKey>;
+        type Context = Context<Sha256Digest, Ed25519PublicKey>;
         type Digest = Sha256Digest;
 
         async fn propose(&mut self, _: Self::Context) -> oneshot::Receiver<Self::Digest> {
@@ -610,9 +618,8 @@ mod tests {
     #[test]
     fn automaton_records_each_request_and_delivered_outcome() {
         deterministic::Runner::seeded(7).start(|context| async move {
-            let (participants, _) =
-                id_mock::fixture(&mut test_rng(), b"simplex-audit-automaton", N);
-            let audit: AuditLog<id_mock::Scheme, Sha256Digest> =
+            let (participants, _) = fixture(b"simplex-audit-automaton");
+            let audit: AuditLog<MockScheme, Sha256Digest> =
                 AuditLog::new(participants[0].clone(), 7);
             let proposed = digest(0xA);
             let verified = digest(0xB);
@@ -696,8 +703,8 @@ mod tests {
     #[test]
     fn automaton_records_canceled_when_immediate_value_cannot_be_delivered() {
         deterministic::Runner::seeded(7).start(|context| async move {
-            let (participants, _) = id_mock::fixture(&mut test_rng(), b"simplex-audit-canceled", N);
-            let audit: AuditLog<id_mock::Scheme, Sha256Digest> =
+            let (participants, _) = fixture(b"simplex-audit-canceled");
+            let audit: AuditLog<MockScheme, Sha256Digest> =
                 AuditLog::new(participants[0].clone(), 0);
             let request_context = Context {
                 round: round(5),

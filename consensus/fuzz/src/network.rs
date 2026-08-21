@@ -1,5 +1,4 @@
-//! Helpers for preferential delivery of Byzantine messages in fuzz tests emulating
-//! a faulty messaging layer (`FuzzMode::FaultyMessaging`).
+//! Helpers for specialized message delivery in consensus fuzz tests.
 //!
 //! This module provides a simple wrapper around the simulated p2p receiver split
 //! functionality.
@@ -34,8 +33,6 @@ use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{Clock, deterministic};
 use commonware_utils::{sequence::U64, sync::Mutex};
-use rand::RngExt as _;
-use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
@@ -47,34 +44,15 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// Shared cell holding the currently-active honest-message drop rate (0..=90).
-/// Updated by the `FaultyMessaging` scheduler on view boundaries; read on every
-/// routing decision via [`Router::route`].
-pub type DropRateCell = Arc<Mutex<u8>>;
-
-/// Construct a fresh drop-rate cell initialized to 0 (no drop).
-pub fn drop_rate_cell() -> DropRateCell {
-    Arc::new(Mutex::new(0))
-}
-
-/// A filtering split-router that routes messages by origin public key, with a
-/// shared cell controlling the per-view honest-message drop rate.
-pub struct Router<P: PublicKey, E: CryptoRng + Send + 'static> {
+/// A split-router that routes messages by origin public key.
+pub struct Router<P: PublicKey> {
     byzantine: Arc<HashSet<P>>,
-    drop_rate: DropRateCell,
-    context: Arc<Mutex<E>>,
 }
 
-impl<P: PublicKey, E: CryptoRng + Send + 'static> Router<P, E> {
-    pub fn new(
-        context: E,
-        byzantine: impl IntoIterator<Item = P>,
-        drop_rate: DropRateCell,
-    ) -> Self {
+impl<P: PublicKey> Router<P> {
+    pub fn new(byzantine: impl IntoIterator<Item = P>) -> Self {
         Self {
             byzantine: Arc::new(byzantine.into_iter().collect()),
-            drop_rate,
-            context: Arc::new(Mutex::new(context)),
         }
     }
 
@@ -84,27 +62,15 @@ impl<P: PublicKey, E: CryptoRng + Send + 'static> Router<P, E> {
         if self.byzantine.contains(sender) {
             SplitTarget::Primary
         } else {
-            let rate = *self.drop_rate.lock();
-            if rate > 0 && self.should_drop_honest_message(rate) {
-                return SplitTarget::None;
-            }
             SplitTarget::Secondary
         }
     }
-
-    fn should_drop_honest_message(&self, rate: u8) -> bool {
-        let mut context = self.context.lock();
-        let sample = context.random_range(0..100u8);
-        sample < rate
-    }
 }
 
-impl<P: PublicKey, E: CryptoRng + Send + 'static> Clone for Router<P, E> {
+impl<P: PublicKey> Clone for Router<P> {
     fn clone(&self) -> Self {
         Self {
             byzantine: self.byzantine.clone(),
-            drop_rate: self.drop_rate.clone(),
-            context: self.context.clone(),
         }
     }
 }
@@ -1424,16 +1390,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EPOCH, id_mock};
+    use crate::{EPOCH, simplex_certificate_mock as cert_mock};
     use commonware_codec::Encode;
     use commonware_consensus::{
         simplex::types::{Finalization, Finalize, Nullification, Nullify},
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::{certificate::Verifier as _, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::{
+        certificate::Verifier as _, ed25519::PublicKey as Ed25519PublicKey,
+        sha256::Digest as Sha256Digest,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::IoBuf;
     use std::{collections::VecDeque, io};
+
+    type MockScheme = cert_mock::Scheme<Ed25519PublicKey>;
+
+    fn fixture(namespace: &[u8]) -> (Vec<Ed25519PublicKey>, Vec<MockScheme>) {
+        let fixture = cert_mock::fixture(&mut commonware_utils::test_rng(), namespace, 4);
+        (fixture.participants, fixture.schemes)
+    }
 
     #[derive(Debug)]
     struct QueueReceiver<P: PublicKey> {
@@ -1453,22 +1429,21 @@ mod tests {
 
     #[test]
     fn notarize_omission_forwards_other_vote_traffic() {
-        let mut rng = commonware_utils::test_rng();
-        let (participants, schemes) = id_mock::fixture(&mut rng, b"notarize_omission", 4);
+        let (participants, schemes) = fixture(b"notarize_omission");
         let round = Round::new(Epoch::new(EPOCH), View::new(1));
         let proposal = Proposal::new(round, View::zero(), Sha256Digest([7; 32]));
         let first = 0;
         let second = 1;
 
-        let first_notarize = Vote::<id_mock::Scheme, Sha256Digest>::Notarize(
+        let first_notarize = Vote::<MockScheme, Sha256Digest>::Notarize(
             Notarize::sign(&schemes[first], proposal.clone()).unwrap(),
         )
         .encode();
-        let second_notarize = Vote::<id_mock::Scheme, Sha256Digest>::Notarize(
+        let second_notarize = Vote::<MockScheme, Sha256Digest>::Notarize(
             Notarize::sign(&schemes[second], proposal.clone()).unwrap(),
         )
         .encode();
-        let finalize = Vote::<id_mock::Scheme, Sha256Digest>::Finalize(
+        let finalize = Vote::<MockScheme, Sha256Digest>::Finalize(
             Finalize::sign(&schemes[first], proposal).unwrap(),
         )
         .encode();
@@ -1482,10 +1457,8 @@ mod tests {
             ]),
         };
         let omitted = Arc::new(AtomicUsize::new(0));
-        let mut receiver = NotarizeOmissionReceiver::<id_mock::Scheme, Sha256Digest, _>::new(
-            receiver,
-            omitted.clone(),
-        );
+        let mut receiver =
+            NotarizeOmissionReceiver::<MockScheme, Sha256Digest, _>::new(receiver, omitted.clone());
 
         let (_, received) = futures::executor::block_on(receiver.recv()).unwrap();
         assert_eq!(received.as_ref(), finalize.as_ref());
@@ -1496,8 +1469,7 @@ mod tests {
 
     #[test]
     fn finalization_omission_covers_certificate_and_resolver_channels() {
-        let mut rng = commonware_utils::test_rng();
-        let (participants, schemes) = id_mock::fixture(&mut rng, b"finalization_omission", 4);
+        let (participants, schemes) = fixture(b"finalization_omission");
         let proposal = Proposal::new(
             Round::new(Epoch::new(EPOCH), View::new(3)),
             View::new(2),
@@ -1527,7 +1499,7 @@ mod tests {
                 (participants[1].clone(), notarization.clone().into()),
             ]),
         };
-        let mut receiver = FinalizationOmissionReceiver::<id_mock::Scheme, Sha256Digest, _>::new(
+        let mut receiver = FinalizationOmissionReceiver::<MockScheme, Sha256Digest, _>::new(
             receiver,
             schemes[0].clone(),
             FinalizationOmissionChannel::Certificate,
@@ -1564,7 +1536,7 @@ mod tests {
                 (participants[1].clone(), request.clone().into()),
             ]),
         };
-        let mut receiver = FinalizationOmissionReceiver::<id_mock::Scheme, Sha256Digest, _>::new(
+        let mut receiver = FinalizationOmissionReceiver::<MockScheme, Sha256Digest, _>::new(
             receiver,
             schemes[0].clone(),
             FinalizationOmissionChannel::Resolver,
@@ -1579,8 +1551,7 @@ mod tests {
 
     #[test]
     fn certificate_poison_counts_only_matched_retries() {
-        let mut rng = commonware_utils::test_rng();
-        let (participants, schemes) = id_mock::fixture(&mut rng, b"certificate_poison", 4);
+        let (participants, schemes) = fixture(b"certificate_poison");
         let view = View::new(3);
         let nullifies: Vec<_> = schemes[..3]
             .iter()
@@ -1588,7 +1559,7 @@ mod tests {
                 Nullify::sign::<Sha256Digest>(scheme, Round::new(Epoch::new(EPOCH), view)).unwrap()
             })
             .collect();
-        let nullification = Certificate::<id_mock::Scheme, Sha256Digest>::Nullification(
+        let nullification = Certificate::<MockScheme, Sha256Digest>::Nullification(
             Nullification::from_nullifies(&schemes[0], &nullifies, &Sequential).unwrap(),
         )
         .encode();
@@ -1619,7 +1590,7 @@ mod tests {
                 (participants[0].clone(), request(10, 4).into()),
             ]),
         };
-        let mut observer = CertificatePoisonReceiver::<id_mock::Scheme, Sha256Digest, _>::observer(
+        let mut observer = CertificatePoisonReceiver::<MockScheme, Sha256Digest, _>::observer(
             observer,
             participants[1].clone(),
             participants[0].clone(),
@@ -1638,7 +1609,7 @@ mod tests {
                 (participants[1].clone(), response(9).into()),
             ]),
         };
-        let mut receiver = CertificatePoisonReceiver::<id_mock::Scheme, Sha256Digest, _>::new(
+        let mut receiver = CertificatePoisonReceiver::<MockScheme, Sha256Digest, _>::new(
             receiver,
             schemes.clone(),
             Epoch::new(EPOCH),
@@ -1654,7 +1625,7 @@ mod tests {
         let ResolverPayload::Response(payload) = decoded.payload else {
             panic!("poisoned message must stay a response");
         };
-        let certificate = Certificate::<id_mock::Scheme, Sha256Digest>::decode_cfg(
+        let certificate = Certificate::<MockScheme, Sha256Digest>::decode_cfg(
             payload,
             &schemes[0].certificate_codec_config(),
         )

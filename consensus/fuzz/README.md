@@ -59,49 +59,34 @@ PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p commonware-consensus-fuzz pr
 
 Run continuous fuzzing for a specific target:
 ```bash
-cargo fuzz run simplex_ed25519
+cargo fuzz run simplex_cert_mock
 ```
 
 Available fuzz targets (standard mode):
-- `simplex_ed25519`
-- `simplex_secp256r1`
-- `simplex_id`
-- `simplex_id_audit_notarize_omission`
 - `simplex_cert_mock`
-- `simplex_bls12381_multisig_minpk`
-- `simplex_bls12381_threshold_minsig`
-
-Available fuzz targets (faulty messaging):
-- `simplex_id_faulty_msg`
-- `simplex_cert_mock_faulty_msg`
+- `simplex_cert_mock_audit_notarize_omission`
 
 Available fuzz targets (faulty network):
-- `simplex_id_faulty_net`
 - `simplex_cert_mock_faulty_net`
 
 Available fuzz targets (twins mutator):
-- `simplex_ed25519_shuffled_twins_mutator`
-- `simplex_id_twins_mutator`
 - `simplex_cert_mock_twins_mutator`
+- `simplex_cert_mock_shuffled_twins_mutator`
 
 Available fuzz targets (twins campaign):
-- `simplex_id_twins_campaign`
 - `simplex_cert_mock_twins_campaign`
 
 Available fuzz targets (node driver):
-- `simplex_id_node`
-- `simplex_id_node_recovery`
-- `simplex_id_node_recovery_stable_term`
 - `simplex_cert_mock_node`
 - `simplex_cert_mock_node_recovery`
+- `simplex_cert_mock_node_recovery_stable_term`
 
 Available fuzz targets (ByzzFuzz):
-- `simplex_id_byzzfuzz`
 - `simplex_cert_mock_byzzfuzz`
 
 Reproduce a failure from a crash file:
 ```bash
-cargo fuzz run simplex_ed25519 fuzz/artifacts/simplex_ed25519/<crash_file>
+cargo fuzz run simplex_cert_mock fuzz/artifacts/simplex_cert_mock/<crash_file>
 ```
 
 ## Marshal Fuzzing
@@ -114,10 +99,8 @@ cargo fuzz run marshal_e2e_standard_deferred_cert_mock_disrupter
 cargo fuzz run marshal_e2e_coding_cert_mock_disrupter
 cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
 cargo fuzz run marshal_e2e_coding_app_cert_mock_twins
-cargo fuzz run marshal_e2e_coding_app_id_twins
-cargo fuzz run marshal_e2e_coding_id_disrupter
-cargo fuzz run marshal_e2e_standard_deferred_id_twins_split_header
-cargo fuzz run marshal_e2e_standard_inline_id_twins_split_header
+cargo fuzz run marshal_e2e_standard_deferred_cert_mock_twins_split_header
+cargo fuzz run marshal_e2e_standard_inline_cert_mock_twins_split_header
 cargo fuzz run marshal_e2e_standard_deferred_cert_mock_poison
 cargo fuzz run marshal_e2e_standard_deferred_cert_mock_scenarios
 ```
@@ -129,9 +112,8 @@ proposal-header equivocation in their action space. The general Standard Twins
 target shares one corpus across the Basic and Faulty applications with both
 Inline and Deferred wrappers. The Coding Twins targets share the application
 axis but use Coding's Marshaled adapter directly; Deferred and Inline do not
-apply. Both the Coding Twins and coding disrupter paths run under `SimplexId`,
-whose certificate verifier checks the signer-set size and quorum rather than
-accepting the lightweight certificate-mock oracle.
+apply. The fuzz targets use `SimplexCertificateMock` to avoid repeating the
+same harnesses across multiple mock schemes.
 Three honest validators each run
 `Simplex -> Inline|Deferred|Marshaled -> Marshal -> Application`; the
 compromised identity runs one full Simplex engine over the same real

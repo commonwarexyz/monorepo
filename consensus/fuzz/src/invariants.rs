@@ -2733,8 +2733,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        N4F1C3, N4F3C1, id_mock,
-        simplex::{SimplexEd25519, SimplexId},
+        N4F1C3, N4F3C1, simplex::SimplexCertificateMockAttributable,
+        simplex_certificate_mock as cert_mock,
     };
     use commonware_consensus::{
         Reporter as _,
@@ -2759,6 +2759,8 @@ mod tests {
 
     const N: u32 = 4;
     const Q: usize = 3;
+
+    type MockScheme = cert_mock::Scheme<Ed25519PublicKey, false>;
 
     fn digest(byte: u8) -> Sha256Digest {
         Sha256Digest([byte; 32])
@@ -2821,7 +2823,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![(5, finalization(4, 0xE))]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2831,7 +2833,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![(6, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2841,7 +2843,7 @@ mod tests {
             views(vec![(3, nullification())]),
             views(vec![(1, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2851,7 +2853,7 @@ mod tests {
             views(vec![(2, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2862,7 +2864,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2873,12 +2875,12 @@ mod tests {
             views(vec![(2, nullification()), (3, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
     fn valid_consolidated_chain_passes() {
-        check::<SimplexId>(
+        check::<SimplexCertificateMockAttributable>(
             N4F1C3,
             TermLength::ONE,
             vec![chain_replica(), chain_replica()],
@@ -2892,7 +2894,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2908,7 +2910,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2924,7 +2926,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xB))]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2940,7 +2942,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2951,7 +2953,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2962,7 +2964,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xB))]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2975,7 +2977,7 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(1, 0xA))]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2986,7 +2988,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2997,7 +2999,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -3008,7 +3010,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -3018,7 +3020,7 @@ mod tests {
             views(vec![(2, nullification()), (3, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -3029,19 +3031,26 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(1, 0xA))]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
-    // Vote-invariant fixtures: id_mock schemes share one signing record, so any
-    // scheme instance verifies any participant's votes.
-    fn vote_fixture() -> (Vec<id_mock::PublicKey>, Vec<id_mock::Scheme>) {
-        id_mock::fixture(&mut test_rng(), b"invariants-tests", N)
+    // Certificate-mock schemes share one signing record, so any scheme instance
+    // verifies any participant's votes. The production fuzz mock is
+    // non-attributable, so certificate signer checks remain covered by the
+    // synthetic attributable-state tests above without assuming a wire bitmap.
+    fn vote_fixture() -> (Vec<Ed25519PublicKey>, Vec<MockScheme>) {
+        let fixture = cert_mock::fixture_with::<false, true, true, _>(
+            &mut test_rng(),
+            b"invariants-tests",
+            N,
+        );
+        (fixture.participants, fixture.schemes)
     }
 
     fn vote_reporter(
-        participants: &[id_mock::PublicKey],
-        schemes: &[id_mock::Scheme],
-    ) -> Reporter<TestRng, id_mock::Scheme, RoundRobin, Sha256Digest> {
+        participants: &[Ed25519PublicKey],
+        schemes: &[MockScheme],
+    ) -> Reporter<TestRng, MockScheme, RoundRobin, Sha256Digest> {
         let reporter = Reporter::new(
             test_rng(),
             ReporterConfig {
@@ -3060,10 +3069,10 @@ mod tests {
     /// elector carries the checked term length, so recorded leader targets
     /// match the term-aware invariants. No prior history is seeded.
     fn term_vote_reporter(
-        participants: &[id_mock::PublicKey],
-        schemes: &[id_mock::Scheme],
+        participants: &[Ed25519PublicKey],
+        schemes: &[MockScheme],
         term_length: TermLength,
-    ) -> Reporter<TestRng, id_mock::Scheme, RoundRobin, Sha256Digest> {
+    ) -> Reporter<TestRng, MockScheme, RoundRobin, Sha256Digest> {
         Reporter::new(
             test_rng(),
             ReporterConfig {
@@ -3696,21 +3705,21 @@ mod tests {
 
     /// Assembles a quorum-backed notarization certificate over `proposal(view, parent, payload)`.
     fn notarization_activity(
-        schemes: &[id_mock::Scheme],
+        schemes: &[MockScheme],
         view: u64,
         parent: u64,
         payload: u8,
-    ) -> SimplexNotarization<id_mock::Scheme, Sha256Digest> {
+    ) -> SimplexNotarization<MockScheme, Sha256Digest> {
         notarization_activity_from(schemes, &[0, 1, 2], view, parent, payload)
     }
 
     fn notarization_activity_from(
-        schemes: &[id_mock::Scheme],
+        schemes: &[MockScheme],
         signers: &[usize],
         view: u64,
         parent: u64,
         payload: u8,
-    ) -> SimplexNotarization<id_mock::Scheme, Sha256Digest> {
+    ) -> SimplexNotarization<MockScheme, Sha256Digest> {
         assert_eq!(signers.len(), Q);
         let votes: Vec<_> = signers
             .iter()
@@ -3722,12 +3731,12 @@ mod tests {
     }
 
     fn finalization_activity_from(
-        schemes: &[id_mock::Scheme],
+        schemes: &[MockScheme],
         signers: &[usize],
         view: u64,
         parent: u64,
         payload: u8,
-    ) -> SimplexFinalization<id_mock::Scheme, Sha256Digest> {
+    ) -> SimplexFinalization<MockScheme, Sha256Digest> {
         assert_eq!(signers.len(), Q);
         let votes: Vec<_> = signers
             .iter()
@@ -3740,9 +3749,9 @@ mod tests {
 
     /// Assembles a quorum-backed nullification certificate for `view`.
     fn nullification_activity(
-        schemes: &[id_mock::Scheme],
+        schemes: &[MockScheme],
         view: u64,
-    ) -> SimplexNullification<id_mock::Scheme> {
+    ) -> SimplexNullification<MockScheme> {
         let votes: Vec<_> = schemes[..Q]
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round(view)).unwrap())
@@ -3752,11 +3761,11 @@ mod tests {
 
     /// Assembles a quorum-backed finalization certificate over `proposal(view, parent, payload)`.
     fn finalization_activity(
-        schemes: &[id_mock::Scheme],
+        schemes: &[MockScheme],
         view: u64,
         parent: u64,
         payload: u8,
-    ) -> SimplexFinalization<id_mock::Scheme, Sha256Digest> {
+    ) -> SimplexFinalization<MockScheme, Sha256Digest> {
         let votes: Vec<_> = schemes[..Q]
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal(view, parent, payload)).unwrap())
@@ -3764,12 +3773,12 @@ mod tests {
         SimplexFinalization::from_finalizes(&schemes[0], &votes, &Sequential).unwrap()
     }
 
-    type AuditReporter = RecordingReporter<TestRng, id_mock::Scheme, RoundRobin, Sha256Digest>;
+    type AuditReporter = RecordingReporter<TestRng, MockScheme, RoundRobin, Sha256Digest>;
 
     fn audit_reporter(
         observer: usize,
-        participants: &[id_mock::PublicKey],
-        schemes: &[id_mock::Scheme],
+        participants: &[Ed25519PublicKey],
+        schemes: &[MockScheme],
     ) -> AuditReporter {
         RecordingReporter::new(
             test_rng(),
@@ -3787,8 +3796,8 @@ mod tests {
     /// how the stable-term harnesses configure recording reporters.
     fn term_audit_reporter(
         observer: usize,
-        participants: &[id_mock::PublicKey],
-        schemes: &[id_mock::Scheme],
+        participants: &[Ed25519PublicKey],
+        schemes: &[MockScheme],
         term_length: TermLength,
     ) -> AuditReporter {
         RecordingReporter::new(
@@ -3808,17 +3817,17 @@ mod tests {
     }
 
     fn automaton_context(
-        leader: id_mock::PublicKey,
+        leader: Ed25519PublicKey,
         proposal: &Proposal<Sha256Digest>,
-    ) -> Context<Sha256Digest, id_mock::PublicKey> {
+    ) -> Context<Sha256Digest, Ed25519PublicKey> {
         automaton_context_with_parent_digest(leader, proposal, digest(0xF))
     }
 
     fn automaton_context_with_parent_digest(
-        leader: id_mock::PublicKey,
+        leader: Ed25519PublicKey,
         proposal: &Proposal<Sha256Digest>,
         parent_digest: Sha256Digest,
-    ) -> Context<Sha256Digest, id_mock::PublicKey> {
+    ) -> Context<Sha256Digest, Ed25519PublicKey> {
         Context {
             round: proposal.round,
             leader,
@@ -3828,7 +3837,7 @@ mod tests {
 
     fn record_automaton(
         reporter: &AuditReporter,
-        event: AutomatonEvent<Sha256Digest, id_mock::PublicKey>,
+        event: AutomatonEvent<Sha256Digest, Ed25519PublicKey>,
     ) {
         reporter.audit().record(Event::Automaton(event));
     }
@@ -3846,7 +3855,7 @@ mod tests {
 
     fn record_verify_result(
         reporter: &AuditReporter,
-        leader: id_mock::PublicKey,
+        leader: Ed25519PublicKey,
         proposal: &Proposal<Sha256Digest>,
         result: bool,
     ) {
@@ -3855,7 +3864,7 @@ mod tests {
 
     fn record_verify_result_with_parent_digest(
         reporter: &AuditReporter,
-        leader: id_mock::PublicKey,
+        leader: Ed25519PublicKey,
         proposal: &Proposal<Sha256Digest>,
         parent_digest: Sha256Digest,
         result: bool,
@@ -3885,7 +3894,7 @@ mod tests {
         );
     }
 
-    fn record_later_own_vote(reporter: &mut AuditReporter, schemes: &[id_mock::Scheme]) {
+    fn record_later_own_vote(reporter: &mut AuditReporter, schemes: &[MockScheme]) {
         // Advance without adding any certificate exit that would exempt the trigger.
         reporter.report(Activity::Nullify(
             Nullify::sign::<Sha256Digest>(&schemes[0], Round::new(Epoch::new(1), View::new(1)))
@@ -4040,7 +4049,7 @@ mod tests {
 
     fn record_finalize_votes(
         reporter: &mut AuditReporter,
-        schemes: &[id_mock::Scheme],
+        schemes: &[MockScheme],
         proposal: &Proposal<Sha256Digest>,
         signers: impl IntoIterator<Item = usize>,
     ) {
@@ -4053,7 +4062,7 @@ mod tests {
 
     fn record_pending_finalize_recovery(
         reporter: &mut AuditReporter,
-        schemes: &[id_mock::Scheme],
+        schemes: &[MockScheme],
         proposal: &Proposal<Sha256Digest>,
     ) {
         record_finalize_votes(reporter, schemes, proposal, 0..Q);
@@ -5151,28 +5160,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "finalization signer without successful certification")]
-    fn finalization_signer_without_certification_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        reporter.report(Activity::Finalization(finalization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "notarization signer without application acceptance")]
-    fn notarization_signer_without_acceptance_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        reporter.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
     fn notarization_signer_acceptance_ignores_parent_digest() {
         let (participants, schemes) = vote_fixture();
         let mut reporter = audit_reporter(0, &participants, &schemes);
@@ -5462,7 +5449,7 @@ mod tests {
             views(vec![(0, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N4F1C3, TermLength::ONE, vec![r]);
+        check::<SimplexCertificateMockAttributable>(N4F1C3, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -5505,130 +5492,6 @@ mod tests {
         let (participants, schemes) = vote_fixture();
         let mut rep = vote_reporter(&participants, &schemes);
         rep.report(Activity::Nullification(nullification_activity(&schemes, 0)));
-        check_vote_invariants_with_byzantine(
-            &HashSet::new(),
-            RoundRobin::default(),
-            Epoch::new(0),
-            TermLength::ONE,
-            &[rep],
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "correct signer notarized multiple payloads in view 5")]
-    fn certificate_signer_with_conflicting_notarize_vote_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        rep.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep.report(Activity::Notarize(
-            Notarize::sign(&schemes[1], proposal(5, 4, 0xB)).unwrap(),
-        ));
-        check_vote_invariants_with_byzantine(
-            &HashSet::new(),
-            RoundRobin::default(),
-            Epoch::new(0),
-            TermLength::ONE,
-            &[rep],
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "vote equivocation in view 5")]
-    fn nullification_certificate_signer_with_finalize_vote_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        rep.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep.report(Activity::Nullification(nullification_activity(&schemes, 5)));
-        rep.report(Activity::Finalize(
-            Finalize::sign(&schemes[1], proposal(5, 4, 0xA)).unwrap(),
-        ));
-        check_vote_invariants_with_byzantine(
-            &HashSet::new(),
-            RoundRobin::default(),
-            Epoch::new(0),
-            TermLength::ONE,
-            &[rep],
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "vote equivocation in view 5")]
-    fn finalization_certificate_signer_with_nullify_vote_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        rep.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep.report(Activity::Finalization(finalization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep.report(Activity::Nullify(
-            Nullify::sign::<Sha256Digest>(&schemes[1], round(5)).unwrap(),
-        ));
-        check_vote_invariants_with_byzantine(
-            &HashSet::new(),
-            RoundRobin::default(),
-            Epoch::new(0),
-            TermLength::ONE,
-            &[rep],
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "correct signer finalized multiple payloads in view 5")]
-    fn finalization_certificate_signer_with_conflicting_finalize_vote_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        rep.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep.report(Activity::Finalization(finalization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep.report(Activity::Finalize(
-            Finalize::sign(&schemes[1], proposal(5, 4, 0xB)).unwrap(),
-        ));
-        check_vote_invariants_with_byzantine(
-            &HashSet::new(),
-            RoundRobin::default(),
-            Epoch::new(0),
-            TermLength::ONE,
-            &[rep],
-        );
-    }
-
-    #[test]
-    fn byzantine_certificate_signer_conflict_is_allowed() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        rep.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep.report(Activity::Notarize(
-            Notarize::sign(&schemes[1], proposal(5, 4, 0xB)).unwrap(),
-        ));
-        let byzantine: HashSet<usize> = [1].into_iter().collect();
-        check_vote_invariants_with_byzantine(
-            &byzantine,
-            RoundRobin::default(),
-            Epoch::new(0),
-            TermLength::ONE,
-            &[rep],
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "finalize vote without notarization in view 5")]
-    fn finalization_certificate_without_notarization_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        rep.report(Activity::Finalization(finalization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
         check_vote_invariants_with_byzantine(
             &HashSet::new(),
             RoundRobin::default(),
@@ -6108,7 +5971,7 @@ mod tests {
         replicas: Vec<ReplicaState>,
     ) -> String {
         let result = std::panic::catch_unwind(|| {
-            check::<SimplexEd25519>(configuration, term_length, replicas);
+            check::<SimplexCertificateMockAttributable>(configuration, term_length, replicas);
         });
         let err = result.expect_err("check must panic");
         err.downcast_ref::<String>()
@@ -6149,7 +6012,7 @@ mod tests {
         // A Byzantine quorum can mint a certificate with a mutated parent
         // alongside the honest one, so a parent mismatch must not fire
         // without an honest quorum.
-        check::<SimplexEd25519>(
+        check::<SimplexCertificateMockAttributable>(
             N4F3C1,
             TermLength::new(NZU32!(5)),
             vec![conflicted(1), conflicted(2)],
@@ -6175,7 +6038,7 @@ mod tests {
         // finalization without any notarization), so neither the same-term
         // exclusion nor the notarization-backing check may fire without an
         // honest quorum.
-        check::<SimplexEd25519>(
+        check::<SimplexCertificateMockAttributable>(
             N4F3C1,
             TermLength::new(NZU32!(5)),
             vec![replica(
@@ -6226,7 +6089,7 @@ mod tests {
 
         // Without an honest quorum the parent is not trustworthy, so the rule
         // must not fire (see `parent_mismatch_requires_honest_quorum`).
-        check::<SimplexEd25519>(N4F3C1, TermLength::new(NZU32!(5)), state());
+        check::<SimplexCertificateMockAttributable>(N4F3C1, TermLength::new(NZU32!(5)), state());
     }
 
     #[test]
@@ -6275,7 +6138,11 @@ mod tests {
         );
 
         // Both skipped terms nullified: the skip is legal.
-        check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state(&[4, 6]));
+        check::<SimplexCertificateMockAttributable>(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            state(&[4, 6]),
+        );
     }
 
     #[test]
