@@ -32,7 +32,8 @@
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active for `skip_timeout` while a quorum of participants
-//!       has been, set both `t_l` and `t_a` to 0.
+//!       has been, set both `t_l` and `t_a` to 0. A participant can trigger this at most once
+//!       between finalizations. Later signals leave the round's remaining deadlines unchanged.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`

@@ -21,7 +21,7 @@ use commonware_runtime::{
     Clock, Metrics,
     telemetry::metrics::{Counter, CounterFamily, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::futures::Aborter;
+use commonware_utils::{bitmap::BitMap, futures::Aborter};
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -163,8 +163,15 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     /// this set.
     failed_certifications: BTreeSet<View>,
 
+    /// Newly notarized or unblocked views awaiting a certification readiness check.
     certification_candidates: BTreeSet<View>,
+
+    /// Views with application certification requests in flight.
     outstanding_certifications: BTreeSet<View>,
+
+    /// Participants ineligible for an event-driven immediate timeout until the
+    /// next finalization, indexed by participant.
+    fast_skipped: BitMap,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -230,6 +237,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let nullifications = context.family("nullifications", "nullifications");
 
         let lookahead = Lookahead::new(&cfg.elector.terms());
+        let fast_skipped = BitMap::zeroes(cfg.scheme.participants().len() as u64);
 
         Self {
             context,
@@ -251,6 +259,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             failed_certifications: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
+            fast_skipped,
             current_view,
             tracked_views,
             issuance_window_probes,
@@ -441,6 +450,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn next_timeout(&mut self) -> (SystemTime, TimeoutReason) {
         let now = self.context.current();
         let timeout_retry = self.timeout_retry;
+        let fast_skipped = &self.fast_skipped;
         let round_timeout = {
             // The current round always has a pending timeout:
             // `Round::next_timeout` only returns `None` for rounds that are
@@ -451,8 +461,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 .views
                 .get_mut(&self.view)
                 .expect("current round must exist");
+            let allow_latched_timeout = round
+                .leader_index()
+                .is_some_and(|leader| !fast_skipped.get(leader.get().into()));
             round
-                .next_timeout(now, timeout_retry)
+                .next_timeout(now, timeout_retry, allow_latched_timeout)
                 .expect("current round must always have a timeout")
         };
 
@@ -515,12 +528,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if view != self.view {
             return None;
         }
-        let (is_retry, leader) = {
+        let (is_retry, consumed_latch, leader) = {
             let round = self.create_round(view);
-            (round.construct_nullify()?, round.leader())
+            let (is_retry, consumed_latch) = round.construct_nullify()?;
+            (is_retry, consumed_latch, round.leader())
         };
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         self.nullify_views.insert(view);
+        if consumed_latch && let Some(leader) = leader.as_ref() {
+            self.fast_skipped.set(leader.idx.get().into(), true);
+        }
         if !is_retry && let Some(leader) = leader {
             self.timeouts
                 .get_or_create(&Timeout::new(&leader.key, reason))
@@ -633,6 +650,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let view = finalization.view();
         if view > self.last_finalized {
             self.last_finalized = view;
+
+            // A new finalization makes every participant eligible for another immediate timeout.
+            self.fast_skipped.set_all(false);
 
             // Finalization overrides local certification rejections at or
             // below its view.
@@ -809,8 +829,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Restores round-level broadcast flags (via [`Round::replay`]) and
     /// tracking sets (`nullify_views`, `nullification_views`, and
     /// `failed_certifications`) so that term-safety and ancestry checks work
-    /// correctly after a restart. Replaying a local notarize vote also restores
-    /// the optimistic successor prepared by live vote construction. Unlike
+    /// correctly after a restart.
+    ///
+    /// Replaying a local notarize vote also restores the optimistic successor
+    /// prepared by live vote construction. Unlike
     /// [`Self::add_nullification`] (which the actor's replay loop also calls,
     /// making the `nullification_views` insert idempotent on that path), this
     /// never advances the view.
@@ -834,9 +856,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns the leader index for `view` if we already entered it.
     pub fn leader_index(&self, view: View) -> Option<Participant> {
-        self.views
-            .get(&view)
-            .and_then(|round| round.leader().map(|leader| leader.idx))
+        self.views.get(&view).and_then(Round::leader_index)
     }
 
     /// Returns how long ago the local node started work on `view` (see
@@ -849,14 +869,19 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .and_then(|round| round.elapsed_since_start(now))
     }
 
-    /// Immediately expires `view` on first timeout, forcing a timeout to fire on the next tick.
+    /// Latches an event-driven timeout for `view`.
+    ///
+    /// When the view becomes current, the latch fires immediately if its leader
+    /// has not already consumed a fast-skip since the last finalization.
+    /// Otherwise, the round's remaining deadlines govern the timeout.
     ///
     /// If the round has already been marked timed out, this preserves the existing
     /// retry schedule.
     ///
-    /// This only latches the first timeout for the view (see
-    /// [`Round::latch_timeout`]); the latched reason is delivered back through
-    /// [`Self::next_timeout`] when the timeout fires.
+    /// This preserves any timeout already pending for the view (see
+    /// [`Round::latch_timeout`]). [`Self::next_timeout`] may discard it as
+    /// ineligible, after which a later signal can become the new pending
+    /// timeout. The retained reason is delivered when the timeout fires.
     ///
     /// [`Self::next_timeout`] only polls the current round, so views already
     /// advanced past are ignored: their latch would have no reader. Failures
@@ -1823,16 +1848,21 @@ mod tests {
             validators.try_into().expect("validator count fits in u32"),
         );
         let scheme = fixture.schemes[signer].clone();
+        let elector = if term_length == TermLength::ONE {
+            round_robin(&scheme)
+        } else {
+            round_robin_with_term(
+                &scheme,
+                term_length,
+                Duration::from_secs(4),
+                optimistic_views,
+            )
+        };
         let mut state = State::new(
             context.child("state"),
             Config {
-                scheme: scheme.clone(),
-                elector: round_robin_with_term(
-                    &scheme,
-                    term_length,
-                    Duration::from_secs(4),
-                    optimistic_views,
-                ),
+                scheme,
+                elector,
                 epoch: Epoch::new(epoch),
                 view_retention: ViewDelta::new(view_retention),
                 leader_timeout: Duration::from_secs(1),
@@ -2704,6 +2734,416 @@ mod tests {
             let (deadline, reason) = state.next_timeout();
             assert_eq!(reason, TimeoutReason::Inactivity);
             assert_eq!(deadline, now);
+        });
+    }
+
+    /// Every participant is fast-skipped at most once between finalizations, so a
+    /// leader that comes back around waits out its leader timeout regardless of
+    /// which event caused the first skip.
+    #[test]
+    fn fast_skip_spent_once_per_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                7,
+                10,
+                TermLength::ONE,
+                ViewDelta::zero(),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            // Each of the four leaders spends its own skip.
+            for view in 1..=4 {
+                let view = View::new(view);
+                let reason = if view == View::new(1) {
+                    TimeoutReason::MissingProposal
+                } else {
+                    TimeoutReason::Inactivity
+                };
+                assert_eq!(state.current_view(), view);
+                let now = context.current();
+                state.trigger_timeout(view, reason);
+                assert_eq!(state.next_timeout(), (now, reason));
+                assert!(!state.construct_nullify(view, reason).expect("nullify").0);
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+
+            // View 5 returns to view 1's leader, whose skip is already spent.
+            let view = View::new(5);
+            assert_eq!(state.current_view(), view);
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    /// An advancing finalization restores every fast-skip, while a duplicate
+    /// finalization does not create another reset.
+    #[test]
+    fn finalization_restores_fast_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                7,
+                10,
+                TermLength::ONE,
+                ViewDelta::zero(),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            for view in 1..=4 {
+                let view = View::new(view);
+                state.trigger_timeout(view, TimeoutReason::Inactivity);
+                assert!(
+                    !state
+                        .construct_nullify(view, TimeoutReason::Inactivity)
+                        .expect("nullify")
+                        .0
+                );
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+
+            // Finalizing view 5 clears the spent skips and enters view 6, whose
+            // leader led view 2.
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), View::new(5)),
+                GENESIS_VIEW,
+                Sha256Digest::from([123u8; 32]),
+            );
+            let finalization = build_finalization(&verifier, &schemes, &proposal);
+            assert!(state.add_finalization(finalization.clone()).0);
+            assert_eq!(state.current_view(), View::new(6));
+
+            let now = context.current();
+            let view = View::new(6);
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+            assert!(
+                state
+                    .construct_nullify(view, TimeoutReason::Inactivity)
+                    .is_some()
+            );
+
+            assert!(!state.add_finalization(finalization).0);
+            for view in 6..=9 {
+                let view = View::new(view);
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+
+            let view = View::new(10);
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    /// A timeout hint only spends the leader's fast-skip if it installs the
+    /// timeout that drives the nullify.
+    #[test]
+    fn rejected_timeout_does_not_spend_fast_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                7,
+                10,
+                TermLength::ONE,
+                ViewDelta::zero(),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            // A non-latched nullify starts view 1's retry schedule. A later
+            // hint is ignored because retry cadence now owns the view.
+            let view = View::new(1);
+            assert!(
+                !state
+                    .construct_nullify(view, TimeoutReason::LeaderTimeout)
+                    .expect("first nullify")
+                    .0
+            );
+            let retry = state.next_timeout();
+            state.trigger_timeout(view, TimeoutReason::LeaderNullify);
+            assert_eq!(state.next_timeout(), retry);
+
+            for view in 1..=4 {
+                let view = View::new(view);
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+
+            // View 5 has view 1's leader, whose actual fast-skip remains
+            // available because the earlier hint had no effect.
+            let view = View::new(5);
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+        });
+    }
+
+    /// A future timeout latched while leaderless is charged to the leader
+    /// attached before the latch drives a nullify.
+    #[test]
+    fn leaderless_future_timeout_spends_fast_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                7,
+                10,
+                TermLength::ONE,
+                ViewDelta::zero(),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            let future = View::new(5);
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), future),
+                GENESIS_VIEW,
+                Sha256Digest::from([124u8; 32]),
+            );
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &proposal))
+                    .0
+            );
+            assert!(state.leader_index(future).is_none());
+            let (ready, fetches) = state.certify_candidates();
+            assert_eq!(ready, vec![proposal]);
+            assert!(fetches.is_empty());
+            assert!(state.certified(future, false).is_some());
+
+            for view in 1..=4 {
+                let view = View::new(view);
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+            let leader = state.leader_index(future).expect("leader attached");
+            assert_eq!(state.next_timeout().1, TimeoutReason::FailedCertification);
+            assert!(
+                state
+                    .construct_nullify(future, TimeoutReason::FailedCertification)
+                    .is_some()
+            );
+
+            for view in 5..=8 {
+                let view = View::new(view);
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+            let view = View::new(9);
+            assert_eq!(state.leader_index(view), Some(leader));
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::MissingProposal);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    /// A future latch consumed after finalization spends the restored fast-skip
+    /// in that finalization interval.
+    #[test]
+    fn future_timeout_after_finalization_spends_restored_fast_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                14,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(1),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            let parent = propose_and_notarize_view1(&mut state, 125);
+            let view = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), view),
+                View::new(1),
+                Sha256Digest::from([126u8; 32]),
+            );
+            assert!(state.set_proposal(view, proposal.clone()));
+            state.trigger_timeout(view, TimeoutReason::InvalidProposal);
+
+            assert!(
+                state
+                    .add_finalization(build_finalization(&verifier, &schemes, &parent))
+                    .0
+            );
+            assert_eq!(state.current_view(), view);
+            assert_eq!(state.next_timeout().1, TimeoutReason::InvalidProposal);
+            assert!(
+                state
+                    .construct_nullify(view, TimeoutReason::InvalidProposal)
+                    .is_some()
+            );
+
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &proposal))
+                    .0
+            );
+            assert!(state.certified(view, true).is_some());
+            let view = View::new(3);
+            assert_eq!(state.current_view(), view);
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    /// A future timeout retained while its leader's fast-skip is spent can use
+    /// the quota restored before that future view becomes current.
+    #[test]
+    fn finalization_restores_pending_future_fast_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                14,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(1),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            let current = View::new(1);
+            let parent = propose_and_notarize_view1(&mut state, 129);
+            let future = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), future),
+                current,
+                Sha256Digest::from([130u8; 32]),
+            );
+            assert!(state.set_proposal(future, proposal));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+            assert_eq!(state.leader_index(current), state.leader_index(future));
+
+            state.trigger_timeout(current, TimeoutReason::LeaderNullify);
+            assert_eq!(state.next_timeout().1, TimeoutReason::LeaderNullify);
+            assert!(
+                state
+                    .construct_nullify(current, TimeoutReason::LeaderNullify)
+                    .is_some()
+            );
+            state.verification_failed(future, TimeoutReason::InvalidProposal);
+
+            assert!(
+                state
+                    .add_finalization(build_finalization(&verifier, &schemes, &parent))
+                    .0
+            );
+            assert_eq!(state.current_view(), future);
+            assert_eq!(
+                state.next_timeout(),
+                (context.current(), TimeoutReason::InvalidProposal)
+            );
+        });
+    }
+
+    /// A future latch cannot bypass a fast-skip spent by the same stable
+    /// leader before that future view becomes current.
+    #[test]
+    fn spent_fast_skip_suppresses_pending_future_timeout() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                14,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(1),
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            let parent = propose_and_notarize_view1(&mut state, 127);
+            let future = View::new(2);
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), future),
+                View::new(1),
+                Sha256Digest::from([128u8; 32]),
+            );
+            assert!(state.set_proposal(future, proposal));
+            state.trigger_timeout(future, TimeoutReason::InvalidProposal);
+
+            let current = View::new(1);
+            state.trigger_timeout(current, TimeoutReason::MissingProposal);
+            assert_eq!(state.next_timeout().1, TimeoutReason::MissingProposal);
+            assert!(
+                state
+                    .construct_nullify(current, TimeoutReason::MissingProposal)
+                    .is_some()
+            );
+
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &parent))
+                    .0
+            );
+            assert!(state.certified(current, true).is_some());
+            assert_eq!(state.current_view(), future);
+            let now = context.current();
+            let expected = (
+                now + Duration::from_secs(2),
+                TimeoutReason::CertificationTimeout,
+            );
+            assert_eq!(state.next_timeout(), expected);
+
+            assert!(
+                state
+                    .add_finalization(build_finalization(&verifier, &schemes, &parent))
+                    .0
+            );
+            assert_eq!(state.current_view(), future);
+            assert_eq!(state.next_timeout(), expected);
         });
     }
 
