@@ -102,9 +102,8 @@ O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
         <p><em>Update (8/20/26): Clearing now uses a 32-byte commitment
-        and BLS12-381 multisignatures for validator certificates.
-        Concurrent root and proof construction is substantially
-        faster.</em></p>
+        and BLS12-381 multisignatures for the commitment
+        certificate.</em></p>
         <p>$0.000001 payments cost more to replicate, settle onchain,
         and index than they’re worth. Yet your agent will need to make
         millions of them over the coming years.</p>
@@ -121,14 +120,15 @@ O’Grady</a></div>
         this later).</p>
         <p><strong>Bajillion</strong> is a new optimistic clearing
         protocol for many-to-many payments at massive scale. At each
-        settlement, all of that activity becomes a compact commitment
-        that most chains can process. Preconfirmations arrive as fast as
-        browsing the web and double as the evidence that holds the
-        system honest. Payments flow through a non-custodial operator
-        selected by the sender: if the operator disappears or censors an
-        account, senders and recipients alike can force recovery through
-        the settlement chain alone. And the protocol requires only
-        signatures and Merkle openings.</p>
+        settlement, all of that activity becomes a roughly 100-byte
+        certified commitment that most chains can process.
+        Preconfirmations arrive as fast as browsing the web and double
+        as the evidence that holds the system honest. Payments flow
+        through a non-custodial operator selected by the sender: if the
+        operator disappears or censors an account, senders and
+        recipients alike can force recovery through the settlement chain
+        alone. And the protocol requires only signatures and Merkle
+        openings.</p>
         <p>For a given set of accounts, one payment or a bajillion costs
         the same to settle.</p>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
