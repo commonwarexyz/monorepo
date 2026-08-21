@@ -120,15 +120,14 @@ O’Grady</a></div>
         this later).</p>
         <p><strong>Bajillion</strong> is a new optimistic clearing
         protocol for many-to-many payments at massive scale. At each
-        settlement, all of that activity becomes a roughly 100-byte
-        certified commitment that most chains can process.
-        Preconfirmations arrive as fast as browsing the web and double
-        as the evidence that holds the system honest. Payments flow
-        through a non-custodial operator selected by the sender: if the
-        operator disappears or censors an account, senders and
-        recipients alike can force recovery through the settlement chain
-        alone. And the protocol requires only signatures and Merkle
-        openings.</p>
+        settlement, all of that activity becomes a ~100-byte certified
+        commitment that most chains can process. Preconfirmations arrive
+        as fast as browsing the web and double as the evidence that
+        holds the system honest. Payments flow through a non-custodial
+        operator selected by the sender: if the operator disappears or
+        censors an account, senders and recipients alike can force
+        recovery through the settlement chain alone. And the protocol
+        requires only signatures and Merkle openings.</p>
         <p>For a given set of accounts, one payment or a bajillion costs
         the same to settle.</p>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
@@ -360,7 +359,8 @@ O’Grady</a></div>
         <p>Successful verification proves every omitted position
         unchanged and every row position changed to exactly its
         committed close. An account changes if and only if it has a row.
-        The close is named by a hash of its three ordered roots:</p>
+        The settlement chain retains only a hash composed of its three
+        ordered roots:</p>
         <p><span class="math display">
         \mathsf{Commitment}_e
         =H\!\left(
@@ -374,11 +374,9 @@ O’Grady</a></div>
         class="math inline">C_e</span>, deposits <span
         class="math inline">F_e</span>, and withdrawals <span
         class="math inline">W_e</span>, with the row, record, and shard
-        counts alongside. They remain in settlement state, so admission
-        no longer needs the terminal row or its Merkle opening. The
-        three roots, shard vectors, changed rows, and paired witness
-        stay offchain as an authenticated corpus <span
-        class="math inline">\mathcal D_e</span> that must remain
+        counts alongside. The three roots, shard vectors, changed rows,
+        and paired witness stay offchain as an authenticated corpus
+        <span class="math inline">\mathcal D_e</span> that must remain
         retrievable through the challenge deadline <span
         class="math inline">\Delta_e</span>.</p>
         <h2 id="validate-everything-up-front">Validate Everything Up
@@ -608,10 +606,10 @@ O’Grady</a></div>
         Grows (with Payments)</h2>
         <p>Every profile below runs one fixture: a registry of <span
         class="math inline">N=1{,}000{,}000</span> accounts, a
-        100-validator committee, 256 evidence pieces distributed among
-        validators, and an eight-thread worker pool. Every changed
-        account sends, and the same 512 credited accounts receive,
-        spaced evenly among the senders.</p>
+        100-validator committee, the evidence divided into 256 slices
+        and dealt among validators, and an eight-thread worker pool.
+        Every changed account sends, and the same 512 credited accounts
+        receive, spaced evenly among the senders.</p>
         <p>The matrix independently varies <span
         class="math inline">A</span>, the number of changed accounts,
         and <span class="math inline">h</span>, the number of receive
@@ -723,12 +721,11 @@ O’Grady</a></div>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show benchmark latency for preparing the roots, dealing the evidence into pieces, and sealing the largest of the 100 validator dealings. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
         <div class="image-caption">
         <p>Figure 5: These are four measured profiles, not an
-        interpolation. Points are central estimates, and each panel has
-        its own millisecond scale. Blue holds <span
-        class="math inline">A=1{,}024</span> and green holds <span
-        class="math inline">A=1{,}000{,}000</span> while the horizontal
-        axis changes the receive shards on each credited account from
-        <span class="math inline">h=1</span> to <span
+        interpolation. Each panel has its own millisecond scale. Blue
+        holds <span class="math inline">A=1{,}024</span> and green holds
+        <span class="math inline">A=1{,}000{,}000</span> while the
+        horizontal axis changes the receive shards on each credited
+        account from <span class="math inline">h=1</span> to <span
         class="math inline">h=512</span>.</p>
         </div>
         <p>Increasing <span class="math inline">A</span> makes the state
@@ -746,8 +743,8 @@ O’Grady</a></div>
         payments only divide it. Ten million payments spread the sparse
         profile’s 2.27 MB to about 0.23 offchain bytes per payment; a
         billion spread it to 0.0023 offchain bytes per payment. The
-        certified commitment adds the signer bitmap and aggregate
-        signature to the 32-byte commitment, for 101 bytes total; it
+        certified commitment includes the 32-byte commitment, signer
+        bitmap, and aggregate signature, for 101 bytes total; it
         likewise shrinks as <span class="math inline">1/T</span>.</p>
         <p>This fixture queues no withdrawals and no full closes, whose
         re-check and row openings would otherwise add to it. The
