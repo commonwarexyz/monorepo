@@ -2,7 +2,7 @@ use super::{Config, Translator};
 use crate::{
     Context,
     archive::{Error, Identifier},
-    index::{Unordered, unordered::Index},
+    index::{Cursor as _, Unordered, unordered::Index},
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
@@ -85,6 +85,13 @@ impl<K: Array> OversizedRecord for Record<K> {
     }
 }
 
+/// Identifies one index-journal occurrence represented in the translated-key index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyCandidate {
+    index: u64,
+    position: u64,
+}
+
 #[cfg(feature = "arbitrary")]
 impl<K: Array> arbitrary::Arbitrary<'_> for Record<K>
 where
@@ -126,8 +133,8 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
-    /// Maps translated key representation to its corresponding index.
-    keys: Index<T, u64>,
+    /// Maps translated key representation to its corresponding journal occurrences.
+    keys: Index<T, KeyCandidate>,
 
     /// Maps index to its first position in the index journal.
     indices: BTreeMap<u64, u64>,
@@ -160,6 +167,36 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             Some(oldest_allowed) => index < oldest_allowed,
             None => false,
         }
+    }
+
+    /// Insert a key candidate in the same order produced by journal replay.
+    ///
+    /// Sections replay from low to high, and records within a section replay in append order. The
+    /// in-memory index yields the most recently inserted candidate first, so candidates are kept
+    /// in descending section order and a new candidate leads the candidates from its own section.
+    fn insert_key_candidate(
+        keys: &mut Index<T, KeyCandidate>,
+        items_per_section: u64,
+        key: &K,
+        candidate: KeyCandidate,
+    ) {
+        let index = candidate.index;
+        let section = (index / items_per_section) * items_per_section;
+        let rank = (section, candidate.position);
+        let Some(mut cursor) = keys.get_mut_or_insert(key, candidate) else {
+            return;
+        };
+
+        while let Some(current) = cursor.next() {
+            let current_section = (current.index / items_per_section) * items_per_section;
+            if (current_section, current.position) <= rank {
+                let displaced = *current;
+                cursor.update(candidate);
+                cursor.insert(displaced);
+                return;
+            }
+        }
+        cursor.insert(candidate);
     }
 
     /// Iterate over all positions for a given index (first + extras).
@@ -215,8 +252,16 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                     }
                 }
 
-                // Store index in keys
-                keys.insert(&entry.key, entry.index);
+                // Keep the key index in the same order during replay and live operation.
+                Self::insert_key_candidate(
+                    &mut keys,
+                    cfg.items_per_section.get(),
+                    &entry.key,
+                    KeyCandidate {
+                        index: entry.index,
+                        position,
+                    },
+                );
 
                 // Store index in intervals
                 intervals.insert(entry.index);
@@ -285,35 +330,32 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.gets.inc();
 
         // Fetch index
-        let iter = self.keys.get(key);
-        for index in iter {
+        for candidate in self.keys.get(key) {
             // Continue if index is no longer allowed due to pruning.
-            if self.pruned(*index) {
+            if self.pruned(candidate.index) {
                 continue;
             }
 
-            // Get all positions at this index
-            if !self.indices.contains_key(index) {
+            if !self.indices.contains_key(&candidate.index) {
                 return Err(Error::RecordCorrupted);
             }
-            let section = self.section(*index);
+            let section = self.section(candidate.index);
 
-            for position in self.iter_positions(*index) {
-                // Fetch index entry from index journal to verify key
-                let entry = self.oversized.get(section, position).await?;
+            // Fetch this exact candidate from the index journal. Candidates retain their positions
+            // so a translated-key collision cannot promote an unrelated occurrence at one index.
+            let entry = self.oversized.get(section, candidate.position).await?;
 
-                // Verify key matches
-                if entry.key.as_ref() == key.as_ref() {
-                    // Fetch value directly from blob storage (bypasses page cache)
-                    let (value_offset, value_size) = entry.value_location();
-                    let value = self
-                        .oversized
-                        .get_value(section, value_offset, value_size)
-                        .await?;
-                    return Ok(Some(value));
-                }
-                self.unnecessary_reads.inc();
+            // Verify the full key before following a candidate from the translated-key index.
+            if entry.key.as_ref() == key.as_ref() {
+                // Fetch value directly from blob storage (bypasses page cache)
+                let (value_offset, value_size) = entry.value_location();
+                let value = self
+                    .oversized
+                    .get_value(section, value_offset, value_size)
+                    .await?;
+                return Ok(Some(value));
             }
+            self.unnecessary_reads.inc();
         }
 
         Ok(None)
@@ -324,26 +366,22 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     /// Confirms translated-key candidates against index journal entries,
     /// never reading values.
     async fn has_key(&self, key: &K) -> Result<bool, Error> {
-        for index in self.keys.get(key) {
+        for candidate in self.keys.get(key) {
             // Continue if index is no longer allowed due to pruning.
-            if self.pruned(*index) {
+            if self.pruned(candidate.index) {
                 continue;
             }
 
-            // Get all positions at this index
-            if !self.indices.contains_key(index) {
+            if !self.indices.contains_key(&candidate.index) {
                 return Err(Error::RecordCorrupted);
             }
-            let section = self.section(*index);
+            let section = self.section(candidate.index);
 
-            for position in self.iter_positions(*index) {
-                // Fetch index entry from index journal to verify key
-                let entry = self.oversized.get(section, position).await?;
-                if entry.key.as_ref() == key.as_ref() {
-                    return Ok(true);
-                }
-                self.unnecessary_reads.inc();
+            let entry = self.oversized.get(section, candidate.position).await?;
+            if entry.key.as_ref() == key.as_ref() {
+                return Ok(true);
             }
+            self.unnecessary_reads.inc();
         }
 
         Ok(false)
@@ -392,9 +430,15 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Store interval
         self.intervals.insert(index);
 
-        // Insert and prune any useless keys
+        // Remove pruned candidates before inserting with the precedence reconstructed by replay.
         self.keys
-            .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
+            .retain(&key, |candidate| candidate.index >= oldest_allowed);
+        Self::insert_key_candidate(
+            &mut self.keys,
+            self.items_per_section,
+            &key,
+            KeyCandidate { index, position },
+        );
 
         // Add section to pending
         self.pending.insert(section);
@@ -567,16 +611,15 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             return Ok(false);
         }
 
-        // A key absent from the in-memory index is not stored anywhere, so
-        // absence is decided without touching disk. A translated-key hit may
-        // be a collision, so confirm against the stored keys at `index`
-        // (reads index journal entries, never values).
-        if !self.keys.get(key).any(|candidate| *candidate == index) {
-            return Ok(false);
-        }
+        // A translated-key hit may be a collision, so confirm each occurrence at this index
+        // against its persisted full key (reads index journal entries, never values).
         let section = self.section(index);
-        for position in self.iter_positions(index) {
-            let entry = self.oversized.get(section, position).await?;
+        for candidate in self
+            .keys
+            .get(key)
+            .filter(|candidate| candidate.index == index)
+        {
+            let entry = self.oversized.get(section, candidate.position).await?;
             if entry.key.as_ref() == key.as_ref() {
                 return Ok(true);
             }
