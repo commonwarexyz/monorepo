@@ -139,8 +139,8 @@ impl LtHash {
     /// Return the [Digest] of the current state.
     pub fn checksum(&self) -> Digest {
         let mut bytes = [0u8; LTHASH_SIZE];
-        for (chunk, val) in bytes.chunks_exact_mut(2).zip(&self.state) {
-            chunk.copy_from_slice(&val.to_le_bytes());
+        for (chunk, val) in bytes.as_chunks_mut::<2>().0.iter_mut().zip(&self.state) {
+            *chunk = val.to_le_bytes();
         }
         Blake3::hash(&[&bytes])
     }
