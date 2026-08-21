@@ -142,6 +142,10 @@ where
     ) -> Participant {
         self.inner.elect(round, certificate)
     }
+
+    fn elect_early(&self, round: Round) -> Option<Participant> {
+        self.inner.elect_early(round)
+    }
 }
 
 impl<S> Verifier for Scheme<S>

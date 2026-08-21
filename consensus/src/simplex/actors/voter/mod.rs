@@ -95,7 +95,7 @@ mod tests {
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{NZU16, NZU32, NZUsize, Probability, sync::Mutex};
+    use commonware_utils::{NZU16, NZU32, NZUsize, Probability, channel::oneshot, sync::Mutex};
     use futures::FutureExt;
     use rand_core::CryptoRng;
     use std::{
@@ -108,6 +108,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    type ProposeRequests = Arc<Mutex<Vec<(View, View)>>>;
+    type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
     async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
@@ -194,14 +196,14 @@ mod tests {
         local_index: usize,
         /// Mock application propose latency, in milliseconds.
         propose_latency_ms: f64,
-        /// Views whose proposal requests reached the mock application.
-        propose_requests: Option<Arc<Mutex<Vec<View>>>>,
-        /// Whether proposal responses should remain pending indefinitely.
-        stall_proposals: bool,
         /// Mock application verify latency, in milliseconds.
         verify_latency_ms: f64,
         /// Mock application certify latency, in milliseconds.
         certify_latency_ms: f64,
+        /// Views and parents supplied to mock application proposal requests.
+        propose_requests: Option<ProposeRequests>,
+        /// Whether mock application proposal requests should remain pending.
+        stall_proposals: bool,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
         /// Whether every mock application verification should fail.
@@ -219,10 +221,10 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 local_index: 0,
                 propose_latency_ms: 1.0,
-                propose_requests: None,
-                stall_proposals: false,
                 verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
+                propose_requests: None,
+                stall_proposals: false,
                 verify_requests: None,
                 fail_verification: false,
                 certifier: mocks::application::Certifier::Always,
@@ -277,7 +279,9 @@ mod tests {
         actor.set_fail_verification(options.fail_verification);
         if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
-                propose_requests.lock().push(context.view());
+                propose_requests
+                    .lock()
+                    .push((context.view(), context.parent.0));
             }));
         }
         if let Some(verify_requests) = verify_requests {
@@ -340,16 +344,142 @@ mod tests {
         )
     }
 
-    async fn wait_for_request(
+    /// Certifies view 1 and drives a follower through its notarize vote for
+    /// view 2, leaving the outgoing tip uncertified for handoff tests.
+    async fn prepare_pipelined_handoff_tip(
+        context: &mut deterministic::Context,
+        schemes: &[ed25519::Scheme],
+        outgoing: &PublicKey,
+        voter_mailbox: &mut Mailbox<ed25519::Scheme, Sha256Digest>,
+        batcher_receiver: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
+        resolver_receiver: &mut mailbox::Receiver<
+            resolver::MailboxMessage<ed25519::Scheme, Sha256Digest>,
+        >,
+        relay: &Arc<mocks::relay::Relay<Sha256Digest, PublicKey>>,
+    ) -> Proposal<Sha256Digest> {
+        let epoch = Epoch::new(333);
+        let quorum = quorum(u32::try_from(schemes.len()).expect("test fixture must fit u32"));
+        assert!(matches!(
+            batcher_receiver.recv().await.unwrap(),
+            batcher::Message::Update { .. }
+        ));
+
+        let genesis = mocks::application::genesis::<Sha256>(epoch);
+        let proposal_1 = Proposal::new(
+            Round::new(epoch, View::new(1)),
+            View::zero(),
+            Sha256::hash(&[b"pipelined_test_view_1"]),
+        );
+        relay.broadcast(
+            outgoing,
+            Recipients::All,
+            (
+                proposal_1.payload,
+                (proposal_1.round, genesis, 0u64).encode(),
+            ),
+        );
+        let (_, notarization_1) = build_notarization(schemes, &proposal_1, quorum);
+        voter_mailbox.recovered(Certificate::Notarization(notarization_1));
+
+        let mut certified_view_1 = false;
+        let mut entered_view_2 = false;
+        while !certified_view_1 || !entered_view_2 {
+            select! {
+                message = batcher_receiver.recv() => {
+                    if matches!(
+                        message.unwrap(),
+                        batcher::Message::Update { current, .. } if current == View::new(2)
+                    ) {
+                        entered_view_2 = true;
+                    }
+                },
+                message = resolver_receiver.recv() => {
+                    if matches!(
+                        message.unwrap(),
+                        MailboxMessage::Certified { view, success: true, .. }
+                            if view == View::new(1)
+                    ) {
+                        certified_view_1 = true;
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("view 1 did not certify before the handoff");
+                }
+            }
+        }
+
+        let proposal_2 = Proposal::new(
+            Round::new(epoch, View::new(2)),
+            View::new(1),
+            Sha256::hash(&[b"pipelined_test_view_2"]),
+        );
+        relay.broadcast(
+            outgoing,
+            Recipients::All,
+            (
+                proposal_2.payload,
+                (proposal_2.round, proposal_1.payload, 1u64).encode(),
+            ),
+        );
+        voter_mailbox.proposal(proposal_2.clone());
+
+        loop {
+            select! {
+                message = batcher_receiver.recv() => {
+                    if matches!(
+                        message.unwrap(),
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == View::new(2)
+                    ) {
+                        return proposal_2;
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("view 2 was not notarized before the handoff");
+                }
+            }
+        }
+    }
+
+    async fn wait_for_request<T>(
         context: &deterministic::Context,
-        requests: &Arc<Mutex<Vec<View>>>,
+        requests: &Arc<Mutex<Vec<T>>>,
         view: View,
+        request_view: impl Fn(&T) -> View,
     ) {
         let deadline = context.current() + Duration::from_secs(1);
-        while !requests.lock().contains(&view) {
+        while !requests
+            .lock()
+            .iter()
+            .any(|request| request_view(request) == view)
+        {
             if context.current() >= deadline {
                 panic!("application did not receive request for {view}");
             }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn take_certification_request(
+        context: &deterministic::Context,
+        requests: &CertificationRequests,
+        view: View,
+    ) -> oneshot::Sender<bool> {
+        let deadline = context.current() + Duration::from_secs(1);
+        loop {
+            if let Some(response) = {
+                let mut requests = requests.lock();
+                requests
+                    .iter()
+                    .position(|(request_view, _)| *request_view == view)
+                    .map(|index| requests.swap_remove(index).1)
+            } {
+                return response;
+            }
+            assert!(
+                context.current() < deadline,
+                "application did not receive certification request for {view}"
+            );
             context.sleep(Duration::from_millis(1)).await;
         }
     }
@@ -3072,7 +3202,10 @@ mod tests {
 
             // Once the view 1 propose request is in flight, gate the journal so
             // the sync covering the view 1 notarize blocks until released.
-            wait_for_request(&context, &propose_requests, View::new(1)).await;
+            wait_for_request(&context, &propose_requests, View::new(1), |request| {
+                request.0
+            })
+            .await;
             pending_syncs.arm();
 
             // The voter appends the view 1 notarize and blocks on the gated
@@ -3082,7 +3215,10 @@ mod tests {
                 .blocked
                 .await
                 .expect("view 1 journal sync was dropped");
-            wait_for_request(&context, &propose_requests, View::new(2)).await;
+            wait_for_request(&context, &propose_requests, View::new(2), |request| {
+                request.0
+            })
+            .await;
 
             // Nothing constructed for view 1 may reach the batcher while its
             // sync is blocked.
@@ -3168,7 +3304,10 @@ mod tests {
             ));
             // The view 1 propose request stalls forever, occupying the pending
             // request slot.
-            wait_for_request(&context, &propose_requests, View::new(1)).await;
+            wait_for_request(&context, &propose_requests, View::new(1), |request| {
+                request.0
+            })
+            .await;
 
             // The leader timeout fires while the request is still outstanding.
             let nullify = loop {
@@ -3193,7 +3332,10 @@ mod tests {
             // view 3, the term start, which builds on genesis. The stalled
             // view 1 request must not suppress the view 3 request.
             mailbox.resolved(Certificate::Nullification(nullification));
-            wait_for_request(&context, &propose_requests, View::new(3)).await;
+            wait_for_request(&context, &propose_requests, View::new(3), |request| {
+                request.0
+            })
+            .await;
 
             // The replacement must dispatch at the same-iteration checkpoint,
             // before the nullification broadcast.
@@ -3286,7 +3428,7 @@ mod tests {
             let contents_1 = (proposal_1.round, genesis, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal_1.payload, contents_1));
             mailbox.proposal(proposal_1.clone());
-            wait_for_request(&context, &verify_requests, View::new(1)).await;
+            wait_for_request(&context, &verify_requests, View::new(1), |request| *request).await;
 
             let proposal_2 = Proposal::new(
                 Round::new(epoch, View::new(2)),
@@ -3338,6 +3480,435 @@ mod tests {
                 "view 2 verification must dispatch before the view 1 notarize broadcast \
                  (verify at {verify_next}, broadcast at {broadcast})"
             );
+        });
+    }
+
+    /// A pipelined handoff proposes and notarizes across the term boundary
+    /// before any certificate forms: voting for the outgoing term's final
+    /// view is enough for the incoming leader to issue its proposal.
+    #[test_traced]
+    fn test_pipelined_handoff_proposes_across_term_boundary() {
+        let n = 5;
+        let namespace = b"pipelined_handoff_proposes_across_term_boundary".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default()
+                .with_term(term_length, Duration::from_secs(30), ViewDelta::new(1))
+                .with_pipelined_handoff();
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let outgoing_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let outgoing = participants[usize::from(outgoing_idx)].clone();
+            // Views 1 and 2 form term 1; view 3 starts term 2.
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            assert_ne!(usize::from(outgoing_idx), local_index);
+
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    // Timeouts long enough that none fires within the test:
+                    // no certificate is ever delivered, so a view-3 notarize
+                    // can only come from a pipelined handoff.
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    propose_latency_ms: 10.0,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+
+            // Feed the outgoing leader's proposals for both views of term 1.
+            let proposal_1 = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"pipelined_handoff_view_1"]),
+            );
+            let contents_1 = (proposal_1.round, genesis, 0u64).encode();
+            relay.broadcast(&outgoing, Recipients::All, (proposal_1.payload, contents_1));
+            mailbox.proposal(proposal_1.clone());
+
+            let proposal_2 = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256::hash(&[b"pipelined_handoff_view_2"]),
+            );
+            let contents_2 = (proposal_2.round, proposal_1.payload, 1u64).encode();
+            relay.broadcast(&outgoing, Recipients::All, (proposal_2.payload, contents_2));
+            mailbox.proposal(proposal_2.clone());
+
+            let mut saw_view_2_notarize = false;
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { .. } => {}
+                            batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                                if notarize.view() == View::new(2) {
+                                    saw_view_2_notarize = true;
+                                }
+                                if notarize.view() == View::new(3) {
+                                    assert!(
+                                        saw_view_2_notarize,
+                                        "expected the outgoing tip's notarize before the handoff notarize"
+                                    );
+                                    assert_eq!(
+                                        notarize.proposal.parent,
+                                        View::new(2),
+                                        "handoff proposal must build on the outgoing term's final view"
+                                    );
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(8)) => {
+                        panic!("expected pipelined handoff notarize for view 3");
+                    }
+                }
+            }
+        });
+    }
+
+    /// A locally pipelined term-start vote may notarize before its parent
+    /// certifies, but application certification requests remain parent-first.
+    #[test_traced]
+    fn test_pipelined_handoff_certifies_parent_before_child() {
+        let n = 1;
+        let namespace = b"pipelined_handoff_certifies_parent_before_child".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let requests_for_app = requests.clone();
+            let certifier =
+                mocks::application::Certifier::Controlled(Box::new(move |round, _, response| {
+                    requests_for_app.lock().push((round.view(), response));
+                }));
+            let elector = RoundRobin::<Sha256>::default().with_pipelined_handoff();
+            let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    certifier,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // A singleton's local votes notarize both views while the parent
+            // application request remains under test control.
+            let mut parent = None;
+            let mut child = None;
+            while parent.is_none() || child.is_none() {
+                select! {
+                    message = batcher_receiver.recv() => {
+                        match message.unwrap() {
+                            batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                                match notarize.view() {
+                                    view if view == View::new(1) => {
+                                        parent = Some(notarize.proposal);
+                                    }
+                                    view if view == View::new(2) => {
+                                        child = Some(notarize.proposal);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            batcher::Message::Update { .. } => {}
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected local parent and handoff-child notarize votes");
+                    }
+                }
+            }
+            let parent = parent.expect("parent proposal");
+            let child = child.expect("child proposal");
+            assert_eq!(child.parent, parent.view());
+
+            // Deliver the child certificate first. Once the later parent
+            // request appears, FIFO mailbox processing proves the child was
+            // already considered for certification.
+            let (_, child_notarization) = build_notarization(&schemes, &child, 1);
+            mailbox.recovered(Certificate::Notarization(child_notarization));
+            let (_, parent_notarization) = build_notarization(&schemes, &parent, 1);
+            mailbox.recovered(Certificate::Notarization(parent_notarization));
+            let parent_response =
+                take_certification_request(&context, &requests, View::new(1)).await;
+
+            assert!(
+                !requests
+                    .lock()
+                    .iter()
+                    .any(|(view, _)| *view == View::new(2)),
+                "child certification ran ahead of its parent"
+            );
+
+            parent_response
+                .send(true)
+                .expect("parent certification receiver must remain open");
+            let child_response =
+                take_certification_request(&context, &requests, View::new(2)).await;
+            child_response
+                .send(true)
+                .expect("child certification receiver must remain open");
+
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => {
+                        if matches!(
+                            message.unwrap(),
+                            batcher::Message::Constructed(Vote::Finalize(finalize))
+                                if finalize.view() == View::new(2)
+                        ) {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("child did not finalize after parent certification completed");
+                    }
+                }
+            }
+            assert!(reporter.certifications.lock().contains_key(&View::new(1)));
+            assert!(reporter.certifications.lock().contains_key(&View::new(2)));
+        });
+    }
+
+    /// A stalled proposal build on an abandoned outgoing tip must be
+    /// superseded while the incoming term-start view is still live.
+    #[test_traced]
+    fn test_pipelined_handoff_reissues_stalled_proposal_after_parent_nullification() {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"pipelined_handoff_reissues_stalled_proposal".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default()
+                .with_term(term_length, Duration::from_secs(30), ViewDelta::new(1))
+                .with_pipelined_handoff();
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            let outgoing_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let outgoing = participants[outgoing_index].clone();
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    propose_requests: Some(propose_requests.clone()),
+                    stall_proposals: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // Certify view 1 so it remains a usable fallback after view 2 is
+            // abandoned, then let the outgoing leader issue view 2.
+            prepare_pipelined_handoff_tip(
+                &mut context,
+                &schemes,
+                &outgoing,
+                &mut mailbox,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                &relay,
+            )
+            .await;
+
+            let deadline = context.current() + Duration::from_secs(2);
+            while propose_requests.lock().is_empty() {
+                assert!(
+                    context.current() < deadline,
+                    "initial handoff proposal was not requested"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                propose_requests.lock().as_slice(),
+                &[(View::new(3), View::new(2))]
+            );
+
+            // Nullifying the captured parent enters view 3. The still-pending
+            // build must be replaced immediately with one on certified view 1.
+            let (_, nullification_2) =
+                build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
+            mailbox.recovered(Certificate::Nullification(nullification_2));
+
+            let deadline = context.current() + Duration::from_secs(2);
+            while propose_requests.lock().len() < 2 {
+                assert!(
+                    context.current() < deadline,
+                    "proposal was not reissued on the certified fallback"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(1))];
+            assert_eq!(propose_requests.lock().as_slice(), &expected);
+        });
+    }
+
+    /// A follower requests a missing parent certificate from the term-start
+    /// proposer. Targeting one peer limits retries if the certificate never forms.
+    #[test_traced]
+    fn test_pipelined_handoff_parent_repair_targets_proposer() {
+        let n = 5;
+        let namespace = b"pipelined_handoff_parent_repair_targets_proposer".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default()
+                .with_term(term_length, Duration::from_secs(30), ViewDelta::new(1))
+                .with_pipelined_handoff();
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let outgoing_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let incoming_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            let local_index = (0..participants.len())
+                .find(|index| *index != outgoing_index && *index != incoming_index)
+                .expect("a follower must exist");
+            let outgoing = participants[outgoing_index].clone();
+            let incoming = participants[incoming_index].clone();
+
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let proposal_2 = prepare_pipelined_handoff_tip(
+                &mut context,
+                &schemes,
+                &outgoing,
+                &mut mailbox,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                &relay,
+            )
+            .await;
+
+            let proposal_3 = Proposal::new(
+                Round::new(epoch, View::new(3)),
+                View::new(2),
+                Sha256::hash(&[b"targeted_repair_view_3"]),
+            );
+            relay.broadcast(
+                &incoming,
+                Recipients::All,
+                (
+                    proposal_3.payload,
+                    (proposal_3.round, proposal_2.payload, 2u64).encode(),
+                ),
+            );
+            mailbox.proposal(proposal_3);
+
+            loop {
+                select! {
+                    message = resolver_receiver.recv() => {
+                        let MailboxMessage::Resolve {
+                            proposal,
+                            view,
+                            kind,
+                            target,
+                            ..
+                        } = message.unwrap() else {
+                            continue;
+                        };
+                        assert_eq!(proposal, View::new(3));
+                        assert_eq!(view, View::new(2));
+                        assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
+                        assert_eq!(
+                            target.as_ref(),
+                            Some(&incoming),
+                            "raw term-start parent repair must target its proposer"
+                        );
+                        break;
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("voter never requested the outgoing parent certificate");
+                    }
+                }
+            }
         });
     }
 

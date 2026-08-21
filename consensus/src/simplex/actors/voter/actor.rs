@@ -13,7 +13,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
-            Notarize, Nullification, Nullify, Proposal, Vote,
+            Notarize, Nullification, Nullify, Vote,
         },
     },
     types::{Round as Rnd, View},
@@ -412,22 +412,21 @@ impl<
         Some(Request(context, span, receiver))
     }
 
-    /// Drops pending application requests for exited views and dispatches
-    /// eligible new ones.
+    /// Drops obsolete pending application requests and dispatches eligible new ones.
     async fn reconcile_application_requests(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_propose: &mut Option<Request<Context<D, S::PublicKey>, D>>,
         pending_verify: &mut Option<Request<Context<D, S::PublicKey>, bool>>,
     ) {
-        // Keep requests for optimistic future views and clear requests for
-        // exited views. Certification for an exited view can continue after
-        // its verification receiver is dropped.
+        // Keep requests for optimistic future views unless their captured proposal
+        // ancestry has been superseded, and clear requests for exited views.
+        // Certification for an exited view can continue after its verification
+        // receiver is dropped.
         let current_view = self.state.current_view();
-        if pending_propose
-            .as_ref()
-            .is_some_and(|request| request.view() < current_view)
-        {
+        if pending_propose.as_ref().is_some_and(|request| {
+            request.view() < current_view || self.state.supersede_proposal_request(&request.0)
+        }) {
             *pending_propose = None;
         }
         if pending_verify
@@ -692,9 +691,9 @@ impl<
             return None;
         }
 
-        // Construct proposal
-        let proposal = Proposal::new(context.round, context.parent.0, proposed);
-        if !self.state.proposed(proposal) {
+        // Record the proposal only if the parent captured for the build is
+        // still valid.
+        if !self.state.proposed(&context, proposed) {
             warn!(round = ?context.round, "dropped our proposal");
             return None;
         }
@@ -1125,7 +1124,8 @@ impl<
                     &mut resolver,
                     &mut pending_propose,
                     &mut pending_verify,
-                ).await;
+                )
+                .await;
 
                 // Attempt to certify any views that we have notarizations for.
                 //
