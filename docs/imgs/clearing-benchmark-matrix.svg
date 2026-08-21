@@ -41,16 +41,16 @@
   <text class="axis" x="95" y="375" text-anchor="end">0</text>
   <text class="axis-strong" x="160" y="402" text-anchor="middle">h = 1</text>
   <text class="axis-strong" x="340" y="402" text-anchor="middle">h = 512</text>
-  <path class="blue series" d="M160 369.46 L340 369.29"/>
-  <path class="green series" d="M160 212.17 L340 186.88"/>
-  <circle cx="160" cy="369.46" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="340" cy="369.29" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <rect x="155" y="207.17" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="335" y="181.88" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="172" y="357">0.862</text>
-  <text class="value blue-text" x="350" y="357">1.12</text>
-  <text class="value green-text" x="172" y="201">251</text>
-  <text class="value green-text" x="350" y="175">291</text>
+  <path class="blue series" d="M160 369.51 L340 369.32"/>
+  <path class="green series" d="M160 216.63 L340 212.86"/>
+  <circle cx="160" cy="369.51" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="340" cy="369.32" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="155" y="211.63" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="335" y="207.86" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="172" y="357">0.783</text>
+  <text class="value blue-text" x="350" y="357">1.08</text>
+  <text class="value green-text" x="172" y="205">244</text>
+  <text class="value green-text" x="350" y="201">250</text>
 
   <!-- Deal construction across all pieces. -->
   <rect class="frame" x="460" y="90" width="400" height="360" rx="3"/>
@@ -68,16 +68,16 @@
   <text class="axis" x="525" y="375" text-anchor="end">0</text>
   <text class="axis-strong" x="590" y="402" text-anchor="middle">h = 1</text>
   <text class="axis-strong" x="770" y="402" text-anchor="middle">h = 512</text>
-  <path class="blue series" d="M590 368.80 L770 359.76"/>
-  <path class="green series" d="M590 222.32 L770 184.64"/>
-  <circle cx="590" cy="368.80" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="770" cy="359.76" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <rect x="585" y="217.32" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="765" y="179.64" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="602" y="357">0.381</text>
-  <text class="value blue-text" x="780" y="348">3.26</text>
-  <text class="value green-text" x="602" y="210">47.0</text>
-  <text class="value green-text" x="780" y="173">59.0</text>
+  <path class="blue series" d="M590 368.83 L770 359.41"/>
+  <path class="green series" d="M590 214.11 L770 185.51"/>
+  <circle cx="590" cy="368.83" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="770" cy="359.41" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="585" y="209.11" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="765" y="180.51" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="602" y="357">0.373</text>
+  <text class="value blue-text" x="780" y="348">3.37</text>
+  <text class="value green-text" x="602" y="202">49.6</text>
+  <text class="value green-text" x="780" y="174">58.7</text>
 
   <!-- Maximum-load validator. -->
   <rect class="frame" x="890" y="90" width="400" height="360" rx="3"/>
@@ -95,14 +95,14 @@
   <text class="axis" x="955" y="375" text-anchor="end">0</text>
   <text class="axis-strong" x="1020" y="402" text-anchor="middle">h = 1</text>
   <text class="axis-strong" x="1200" y="402" text-anchor="middle">h = 512</text>
-  <path class="blue series" d="M1020 369.60 L1200 333.75"/>
-  <path class="green series" d="M1020 181.80 L1200 170.98"/>
-  <circle cx="1020" cy="369.60" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="1200" cy="333.75" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <rect x="1015" y="176.80" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="1195" y="165.98" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="1032" y="358">2.89</text>
-  <text class="value blue-text" x="1210" y="322">264</text>
-  <text class="value green-text" x="1032" y="170">1,369</text>
-  <text class="value green-text" x="1210" y="159">1,447</text>
+  <path class="blue series" d="M1020 369.62 L1200 336.18"/>
+  <path class="green series" d="M1020 187.39 L1200 162.21"/>
+  <circle cx="1020" cy="369.62" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="1200" cy="336.18" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="1015" y="182.39" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="1195" y="157.21" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="1032" y="358">2.78</text>
+  <text class="value blue-text" x="1210" y="324">246</text>
+  <text class="value green-text" x="1032" y="176">1,328</text>
+  <text class="value green-text" x="1210" y="151">1,511</text>
 </svg>

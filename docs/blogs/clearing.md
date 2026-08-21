@@ -311,17 +311,17 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">0.862 ms</td>
-      <td style="text-align:right;">1.12 ms</td>
-      <td style="text-align:right;">251 ms</td>
-      <td style="text-align:right;">291 ms</td>
+      <td style="text-align:right;">0.783 ms</td>
+      <td style="text-align:right;">1.08 ms</td>
+      <td style="text-align:right;">244 ms</td>
+      <td style="text-align:right;">250 ms</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">deal</td>
-      <td style="text-align:right;">0.381 ms</td>
-      <td style="text-align:right;">3.26 ms</td>
-      <td style="text-align:right;">47.0 ms</td>
-      <td style="text-align:right;">59.0 ms</td>
+      <td style="text-align:right;">0.373 ms</td>
+      <td style="text-align:right;">3.37 ms</td>
+      <td style="text-align:right;">49.6 ms</td>
+      <td style="text-align:right;">58.7 ms</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
@@ -333,10 +333,10 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">2.89 ms</td>
-      <td style="text-align:right;">264 ms</td>
-      <td style="text-align:right;">1.37 s</td>
-      <td style="text-align:right;">1.45 s</td>
+      <td style="text-align:right;">2.78 ms</td>
+      <td style="text-align:right;">246 ms</td>
+      <td style="text-align:right;">1.33 s</td>
+      <td style="text-align:right;">1.51 s</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
     <tr>
@@ -355,10 +355,10 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
     </tr>
     <tr>
       <td style="padding-left:20px;">check certified commitment</td>
-      <td style="text-align:right;"><strong>0.490 ms</strong></td>
-      <td style="text-align:right;"><strong>0.524 ms</strong></td>
-      <td style="text-align:right;"><strong>0.491 ms</strong></td>
-      <td style="text-align:right;"><strong>0.482 ms</strong></td>
+      <td style="text-align:right;"><strong>0.481 ms</strong></td>
+      <td style="text-align:right;"><strong>0.483 ms</strong></td>
+      <td style="text-align:right;"><strong>0.487 ms</strong></td>
+      <td style="text-align:right;"><strong>0.487 ms</strong></td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
     <tr>
@@ -370,10 +370,10 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
     </tr>
     <tr>
       <td style="padding-left:20px;">check challenge</td>
-      <td style="text-align:right;"><strong>0.177 ms</strong></td>
-      <td style="text-align:right;"><strong>0.269 ms</strong></td>
-      <td style="text-align:right;"><strong>0.178 ms</strong></td>
-      <td style="text-align:right;"><strong>0.176 ms</strong></td>
+      <td style="text-align:right;"><strong>0.454 ms</strong></td>
+      <td style="text-align:right;"><strong>0.447 ms</strong></td>
+      <td style="text-align:right;"><strong>0.481 ms</strong></td>
+      <td style="text-align:right;"><strong>0.471 ms</strong></td>
     </tr>
   </tbody>
 </table>
