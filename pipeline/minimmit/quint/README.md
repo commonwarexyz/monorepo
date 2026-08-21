@@ -14,12 +14,14 @@ _To run the model checker, you must install the Java Development Kit (JDK) 17 or
 
 ## Protocol Configurations
 
-The specification supports various configurations for testing:
+The specification supports these top-level configurations:
 
-- **N=6, F=0**: 6 replicas, no Byzantine replicas
-- **N=6, F=1**: 6 replicas, 1 Byzantine replica
-- **N=6, F=2**: 6 replicas, 2 Byzantine replicas (safety violations expected)
-- **N=7, F=1**: 7 replicas, no Byzantine replicas
+- `main_n6f1b0.qnt`: 6 replicas, no Byzantine replicas
+- `main_n6f1b1.qnt`: 6 replicas, 1 Byzantine replica
+- `main_n6f1b2.qnt`: 6 replicas, 2 Byzantine replicas with `F = 1` (safety violations expected)
+- `main_twins_n6f1b1.qnt`: 6 logical replicas with one faulty logical key modeled by two twin actors
+
+The test suite also includes `tests_n7f1b1.qnt`, with 7 replicas and 1 Byzantine replica.
 
 ## Safety Invariants
 
@@ -27,24 +29,33 @@ The specification validates the following safety properties:
 
 | # | Invariant Name | Description |
 |---|----------------|-------------|
-| 1 | `agreement` | No two correct replicas disagree on the committed blocks - ensures all correct replicas have consistent blockchain prefixes |
-| 2 | `no_vote_equivocation_inv` | A correct replica should not send two votes in the same view - honest replicas may not broadcast a `notarize(c, v)` after first broadcasting a `nullify(v)` |
-| 3 | `no_nullification_and_finalization_in_the_same_view` | It is impossible to produce both a nullification and finalization certificate for the same slot `v` |
-| 4 | `no_proposal_equivocation` | No correct proposer sends two different proposals in the same view |
-| 5 | `valid_last_finalized` | The last finalized view must not exceed the last seen notarization view |
-| 6 | `certificates_are_valid_inv` | All certificates stored by correct replicas are well-formed with valid signatures and proper thresholds |
-| 7 | `notarized_consistence` | Consistency between notarized blocks in replica state and sent votes |
-| 8 | `validity` | If a block `B` for some slot `v` is finalized, then no other block `B'` for slot `v` can be finalized |
-| 9 | `no_nullification_in_finalized_view` | If there is a finalized block in a view `v`, there is no nullification in this view |
-| 10 | `no_notarization_in_finalized_view` | If there is a finalized block in a view `v`, there is no notarization for another block in this view |
+| 1 | `no_proposal_equivocation` | No honest proposer sends two different proposals in the same view |
+| 2 | `block_commits_to_parent` | A block is a hash-protected container that commits to its parent, so the same block cannot be built on two different parents |
+| 3 | `agreement` | No two honest replicas disagree on committed proposal-chain prefixes |
+| 4 | `no_vote_equivocation_inv` | An honest replica does not send an invalid sequence of votes in one view |
+| 5 | `contradiction_nullify_is_justified` | An honest replica that nullified after notarizing (minimmit.md 8.6) holds an M-quorum of conflicting votes justifying it |
+| 6 | `no_nullification_and_finalization_in_the_same_view` | One honest replica does not observe both nullification and finalization evidence for the same view |
+| 7 | `validity` | At most one proposal can be finalized in a view |
+| 8 | `finalization_agreement` | No two honest replicas finalize different proposals in the same view |
+| 9 | `valid_last_finalized` | The last finalized view must not exceed the last seen notarization view |
+| 10 | `certificates_are_valid_inv` | Stored certificates are well-formed and meet their thresholds |
+| 11 | `certificates_are_backed` | Certificate signatures from non-faulty keys are backed by matching votes |
+| 12 | `notarized_consistency` | Local notarization state matches notarize votes sent by the same honest key |
+| 13 | `safe_finalization` | A finalized view has neither nullification nor conflicting notarization evidence |
+| 14 | `committed_blocks_are_finalized` | Every committed proposal is notarized, and the tip of the committed chain is finalized (its ancestors are finalized transitively, minimmit.md 8.4) |
+| 15 | `committed_chain_is_connected` | Every committed proposal links to the preceding committed proposal |
+| 16 | `last_finalized_is_committed` | `last_finalized` equals the view of the committed chain's tip (genesis while nothing is committed) |
+| 17 | `finalized_blocks_are_committed_or_pending` | Every stored finalization is on the committed chain or pending backfill of its ancestry |
+| 18 | `pending_finalization_agreement` | A pending finalized block does not conflict with a block another honest replica committed at the same view |
+| 19 | `no_nullification_and_finalization_globally` | No view has both nullification and finalization evidence across honest stores |
 
 ## Running the Specification
 
 You can choose any specification instance stored in the `main_` files:
 
 ```bash
-quint run --invariant=block_example ./main_n6f0.qnt
-quint run --invariant=two_chained_blocks_example ./main_n6f0.qnt
+quint run --invariant=block_example ./main_n6f1b0.qnt
+quint run --invariant=two_chained_blocks_example ./main_n6f1b0.qnt
 ```
 
 ## Checking State Invariants
@@ -54,7 +65,7 @@ quint run --invariant=two_chained_blocks_example ./main_n6f0.qnt
 The simulator converts non-deterministic constructs in the specification like `any` and `oneOf` into random selections:
 
 ```bash
-quint verify --invariant=safe --max-steps=20 --random-transitions ./main_n6f0.qnt
+quint verify --invariant=safe --max-steps=20 --random-transitions ./main_n6f1b0.qnt
 ```
 
 ### Randomized Symbolic Execution
@@ -62,7 +73,7 @@ quint verify --invariant=safe --max-steps=20 --random-transitions ./main_n6f0.qn
 Symbolic execution uses the symbolic model checker to find executions, with actions chosen randomly at each step:
 
 ```bash
-quint verify --invariant=safe --max-steps=20 --random-transitions=true ./main_n6f1.qnt
+quint verify --invariant=safe --max-steps=20 --random-transitions=true ./main_n6f1b1.qnt
 ```
 
 ### Bounded Model Checking
@@ -70,5 +81,25 @@ quint verify --invariant=safe --max-steps=20 --random-transitions=true ./main_n6
 The bounded model checker verifies an invariant across all possible executions within a specified depth limit:
 
 ```bash
-quint verify --invariant=safe --max-steps=20 ./main_n6f1.qnt
+quint verify --invariant=safe --max-steps=20 ./main_n6f1b1.qnt
 ```
+
+## Modeling Notes
+
+The model is faithful to [minimmit.md](../minimmit.md) except for the following deliberate choices, which materially affect the modeled behavior:
+
+- **`Block` is a hash-protected container that commits to its parent.** A block value uniquely
+  determines its parent, so the same block cannot be built on two different parents. This is the
+  "block digests" extension (minimmit.md §10) and is enforced by the `block_commits_to_parent`
+  invariant and by guards on both the honest proposer and the Byzantine proposal injection. It is
+  what makes ancestor finalization (see below) unambiguous and safe.
+
+- **Ancestor finalization.** `rebuild_committed_chain` realizes minimmit.md §8.4 "finalize `c` and
+  all of its ancestors": committing a finalized block also commits its notarized ancestors, as long
+  as every skipped view is nullified. A block is committed once it carries a notarization and some
+  descendant carries a finalization.
+
+- **Notarize votes are proposal-driven only (base spec §8.2).** A replica casts a `notarize(c, v)`
+  vote solely on receiving the leader's proposal (`on_proposal`). Certificate handling
+  (`_process_certificate`, §8.4/§8.5) only stores the proof, rebroadcasts it, and enters the next
+  view — it never casts a notarize vote.

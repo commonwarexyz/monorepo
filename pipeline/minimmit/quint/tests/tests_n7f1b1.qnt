@@ -3,13 +3,15 @@ module tests {
     import defs.* from "../defs"
     import option.* from "../option"
     import replica(
+        REPLICA_IDS = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         BYZANTINE = Set("n6"),
+        TWINS = Set(),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4" -> "n4", "n5"->"n5", "n6"->"n6"),
         N = 7,
         F = 1,
         VIEWS = 0.to(2),
-        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
+        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2", "val_b3", "val_b4", "val_b5"),
         INVALID_BLOCKS = Set("inv_b3")
     ).* from "../replica"
 
@@ -19,9 +21,9 @@ module tests {
         assumptions_valid
     }
 
-    // This test reproduces the conditions for the following attack in the case of N = 7, F = 1, M = N-3*F=4, L = N - F=6. 
+    // This test reproduces the conditions for the following attack in the case of N = 7, F = 1, M = N-3*F=4, L = N - F=6.
     // Note, that we use M = 2*F + 1 = 3. So this attack should not be possible, and this test checks exactly that.
-    
+
     // Byzantine leader proposes block B to 3 honest replicas n0-n2,
     // and a conflicting block B' to the other 3 honest replicas n3-n6.
     //
@@ -47,14 +49,14 @@ module tests {
     // ⇒ So M = 4 can break liveness.
 
     run livenessTest = {
-        pure val proposal_from_n6_1 = { 
+        pure val proposal_from_n6_1 = {
             block: "val_b0",
             view: 0,
             view_parent: GENESIS_VIEW,
             block_parent: GENESIS_BLOCK,
             sig: sig_of("n6")
         }
-        pure val proposal_from_n6_2 = { 
+        pure val proposal_from_n6_2 = {
             block: "val_b1",
             view: 0,
             view_parent: GENESIS_VIEW,
@@ -64,7 +66,7 @@ module tests {
 
         initWithLeader(Map(0 -> "n6", 1 -> "n6", 2 -> "n6", 3 -> "n6", 4 -> "n6", 5 -> "n6"))
             // === view 0 ===
-            
+
             // A faulty replica equivocates:
             .then(inject_proposal(proposal_from_n6_1))
             .then(inject_proposal(proposal_from_n6_2))
@@ -78,34 +80,34 @@ module tests {
             .then(on_proposal("n3", proposal_from_n6_2))
             .then(on_proposal("n4", proposal_from_n6_2))
             .then(on_proposal("n5", proposal_from_n6_2))
-            
-            
+
+
             // n0-n2 notarize 0 and move to view 1
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n0", proposal_from_n6_1, "n0"))
+            .then(replica_receives_notarize_vote("n0", proposal_from_n6_1, "n1"))
+            .then(replica_receives_notarize_vote("n0", proposal_from_n6_1, "n2"))
 
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n1", proposal_from_n6_1, "n0"))
+            .then(replica_receives_notarize_vote("n1", proposal_from_n6_1, "n1"))
+            .then(replica_receives_notarize_vote("n1", proposal_from_n6_1, "n2"))
 
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n2", proposal_from_n6_1, "n0"))
+            .then(replica_receives_notarize_vote("n2", proposal_from_n6_1, "n1"))
+            .then(replica_receives_notarize_vote("n2", proposal_from_n6_1, "n2"))
 
-            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n3"))
-            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n4"))
-            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n3", proposal_from_n6_2, "n3"))
+            .then(replica_receives_notarize_vote("n3", proposal_from_n6_2, "n4"))
+            .then(replica_receives_notarize_vote("n3", proposal_from_n6_2, "n5"))
 
-            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n3"))
-            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n4"))
-            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n4", proposal_from_n6_2, "n3"))
+            .then(replica_receives_notarize_vote("n4", proposal_from_n6_2, "n4"))
+            .then(replica_receives_notarize_vote("n4", proposal_from_n6_2, "n5"))
 
-            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n3"))
-            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n4"))
-            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n5", proposal_from_n6_2, "n3"))
+            .then(replica_receives_notarize_vote("n5", proposal_from_n6_2, "n4"))
+            .then(replica_receives_notarize_vote("n5", proposal_from_n6_2, "n5"))
 
-            
+
             .then(all {
                 assert(replica_state.get("n0").view == 1),
                 assert(replica_state.get("n1").view == 1),
@@ -117,13 +119,22 @@ module tests {
             })
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b0").size() == 3),
-                assert(store_vote.get("n3").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b1").size() == 3),
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 0),
+                assert(store_vote.get("n0").filter(v => and {
+                    vote_view(v) == 0,
+                    vote_kind(v) == NotarizeKind,
+                    vote_proposal(v) == Some(proposal_from_n6_1),
+                }).size() == 3),
+                assert(store_vote.get("n3").filter(v => and {
+                    vote_view(v) == 0,
+                    vote_kind(v) == NotarizeKind,
+                    vote_proposal(v) == Some(proposal_from_n6_2),
+                }).size() == 3),
+                assert(store_vote.get("n0").filter(v =>
+                    vote_view(v) == 0 and vote_kind(v) == NullifyKind).size() == 0),
                 assert(replica_state.get("n0").nullified == false),
                 assert(replica_state.get("n3").nullified == false),
-                assert(replica_state.get("n0").notarized.get(0) == "val_b0"),
-                assert(replica_state.get("n3").notarized.get(0) == "val_b1"),
+                assert(replica_state.get("n0").notarized.get(0).option_has(p => p.block == "val_b0")),
+                assert(replica_state.get("n3").notarized.get(0).option_has(p => p.block == "val_b1")),
                 assert(is_contradicted(replica_state.get("n0"), 0, store_vote.get("n0")) == false),
                 assert(is_contradicted(replica_state.get("n3"), 0, store_vote.get("n3")) == false),
                 unchanged_all,
@@ -132,7 +143,7 @@ module tests {
     }
 
     action inject_proposal(proposal: Proposal): bool = all {
-        sent_proposal' = sent_proposal.union(Set(proposal)), 
+        sent_proposal' = sent_proposal.union(Set(proposal)),
         sent_vote' = sent_vote,
         sent_certificate' = sent_certificate,
         store_vote' = store_vote,
@@ -155,11 +166,11 @@ module tests {
         replica_state' = replica_state,
     }
 
-     action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool = 
-        on_vote_notarize(id, view, block,  Set(notarize(view, src, block)))  
+     action replica_receives_notarize_vote(id: ReplicaId, proposal: Proposal, src: ReplicaId): bool =
+        on_vote_notarize(id, proposal,  Set(notarize(proposal, src)))
 
-    action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool = 
-        on_vote_nullify(id, view, Set(nullify(view, src)))    
+    action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool =
+        on_vote_nullify(id, view, Set(nullify(view, src)))
 
     action unchanged_all = all {
         sent_proposal' = sent_proposal,
