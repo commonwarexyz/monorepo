@@ -2586,7 +2586,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::tests::{corrupt_page, run_contiguous_tests};
+    use crate::journal::{contiguous::tests::run_contiguous_tests, test_utils::corrupt_page};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,

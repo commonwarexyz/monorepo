@@ -1747,7 +1747,7 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::{Contiguous as _, tests::corrupt_page};
+    use crate::journal::{contiguous::Contiguous as _, test_utils::corrupt_page};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;

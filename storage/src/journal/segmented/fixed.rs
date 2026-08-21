@@ -73,23 +73,33 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
 
-        // Repair any blobs with trailing bytes (incomplete items from crash)
+        // `Writer::new` finds a blob's size by scanning backward from its last valid page, so a
+        // later valid page can hide an earlier torn one. Before trimming a non-item-aligned tail,
+        // find the contiguous valid prefix: the item boundary may lie inside the torn page, which
+        // `Writer::resize` would have to read to preserve its partial contents.
         let sections: Vec<_> = manager.sections().collect();
         for section in sections {
             let size = manager.size(section)?;
-            if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-                let valid_size = size - (size % Self::CHUNK_SIZE_U64);
-                warn!(
-                    section,
-                    invalid_size = size,
-                    new_size = valid_size,
-                    "trailing bytes detected: truncating"
-                );
-                manager.rewind_section(section, valid_size).await?;
-                // Startup repair is exceptional; make it durable immediately so callers do not
-                // need to track repaired sections separately.
-                manager.sync(section).await?;
+            if size.is_multiple_of(Self::CHUNK_SIZE_U64) {
+                continue;
             }
+            let recoverable = manager
+                .get(section)?
+                .expect("listed section is present")
+                .recoverable_prefix_len()
+                .await?;
+            let valid_size = recoverable - (recoverable % Self::CHUNK_SIZE_U64);
+            warn!(
+                section,
+                invalid_size = size,
+                recoverable_size = recoverable,
+                new_size = valid_size,
+                "invalid journal tail detected: truncating"
+            );
+            manager.rewind_section(section, valid_size).await?;
+            // Startup repair is exceptional; make it durable immediately so callers do not
+            // need to track repaired sections separately.
+            manager.sync(section).await?;
         }
 
         Ok(Self {
@@ -593,11 +603,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::test_utils::corrupt_page;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
-        buffer::paged::CacheRef,
+        buffer::paged::{CacheRef, Writer},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
@@ -1550,6 +1561,63 @@ mod tests {
             }
 
             journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_validates_pages_before_trailing_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const LOGICAL_PAGE_SIZE: u64 = 5;
+            const SECTION: u64 = 0;
+
+            let cfg = Config {
+                partition: "segmented-fixed-validate-before-tail-trim".into(),
+                page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(LOGICAL_PAGE_SIZE as u16),
+                    NZUsize!(4),
+                ),
+                write_buffer: NZUsize!(128),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for value in [11u64, 22, 33, 44] {
+                (journal, _) = journal.append(SECTION, &value).await.unwrap();
+            }
+            journal = journal.sync_all().await.unwrap();
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&cfg.partition, &SECTION.to_be_bytes())
+                .await
+                .unwrap();
+            let mut writer = Writer::new(blob, size, 128, cfg.page_cache.clone())
+                .await
+                .unwrap();
+            writer.resize(30).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            // Five-byte integrity pages crossed by eight-byte journal items:
+            //
+            // pages: [0..5) [5..10) [10..15) [15..20) [20..25) [25..30)
+            // state:    ok      ok       ok       ok       torn      ok
+            // items: [0......8) [8.......16) [16......24) [24..30 tail)
+            //
+            // Backward sizing stops at valid page 5 and reports 30 logical bytes. Item alignment
+            // alone selects 24, inside torn page 4, which `Writer::resize` cannot preserve.
+            // Forward page validation finds 20 contiguous bytes and selects safe item boundary 16.
+            corrupt_page(&context, &cfg.partition, SECTION, 4, LOGICAL_PAGE_SIZE).await;
+
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.section_len(SECTION).unwrap(), 2);
+            assert_eq!(journal.get(SECTION, 0).await.unwrap(), 11);
+            assert_eq!(journal.get(SECTION, 1).await.unwrap(), 22);
+            journal.destroy().await.unwrap();
         });
     }
 

@@ -410,11 +410,50 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         read_options: ReadOptions,
     ) -> Result<Replay<E, V>, Error> {
         let mut sections = VecDeque::new();
-        for (&section, blob) in self.0.manager.sections_from(start_section) {
-            if section == start_section && start_offset > blob.size() {
+        let section_ids: Vec<_> = self
+            .0
+            .manager
+            .sections()
+            .filter(|&section| section >= start_section)
+            .collect();
+        for section in section_ids {
+            // Constructing the reader flushes accepted writes so the page-prefix scan observes
+            // both reopened data and live buffered appends. The backward sizing performed by
+            // `Writer::new` cannot detect a torn page followed by a valid one, while frame replay
+            // may prefetch both pages and expose neither. Repair the page prefix first, then let
+            // frame replay align a cut through an item to the preceding complete frame.
+            let (reader, size, recoverable) = {
+                let blob = self
+                    .0
+                    .manager
+                    .get_mut(section)
+                    .expect("listed section is present");
+                let reader = blob.replay(buffer, read_options).await?;
+                let size = blob.size();
+                let recoverable = blob.recoverable_prefix_len().await?;
+                (reader, size, recoverable)
+            };
+            let reader = if recoverable < size {
+                warn!(
+                    section,
+                    invalid_size = size,
+                    new_size = recoverable,
+                    "torn page detected: truncating"
+                );
+                drop(reader);
+                repair_blob(&mut self, section, recoverable).await?;
+                self.0
+                    .manager
+                    .get_mut(section)
+                    .expect("repaired section is present")
+                    .replay(buffer, read_options)
+                    .await?
+            } else {
+                reader
+            };
+            if section == start_section && start_offset > reader.blob_size() {
                 return Err(Error::ItemOutOfRange(start_offset));
             }
-            let reader = blob.replay(buffer, read_options).await?;
             let skip_bytes = if section == start_section {
                 start_offset
             } else {
@@ -798,6 +837,7 @@ async fn repair_blob<E: Storage + Metrics, V: Codec>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::test_utils::corrupt_page;
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -1812,6 +1852,65 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             assert_eq!(blob_size, 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_variable_replay_repairs_torn_interior_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const LOGICAL_PAGE_SIZE: u64 = 64;
+            const SECTION: u64 = 0;
+
+            let cfg = Config {
+                partition: "segmented-variable-torn-interior".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(LOGICAL_PAGE_SIZE as u16),
+                    NZUsize!(4),
+                ),
+                write_buffer: NZUsize!(256),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..15u64 {
+                let offset;
+                (journal, offset, _) = journal.append(SECTION, &value).await.unwrap();
+                assert_eq!(offset, value * 9);
+            }
+            journal = journal.sync_all().await.unwrap();
+            drop(journal);
+
+            // Fifteen nine-byte frames occupy 135 bytes. Pages 0 and 2 remain valid while page 1
+            // is torn, so backward sizing reports the full tail. Forward page validation must
+            // first truncate to 64 bytes; frame replay can then retain the seven complete frames
+            // ending at byte 63 and safely discard the one-byte frame prefix at the page boundary.
+            // The replay buffer spans all three pages, proving recovery does not lose page 0 when
+            // a prefetched later page fails validation.
+            corrupt_page(&context, &cfg.partition, SECTION, 1, LOGICAL_PAGE_SIZE).await;
+
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            let mut replay = journal
+                .replay(SECTION, 0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            let mut values = Vec::new();
+            while let Some(result) = replay.next().await {
+                let (section, offset, _, value) = result.unwrap();
+                assert_eq!(section, SECTION);
+                assert_eq!(offset, value * 9);
+                values.push(value);
+            }
+            assert_eq!(values, (0..7).collect::<Vec<_>>());
+
+            let journal = replay.finish().unwrap();
+            assert_eq!(journal.size(SECTION).unwrap(), 63);
+            journal.destroy().await.unwrap();
         });
     }
 

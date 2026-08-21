@@ -4,7 +4,7 @@ use super::{Contiguous, Many, fixed, variable};
 use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as _, ReadOptions, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
+    ReadOptions, Runner as _, Spawner as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs},
@@ -16,38 +16,6 @@ use std::{
     future::Future,
     sync::atomic::{AtomicUsize, Ordering},
 };
-
-/// Flip one byte inside physical page `page` of `blob`, leaving every other page valid. Models
-/// a torn interior page: a crash during an in-flight fsync can lose an interior page while later
-/// pages persist. Physical pages are the logical page plus the 12-byte checksum record.
-pub(super) async fn corrupt_page(
-    context: &deterministic::Context,
-    partition: &str,
-    blob: u64,
-    page: u64,
-    logical_page_size: u64,
-) {
-    let physical_page_size = logical_page_size + 12;
-    let offset = page * physical_page_size + 5;
-    let (blob, size) = context.open(partition, &blob.to_be_bytes()).await.unwrap();
-    assert!(
-        offset < size - physical_page_size,
-        "corruption target must be an interior page"
-    );
-    let byte = blob
-        .read_at(offset, 1, ReadOptions::default())
-        .await
-        .unwrap()
-        .coalesce();
-    blob.write_at(
-        offset,
-        vec![byte.as_ref()[0] ^ 0xFF],
-        WriteOptions::default(),
-    )
-    .await
-    .unwrap();
-    blob.sync().await.unwrap();
-}
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.
 ///
