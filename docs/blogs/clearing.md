@@ -381,7 +381,7 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
 ```
 
 ::: {.image-caption}
-The operator prepares the roots, then deals the evidence into validator-specific pieces. Each validator seals its dealing by checking and retaining those pieces before signing the commitment. A receipt holder with evidence of fraud can dispute the certified commitment with a challenge that the chain checks.
+Figure 4: The operator prepares the roots, then deals the evidence into validator-specific pieces. Each validator seals its dealing by checking and retaining those pieces before signing the commitment. A receipt holder with evidence of fraud can dispute the certified commitment with a challenge that the chain checks.
 :::
 
 ```{=html}
@@ -389,7 +389,7 @@ The operator prepares the roots, then deals the evidence into validator-specific
 ```
 
 ::: {.image-caption}
-Figure 4: These are four measured profiles, not an interpolation. Points are central estimates, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the receive shards on each credited account from $h=1$ to $h=512$.
+Figure 5: These are four measured profiles, not an interpolation. Points are central estimates, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the receive shards on each credited account from $h=1$ to $h=512$.
 :::
 
 Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated shard leaves and signatures behind each credited row.
@@ -405,7 +405,7 @@ This fixture queues no withdrawals and no full closes, whose re-check and row op
 ```
 
 ::: {.image-caption}
-Figure 5: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The offchain evidence (left) depends on $A$ and $h$: shards move the million-account evidence by only $1.2\times$ but the sparse evidence by $46\times$. The certified commitment (right) stays 101 bytes across profiles.
+Figure 6: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The offchain evidence (left) depends on $A$ and $h$: shards move the million-account evidence by only $1.2\times$ but the sparse evidence by $46\times$. The certified commitment (right) stays 101 bytes across profiles.
 :::
 
 ## A Bajillion Payments, One Settlement

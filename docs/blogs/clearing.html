@@ -713,16 +713,16 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>The operator prepares the roots, then deals the evidence into
-        validator-specific pieces. Each validator seals its dealing by
-        checking and retaining those pieces before signing the
-        commitment. A receipt holder with evidence of fraud can dispute
-        the certified commitment with a challenge that the chain
-        checks.</p>
+        <p>Figure 4: The operator prepares the roots, then deals the
+        evidence into validator-specific pieces. Each validator seals
+        its dealing by checking and retaining those pieces before
+        signing the commitment. A receipt holder with evidence of fraud
+        can dispute the certified commitment with a challenge that the
+        chain checks.</p>
         </div>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show benchmark latency for preparing the roots, dealing the evidence into pieces, and sealing the largest of the 100 validator dealings. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
         <div class="image-caption">
-        <p>Figure 4: These are four measured profiles, not an
+        <p>Figure 5: These are four measured profiles, not an
         interpolation. Points are central estimates, and each panel has
         its own millisecond scale. Blue holds <span
         class="math inline">A=1{,}024</span> and green holds <span
@@ -756,7 +756,7 @@ O’Grady</a></div>
         verifies two signatures and two openings.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows offchain evidence bytes per payment for the four A-by-h profiles; the right shows the 101-byte certified commitment. Every line falls as 1/T.">
         <div class="image-caption">
-        <p>Figure 5: Each panel divides fixed per-profile bytes from the
+        <p>Figure 6: Each panel divides fixed per-profile bytes from the
         table by <span class="math inline">T</span>, so every line falls
         exactly as <span class="math inline">1/T</span>. The offchain
         evidence (left) depends on <span class="math inline">A</span>
