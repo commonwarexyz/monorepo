@@ -43,6 +43,15 @@ struct Certification<V> {
     batchable: bool,
     /// Progress toward a certificate.
     state: State<V>,
+    /// The number of verified votes present when assembly last returned `None`.
+    /// Zero means assembly has never been attempted. Used to gate retry attempts:
+    /// `try_complete` only surrenders votes again once the verified set has grown
+    /// beyond this mark, preventing redundant offloads between new arrivals.
+    assembly_failed_at: usize,
+    /// Pending votes rescued from the `Incomplete` state before `try_complete`
+    /// calls `complete()`. Restored by `revert_complete` so that votes which
+    /// had not yet been verified at the time of a failed assembly are not lost.
+    saved_pending: Vec<V>,
 }
 
 /// The state of a [Certification].
@@ -68,6 +77,8 @@ impl<V> Certification<V> {
                 pending: Vec::new(),
                 verified: Vec::new(),
             },
+            assembly_failed_at: 0,
+            saved_pending: Vec::new(),
         }
     }
 
@@ -101,8 +112,16 @@ impl<V> Certification<V> {
     const fn should_verify(&self) -> bool {
         match &self.state {
             State::Incomplete { pending, verified } => {
-                !pending.is_empty()
-                    && verified.len() < self.quorum
+                if pending.is_empty() {
+                    return false;
+                }
+                // After a failed assembly the scheme needs more share-weight than
+                // the participant-count quorum guarantees. Keep verifying so that
+                // additional high-weight signers can push the total over the threshold.
+                if self.assembly_failed_at != 0 {
+                    return true;
+                }
+                verified.len() < self.quorum
                     && (!self.batchable || verified.len() + pending.len() >= self.quorum)
             }
             State::Complete => false,
@@ -143,17 +162,48 @@ impl<V> Certification<V> {
         let State::Incomplete { verified, .. } = &mut self.state else {
             return None;
         };
-        if verified.len() < self.quorum {
+        // After a failed assembly attempt we re-try only when the verified set has
+        // grown beyond the count present at the last failure, preventing redundant
+        // offloads on duplicate messages.
+        if self.assembly_failed_at != 0 {
+            if verified.len() <= self.assembly_failed_at {
+                return None;
+            }
+        } else if verified.len() < self.quorum {
+            return None;
+        }
+        if verified.is_empty() {
             return None;
         }
         let votes = mem::take(verified);
+        // Rescue any pending (not-yet-verified) votes before complete() drops them.
+        // They are restored by revert_complete if assembly returns None.
+        if let State::Incomplete { pending, .. } = &mut self.state {
+            self.saved_pending = mem::take(pending);
+        }
         self.complete();
         Some(votes)
+    }
+
+    /// Restores verified and pending votes after a failed assembly and records
+    /// the verified count at failure time so that `try_complete` can avoid
+    /// redundant retries.
+    /// so that `should_verify` continues past the participant-count quorum.
+    fn revert_complete(&mut self, votes: Vec<V>) {
+        // Reset from Complete (set by try_complete) back to Incomplete so that
+        // further votes can accumulate and assembly can be retried.
+        let failed_at = votes.len();
+        self.state = State::Incomplete {
+            pending: mem::take(&mut self.saved_pending),
+            verified: votes,
+        };
+        self.assembly_failed_at = failed_at;
     }
 
     /// Completes, dropping all buffered votes.
     fn complete(&mut self) {
         self.state = State::Complete;
+        self.saved_pending = Vec::new();
     }
 
     /// Returns true if a certificate exists.
@@ -166,7 +216,14 @@ impl<V> Certification<V> {
         if let State::Incomplete { pending, verified } = &mut self.state {
             pending.retain(|v| f(v));
             verified.retain(|v| f(v));
+            // If retain shrank the verified set at or below the failure
+            // watermark, the mark is stale; reset it so try_complete can
+            // attempt assembly with the filtered set.
+            if self.assembly_failed_at > 0 && verified.len() <= self.assembly_failed_at {
+                self.assembly_failed_at = 0;
+            }
         }
+        self.saved_pending.retain(|v| f(v));
     }
 }
 
@@ -320,12 +377,17 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 view = self.round.view().traced()
             );
             let scheme = Arc::clone(&self.scheme);
-            let notarization = offload(span, strategy, move |strategy| {
+            let backup = notarizes.clone();
+            let result = offload(span, strategy, move |strategy| {
                 Notarization::from_owned_notarizes(scheme.as_ref(), notarizes, &strategy)
-                    .expect("verified notarize quorum must assemble")
             })
             .await;
-            return Some(Certificate::Notarization(notarization));
+            if let Some(notarization) = result {
+                return Some(Certificate::Notarization(notarization));
+            }
+            // Assembly returned None: participant-count quorum met but share-weight
+            // threshold not reached. Restore votes; keep accumulating.
+            self.notarize.revert_complete(backup);
         }
 
         if let Some(nullifies) = self.nullify.try_complete() {
@@ -335,12 +397,15 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 view = self.round.view().traced()
             );
             let scheme = Arc::clone(&self.scheme);
-            let nullification = offload(span, strategy, move |strategy| {
+            let backup = nullifies.clone();
+            let result = offload(span, strategy, move |strategy| {
                 Nullification::from_owned_nullifies(scheme.as_ref(), nullifies, &strategy)
-                    .expect("verified nullify quorum must assemble")
             })
             .await;
-            return Some(Certificate::Nullification(nullification));
+            if let Some(nullification) = result {
+                return Some(Certificate::Nullification(nullification));
+            }
+            self.nullify.revert_complete(backup);
         }
 
         if let Some(finalizes) = self.finalize.try_complete() {
@@ -350,12 +415,15 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 view = self.round.view().traced()
             );
             let scheme = Arc::clone(&self.scheme);
-            let finalization = offload(span, strategy, move |strategy| {
+            let backup = finalizes.clone();
+            let result = offload(span, strategy, move |strategy| {
                 Finalization::from_owned_finalizes(scheme.as_ref(), finalizes, &strategy)
-                    .expect("verified finalize quorum must assemble")
             })
             .await;
-            return Some(Certificate::Finalization(finalization));
+            if let Some(finalization) = result {
+                return Some(Certificate::Finalization(finalization));
+            }
+            self.finalize.revert_complete(backup);
         }
 
         None
@@ -2260,6 +2328,87 @@ mod tests {
 
     /// Constructible kinds drain in certificate order, exercising local
     /// assembly for every kind.
+
+    /// After a failed certificate assembly, verified votes must be restored and
+    /// `should_verify` must re-open so that a later higher-weight signer can tip
+    /// the aggregate over the scheme's assembly threshold.
+    ///
+    /// Regression test for issue #4409 (stall path): the batcher's participant-
+    /// count quorum (2) is intentionally smaller than the BLS threshold scheme's
+    /// assembly requirement (>= 3 of 4 signers), which previously caused all
+    /// subsequent votes to be silently dropped once the state was marked Complete.
+    #[test_async]
+    async fn test_construct_retries_after_failed_assembly() {
+        let mut rng = test_rng();
+        // 4-participant BLS threshold scheme: assembly requires >= 3 valid partial
+        // signatures even though the batcher is configured with quorum = 2.
+        let Fixture { schemes, .. } =
+            bls12381_threshold_std::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), 2);
+
+        let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
+        verifier.set_leader(leader_notarize.signer(), Some(&leader_notarize));
+
+        // Pre-verify 2 votes - satisfies quorum = 2 but not the BLS assembly
+        // threshold (needs >= 3 partial sigs).
+        for scheme in schemes.iter().take(2) {
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
+                true,
+            );
+        }
+
+        // First attempt: assembly fails because only 2 of the required 3 partial
+        // sigs are present. Votes must be restored, not dropped.
+        assert!(
+            verifier
+                .try_construct_certificate(&Sequential)
+                .await
+                .is_none(),
+            "assembly must return None when threshold is unmet"
+        );
+        assert_eq!(
+            verifier.notarize.verified().len(),
+            2,
+            "verified votes must be restored after a failed assembly"
+        );
+        assert!(
+            !verifier.notarize.is_complete(),
+            "certification must not be Complete after a failed assembly"
+        );
+        assert!(
+            verifier.notarize.assembly_failed_at != 0,
+            "assembly_failed_at must be set so should_verify re-opens"
+        );
+
+        // A third signer's vote arrives in pending. `should_verify` must return
+        // true even though verified.len() (2) >= quorum (2), because
+        // `assembly_failed` is set.
+        verifier.add(
+            Vote::Notarize(create_notarize(&schemes[2], round, View::new(0), 1)),
+            false,
+        );
+        assert!(
+            verifier.notarize.should_verify(),
+            "should_verify must re-open after failed assembly when pending votes exist"
+        );
+
+        // Batch-verify the pending vote so it joins the verified set.
+        verifier
+            .try_verify_notarizes(&mut rng, &Sequential)
+            .await;
+
+        // Second attempt: 3 partial sigs now available - assembly succeeds.
+        assert!(
+            matches!(
+                verifier.try_construct_certificate(&Sequential).await,
+                Some(Certificate::Notarization(_))
+            ),
+            "certificate must be produced once the assembly threshold is met"
+        );
+    }
+
     #[test_async]
     async fn test_construct_drains_kinds_in_order() {
         let mut rng = test_rng();
