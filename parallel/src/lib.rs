@@ -85,6 +85,7 @@ commonware_macros::stability_scope!(BETA {
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
                 sync::Arc,
+                time::{Duration, Instant},
             };
 
             mod policy;
@@ -130,16 +131,26 @@ commonware_macros::stability_scope!(BETA {
         where
             Self: Sized;
 
-        /// Submit one CPU-bound job to this strategy.
+        /// Submit one CPU-bound job to this strategy, running it inline on the calling task or
+        /// offloading it to the pool based on the measured cost of each path.
         ///
-        /// The returned future resolves when the submitted job completes, but blocking on external
+        /// `len` is a size hint used only to group similar calls. It has no ordering or
+        /// correctness meaning. Jobs too small to amortize the pool hand-off run inline. To force
+        /// an unconditional hand-off, submit through [`manual`](Self::manual).
+        ///
+        /// The returned future resolves when the job completes. Blocking on external
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
         /// When the polling thread itself belongs to the strategy's execution resources (e.g. a
         /// runtime whose executor thread is registered as a pool worker), the job (and other
         /// pending work) may be executed inline on that thread rather than waited on.
         ///
         /// If the job panics, the panic is propagated to the caller; it never aborts the process.
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        #[track_caller]
+        fn spawn<F, T>(
+            &self,
+            len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static;
@@ -614,13 +625,17 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        fn spawn<F, T>(
+            &self,
+            len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
             let s = self.clone();
-            self.strategy.spawn(|_| f(s))
+            self.strategy.spawn(len, |_| f(s))
         }
 
         #[track_caller]
@@ -797,7 +812,11 @@ commonware_macros::stability_scope!(BETA {
             Manual::new(Self, NonZeroUsize::new(1).unwrap())
         }
 
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        fn spawn<F, T>(
+            &self,
+            _len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
@@ -1016,45 +1035,103 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             }
         }
 
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        #[track_caller]
+        fn spawn<F, T>(
+            &self,
+            len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
-            if self.thread_pool.current_num_threads() <= 1 {
-                return Either::Left(future::ready(f(self.clone())));
+            let threads = self.thread_pool.current_num_threads();
+            let caller = Location::caller();
+
+            // One worker cannot overlap (always inline); a manual strategy has no policy (keep
+            // spawn's unconditional offload). Otherwise let the policy decide.
+            let (offload_it, measure) = if threads <= 1 {
+                (false, false)
+            } else {
+                self.policy.as_ref().map_or((true, false), |policy| {
+                    match policy.choose_spawn(caller, len, threads) {
+                        (policy::SpawnExecution::Inline, measure) => (false, measure),
+                        (policy::SpawnExecution::Offload, measure) => (true, measure),
+                    }
+                })
+            };
+
+            if !offload_it {
+                // Inline: run on the calling task and hand back a ready future.
+                let start = measure.then(Instant::now);
+                let result = f(self.clone());
+                if let (Some(start), Some(policy)) = (start, self.policy.as_ref()) {
+                    policy.record_spawn(
+                        caller,
+                        len,
+                        threads,
+                        policy::SpawnExecution::Inline,
+                        start.elapsed(),
+                        None,
+                    );
+                }
+                return Either::Left(future::ready(result));
             }
 
+            // Offload: hand the job to the pool. The worker times the job's own wall so we can
+            // estimate the inline cost; the returned future times the residual wait once joined.
+            let setup_start = measure.then(Instant::now);
             let (tx, mut rx) = oneshot::channel();
             let s = self.clone();
             let pool = self.thread_pool.clone();
             self.thread_pool.spawn(move || {
-                // Catch the panic so a panicking job propagates to the awaiting task rather than
-                // aborting the process (rayon aborts on an uncaught panic in a spawned job).
+                let job_start = measure.then(Instant::now);
                 let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
-                let _ = tx.send(result);
+                let job_wall = job_start.map(|start| start.elapsed());
+                let _ = tx.send((result, job_wall));
+            });
+            let recorder = measure.then(|| {
+                (
+                    self.policy.clone(),
+                    caller,
+                    len,
+                    threads,
+                    setup_start.map_or(Duration::ZERO, |start| start.elapsed()),
+                )
             });
             Either::Right(async move {
-                // When the polling thread is itself a member of the pool, waiting on the channel
-                // could park the only worker able to run the job. Execute pending pool work inline
-                // until the job completes or another worker takes over. `yield_now` returns `None`
-                // when this thread is not a pool member, so external callers fall through to the
-                // channel immediately.
-                loop {
-                    if let Ok(Some(result)) = rx.try_recv() {
-                        return match result {
-                            Ok(value) => value,
-                            Err(payload) => panic::resume_unwind(payload),
-                        };
+                // Time from the caller's first poll (when it joins) to the result: the part of the
+                // job not hidden behind the caller's interleaved work.
+                let poll_start = Instant::now();
+                let (result, job_wall) = loop {
+                    if let Ok(Some(payload)) = rx.try_recv() {
+                        break payload;
                     }
+
+                    // If the polling thread is a pool member, run pending pool work inline rather
+                    // than parking the only worker able to finish the job.
                     if !matches!(pool.yield_now(), Some(Yield::Executed)) {
-                        break;
+                        break rx.await
+                            .unwrap_or_else(|_| panic!("strategy job dropped before completion"));
                     }
-                }
-                match rx.await {
-                    Ok(Ok(value)) => value,
-                    Ok(Err(payload)) => panic::resume_unwind(payload),
-                    Err(_) => panic!("strategy job dropped before completion"),
+                };
+                match result {
+                    Ok(value) => {
+                        // Record successful runs only, matching the inline arm: a panicked
+                        // job's wall time says nothing about the job size.
+                        if let Some((Some(policy), caller, len, threads, setup)) = recorder {
+                            policy.record_spawn(
+                                caller,
+                                len,
+                                threads,
+                                policy::SpawnExecution::Offload,
+                                setup.saturating_add(poll_start.elapsed()),
+                                job_wall,
+                            );
+                        }
+                        value
+                    }
+                    Err(payload) => panic::resume_unwind(payload),
                 }
             })
         }
@@ -1272,6 +1349,53 @@ mod test {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
     }
 
+    /// Call `spawn` with this helper so the policy entry is keyed by the helper's call
+    /// site (both `track_caller` locations resolve to the same line).
+    #[track_caller]
+    fn spawn_flagged(
+        strategy: &Rayon,
+        panics: bool,
+    ) -> (
+        &'static std::panic::Location<'static>,
+        impl core::future::Future<Output = usize> + Send + 'static,
+    ) {
+        (
+            std::panic::Location::caller(),
+            strategy.spawn(64, move |_| {
+                if panics {
+                    panic!("job panic");
+                }
+                7
+            }),
+        )
+    }
+
+    fn spawn_recorded(strategy: &Rayon, loc: &'static std::panic::Location<'static>) -> bool {
+        let parallelism = strategy.manual().parallelism();
+        strategy
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.spawn_recorded(loc, 64, parallelism))
+    }
+
+    /// A panicking offloaded job must not update the spawn policy: its wall time says
+    /// nothing about the job size and would train the policy toward inlining.
+    #[test]
+    fn spawn_panic_records_nothing() {
+        let strategy = parallel_strategy();
+
+        let (loc, job) = spawn_flagged(&strategy, true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures::executor::block_on(job)
+        }));
+        assert!(result.is_err());
+        assert!(!spawn_recorded(&strategy, loc));
+
+        let (loc, job) = spawn_flagged(&strategy, false);
+        assert_eq!(futures::executor::block_on(job), 7);
+        assert!(spawn_recorded(&strategy, loc));
+    }
+
     fn policy_len(strategy: &Rayon) -> usize {
         strategy.policy.as_ref().map_or(0, |policy| policy.len())
     }
@@ -1325,7 +1449,7 @@ mod test {
         let strategy = Rayon::with_pool(Arc::new(pool));
 
         let result = strategy
-            .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+            .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
             .now_or_never()
             .expect("spawn should complete on first poll via the yield loop");
         assert_eq!(result, vec![1, 2]);
@@ -1489,7 +1613,7 @@ mod test {
 
     #[test]
     fn sequential_spawn_runs_job() {
-        let result = futures::executor::block_on(Sequential.spawn(|_| 7));
+        let result = futures::executor::block_on(Sequential.spawn(1, |_| 7));
 
         assert_eq!(result, 7);
     }
@@ -1498,7 +1622,7 @@ mod test {
     fn rayon_spawn_runs_job_on_pool() {
         let strategy = parallel_strategy();
 
-        let result = futures::executor::block_on(strategy.spawn(|_| {
+        let result = futures::executor::block_on(strategy.spawn(1, |_| {
             assert!(rayon::current_thread_index().is_some());
             7
         }));
@@ -1519,7 +1643,7 @@ mod test {
 
         assert_eq!(strategy.manual().parallelism(), 4);
 
-        let result = strategy.spawn(|_| 7).now_or_never();
+        let result = strategy.spawn(1, |_| 7).now_or_never();
 
         assert_eq!(result, Some(7));
         assert_eq!(policy_len(&strategy), 0);
@@ -1531,13 +1655,13 @@ mod test {
         // A panic on a pool worker must surface at the await point, not abort the process.
         let strategy = parallel_strategy();
 
-        let _: () = futures::executor::block_on(strategy.spawn(|_| panic!("boom")));
+        let _: () = futures::executor::block_on(strategy.spawn(1, |_| panic!("boom")));
     }
 
     #[test]
     #[should_panic(expected = "boom")]
     fn sequential_spawn_propagates_job_panic() {
-        let _: () = futures::executor::block_on(Sequential.spawn(|_| panic!("boom")));
+        let _: () = futures::executor::block_on(Sequential.spawn(1, |_| panic!("boom")));
     }
 
     proptest! {

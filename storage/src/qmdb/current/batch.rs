@@ -770,7 +770,7 @@ where
     let grafted_tree = Arc::clone(grafted_tree);
     strategy
         .clone()
-        .spawn(move |strategy| {
+        .spawn(graft_inputs.len(), move |strategy| {
             let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
             for (chunk_idx, digest) in new_leaves {
                 if chunk_idx < old_grafted_leaves {

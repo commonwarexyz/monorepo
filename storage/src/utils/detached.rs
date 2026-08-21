@@ -18,7 +18,9 @@ pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<(
     for _ in 0..workers {
         let started_tx = started_tx.clone();
         let release_rx = Arc::clone(&release_rx);
-        drop(strategy.spawn(move |_| {
+        // The job blocks until released, so it must never run inline on the calling
+        // task: submit through `manual()` for an unconditional hand-off.
+        drop(strategy.manual().spawn(1, move |_| {
             started_tx.send(()).unwrap();
             let _ = release_rx.lock().recv();
         }));
