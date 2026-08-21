@@ -151,7 +151,7 @@ commonware_macros::stability_scope!(BETA {
             &self,
             len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<Self, F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static;
@@ -630,7 +630,7 @@ commonware_macros::stability_scope!(BETA {
             &self,
             len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<S, F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
@@ -817,7 +817,7 @@ commonware_macros::stability_scope!(BETA {
             &self,
             _len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
@@ -1041,7 +1041,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             &self,
             len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,

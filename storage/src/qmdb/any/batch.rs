@@ -366,6 +366,74 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
 type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 
+/// The output of [`Merkleizer::finish_pending`]: the journal merkleize job already in
+/// flight on the strategy, plus everything else `finish` computes. Lets a caller overlap
+/// independent work with the job before sealing the batch via [`PendingMerkleize::seal`].
+#[allow(clippy::type_complexity)]
+pub(crate) struct PendingMerkleize<F: Family, H: Hasher, U: update::Update, S: Strategy>
+where
+    Operation<F, U>: Send + Sync,
+{
+    /// The in-flight journal merkleize job.
+    job: core::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        (
+                            Arc<authenticated::MerkleizedBatch<F, H::Digest, Operation<F, U>, S>>,
+                            H::Digest,
+                        ),
+                        crate::merkle::Error<F>,
+                    >,
+                > + Send,
+        >,
+    >,
+    /// The unmerkleized journal batch's parent, for reading pre-batch tree nodes while
+    /// the job runs.
+    pub(crate) journal_parent:
+        Option<Arc<authenticated::MerkleizedBatch<F, H::Digest, Operation<F, U>, S>>>,
+    pub(crate) diff: Arc<DiffVec<U::Key, F, U::Value>>,
+    parent: Option<Weak<MerkleizedBatch<F, H::Digest, U, S>>>,
+    total_active_keys: usize,
+    pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
+    ancestor_base_locs: AncestorBaseLocs<U::Key, F>,
+    ancestors: Vec<batch_chain::AncestorBounds<F, H::Digest>>,
+    base_state: Commitment<F, H::Digest>,
+    db_state: Commitment<F, H::Digest>,
+    /// Location of this batch's CommitFloor operation (the tip is one past it).
+    pub(crate) commit_loc: Location<F>,
+    pub(crate) floor: Location<F>,
+    /// Operations this batch appends, including the CommitFloor.
+    pub(crate) batch_len: usize,
+}
+
+impl<F: Family, H: Hasher, U: update::Update, S: Strategy> PendingMerkleize<F, H, U, S>
+where
+    Operation<F, U>: Send + Sync,
+{
+    /// Await the journal merkleize job and assemble the sealed batch.
+    pub(crate) async fn seal(
+        self,
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>> {
+        let (journal, root) = self.job.await?;
+        Ok(Arc::new(MerkleizedBatch {
+            journal_batch: journal,
+            diff: self.diff,
+            parent: self.parent,
+            total_active_keys: self.total_active_keys,
+            ancestor_diffs: self.ancestor_diffs,
+            ancestor_base_locs: self.ancestor_base_locs,
+            bounds: batch_chain::Bounds {
+                base: self.base_state,
+                db: self.db_state,
+                tip: Commitment::new(self.commit_loc + 1, root),
+                ancestors: self.ancestors,
+                inactivity_floor: self.floor,
+            },
+        }))
+    }
+}
+
 /// Batch-infrastructure state used during merkleization.
 ///
 /// Created by [`UnmerkleizedBatch::into_parts()`], which separates the pending mutations
@@ -1050,7 +1118,10 @@ where
     /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
     /// caller gathered and read ahead of time, consumed by the raise before scanning live.
     #[allow(clippy::too_many_arguments)]
-    async fn finish<E, C, I, const N: usize>(
+    /// Complete merkleization through the journal job's submission: the returned
+    /// [`PendingMerkleize`] carries the in-flight job so the caller can overlap
+    /// independent work with it before sealing.
+    async fn finish_pending<E, C, I, const N: usize>(
         self,
         mut ops: Vec<Operation<F, U>>,
         mut diff: DiffVec<U::Key, F, U::Value>,
@@ -1061,7 +1132,7 @@ where
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
+    ) -> Result<PendingMerkleize<F, H, U, S>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -1364,12 +1435,14 @@ where
         let leaves = self.base_state.size + ops.len() as u64;
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
-        // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize`).
-        let (journal, root) = db
-            .log
-            .merkleize(self.journal_batch, ops, inactive_peaks)
-            .await?;
+        // Leaf and node hashing dominate merkleization, so submit them as one job on the
+        // strategy instead of occupying the calling task (see `Journal::merkleize_start`).
+        let batch_len = ops.len();
+        let journal_parent = self.journal_batch.parent().cloned();
+        let job = Box::pin(
+            db.log
+                .merkleize_start(self.journal_batch, ops, inactive_peaks),
+        );
         if let Some(job) = diff_merge.take() {
             diff = job.await;
         }
@@ -1403,21 +1476,21 @@ where
             .collect();
 
         assert!(total_active_keys >= 0, "active_keys underflow");
-        Ok(Arc::new(MerkleizedBatch {
-            journal_batch: journal,
+        Ok(PendingMerkleize {
+            job,
+            journal_parent,
             diff: Arc::new(diff),
             parent: self.ancestors.first().map(Arc::downgrade),
             total_active_keys: total_active_keys as usize,
             ancestor_diffs,
             ancestor_base_locs,
-            bounds: batch_chain::Bounds {
-                base: self.base_state,
-                db: self.db_state,
-                tip: Commitment::new(commit_loc + 1, root),
-                ancestors,
-                inactivity_floor: floor,
-            },
-        }))
+            ancestors,
+            base_state: self.base_state,
+            db_state: self.db_state,
+            commit_loc,
+            floor,
+            batch_len,
+        })
     }
 }
 
@@ -2105,6 +2178,33 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        self.merkleize_with_floor_scan_pending(
+            db,
+            metadata,
+            staged_updates,
+            prefetched,
+            fill_candidates,
+        )
+        .await?
+        .seal()
+        .await
+    }
+
+    /// [`Self::merkleize_with_floor_scan`], stopping with the journal merkleize job in
+    /// flight (see [`PendingMerkleize`]).
+    pub(crate) async fn merkleize_with_floor_scan_pending<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+        staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
+        prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
+        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+    ) -> Result<PendingMerkleize<F, H, update::Unordered<K, V>, S>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys.
@@ -2247,7 +2347,7 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(
+        m.finish_pending(
             ops,
             diff,
             superseded_locs,
@@ -2315,6 +2415,26 @@ where
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        self.merkleize_with_floor_scan_pending(db, metadata, staged_updates, fill_candidates)
+            .await?
+            .seal()
+            .await
+    }
+
+    /// [`Self::merkleize_with_floor_scan`], stopping with the journal merkleize job in
+    /// flight (see [`PendingMerkleize`]).
+    pub(crate) async fn merkleize_with_floor_scan_pending<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+        staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
+        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+    ) -> Result<PendingMerkleize<F, H, update::Ordered<K, V>, S>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -2671,7 +2791,7 @@ where
             .collect();
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(
+        m.finish_pending(
             ops,
             diff,
             superseded_locs,
