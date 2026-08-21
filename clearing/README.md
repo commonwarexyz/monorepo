@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/commonware-clearing.svg)](https://crates.io/crates/commonware-clearing)
 [![Docs.rs](https://docs.rs/commonware-clearing/badge.svg)](https://docs.rs/commonware-clearing)
 
-Settle payment records at scale.
+Settle actions at scale.
 
 ## Status
 
