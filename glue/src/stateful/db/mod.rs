@@ -1806,7 +1806,7 @@ where
     result
 }
 
-#[tracing::instrument(name = "stateful.db.apply_or_panic", level = "info", skip_all, fields(index = index))]
+#[tracing::instrument(name = "stateful.db.apply", level = "info", skip_all, fields(index = index))]
 async fn apply<E, T: ManagedDb<E>>(database: T, batch: T::Merkleized, index: Option<usize>) -> T {
     // Mutable apply failures are fatal because the batch may already have been
     // applied to other databases in the same set, leaving partially applied state.
@@ -1822,6 +1822,7 @@ async fn apply<E, T: ManagedDb<E>>(database: T, batch: T::Merkleized, index: Opt
     }
 }
 
+/// Run one database's apply lifecycle under only its own shared writer.
 async fn apply_shared<E, T: ManagedDb<E>>(
     shared: &Shared<T>,
     batch: T::Merkleized,
@@ -1831,6 +1832,7 @@ async fn apply_shared<E, T: ManagedDb<E>>(
     slot.put(apply(database, batch, index).await);
 }
 
+#[tracing::instrument(name = "stateful.db.finalize", level = "info", skip_all, fields(index = index))]
 async fn finalize<E, T: ManagedDb<E>>(database: T, index: Option<usize>) -> (T, Handle<()>) {
     match database.finalize().await {
         Ok(result) => result,
@@ -1844,6 +1846,7 @@ async fn finalize<E, T: ManagedDb<E>>(database: T, index: Option<usize>) -> (T, 
     }
 }
 
+/// Restore the shared database after starting durability, then return its completion handle.
 async fn finalize_shared<E, T: ManagedDb<E>>(
     shared: &Shared<T>,
     index: Option<usize>,
@@ -1872,7 +1875,7 @@ async fn rewind_shared<E, T: ManagedDb<E>>(
     slot.put(rewind(database, target, index).await);
 }
 
-#[tracing::instrument(name = "stateful.db.rewind_or_panic", level = "info", skip_all, fields(index = index))]
+#[tracing::instrument(name = "stateful.db.rewind", level = "info", skip_all, fields(index = index))]
 async fn rewind<E, T: ManagedDb<E>>(database: T, target: T::SyncTarget, index: Option<usize>) -> T {
     // Mutable rewind failures are fatal by design because the database handle
     // may be internally diverged after a failed rewind.
@@ -1888,7 +1891,7 @@ async fn rewind<E, T: ManagedDb<E>>(database: T, target: T::SyncTarget, index: O
     }
 }
 
-#[tracing::instrument(name = "stateful.db.prune_or_panic", level = "info", skip_all, fields(index = index))]
+#[tracing::instrument(name = "stateful.db.prune", level = "info", skip_all, fields(index = index))]
 async fn prune<E, T: ManagedDb<E>>(database: T, target: &T::SyncTarget, index: Option<usize>) -> T {
     // Prune failures are fatal because pruning may already have discarded part
     // of the retained history before the error surfaced.

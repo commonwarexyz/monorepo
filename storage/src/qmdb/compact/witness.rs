@@ -248,6 +248,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
+        // Stage before pruning because a new witness's commit proof needs the unpruned Merkle.
         let verified;
         (self, verified) = self
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
@@ -256,7 +257,11 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Ok(self);
         };
 
+        // Append before pruning and clearing import state so every successful apply has a matching
+        // journal entry.
         (self.journal, _) = self.journal.append(&verified.witness).await?;
+
+        // Publish the applied tip while retaining that it lies outside the durable prefix.
         self.import_pending.store(false, Ordering::Relaxed);
         self.uncommitted = true;
         merkle.prune_to_frontier();

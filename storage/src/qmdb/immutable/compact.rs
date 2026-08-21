@@ -595,6 +595,7 @@ where
     /// # Errors
     ///
     /// Fails if a compact-sync import has not yet been applied to the witness journal.
+    #[tracing::instrument(name = "qmdb.immutable.compact.db.prune", level = "info", skip_all)]
     pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
         self.witness = self.witness.prune(pruning_boundary).await?;
         Ok(self)

@@ -127,6 +127,7 @@ impl Durability {
     }
 }
 
+/// Await the active sync, remaining pending so callers can select unconditionally when none exists.
 async fn sync_completion(sync: &mut Option<Handle<(Height, bool)>>) -> (Height, bool) {
     let Some(sync) = sync else {
         return pending().await;
