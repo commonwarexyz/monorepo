@@ -2293,10 +2293,27 @@ where
 
             // Iterate backwards, repairing blocks as we go.
             while height > gap_start {
-                if let Some(block) = self
+                let parent_block = self
                     .find_block_by_commitment(buffer, parent_commitment)
-                    .await
-                {
+                    .await;
+
+                // Treat a block whose parent height is not contiguous (does not
+                // decrease by exactly one) as missing so that the existing fetch path
+                // requests the correct block from the network. This prevents an infinite
+                // loop when the archive contains corrupted parent pointers.
+                let parent_block = match parent_block {
+                    Some(ref block) if Some(block.height()) != height.previous() => {
+                        warn!(
+                            current = %height,
+                            parent = %block.height(),
+                            "non-contiguous parent height during gap repair, treating as missing"
+                        );
+                        None
+                    }
+                    other => other,
+                };
+
+                if let Some(block) = parent_block {
                     let finalization = self.cache.get_finalization_for(parent_digest).await;
                     let next = (block.height(), block.parent(), V::parent_commitment(&block));
                     let stored;
