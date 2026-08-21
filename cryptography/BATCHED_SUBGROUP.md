@@ -18,8 +18,9 @@ field multiplication is roughly twice as fast on the Apple Silicon parts).
 A decoded curve point can lie outside the prime-order subgroup; using it in a
 pairing or scalar multiplication enables small-subgroup attacks. blst's exact
 per-point check (Scott, [2021/1130](https://eprint.iacr.org/2021/1130), the
-endomorphism test) costs **~22 µs per point**, so a 6000-point batch costs
-~127 ms checked one at a time.
+endomorphism test) costs **~22 µs per point** on the Apple Silicon machine
+(~52 µs on the Xeon), so a 6000-point batch costs ~127 ms (~305 ms) checked
+one at a time.
 
 Every point splits as `P = G + T` with `G` in-subgroup and `T` a "cofactor
 part" in the group of order
@@ -51,8 +52,11 @@ Verified footguns:
 - **Combination count.** 81 combinations = 128.38 bits; 80 = 126.8 —
   insufficient. The code divides by a strict lower bound on `log₂3`.
 - **Coefficient uniformity.** The margin is 0.38 bits. A biased `byte % 3`
-  (max probability 86/256) yields 127.5 bits — below target. The implementation
-  rejection-samples (bytes < 243 → five exact trits); this is load-bearing.
+  (max probability 86/256) yields 127.5 bits — below target. Rejection
+  sampling is load-bearing: the first-generation sampler rejected bytes at or
+  above 243 (five exact trits per accepted byte); the shipping sampler draws
+  whole bucket ids by Lemire rejection on 16-bit values (exactly
+  `floor(2^16 / 3^m)` inputs per id, verified exhaustively in a test).
 - **Odd cofactor required.** An order-2 part `T` has `2T = 0`: escape
   probability 2/3 per combination. BLS12-377 G1 (`2^92 | h`) cannot use this
   scheme as-is.
@@ -128,7 +132,8 @@ lift the cap to `m = 10` (`u16` ids) and make wide rounds pay:
    slot parks there, a point landing on an occupied slot pairs with the
    parked one (the slot empties until the pair's sum re-enters), and pending
    pairs are completed 1024 at a time with one shared inversion. The
-   addition count is exactly `n` minus the number of nonempty buckets — it
+   addition count is at most `n` minus the number of nonempty buckets (fewer
+   when identities or cancellations resolve without arithmetic) — it
    *shrinks* as buckets multiply — and the working set is the slot table,
    not the full point buffer. Slots for upcoming points are software-
    prefetched (their ids are already drawn), which matters once the table
@@ -173,7 +178,7 @@ against seventeen rounds for the first-generation cap.
 
 Speedups in parentheses are vs per-point serial on the same machine. For
 scale: the first-generation engine measured on this same machine reaches only
-4.3× serial at n = 100 000 (1 237 ms) — the wide rounds are a 2.5× improvement
+4.2× serial at n = 100 000 (1 237 ms) — the wide rounds are a 2.5× improvement
 of the batch path itself. Small batches are check-bound (the ~81 exact checks
 on combination outputs are a fixed ~4.4 ms serial floor here), so the ratio
 climbs with n.
@@ -283,7 +288,16 @@ Strategy C with the wide-round engine is implemented in
   that a single bad point at bucket `d * 3^j` is rejected for every digit
   position and value at m = 9;
 - an exhaustive id-uniformity test (all 2^16 sampler inputs, every width:
-  each id produced exactly `floor(2^16 / 3^m)` times);
+  each id produced exactly `floor(2^16 / 3^m)` times) plus a stream-pinning
+  test that `draw_ids` is exactly that sampler over whole RNG buffers;
+- mutation-hardening tests for the two soundness properties no black-box
+  accept/reject test can observe (found by adversarial review): the batched
+  path executes every planned round (an RNG-fill-counting wrapper), and every
+  round's verdict gates acceptance (a scripted RNG builds one accepting round
+  followed by deterministically rejecting ones, separating `all` from `any`);
+- a check that the order-3 points `(0, ±2)` — the only on-curve points
+  sharing the empty-slot sentinel's `x = 0` — flow through parking, doubling,
+  cancellation, and the combine exactly;
 - adversarial batch tests (cancelling bad pair, repeated bad point, one bad
   point in wide batches);
 - `cargo miri` cannot run the module (blst FFI is unsupported by miri); the

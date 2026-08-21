@@ -37,8 +37,8 @@
 //!   at their slot. Pending pairs are completed in chunks, all pairs of a chunk
 //!   sharing one field inversion (Montgomery's trick), about six field
 //!   multiplications per addition. The working set is the slot table, not the
-//!   point buffer, and the addition count — `n` minus the number of nonempty
-//!   buckets — *shrinks* as buckets multiply.
+//!   point buffer, and the addition count — at most `n` minus the number of
+//!   nonempty buckets — *shrinks* as buckets multiply.
 //! - **Digit-peeling combine.** Recovering the `m` combinations by scanning all
 //!   `3^m` sums once per combination would cost `m * 3^m` additions and cap the
 //!   useful width. Instead, the top digit is peeled off: splitting the sums by
@@ -145,7 +145,7 @@ const POINT_COST: usize = 350;
 /// digit-peeling additions each bucket sum feeds.
 const BUCKET_COST: usize = 2600;
 
-/// Cost of one [`G1::in_subgroup`] check (measured ~150-180x a batch-affine
+/// Cost of one [`G1::in_subgroup`] check (measured ~120-150x a batch-affine
 /// addition, depending on the machine).
 const CHECK_COST: usize = 150 * ADD_COST;
 
@@ -209,6 +209,10 @@ fn plan(n: usize, combinations: usize) -> Option<(u32, usize)> {
 /// `rng` must be a cryptographically secure source the prover cannot predict:
 /// the coefficients are the verifier's private randomness, exactly as in a
 /// batched signature check.
+///
+/// A `security` of 0 requests no soundness at all: the batch is accepted
+/// without examining the points (`2^-0 = 1` is satisfied vacuously), so
+/// callers must not derive `security` from untrusted input.
 ///
 /// The independent rounds are run through `strategy`; an adaptive strategy such
 /// as [`commonware_parallel::Rayon`] runs them serially for small inputs and
@@ -282,13 +286,16 @@ fn map_id(value: u16, num_buckets: usize) -> Option<u16> {
     ((scaled & 0xFFFF) >= threshold).then_some((scaled >> 16) as u16)
 }
 
+/// Bytes drawn from the RNG at a time while sampling bucket ids.
+const ID_BUFFER_BYTES: usize = 8192;
+
 /// Draw `n` independent uniform bucket ids in `[0, num_buckets)`.
 fn draw_ids(rng: &mut impl CryptoRng, n: usize, num_buckets: usize) -> Vec<u16> {
     let mut ids = Vec::with_capacity(n);
     if n == 0 {
         return ids;
     }
-    let mut buffer = [0u8; 8192];
+    let mut buffer = [0u8; ID_BUFFER_BYTES];
     loop {
         rng.fill_bytes(&mut buffer);
         for pair in buffer.chunks_exact(2) {
@@ -753,6 +760,138 @@ mod tests {
         }
     }
 
+    /// Counts the RNG buffer draws the batched path performs; each round
+    /// draws at least one id buffer, so fewer fills than planned rounds means
+    /// rounds were silently dropped (rounds * m below the soundness target).
+    struct CountingRng<R> {
+        inner: R,
+        fills: usize,
+    }
+
+    impl<R: rand_core::TryRng<Error = core::convert::Infallible>> rand_core::TryRng
+        for CountingRng<R>
+    {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.inner.try_next_u32()
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.inner.try_next_u64()
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+            self.fills += 1;
+            self.inner.try_fill_bytes(dest)
+        }
+    }
+
+    impl<R: rand_core::TryCryptoRng<Error = core::convert::Infallible>> rand_core::TryCryptoRng
+        for CountingRng<R>
+    {
+    }
+
+    #[test]
+    fn batch_draws_ids_for_every_planned_round() {
+        // Soundness accounting: plan() promises rounds * m >= 81 combinations,
+        // but nothing else observes whether batch_in_g1 actually *runs* that
+        // many rounds — a dropped round silently degrades security below the
+        // target while every accept/reject test still passes. Each round draws
+        // its ids up front with at least one fill_bytes call, so the fill
+        // count lower-bounds the executed rounds.
+        let mut rng = test_rng();
+        let points: Vec<G1> = (0..LARGE).map(|_| in_subgroup_point(&mut rng)).collect();
+        let (_, rounds) = plan(LARGE, combinations_for_security(SECURITY)).unwrap();
+        assert!(rounds >= 2);
+        let mut counting = CountingRng {
+            inner: rng,
+            fills: 0,
+        };
+        assert!(batch_in_g1(&points, SECURITY, &Sequential, &mut counting));
+        assert!(
+            counting.fills >= rounds,
+            "only {} id-buffer draws for {rounds} planned rounds",
+            counting.fills
+        );
+    }
+
+    #[test]
+    fn every_round_verdict_gates_acceptance() {
+        // Script the RNG so round 0 assigns every point bucket id 0 (all
+        // coefficients zero: the round accepts even though the batch holds a
+        // bad point) while every later round assigns bucket id 1 (a nonzero
+        // digit: the round rejects deterministically). A correct AND across
+        // the per-round verdicts rejects the batch; any weaker aggregation
+        // (all -> any) or ignoring later rounds' verdicts accepts it. No
+        // black-box test can produce mixed round verdicts — a bad batch fails
+        // every round except with probability 3^-m — so this is the only way
+        // to observe the fold.
+        use commonware_utils::ScriptedRng;
+        let mut rng = test_rng();
+        let n = LARGE;
+        let (m, rounds) = plan(n, combinations_for_security(SECURITY)).unwrap();
+        let num_buckets = 3usize.pow(m);
+        assert!(rounds >= 2);
+        // One id buffer holds ID_BUFFER_BYTES / 2 sampler inputs; with
+        // all-accepted scripted values each round consumes exactly one buffer.
+        assert!(n <= ID_BUFFER_BYTES / 2, "one buffer per round assumption");
+        let mut points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+        points[0] = off_subgroup_point(&mut rng);
+
+        // Smallest sampler inputs mapping to bucket ids 0 and 1.
+        let accept = (0..=u16::MAX)
+            .find(|&v| map_id(v, num_buckets) == Some(0))
+            .unwrap();
+        let reject = (0..=u16::MAX)
+            .find(|&v| map_id(v, num_buckets) == Some(1))
+            .unwrap();
+        let pack = |v: u16| {
+            let v = v as u64;
+            v | (v << 16) | (v << 32) | (v << 48)
+        };
+        let per_round = ID_BUFFER_BYTES / 8;
+        let mut samples = vec![pack(accept); per_round];
+        samples.extend(core::iter::repeat_n(pack(reject), (rounds - 1) * per_round));
+        let mut scripted = ScriptedRng::new(samples);
+        assert!(
+            !batch_in_g1(&points, SECURITY, &Sequential, &mut scripted),
+            "a rejecting round after an accepting round must reject the batch"
+        );
+    }
+
+    #[test]
+    fn draw_ids_match_rejection_reference() {
+        // Pin draw_ids to the exact-uniform sampler: consecutive little-endian
+        // 16-bit words of whole 8192-byte fills, Lemire-rejected through
+        // map_id. Exactness is load-bearing (module docs); a deviation — a
+        // modulo fallback on rejection, changed word decoding, tail
+        // mishandling across buffer refills — changes this stream. n and m
+        // are chosen so the draw spans multiple buffers with rejections.
+        use commonware_utils::TestRng;
+        for m in [1u32, 5, MAX_WIDTH] {
+            let num_buckets = 3usize.pow(m);
+            let n = 5000;
+            let ids = draw_ids(&mut TestRng::new(7), n, num_buckets);
+            let mut reference = Vec::with_capacity(n);
+            let mut replay = TestRng::new(7);
+            let mut buffer = [0u8; ID_BUFFER_BYTES];
+            'outer: loop {
+                replay.fill_bytes(&mut buffer);
+                for pair in buffer.chunks_exact(2) {
+                    if let Some(id) = map_id(u16::from_le_bytes([pair[0], pair[1]]), num_buckets)
+                    {
+                        reference.push(id);
+                        if reference.len() == n {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            assert_eq!(ids, reference, "m={m}");
+        }
+    }
+
     #[test]
     fn plan_meets_security() {
         assert_eq!(combinations_for_security(128), 81);
@@ -869,7 +1008,7 @@ mod tests {
         // the direct scan — same points, same wiring — for every width,
         // including tables with identities, duplicates, and cancelling pairs.
         let mut rng = test_rng();
-        for m in 1..=9u32 {
+        for m in 1..=MAX_WIDTH {
             let num_buckets = 3usize.pow(m);
             let base: Vec<G1> = (0..7)
                 .map(|i| {
@@ -929,6 +1068,69 @@ mod tests {
     }
 
     #[test]
+    fn sum_buckets_handles_x_zero_points() {
+        // (0, +-2) are the only on-curve points with x = 0 (y^2 = x^3 + 4).
+        // They cannot be decoded (blst rejects them: they are small-torsion),
+        // but they CAN arise as intermediate bucket sums of adversarial
+        // off-subgroup inputs, and x = 0 is exactly the coordinate the empty-
+        // slot sentinel (0, 0) lives on. blst_p1_affine_is_inf checks both
+        // coordinates, so (0, 2) must NOT read as empty; a sentinel test
+        // weakened to x-only would silently drop an adversary-controllable
+        // term from a bucket sum.
+        use blst::{blst_fp_from_uint64, blst_p1_affine_on_curve, blst_p1_to_affine};
+        let mut two = blst_fp::default();
+        let limbs = [2u64, 0, 0, 0, 0, 0];
+        // SAFETY: valid blst_fp out-pointer and 6-limb input.
+        unsafe { blst_fp_from_uint64(&mut two, limbs.as_ptr()) };
+        let p = blst_p1_affine {
+            x: blst_fp::default(),
+            y: two,
+        };
+        // SAFETY: p is a fully initialized blst_p1_affine.
+        assert!(unsafe { blst_p1_affine_on_curve(&p) }, "(0,2) must be on-curve");
+        assert!(!affine_is_inf(&p), "(0,2) must not collide with the sentinel");
+        let neg_p = blst_p1_affine {
+            x: blst_fp::default(),
+            y: fp_sub(&blst_fp::default(), &two),
+        };
+
+        // Reference addition through blst's complete formulas.
+        let reference = |points: &[blst_p1_affine]| -> blst_p1_affine {
+            let mut acc = blst_p1::default();
+            for q in points {
+                // SAFETY: valid points; handles identity and out == a.
+                unsafe { blst_p1_add_or_double_affine(&mut acc, &acc, q) };
+            }
+            let mut out = blst_p1_affine::default();
+            // SAFETY: valid operands.
+            unsafe { blst_p1_to_affine(&mut out, &acc) };
+            out
+        };
+        let cases: Vec<Vec<blst_p1_affine>> = vec![
+            vec![p, p],            // doubling with x = 0: (0, -2)
+            vec![p, neg_p],        // cancellation: identity
+            vec![p, p, p],         // order 3: identity via 2P + P
+            vec![p, p, p, p],      // back to P
+            vec![neg_p, neg_p, p], // mixed
+        ];
+        for (i, points) in cases.iter().enumerate() {
+            let ids = vec![0u16; points.len()];
+            let sums = sum_buckets(points, &ids, 3);
+            let want = reference(points);
+            assert_eq!(
+                affine_is_inf(&sums[0]),
+                affine_is_inf(&want),
+                "case {i} identity mismatch"
+            );
+            if !affine_is_inf(&want) {
+                assert_eq!(sums[0].x.l, want.x.l, "case {i} x");
+                assert_eq!(sums[0].y.l, want.y.l, "case {i} y");
+            }
+            assert!(affine_is_inf(&sums[1]) && affine_is_inf(&sums[2]));
+        }
+    }
+
+    #[test]
     fn batch_invert_matches_single() {
         let mut rng = test_rng();
         let points: Vec<G1> = (0..17).map(|_| in_subgroup_point(&mut rng)).collect();
@@ -972,6 +1174,8 @@ mod tests {
             (vec![p], vec![1], 3),
             // A displaced stale slot must read as empty, not as its old point.
             (vec![p, p, q], vec![4, 4, 4], 19683),
+            // Maximum width (m = 10) with the largest representable id.
+            (vec![p, q, q], vec![59048, 59048, 0], 59049),
         ];
         for (points, ids, num_buckets) in cases {
             assert_sums_match(&points, &ids, num_buckets);
