@@ -1,13 +1,13 @@
 //! Proof slices for authenticating deterministic account intervals from one public close corpus.
 
 use super::{
-    Assignment, Close, CloseContext, CloseLimits, Header, StateCache, TransitionError,
+    Assignment, Close, CloseContext, CloseLimits, Header, RootBundle, StateCache, TransitionError,
     account_slice, change_tree_with_strategy, read_shard_sets, validate_boundary_roots,
-    validate_header, validate_row, validate_row_structure,
+    validate_header, validate_row, validate_row_structure, validate_terminal_prefix,
 };
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
-    commitment::{self, RangeOpening, RangeUpdate},
+    commitment::{self, RangeOpening, RangeUpdate, VectorKind},
     credit::ShardSet,
     state::{AccountRow, Prefix, StateLeaf},
 };
@@ -125,6 +125,7 @@ impl<P: PublicKey, D: Digest> EncodeSize for StateBounds<P, D> {
 }
 
 impl<P: PublicKey, D: Digest> Read for StateBounds<P, D> {
+    /// No caller-supplied limits are needed because an interval has at most four boundary leaves.
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -216,6 +217,7 @@ impl SliceCodecConfig {
 }
 
 impl<P: PublicKey, D: Digest> Read for ProofSlice<P, D> {
+    /// Anchor-bound close limits and the maximum hashes accepted by each proof frontier.
     type Cfg = SliceCodecConfig;
 
     fn read_cfg(reader: &mut impl Buf, config: &Self::Cfg) -> Result<Self, CodecError> {
@@ -294,6 +296,7 @@ const fn max_proof_hashes(digest_size: usize, max_bytes: usize) -> Result<usize,
     Ok(max_bytes / digest_size)
 }
 
+/// Returns the canonical predecessor, first, last, and successor positions for an interval.
 fn state_boundary_positions(start: u32, end: u32, len: u32) -> Result<Vec<u32>, TransitionError> {
     if start > end || end > len {
         return Err(TransitionError::SliceStateBounds);
@@ -314,6 +317,7 @@ fn state_boundary_positions(start: u32, end: u32, len: u32) -> Result<Vec<u32>, 
     Ok(positions)
 }
 
+/// Authenticates the guarded changed-row interval and its deterministic slice membership.
 fn validate_change_range<H, P, D>(
     assignment: &Assignment<D>,
     index: u16,
@@ -325,6 +329,7 @@ where
     P: PublicKey,
     D: Digest,
 {
+    let len = range.opening.proof.leaf_count;
     let start = range
         .opening
         .start
@@ -333,9 +338,9 @@ where
     let members = u32::try_from(range.rows.len()).map_err(|_| TransitionError::SliceRange)?;
     let end = start
         .checked_add(members)
-        .filter(|end| *end <= root.len)
+        .filter(|end| *end <= len)
         .ok_or(TransitionError::SliceRange)?;
-    if range.predecessor.is_some() != (start > 0) || range.successor.is_some() != (end < root.len) {
+    if range.predecessor.is_some() != (start > 0) || range.successor.is_some() != (end < len) {
         return Err(TransitionError::SliceRange);
     }
     if range
@@ -376,10 +381,13 @@ where
         .chain(range.successor.iter())
         .map(Encode::encode)
         .collect::<Vec<_>>();
-    range.opening.verify::<H, _>(root, &encoded)?;
+    range
+        .opening
+        .verify::<H, _>(VectorKind::Change, root, &encoded)?;
     Ok(())
 }
 
+/// Authenticates the opening-state guards that prove the slice's exact key interval.
 fn validate_state_bounds<H, P, D>(
     assignment: &Assignment<D>,
     index: u16,
@@ -391,7 +399,8 @@ where
     P: PublicKey,
     D: Digest,
 {
-    let positions = state_boundary_positions(bounds.start, bounds.end, root.len)?;
+    let len = bounds.proof.leaf_count;
+    let positions = state_boundary_positions(bounds.start, bounds.end, len)?;
     if positions.len() != bounds.leaves.len()
         || bounds
             .leaves
@@ -401,7 +410,13 @@ where
         return Err(TransitionError::SliceStateBounds);
     }
     let encoded = bounds.leaves.iter().map(Encode::encode).collect::<Vec<_>>();
-    commitment::verify_multi_opening::<H, D, _>(&positions, &bounds.proof, root, &encoded)?;
+    commitment::verify_multi_opening::<H, D, _>(
+        VectorKind::State,
+        &positions,
+        &bounds.proof,
+        root,
+        &encoded,
+    )?;
 
     let mut leaf = 0_usize;
     if bounds.start > 0 {
@@ -422,7 +437,7 @@ where
             leaf += 1;
         }
     }
-    if bounds.end < root.len
+    if bounds.end < len
         && account_slice(&bounds.leaves[leaf].account, assignment.slice_bits())? <= index
     {
         return Err(TransitionError::SliceStateBounds);
@@ -430,36 +445,31 @@ where
     Ok(positions)
 }
 
+/// Establishes the shared header and boundary precondition for one or more slices.
 pub(crate) fn validate_slice_header<H, P, D>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
-    header: &Header<P, D>,
+    header: &Header<D>,
+    roots: &RootBundle<D>,
 ) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
     D: Digest,
 {
-    validate_header(context, header)?;
+    validate_header::<H, P, D>(context, header, roots)?;
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
     withdrawals.verify_deployment(context.deployment())?;
-    let withdrawal_count =
-        u64::try_from(withdrawals.len()).map_err(|_| TransitionError::BoundaryTotals)?;
-    if header.totals.deposit != deposits.total()
-        || header.totals.withdrawal < withdrawals.total()
-        || header.totals.withdrawals != withdrawal_count
-    {
-        return Err(TransitionError::BoundaryTotals);
-    }
     Ok(())
 }
 
+/// Authenticates one slice after the shared header and boundary precondition is established.
 fn validate_slice_after_header<H, P, D>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
-    header: &Header<P, D>,
+    roots: &RootBundle<D>,
     slice: &ProofSlice<P, D>,
     verify_signatures: bool,
 ) -> Result<(), TransitionError>
@@ -468,17 +478,14 @@ where
     P: PublicKey,
     D: Digest,
 {
+    // The two authenticated intervals must describe the requested deterministic slice and align
+    // every changed row with one shard set and one sparse state update.
     let assignment = context.assignment();
     if slice.index >= assignment.slice_count() {
         return Err(TransitionError::SliceIndex);
     }
-    validate_change_range::<H, P, D>(assignment, slice.index, &header.change_root, &slice.changes)?;
-    validate_state_bounds::<H, P, D>(
-        assignment,
-        slice.index,
-        &header.opening_root,
-        &slice.state_bounds,
-    )?;
+    validate_change_range::<H, P, D>(assignment, slice.index, &roots.change, &slice.changes)?;
+    validate_state_bounds::<H, P, D>(assignment, slice.index, &roots.opening, &slice.state_bounds)?;
     if slice.shard_sets.len() != slice.changes.rows.len()
         || slice.update.start != slice.state_bounds.start
         || slice.update.end != slice.state_bounds.end
@@ -487,6 +494,7 @@ where
         return Err(TransitionError::ShardAlignment);
     }
 
+    // Reconstruct both state roots from the exact opening and closing values carried by the rows.
     let opening = slice
         .changes
         .rows
@@ -512,12 +520,15 @@ where
         })
         .collect::<Vec<_>>();
     slice.update.verify::<H, _, _>(
-        &header.opening_root,
-        &header.closing_root,
+        VectorKind::State,
+        &roots.opening,
+        &roots.closing,
         &opening,
         &closing,
     )?;
 
+    // Row equations advance the predecessor prefix through the interval. Admission defers only
+    // signature checks so every distinct payment envelope can share one randomized batch.
     let mut prefix = slice
         .changes
         .predecessor
@@ -546,6 +557,8 @@ where
             return Err(TransitionError::Prefix);
         }
     }
+
+    // The last nonempty change interval owns the corpus-wide terminal totals check.
     let member_start = slice
         .changes
         .opening
@@ -557,8 +570,9 @@ where
             u32::try_from(slice.changes.rows.len()).map_err(|_| TransitionError::SliceRange)?,
         )
         .ok_or(TransitionError::SliceRange)?;
-    if end == header.change_root.len && prefix != header.totals {
-        return Err(TransitionError::TerminalTotals);
+    let change_len = slice.changes.opening.proof.leaf_count;
+    if end == change_len {
+        validate_terminal_prefix(context, deposits, withdrawals, change_len, prefix)?;
     }
     Ok(())
 }
@@ -568,7 +582,8 @@ pub fn validate_slice<H, P, D>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
-    header: &Header<P, D>,
+    header: &Header<D>,
+    roots: &RootBundle<D>,
     slice: &ProofSlice<P, D>,
 ) -> Result<(), TransitionError>
 where
@@ -576,15 +591,16 @@ where
     P: PublicKey,
     D: Digest,
 {
-    validate_slice_header::<H, P, D>(context, deposits, withdrawals, header)?;
-    validate_slice_after_header::<H, P, D>(context, deposits, withdrawals, header, slice, true)
+    validate_slice_header::<H, P, D>(context, deposits, withdrawals, header, roots)?;
+    validate_slice_after_header::<H, P, D>(context, deposits, withdrawals, roots, slice, true)
 }
 
+/// Authenticates slice structure while deferring payment signatures to admission's shared batch.
 pub(crate) fn validate_slice_structure_after_header<H, P, D>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
-    header: &Header<P, D>,
+    roots: &RootBundle<D>,
     slice: &ProofSlice<P, D>,
 ) -> Result<(), TransitionError>
 where
@@ -592,15 +608,17 @@ where
     P: PublicKey,
     D: Digest,
 {
-    validate_slice_after_header::<H, P, D>(context, deposits, withdrawals, header, slice, false)
+    validate_slice_after_header::<H, P, D>(context, deposits, withdrawals, roots, slice, false)
 }
 
+/// Opens the canonical state guards for one interval from the retained opening tree.
 fn build_state_bounds<P: PublicKey, D: Digest>(
     cache: &StateCache<P, D>,
     start: u32,
     end: u32,
 ) -> Result<StateBounds<P, D>, TransitionError> {
-    let positions = state_boundary_positions(start, end, cache.root().len)?;
+    let len = u32::try_from(cache.len()).map_err(|_| TransitionError::TooManyStates)?;
+    let positions = state_boundary_positions(start, end, len)?;
     let leaves = positions
         .iter()
         .map(|position| cache.leaves[*position as usize].clone())
@@ -614,10 +632,10 @@ fn build_state_bounds<P: PublicKey, D: Digest>(
     })
 }
 
-/// Assembles every deterministic proof slice for dissemination.
+/// Deals every deterministic proof slice for dissemination.
 ///
-/// This convenience function reconstructs the roots before proof-slice assembly. Close producers
-/// can retain that work with [`super::PreparedClose`] and avoid rebuilding either root.
+/// This convenience function reconstructs the roots before dealing. Close producers can retain
+/// that work with [`super::PreparedClose`] and avoid rebuilding either root.
 pub fn assemble_slices<H, P, D>(
     cache: &StateCache<P, D>,
     context: &CloseContext<P, D>,
@@ -631,15 +649,15 @@ where
     P: PublicKey,
     D: Digest,
 {
-    validate_slice_header::<H, P, D>(context, deposits, withdrawals, &close.header)?;
-    if cache.root() != close.header.opening_root
+    validate_slice_header::<H, P, D>(context, deposits, withdrawals, &close.header, &close.roots)?;
+    if cache.root() != close.roots.opening
         || close.rows.len() != close.shard_sets.len()
         || close.update.positions.len() != close.rows.len()
     {
         return Err(TransitionError::RowCount);
     }
     let changes = change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?;
-    if changes.root() != close.header.change_root {
+    if changes.root() != close.roots.change {
         return Err(TransitionError::ChangeRoot);
     }
     let closing_values = strategy.map_collect_vec(&close.rows, |row| {
@@ -649,12 +667,11 @@ where
         }
         .encode()
     });
-    let closing = cache.tree.prepare_update_with_strategy::<H, _>(
-        &close.update.positions,
-        &closing_values,
-        strategy,
-    )?;
-    if closing.root() != close.header.closing_root {
+    let closing =
+        cache
+            .tree
+            .prepare_update::<H, _>(&close.update.positions, &closing_values, strategy)?;
+    if closing.root() != close.roots.closing {
         return Err(TransitionError::Commitment(commitment::Error::HiddenChange));
     }
     assemble_prepared_slices(
@@ -667,6 +684,7 @@ where
     )
 }
 
+/// Builds slices from roots already reconstructed and matched to the close.
 pub(super) fn assemble_prepared_slices<P, D>(
     cache: &StateCache<P, D>,
     slice_bits: u8,
@@ -679,14 +697,17 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if cache.root() != close.header.opening_root {
+    if cache.root() != close.roots.opening {
         return Err(TransitionError::OpeningRoot);
     }
+
+    // State boundaries partition the complete registry and share one prepared sparse update.
     let state_boundaries = cache.slice_boundaries(slice_bits)?;
     let updates = cache
         .tree
         .range_updates_from_prepared(closing, &state_boundaries, strategy)?;
 
+    // Canonical row order yields one contiguous changed-row interval per slice.
     let mut row_boundaries = Vec::with_capacity(state_boundaries.len());
     row_boundaries.push(0_usize);
     let mut cursor = 0_usize;
@@ -708,6 +729,7 @@ where
         return Err(TransitionError::NonCanonicalSliceOrder);
     }
 
+    // Each slice reuses the prepared roots and owns only its range openings and local values.
     strategy.try_map_collect_vec(0..slice_count, |index| {
         let slice = usize::from(index);
         let start = row_boundaries[slice];

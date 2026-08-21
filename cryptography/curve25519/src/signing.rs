@@ -468,6 +468,33 @@ impl StrictVerifyingKey {
     }
 }
 
+impl commonware_cryptography::PrivateKey for SigningKey {}
+
+impl commonware_cryptography::Signer for SigningKey {
+    type Signature = Signature;
+    type PublicKey = StrictVerifyingKey;
+
+    fn public_key(&self) -> Self::PublicKey {
+        self.strict_verifying_key()
+    }
+
+    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
+        Self::sign(self, namespace, msg)
+    }
+}
+
+impl commonware_cryptography::PublicKey for StrictVerifyingKey {}
+
+impl commonware_cryptography::Verifier for StrictVerifyingKey {
+    type Signature = Signature;
+
+    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool {
+        Self::verify(self, namespace, msg, sig)
+    }
+}
+
+impl commonware_cryptography::Signature for Signature {}
+
 /// An Ed25519 signature.
 ///
 /// For an honestly generated [`VerifyingKey`], successful verification demonstrates approval by
@@ -592,11 +619,36 @@ impl BatchVerifier {
     }
 }
 
+impl commonware_cryptography::BatchVerifier for BatchVerifier {
+    type PublicKey = StrictVerifyingKey;
+
+    fn new(capacity: usize) -> Self {
+        Self::new(capacity)
+    }
+
+    fn add(
+        &mut self,
+        namespace: &[u8],
+        message: &[u8],
+        public_key: &Self::PublicKey,
+        signature: &<Self::PublicKey as commonware_cryptography::Verifier>::Signature,
+    ) -> bool {
+        Self::add(self, namespace, message, public_key.as_zip215(), signature);
+        true
+    }
+
+    fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+        Self::verify(self, rng, strategy)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BatchItem, SigningKey, StrictVerifyingKey};
+    use super::{BatchItem, BatchVerifier, Signature, SigningKey, StrictVerifyingKey};
     use crate::curve::{G, GAffine};
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST";
 
@@ -651,6 +703,54 @@ mod tests {
             verifying_key,
         );
         assert_eq!(cloned.encode(), signing_key.encode());
+    }
+
+    #[test]
+    fn workspace_signing_traits_use_strict_keys() {
+        fn assert_private_key<T>()
+        where
+            T: commonware_cryptography::PrivateKey
+                + commonware_cryptography::Signer<
+                    Signature = Signature,
+                    PublicKey = StrictVerifyingKey,
+                >,
+        {
+        }
+        fn assert_public_key<T>()
+        where
+            T: commonware_cryptography::PublicKey
+                + commonware_cryptography::Verifier<Signature = Signature>,
+        {
+        }
+        fn assert_signature<T: commonware_cryptography::Signature>() {}
+        fn assert_batch<T>()
+        where
+            T: commonware_cryptography::BatchVerifier<PublicKey = StrictVerifyingKey>,
+        {
+        }
+
+        assert_private_key::<SigningKey>();
+        assert_public_key::<StrictVerifyingKey>();
+        assert_signature::<Signature>();
+        assert_batch::<BatchVerifier>();
+
+        let signing_key = <SigningKey as commonware_cryptography::Signer>::from_seed(7);
+        let public_key = commonware_cryptography::Signer::public_key(&signing_key);
+        let message = b"message";
+        let signature = commonware_cryptography::Signer::sign(&signing_key, NAMESPACE, message);
+        let mut batch = <BatchVerifier as commonware_cryptography::BatchVerifier>::new(1);
+        assert!(commonware_cryptography::BatchVerifier::add(
+            &mut batch,
+            NAMESPACE,
+            message,
+            &public_key,
+            &signature,
+        ));
+        assert!(commonware_cryptography::BatchVerifier::verify(
+            batch,
+            &mut test_rng(),
+            &Sequential,
+        ));
     }
 
     #[test]

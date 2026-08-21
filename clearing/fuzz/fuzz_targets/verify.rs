@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{Committee, assigned_slice_indices, curve25519::Scheme as AdmissionScheme, seal},
+    admission::{Committee, assigned_slice_indices, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalBatch},
     challenge::{
         AccountLookup, Challenge, ChallengeKind, RangeLower, Verdict, adjudicate, decode_bounded,
@@ -16,15 +16,22 @@ use commonware_clearing::bajillion::{
     },
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, Header, ProofSlice, StateCache,
+        Assignment, Close, CloseContext, CloseLimits, Header, ProofSlice, RootBundle, StateCache,
         assemble_slices, build_close, validate_close, validate_slice,
     },
 };
 use commonware_codec::{Encode, EncodeSize};
 use commonware_cryptography::{
     Hasher, Sha256, Signer,
-    curve25519::{BatchVerifier as PaymentBatchVerifier, SigningKey, VerifyingKey},
+    bls12381::primitives::{
+        group::{Private, Scalar},
+        ops::compute_public,
+        variant::MinSig,
+    },
     sha256::Digest,
+};
+use commonware_cryptography_curve25519::signing::{
+    BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
 use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
@@ -41,6 +48,7 @@ const MAX_BOUNDARY_RECORDS: usize = 8;
 
 type TestPayment = Payment<VerifyingKey, Digest>;
 type TestContext = PaymentContext<VerifyingKey, Digest>;
+type TestCloseContext = CloseContext<VerifyingKey, Digest>;
 type TestChallenge = Challenge<VerifyingKey, Digest>;
 
 #[derive(Arbitrary, Debug)]
@@ -64,7 +72,8 @@ struct PaymentCase {
 
 #[derive(Arbitrary, Debug)]
 struct ChallengeCase {
-    header: Header<VerifyingKey, Digest>,
+    header: Header<Digest>,
+    roots: RootBundle<Digest>,
     now: u64,
     challenge: Challenge<VerifyingKey, Digest>,
     seed: u64,
@@ -102,28 +111,7 @@ struct CreditCase {
 #[derive(Arbitrary, Debug)]
 struct HeaderInput {
     context: TestContext,
-    opening_root: VectorRoot<Digest>,
-    change_root: VectorRoot<Digest>,
-    closing_root: VectorRoot<Digest>,
-    totals: Prefix,
-    opening_liability: u64,
-    closing_liability: u64,
-    challenge_deadline: u64,
-}
-
-impl From<HeaderInput> for Header<VerifyingKey, Digest> {
-    fn from(input: HeaderInput) -> Self {
-        Self {
-            context: input.context,
-            opening_root: input.opening_root,
-            change_root: input.change_root,
-            closing_root: input.closing_root,
-            totals: input.totals,
-            opening_liability: input.opening_liability,
-            closing_liability: input.closing_liability,
-            challenge_deadline: input.challenge_deadline,
-        }
-    }
+    roots: RootBundle<Digest>,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -144,7 +132,7 @@ struct AdmissionCase {
     seed: u64,
     slice_bits: u8,
     mutation: u8,
-    certificate: commonware_clearing::bajillion::admission::curve25519::Certificate,
+    certificate: bls12381::Certificate,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -385,18 +373,20 @@ fn invalidate_challenge_scope(challenge: &mut TestChallenge) {
 }
 
 fn exercise_challenge(
-    header: &Header<VerifyingKey, Digest>,
+    context: &TestCloseContext,
+    header: &Header<Digest>,
+    roots: &RootBundle<Digest>,
     kind: ChallengeKind,
     challenge: &TestChallenge,
     wrong: &SigningKey,
     mutation: u8,
 ) {
-    let now = header.challenge_deadline;
+    let now = context.challenge_deadline();
     assert!(matches!(
-        adjudicate::<Sha256, _>(header, now, challenge),
+        adjudicate::<Sha256, _>(context, header, roots, now, challenge),
         Ok(Verdict::Proven(actual)) if actual == kind
     ));
-    assert!(adjudicate::<Sha256, _>(header, now + 1, challenge).is_err());
+    assert!(adjudicate::<Sha256, _>(context, header, roots, now + 1, challenge).is_err());
 
     let encoded = challenge.encode();
     assert_eq!(encoded.len(), challenge.encode_size());
@@ -405,16 +395,16 @@ fn exercise_challenge(
         .expect("canonical bounded challenge must decode");
     assert_eq!(&decoded, challenge);
     assert!(matches!(
-        adjudicate::<Sha256, _>(header, now, &decoded),
+        adjudicate::<Sha256, _>(context, header, roots, now, &decoded),
         Ok(Verdict::Proven(actual)) if actual == kind
     ));
 
     let mut invalid_body = challenge.clone();
     invalidate_challenge_body(&mut invalid_body, wrong);
-    assert!(adjudicate::<Sha256, _>(header, now, &invalid_body).is_err());
+    assert!(adjudicate::<Sha256, _>(context, header, roots, now, &invalid_body).is_err());
     let mut invalid_scope = challenge.clone();
     invalidate_challenge_scope(&mut invalid_scope);
-    assert!(adjudicate::<Sha256, _>(header, now, &invalid_scope).is_err());
+    assert!(adjudicate::<Sha256, _>(context, header, roots, now, &invalid_scope).is_err());
 
     let mut mutated = encoded.to_vec();
     let maximum = match mutation % 4 {
@@ -434,13 +424,11 @@ fn exercise_challenge(
         _ => mutated.len() - 1,
     };
     if let Ok(decoded) = decode_bounded::<VerifyingKey, Digest>(&mutated, maximum) {
-        let _ = adjudicate::<Sha256, _>(header, now, &decoded);
+        let _ = adjudicate::<Sha256, _>(context, header, roots, now, &decoded);
     }
 }
 
 fn fuzz_challenge(case: ChallengeCase) {
-    let _ = adjudicate::<Sha256, _>(&case.header, case.now, &case.challenge);
-
     let (operator, payer, recipient, other_payer) = private_keys(case.seed);
     let mut leaves = vec![
         StateLeaf {
@@ -489,6 +477,13 @@ fn fuzz_challenge(case: ChallengeCase) {
             .expect("zero-bit assignment is valid"),
     )
     .expect("bounded empty-close context must be valid");
+    let _ = adjudicate::<Sha256, _>(
+        &context,
+        &case.header,
+        &case.roots,
+        case.now,
+        &case.challenge,
+    );
     let close = build_close::<Sha256, _, _>(
         &cache,
         &context,
@@ -607,7 +602,9 @@ fn fuzz_challenge(case: ChallengeCase) {
     let wrong = SigningKey::from_seed(case.seed.wrapping_add(100));
     for (offset, (kind, challenge)) in challenges.iter().enumerate() {
         exercise_challenge(
+            &context,
             &header,
+            &close.roots,
             *kind,
             challenge,
             &wrong,
@@ -634,17 +631,18 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     let closing_values = bounded_values(case.closing_values);
     let first = opening_values.first().map_or(&[][..], Vec::as_slice);
 
-    let _ = case.opening.verify::<Sha256>(&case.opening_root, first);
-    let _ =
-        case.opening
-            .reconstruct::<Sha256>(case.opening_root.kind, case.opening_root.len, first);
+    let _ = case
+        .opening
+        .verify::<Sha256>(case.kind, &case.opening_root, first);
+    let _ = case.opening.reconstruct::<Sha256>(case.kind, first);
     let _ = case
         .multi
-        .verify::<Sha256, _>(&case.opening_root, &opening_values);
+        .verify::<Sha256, _>(case.kind, &case.opening_root, &opening_values);
     let _ = case
         .update
-        .reconstruct_closing::<Sha256, _>(&closing_values);
+        .reconstruct_closing::<Sha256, _>(case.kind, &closing_values);
     let _ = case.update.verify::<Sha256, _, _>(
+        case.kind,
         &case.opening_root,
         &case.closing_root,
         &opening_values,
@@ -659,20 +657,24 @@ fn fuzz_commitment(mut case: CommitmentCase) {
             .expect("small encoded value must be length-framable");
     }
     let tree = builder
-        .build()
+        .build(&Sequential)
         .expect("builder received its declared length");
     let root = tree.root();
     if opening_values.is_empty() {
         let multi = tree
             .multi_opening(&[])
             .expect("empty vector has a canonical empty multiproof");
-        assert!(multi.verify::<Sha256, Vec<u8>>(&root, &[]).is_ok());
+        assert!(
+            multi
+                .verify::<Sha256, Vec<u8>>(case.kind, &root, &[])
+                .is_ok()
+        );
         let update = tree
             .sparse_update(&[])
             .expect("empty vector has a canonical empty update");
         assert!(
             update
-                .verify::<Sha256, Vec<u8>, Vec<u8>>(&root, &root, &[], &[])
+                .verify::<Sha256, Vec<u8>, Vec<u8>>(case.kind, &root, &root, &[], &[])
                 .is_ok()
         );
         return;
@@ -685,7 +687,7 @@ fn fuzz_commitment(mut case: CommitmentCase) {
         .expect("selected position is in range");
     assert!(
         opening
-            .verify::<Sha256>(&root, &opening_values[selected])
+            .verify::<Sha256>(case.kind, &root, &opening_values[selected])
             .is_ok()
     );
 
@@ -707,7 +709,11 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     let multi = tree
         .multi_opening(&positions)
         .expect("normalized positions are canonical");
-    assert!(multi.verify::<Sha256, _>(&root, &disclosed).is_ok());
+    assert!(
+        multi
+            .verify::<Sha256, _>(case.kind, &root, &disclosed)
+            .is_ok()
+    );
 
     let update = tree
         .sparse_update(&positions)
@@ -717,11 +723,11 @@ fn fuzz_commitment(mut case: CommitmentCase) {
         value.push(0xff);
     }
     let closing_root = update
-        .reconstruct_closing::<Sha256, _>(&changed)
+        .reconstruct_closing::<Sha256, _>(case.kind, &changed)
         .expect("constructed update must reconstruct");
     assert!(
         update
-            .verify::<Sha256, _, _>(&root, &closing_root, &disclosed, &changed)
+            .verify::<Sha256, _, _>(case.kind, &root, &closing_root, &disclosed, &changed)
             .is_ok()
     );
 }
@@ -855,7 +861,7 @@ fn mutate_slice(
         }
         9 => mutated.update.proof.shared.push(marker),
         10 => mutated.update.proof.outside.push((marker, marker)),
-        11 => mutated.update.kind = VectorKind::Change,
+        11 => mutated.update.proof.leaf_count ^= 1,
         12 => {
             if let Some(row) = mutated.changes.rows.first().cloned() {
                 mutated.changes.rows.push(row);
@@ -880,7 +886,7 @@ fn mutate_slice(
         }
         16 => mutated.state_bounds.proof.siblings.push(marker),
         17 => mutated.update.proof.leaf_count ^= 1,
-        18 => mutated.update.len ^= 1,
+        18 => mutated.update.proof.leaf_count ^= 1,
         _ => {
             if let Some(shards) = mutated.shard_sets.first_mut() {
                 *shards =
@@ -906,12 +912,26 @@ fn exercise_slice_mutation(
         .iter()
         .find(|slice| !slice.changes.rows.is_empty())
         .expect("a nonempty close has a nonempty proof slice");
-    validate_slice::<Sha256, _, _>(context, deposits, withdrawals, &close.header, slice)
-        .expect("canonical nonempty slice must validate");
+    validate_slice::<Sha256, _, _>(
+        context,
+        deposits,
+        withdrawals,
+        &close.header,
+        &close.roots,
+        slice,
+    )
+    .expect("canonical nonempty slice must validate");
     let mutated = mutate_slice(slice, selector);
     assert!(
-        validate_slice::<Sha256, _, _>(context, deposits, withdrawals, &close.header, &mutated,)
-            .is_err()
+        validate_slice::<Sha256, _, _>(
+            context,
+            deposits,
+            withdrawals,
+            &close.header,
+            &close.roots,
+            &mutated,
+        )
+        .is_err()
     );
 }
 
@@ -976,13 +996,11 @@ fn fuzz_transition(mut case: TransitionCase) {
         .collect::<Vec<_>>();
     case.update.positions.truncate(MAX_POSITIONS);
     case.update.proof.siblings.truncate(MAX_PROOF_DIGESTS);
-    let mut header: Header<VerifyingKey, Digest> = case.header.into();
-    header.context = context.payment().clone();
-    header.opening_root = cache.root();
-    header.opening_liability = cache.liability();
-    header.challenge_deadline = context.challenge_deadline();
+    let roots = case.header.roots;
+    let header = Header::new::<Sha256, _>(context.payment(), &roots);
     let close = Close {
         header,
+        roots,
         rows: case.rows,
         shard_sets,
         update: case.update,
@@ -1027,8 +1045,15 @@ fn fuzz_transition(mut case: TransitionCase) {
     )
     .expect("constructed empty close must split into valid slices");
     for slice in &slices {
-        validate_slice::<Sha256, _, _>(&context, &deposits, &withdrawals, &close.header, slice)
-            .expect("constructed slice must validate");
+        validate_slice::<Sha256, _, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close.header,
+            &close.roots,
+            slice,
+        )
+        .expect("constructed slice must validate");
     }
 
     let account = SigningKey::from_seed(case.seed.wrapping_add(10));
@@ -1095,8 +1120,15 @@ fn fuzz_transition(mut case: TransitionCase) {
     )
     .expect("constructed deposit close must split into valid slices");
     for slice in &slices {
-        validate_slice::<Sha256, _, _>(&context, &deposits, &withdrawals, &close.header, slice)
-            .expect("constructed deposit slice must validate");
+        validate_slice::<Sha256, _, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close.header,
+            &close.roots,
+            slice,
+        )
+        .expect("constructed deposit slice must validate");
     }
     exercise_slice_mutation(
         &context,
@@ -1186,28 +1218,35 @@ fn fuzz_transition(mut case: TransitionCase) {
     )
     .expect("constructed withdrawal close must split into slices");
     assert!(slices.iter().all(|slice| {
-        validate_slice::<Sha256, _, _>(&context, &deposits, &withdrawals, &close.header, slice)
-            .is_ok()
+        validate_slice::<Sha256, _, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close.header,
+            &close.roots,
+            slice,
+        )
+        .is_ok()
     }));
 }
 
 #[allow(clippy::too_many_arguments)]
 fn assignment_is_rejected(
-    scheme: &AdmissionScheme<VerifyingKey>,
-    committee: &Committee<VerifyingKey>,
+    scheme: &bls12381::Scheme,
     context: &CloseContext<VerifyingKey, Digest>,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
-    header: &Header<VerifyingKey, Digest>,
+    header: &Header<Digest>,
+    roots: &RootBundle<Digest>,
     slices: Vec<ProofSlice<VerifyingKey, Digest>>,
 ) -> bool {
     seal::<Sha256, _, _, PaymentBatchVerifier, _>(
         scheme,
-        committee,
         context,
         deposits,
         withdrawals,
         header,
+        roots,
         slices,
         &mut test_rng(),
         &Sequential,
@@ -1220,12 +1259,12 @@ fn fuzz_admission(case: AdmissionCase) {
     let challenge_deadline = seed.clamp(1, u64::MAX - 1);
     let admission_deadline = challenge_deadline - 1;
     let validators = (0..4)
-        .map(|offset| SigningKey::from_seed(seed.wrapping_add(offset)))
+        .map(|offset| Private::new(Scalar::from(seed.wrapping_add(offset).max(1))))
         .collect::<Vec<_>>();
     let Ok(committee) = Committee::new(
         validators
             .iter()
-            .map(Signer::public_key)
+            .map(compute_public::<MinSig>)
             .collect::<Vec<_>>(),
     ) else {
         return;
@@ -1304,8 +1343,8 @@ fn fuzz_admission(case: AdmissionCase) {
         .index;
     let mut votes = Vec::new();
     let mut checked_nonempty_mutation = false;
-    for (validator, key) in validators.iter().enumerate() {
-        let scheme = AdmissionScheme::<VerifyingKey>::signer(committee.clone(), key.clone())
+    for (validator, private) in validators.iter().enumerate() {
+        let scheme = bls12381::Scheme::signer(committee.clone(), private.clone())
             .expect("validator belongs to committee");
         let assigned = assigned_slice_indices::<Sha256, _>(
             &committee,
@@ -1319,11 +1358,11 @@ fn fuzz_admission(case: AdmissionCase) {
         let canonical = assigned.clone();
         let (vote, retained) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &scheme,
-            &committee,
             &context,
             &deposits,
             &withdrawals,
             &close.header,
+            &close.roots,
             assigned,
             &mut test_rng(),
             &Sequential,
@@ -1341,11 +1380,11 @@ fn fuzz_admission(case: AdmissionCase) {
             omitted.remove(position);
             assert!(assignment_is_rejected(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 omitted,
             ));
 
@@ -1353,11 +1392,11 @@ fn fuzz_admission(case: AdmissionCase) {
             duplicate.insert(position, canonical[position].clone());
             assert!(assignment_is_rejected(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 duplicate,
             ));
 
@@ -1366,11 +1405,11 @@ fn fuzz_admission(case: AdmissionCase) {
             reordered.swap(0, last);
             assert!(assignment_is_rejected(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 reordered,
             ));
         }
@@ -1383,11 +1422,11 @@ fn fuzz_admission(case: AdmissionCase) {
             malformed[position] = mutate_slice(&malformed[position], case.mutation);
             assert!(assignment_is_rejected(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 malformed,
             ));
             checked_nonempty_mutation = true;
@@ -1395,17 +1434,12 @@ fn fuzz_admission(case: AdmissionCase) {
         votes.push(vote);
     }
     assert!(checked_nonempty_mutation);
-    let verifier = AdmissionScheme::<VerifyingKey>::verifier(committee.clone());
-    let _ = verifier.verify_exact(
-        &mut test_rng(),
-        &close.header,
-        &case.certificate,
-        &Sequential,
-    );
+    let verifier = bls12381::Scheme::verifier(committee.clone());
+    let _ = verifier.verify_exact(&close.header, &case.certificate);
     let certificate = verifier
-        .assemble_exact(votes.into_iter().take(committee.quorum()), &Sequential)
+        .assemble_exact(votes.into_iter().take(committee.quorum()))
         .expect("exact valid quorum must assemble");
-    assert!(verifier.verify_exact(&mut test_rng(), &close.header, &certificate, &Sequential,));
+    assert!(verifier.verify_exact(&close.header, &certificate));
 }
 
 fuzz_target!(|data: &[u8]| {

@@ -1,5 +1,4 @@
 use super::admission_fixtures::{FAULTS, QUORUM, VALIDATORS, certificate_fixture};
-use commonware_parallel::Sequential;
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
@@ -14,7 +13,7 @@ fn bench_assemble_certificate(c: &mut Criterion) {
                     black_box(
                         fixture
                             .assembler
-                            .assemble_exact(black_box(attestations), &Sequential)
+                            .assemble_exact(black_box(attestations))
                             .expect("benchmark attestations form an exact certificate"),
                     )
                 },

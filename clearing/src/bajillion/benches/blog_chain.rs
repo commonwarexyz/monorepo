@@ -7,24 +7,22 @@ use super::{
 };
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{RetainedAssignment, Vote, curve25519, seal},
+    admission::{RetainedAssignment, Vote, bls12381, seal},
     challenge::{
-        AccountLookup, Challenge, ChallengeKind, RowOpening, Verdict, adjudicate_with_strategy,
-        decode_bounded,
+        AccountLookup, Challenge, ChallengeKind, Verdict, adjudicate_with_strategy, decode_bounded,
     },
     credit::{ShardLookup, ShardSet},
     settlement::{BatchStatus, HardFaultReason, SettlementChain, SettlementConfig},
     state::AccountRow,
     transition::{
-        BatchId, Header, PreparedClose, ProofSlice, prepare_close_with_strategy, validate_close,
-        validate_header,
+        BatchId, Header, PreparedClose, ProofSlice, RootBundle, prepare_close_with_strategy,
+        validate_close, validate_header,
     },
 };
 use commonware_codec::{Encode, EncodeSize};
-use commonware_cryptography::{
-    Sha256,
-    curve25519::{BatchVerifier as PaymentBatchVerifier, VerifyingKey},
-    sha256::Digest,
+use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_cryptography_curve25519::signing::{
+    BatchVerifier as PaymentBatchVerifier, StrictVerifyingKey as VerifyingKey,
 };
 use commonware_utils::{Participant, TestRng};
 use criterion::{BatchSize, Criterion, criterion_group};
@@ -34,22 +32,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-type CommitmentPayload = (
-    Header<VerifyingKey, Digest>,
-    curve25519::Certificate,
-    Option<RowOpening<VerifyingKey, Digest>>,
-);
+type CommitmentPayload = (Header<Digest>, RootBundle<Digest>, bls12381::Certificate);
 type TestChain = SettlementChain<Sha256, VerifyingKey>;
 
 struct Metrics {
     close_bytes: usize,
     slice_corpus_bytes: usize,
-    assignment_bytes: usize,
-    assigned_slices: usize,
+    dealing_bytes: usize,
+    dealing_slices: usize,
     header_bytes: usize,
-    certificate_bytes: usize,
-    terminal_opening_bytes: usize,
-    commitment_bytes: usize,
+    root_bundle_witness_bytes: usize,
+    external_certificate_bytes: usize,
+    external_package_bytes: usize,
+    validator_chain_commitment_bytes: usize,
     challenge_row_lookup_bytes: usize,
     challenge_shard_lookup_bytes: usize,
     challenge_bytes: usize,
@@ -57,12 +52,11 @@ struct Metrics {
 
 struct BlogChainFixture {
     close: CloseFixture,
-    validators: Validators,
     validator: Participant,
-    validator_scheme: curve25519::Scheme<VerifyingKey>,
-    validator_slices: Vec<ProofSlice<VerifyingKey, Digest>>,
+    validator_scheme: bls12381::Scheme,
+    dealing: Vec<ProofSlice<VerifyingKey, Digest>>,
     commitment: CommitmentPayload,
-    verifier: curve25519::Scheme<VerifyingKey>,
+    verifier: bls12381::Scheme,
     encoded_challenge: Bytes,
     metrics: Metrics,
 }
@@ -75,7 +69,7 @@ impl BlogChainFixture {
         assert_eq!(validators.committee().quorum(), QUORUM);
 
         let assignment = validators.assignment();
-        let (close, terminal, challenge) = active_chain_fixture(profile, assignment);
+        let (close, challenge) = active_chain_fixture(profile, assignment);
         assert_eq!(close.context.assignment().slice_bits(), SLICE_BITS);
         assert_eq!(
             close.context.assignment().committee(),
@@ -98,21 +92,21 @@ impl BlogChainFixture {
         assert_eq!(all_slices.len(), SLICES);
         let close_bytes = close.prepared.close().encode_size();
         let slice_corpus_bytes = all_slices.iter().map(EncodeSize::encode_size).sum();
-        let (validator, indices, assignment_bytes) =
+        let (validator, indices, dealing_bytes) =
             validators.largest_assignment(close.context.assignment(), &all_slices);
-        let validator_slices = indices
+        let dealing = indices
             .iter()
             .map(|index| all_slices[usize::from(*index)].clone())
             .collect::<Vec<_>>();
         let validator_scheme = validators.signer(validator);
         drop(all_slices);
 
-        let header = close.prepared.close().header.clone();
+        let header = close.prepared.close().header;
         let certificate = exact_certificate(&validators, &header);
-        let commitment = (header.clone(), certificate, Some(terminal));
-        let encoded_commitment = commitment.encode();
-        let commitment_bytes = commitment.encode_size();
-        assert_eq!(encoded_commitment.len(), commitment_bytes);
+        let external_package = (header, certificate.clone());
+        let external_package_bytes = external_package.encode_size();
+        assert_eq!(external_package.encode().len(), external_package_bytes);
+        let commitment = (header, close.prepared.close().roots, certificate);
 
         let (challenge_row_lookup_bytes, challenge_shard_lookup_bytes) = match &challenge {
             Challenge::HigherShardTip {
@@ -144,26 +138,36 @@ impl BlogChainFixture {
         preflight_chain(&close, &validators, &commitment, encoded_challenge.as_ref());
         seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &validator_scheme,
-            validators.committee(),
             &close.context,
             &close.deposits,
             &close.withdrawals,
             &close.prepared.close().header,
-            validator_slices.clone(),
+            &close.prepared.close().roots,
+            dealing.clone(),
             &mut TestRng::new(0),
             strategy(),
         )
-        .expect("benchmark validator assignment is valid");
-        let verifier = curve25519::Scheme::verifier(validators.committee().clone());
+        .expect("benchmark validator dealing is valid");
+        let verifier = bls12381::Scheme::verifier(validators.committee().clone());
+        let header_bytes = commitment.0.encode_size();
+        let root_bundle_witness_bytes = commitment.1.encode_size();
+        let external_certificate_bytes = commitment.2.encode_size();
+        let validator_chain_commitment_bytes = header_bytes;
+        assert_eq!(header_bytes, 32);
+        assert_eq!(root_bundle_witness_bytes, 96);
+        assert_eq!(external_certificate_bytes, 69);
+        assert_eq!(external_package_bytes, 101);
+        assert_eq!(validator_chain_commitment_bytes, 32);
         let metrics = Metrics {
             close_bytes,
             slice_corpus_bytes,
-            assignment_bytes,
-            assigned_slices: validator_slices.len(),
-            header_bytes: commitment.0.encode_size(),
-            certificate_bytes: commitment.1.encode_size(),
-            terminal_opening_bytes: commitment.2.encode_size(),
-            commitment_bytes,
+            dealing_bytes,
+            dealing_slices: dealing.len(),
+            header_bytes,
+            root_bundle_witness_bytes,
+            external_certificate_bytes,
+            external_package_bytes,
+            validator_chain_commitment_bytes,
             challenge_row_lookup_bytes,
             challenge_shard_lookup_bytes,
             challenge_bytes,
@@ -171,10 +175,9 @@ impl BlogChainFixture {
 
         Self {
             close,
-            validators,
             validator,
             validator_scheme,
-            validator_slices,
+            dealing,
             commitment,
             verifier,
             encoded_challenge,
@@ -182,7 +185,7 @@ impl BlogChainFixture {
         }
     }
 
-    fn build_roots(
+    fn prepare(
         &self,
         rows: Vec<AccountRow<VerifyingKey, Digest>>,
         shard_sets: Vec<ShardSet<VerifyingKey, Digest>>,
@@ -196,10 +199,10 @@ impl BlogChainFixture {
             shard_sets,
             strategy(),
         )
-        .expect("benchmark roots are valid")
+        .expect("benchmark preparation is valid")
     }
 
-    fn assemble_proof_slices(&self) -> Vec<ProofSlice<VerifyingKey, Digest>> {
+    fn deal(&self) -> Vec<ProofSlice<VerifyingKey, Digest>> {
         self.close
             .prepared
             .assemble_slices(&self.close.cache, strategy())
@@ -208,60 +211,45 @@ impl BlogChainFixture {
 
     fn seal(
         &self,
-        slices: Vec<ProofSlice<VerifyingKey, Digest>>,
+        dealing: Vec<ProofSlice<VerifyingKey, Digest>>,
         rng: &mut TestRng,
-    ) -> (Vote<VerifyingKey>, RetainedAssignment<VerifyingKey, Digest>) {
+    ) -> (Vote, RetainedAssignment<VerifyingKey, Digest>) {
         seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &self.validator_scheme,
-            self.validators.committee(),
             &self.close.context,
             &self.close.deposits,
             &self.close.withdrawals,
             &self.close.prepared.close().header,
-            slices,
+            &self.close.prepared.close().roots,
+            dealing,
             rng,
             strategy(),
         )
-        .expect("benchmark validator assignment is valid")
+        .expect("benchmark validator dealing is valid")
     }
 
-    // This is the repeatable verification portion of SettlementChain::admit after registration.
-    fn verify_commitment(&self, rng: &mut TestRng) -> BatchId<Digest> {
-        let (header, certificate, terminal) = &self.commitment;
-        validate_header(&self.close.context, header)
+    // Repeatable certified-commitment validation performed by SettlementChain::admit after
+    // registration.
+    fn check_certified_commitment(&self) -> BatchId<Digest> {
+        let (header, roots, certificate) = &self.commitment;
+        validate_header::<Sha256, _, _>(&self.close.context, header, roots)
             .expect("benchmark header matches its registration");
-        assert_eq!(header.totals.deposit, 0);
-        assert_eq!(header.totals.withdrawal, 0);
-        assert_eq!(header.totals.withdrawals, 0);
-        let terminal = terminal
-            .as_ref()
-            .expect("every active profile has a terminal row");
-        terminal
-            .proof
-            .verify::<Sha256>(&header.change_root, terminal.row.encode().as_ref())
-            .expect("benchmark terminal row authenticates");
-        assert_eq!(
-            terminal.proof.position.checked_add(1),
-            Some(header.change_root.len)
-        );
-        assert_eq!(terminal.row.prefix, header.totals);
-        assert!(
-            self.verifier
-                .verify_exact(rng, header, certificate, strategy())
-        );
+        assert!(self.verifier.verify_exact(header, certificate));
         header.batch_id::<Sha256>()
     }
 
-    // This is the repeatable decode-and-adjudicate portion of challenge_encoded.
-    fn verify_challenge(&self) -> Verdict {
+    // Repeatable bounded decode and adjudication performed by challenge_encoded.
+    fn check_challenge(&self) -> Verdict {
         let challenge = decode_bounded::<VerifyingKey, Digest>(
             self.encoded_challenge.as_ref(),
             self.encoded_challenge.len(),
         )
         .expect("benchmark challenge decodes within its exact bound");
         adjudicate_with_strategy::<Sha256, _>(
+            &self.close.context,
             &self.commitment.0,
-            self.commitment.0.challenge_deadline,
+            &self.commitment.1,
+            self.close.context.challenge_deadline(),
             &challenge,
             strategy(),
         )
@@ -269,19 +257,15 @@ impl BlogChainFixture {
     }
 }
 
-fn exact_certificate(
-    validators: &Validators,
-    header: &Header<VerifyingKey, Digest>,
-) -> curve25519::Certificate {
+fn exact_certificate(validators: &Validators, header: &Header<Digest>) -> bls12381::Certificate {
     let attestations = validators.attestations(header);
     assert_eq!(attestations.len(), QUORUM);
     let certificate = validators
         .signer(Participant::new(0))
-        .assemble_exact(attestations, strategy())
+        .assemble_exact(attestations)
         .expect("benchmark attestations form an exact certificate");
     assert_eq!(certificate.signers.len(), VALIDATORS);
     assert_eq!(certificate.signers.count(), QUORUM);
-    assert_eq!(certificate.signatures.len(), QUORUM);
     assert!(certificate.signers.iter().map(usize::from).eq(0..QUORUM));
     certificate
 }
@@ -322,21 +306,13 @@ fn preflight_chain(
             close.withdrawals.clone(),
         )
         .expect("benchmark close can be registered");
-    let mut rng = TestRng::new(0);
     let batch = chain
-        .admit(
-            0,
-            commitment.0.clone(),
-            commitment.1.clone(),
-            commitment.2.as_ref(),
-            &mut rng,
-            strategy(),
-        )
+        .admit(0, commitment.0, commitment.1, commitment.2.clone())
         .expect("benchmark commitment can be admitted");
     assert_eq!(batch, commitment.0.batch_id::<Sha256>());
     let verdict = chain
         .challenge_encoded_with_strategy(
-            commitment.0.challenge_deadline,
+            close.context.challenge_deadline(),
             encoded_challenge,
             encoded_challenge.len(),
             strategy(),
@@ -367,16 +343,17 @@ fn bench_blog_chain(c: &mut Criterion) {
         let credited = profile.credited_accounts;
         let shards = profile.receive_shards_per_credited;
         eprintln!(
-            "clearing blog chain metrics: profile={profile_index} N={registry} A={changed} B={credited} h={shards} n={VALIDATORS} f={FAULTS} q={QUORUM} slices={SLICES} workers={WORKERS} close_bytes={} slice_corpus_bytes={} validator={} assignment_bytes={} assigned_slices={} header_bytes={} certificate_bytes={} terminal_opening_bytes={} commitment_bytes={} challenge_row_lookup_bytes={} challenge_shard_lookup_bytes={} challenge_bytes={}",
+            "clearing blog chain metrics: profile={profile_index} N={registry} A={changed} B={credited} h={shards} n={VALIDATORS} f={FAULTS} q={QUORUM} slices={SLICES} workers={WORKERS} close_bytes={} slice_corpus_bytes={} validator={} dealing_bytes={} dealing_slices={} header_bytes={} root_bundle_witness_bytes={} external_certificate_bytes={} external_package_bytes={} validator_chain_commitment_bytes={} challenge_row_lookup_bytes={} challenge_shard_lookup_bytes={} challenge_bytes={}",
             fixture.metrics.close_bytes,
             fixture.metrics.slice_corpus_bytes,
             usize::from(fixture.validator),
-            fixture.metrics.assignment_bytes,
-            fixture.metrics.assigned_slices,
+            fixture.metrics.dealing_bytes,
+            fixture.metrics.dealing_slices,
             fixture.metrics.header_bytes,
-            fixture.metrics.certificate_bytes,
-            fixture.metrics.terminal_opening_bytes,
-            fixture.metrics.commitment_bytes,
+            fixture.metrics.root_bundle_witness_bytes,
+            fixture.metrics.external_certificate_bytes,
+            fixture.metrics.external_package_bytes,
+            fixture.metrics.validator_chain_commitment_bytes,
             fixture.metrics.challenge_row_lookup_bytes,
             fixture.metrics.challenge_shard_lookup_bytes,
             fixture.metrics.challenge_bytes,
@@ -386,39 +363,33 @@ fn bench_blog_chain(c: &mut Criterion) {
             "N={registry} A={changed} B={credited} h={shards} n={VALIDATORS} q={QUORUM} slices={SLICES} w={WORKERS}"
         );
         c.bench_function(
-            &format!(
-                "{}/p={profile_index} op=build-roots {labels}",
-                module_path!()
-            ),
+            &format!("{}/p={profile_index} op=prepare {labels}", module_path!()),
             |b| {
                 b.iter_batched(
                     || (fixture.close.rows.clone(), fixture.close.shard_sets.clone()),
-                    |(rows, shard_sets)| black_box(fixture.build_roots(rows, shard_sets)),
+                    |(rows, shard_sets)| black_box(fixture.prepare(rows, shard_sets)),
                     BatchSize::PerIteration,
                 );
             },
         );
         c.bench_function(
-            &format!(
-                "{}/p={profile_index} op=assemble-proof-slices {labels}",
-                module_path!()
-            ),
-            |b| b.iter(|| black_box(fixture.assemble_proof_slices())),
+            &format!("{}/p={profile_index} op=deal {labels}", module_path!()),
+            |b| b.iter(|| black_box(fixture.deal())),
         );
         c.bench_function(
             &format!("{}/p={profile_index} op=seal {labels}", module_path!()),
             |b| {
-                let mut slices = Some(fixture.validator_slices.clone());
+                let mut dealing = Some(fixture.dealing.clone());
                 let mut rng = TestRng::new(0);
                 b.iter_custom(|iterations| {
                     let mut elapsed = Duration::ZERO;
                     for _ in 0..iterations {
-                        let input = slices.take().expect("benchmark assignment is available");
+                        let input = dealing.take().expect("benchmark dealing is available");
                         let start = Instant::now();
                         let (vote, retained) = fixture.seal(input, black_box(&mut rng));
                         elapsed += start.elapsed();
                         black_box(vote);
-                        slices = Some(retained.into_slices());
+                        dealing = Some(retained.into_slices());
                     }
                     elapsed
                 });
@@ -426,15 +397,11 @@ fn bench_blog_chain(c: &mut Criterion) {
         );
         c.bench_function(
             &format!(
-                "{}/p={profile_index} op=check-commitment {labels}",
+                "{}/p={profile_index} op=check-certified-commitment {labels}",
                 module_path!()
             ),
             |b| {
-                b.iter_batched(
-                    || TestRng::new(0),
-                    |mut rng| black_box(fixture.verify_commitment(black_box(&mut rng))),
-                    BatchSize::SmallInput,
-                );
+                b.iter(|| black_box(fixture.check_certified_commitment()));
             },
         );
         c.bench_function(
@@ -443,7 +410,7 @@ fn bench_blog_chain(c: &mut Criterion) {
                 module_path!()
             ),
             |b| {
-                b.iter(|| black_box(fixture.verify_challenge()));
+                b.iter(|| black_box(fixture.check_challenge()));
             },
         );
     }

@@ -1,20 +1,17 @@
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
-    challenge::{AccountLookup, Challenge, ChallengeKind, RowOpening, Verdict, adjudicate},
+    challenge::{AccountLookup, Challenge, ChallengeKind, Verdict, adjudicate},
     commitment::{Builder, SparseUpdate, Tree, VectorKind, VectorRoot},
     credit::{ShardHead, ShardLookup, ShardSet},
     payment::{Payment, PaymentContext, SignedReceipt, SignedSend},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, Header, PreparedClose, StateCache,
-        prepare_close_with_strategy,
+        Assignment, Close, CloseContext, CloseLimits, Header, PreparedClose, RootBundle,
+        StateCache, prepare_close_with_strategy,
     },
 };
-use commonware_cryptography::{
-    Hasher, Sha256, Signer as _,
-    curve25519::{SigningKey, VerifyingKey},
-    sha256::Digest,
-};
+use commonware_cryptography::{Hasher, Sha256, Signer as _, sha256::Digest};
+use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
 use commonware_parallel::Rayon;
 use std::{num::NonZeroUsize, ops::Deref, sync::OnceLock};
 
@@ -197,7 +194,9 @@ pub(crate) struct PaymentFixture {
 }
 
 pub(crate) struct ChallengeFixture {
-    pub(crate) header: Header<VerifyingKey, Digest>,
+    pub(crate) context: CloseContext<VerifyingKey, Digest>,
+    pub(crate) header: Header<Digest>,
+    pub(crate) roots: RootBundle<Digest>,
     pub(crate) challenge: Challenge<VerifyingKey, Digest>,
 }
 
@@ -575,11 +574,7 @@ pub(crate) fn payment_fixture() -> PaymentFixture {
 pub(crate) fn active_chain_fixture(
     profile: ActiveProfile,
     assignment: Assignment<Digest>,
-) -> (
-    CloseFixture,
-    RowOpening<VerifyingKey, Digest>,
-    Challenge<VerifyingKey, Digest>,
-) {
+) -> (CloseFixture, Challenge<VerifyingKey, Digest>) {
     let (fixture, accounts) = active_close_fixture_parts(profile, assignment);
     let row_position = fixture
         .shard_sets
@@ -634,12 +629,6 @@ pub(crate) fn active_chain_fixture(
     );
     assert_eq!(retained.receipt().body().index(), expected_index);
 
-    let terminal_position =
-        u32::try_from(fixture.rows.len() - 1).expect("benchmark terminal row position fits in u32");
-    let terminal = fixture
-        .prepared
-        .row_opening(terminal_position)
-        .expect("benchmark terminal row can be opened");
     let recipient = fixture
         .prepared
         .row_opening(u32::try_from(row_position).expect("benchmark row position fits in u32"))
@@ -676,14 +665,16 @@ pub(crate) fn active_chain_fixture(
     };
     assert_eq!(
         adjudicate::<Sha256, _>(
+            &fixture.context,
             &fixture.prepared.close().header,
-            fixture.prepared.close().header.challenge_deadline,
+            &fixture.prepared.close().roots,
+            fixture.context.challenge_deadline(),
             &challenge,
         )
         .expect("benchmark challenge is well formed"),
         Verdict::Proven(ChallengeKind::HigherShardTip)
     );
-    (fixture, terminal, challenge)
+    (fixture, challenge)
 }
 
 pub(crate) fn challenge_fixture(
@@ -744,13 +735,26 @@ pub(crate) fn challenge_fixture(
         recipient: Box::new(recipient),
         shard: Box::new(shard),
     };
-    let header = fixture.prepared.close().header.clone();
+    let context = fixture.context.clone();
+    let header = fixture.prepared.close().header;
+    let roots = fixture.prepared.close().roots;
     assert_eq!(
-        adjudicate::<Sha256, _>(&header, header.challenge_deadline, &challenge)
-            .expect("benchmark challenge is well formed"),
+        adjudicate::<Sha256, _>(
+            &context,
+            &header,
+            &roots,
+            context.challenge_deadline(),
+            &challenge,
+        )
+        .expect("benchmark challenge is well formed"),
         Verdict::Proven(ChallengeKind::HigherShardTip)
     );
-    ChallengeFixture { header, challenge }
+    ChallengeFixture {
+        context,
+        header,
+        roots,
+        challenge,
+    }
 }
 
 fn encoded_value(position: usize) -> [u8; VALUE_SIZE] {
@@ -772,7 +776,9 @@ pub(crate) fn sparse_fixture(registry: usize, changed: usize) -> SparseFixture {
             .add_encoded(value)
             .expect("benchmark value count matches the builder");
     }
-    let tree = builder.build().expect("benchmark state tree is valid");
+    let tree = builder
+        .build(strategy())
+        .expect("benchmark state tree is valid");
     let positions = (0..changed)
         .map(|index| {
             u32::try_from(index * registry / changed)
@@ -792,10 +798,11 @@ pub(crate) fn sparse_fixture(registry: usize, changed: usize) -> SparseFixture {
         .expect("benchmark sparse positions are canonical");
     let opening_root = tree.root();
     let closing_root = update
-        .reconstruct_closing::<Sha256, _>(&closing_values)
+        .reconstruct_closing::<Sha256, _>(VectorKind::State, &closing_values)
         .expect("benchmark closing root is valid");
     update
         .verify::<Sha256, _, _>(
+            VectorKind::State,
             &opening_root,
             &closing_root,
             &opening_values,

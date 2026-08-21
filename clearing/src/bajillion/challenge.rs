@@ -5,8 +5,7 @@ use crate::bajillion::{
     credit::{self, CreditRoot, ShardLookup},
     payment::{Payment, PaymentError, receipt_range_is_feasible},
     state::{AccountRow, StateLeaf},
-    transition::{BatchId, Header},
-    wire::{PublicKeyReader, ReadWithPublicKeys},
+    transition::{BatchId, CloseContext, Header, RootBundle},
 };
 use alloc::boxed::Box;
 use bytes::{Buf, BufMut};
@@ -59,18 +58,8 @@ impl<P: PublicKey, D: Digest> Read for RowOpening<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for RowOpening<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
-            row: AccountRow::read_with_public_keys(buf, public_keys)?,
+            row: AccountRow::read(buf)?,
             proof: commitment::Opening::read(buf)?,
         })
     }
@@ -117,18 +106,8 @@ impl<P: PublicKey, D: Digest> Read for StateOpening<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for StateOpening<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
-            leaf: StateLeaf::read_with_public_keys(buf, public_keys)?,
+            leaf: StateLeaf::read(buf)?,
             proof: commitment::Opening::read(buf)?,
         })
     }
@@ -190,17 +169,16 @@ impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
         change_root: &VectorRoot<D>,
         account: &P,
     ) -> Result<ResolvedAccount<P, D>, ChallengeError> {
-        if opening_root.kind != VectorKind::State || change_root.kind != VectorKind::Change {
-            return Err(ChallengeError::WrongRootKind);
-        }
         match self {
             Self::Present(opening) => {
                 if &opening.row.account != account {
                     return Err(ChallengeError::LookupKey);
                 }
-                opening
-                    .proof
-                    .verify::<H>(change_root, opening.row.encode().as_ref())?;
+                opening.proof.verify::<H>(
+                    VectorKind::Change,
+                    change_root,
+                    opening.row.encode().as_ref(),
+                )?;
                 Ok(ResolvedAccount {
                     opening: opening.row.opening,
                     closing: opening.row.closing,
@@ -215,11 +193,17 @@ impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
                 if &state.leaf.account != account {
                     return Err(ChallengeError::LookupKey);
                 }
-                state
-                    .proof
-                    .verify::<H>(opening_root, state.leaf.encode().as_ref())?;
+                state.proof.verify::<H>(
+                    VectorKind::State,
+                    opening_root,
+                    state.leaf.encode().as_ref(),
+                )?;
 
-                if change_root.len == 0 {
+                let change_len = predecessor
+                    .as_ref()
+                    .or(successor.as_ref())
+                    .map_or(0, |opening| opening.proof.proof.leaf_count);
+                if change_len == 0 {
                     if predecessor.is_some()
                         || successor.is_some()
                         || *change_root != commitment::empty_root::<H>(VectorKind::Change)
@@ -228,13 +212,15 @@ impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
                     }
                 } else {
                     for opening in predecessor.iter().chain(successor.iter()) {
-                        opening
-                            .proof
-                            .verify::<H>(change_root, opening.row.encode().as_ref())?;
+                        opening.proof.verify::<H>(
+                            VectorKind::Change,
+                            change_root,
+                            opening.row.encode().as_ref(),
+                        )?;
                     }
                     let insertion = successor
                         .as_ref()
-                        .map_or(change_root.len, |opening| opening.proof.position);
+                        .map_or(change_len, |opening| opening.proof.position);
                     match predecessor {
                         None if insertion == 0 => {}
                         Some(opening)
@@ -243,7 +229,7 @@ impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
                         _ => return Err(ChallengeError::LookupOrder),
                     }
                     match successor {
-                        None if insertion == change_root.len => {}
+                        None if insertion == change_len => {}
                         Some(opening)
                             if opening.proof.position == insertion
                                 && opening.row.account > *account => {}
@@ -276,14 +262,10 @@ fn write_optional_row<P: PublicKey, D: Digest>(
 
 fn read_optional_row<P: PublicKey, D: Digest>(
     buf: &mut impl Buf,
-    public_keys: &mut PublicKeyReader<P>,
 ) -> Result<Option<Box<RowOpening<P, D>>>, CodecError> {
     match u8::read(buf)? {
         0 => Ok(None),
-        1 => Ok(Some(Box::new(RowOpening::read_with_public_keys(
-            buf,
-            public_keys,
-        )?))),
+        1 => Ok(Some(Box::new(RowOpening::read(buf)?))),
         tag => Err(CodecError::InvalidEnum(tag)),
     }
 }
@@ -335,25 +317,12 @@ impl<P: PublicKey, D: Digest> Read for AccountLookup<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for AccountLookup<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            1 => Ok(Self::Present(Box::new(RowOpening::read_with_public_keys(
-                buf,
-                public_keys,
-            )?))),
+            1 => Ok(Self::Present(Box::new(RowOpening::read(buf)?))),
             2 => Ok(Self::Absent {
-                state: Box::new(StateOpening::read_with_public_keys(buf, public_keys)?),
-                predecessor: read_optional_row(buf, public_keys)?,
-                successor: read_optional_row(buf, public_keys)?,
+                state: Box::new(StateOpening::read(buf)?),
+                predecessor: read_optional_row(buf)?,
+                successor: read_optional_row(buf)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -411,22 +380,9 @@ impl<P: PublicKey, D: Digest> Read for RangeLower<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for RangeLower<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             1 => Ok(Self::ShardStart),
-            2 => Ok(Self::Payment(Box::new(Payment::read_with_public_keys(
-                buf,
-                public_keys,
-            )?))),
+            2 => Ok(Self::Payment(Box::new(Payment::read(buf)?))),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -569,7 +525,9 @@ pub enum Verdict {
 
 /// Checks one challenge through the inclusive deadline.
 pub fn adjudicate<H, P>(
-    header: &Header<P, H::Digest>,
+    context: &CloseContext<P, H::Digest>,
+    header: &Header<H::Digest>,
+    roots: &RootBundle<H::Digest>,
     now: u64,
     challenge: &Challenge<P, H::Digest>,
 ) -> Result<Verdict, ChallengeError>
@@ -577,12 +535,14 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    adjudicate_with_strategy::<H, P>(header, now, challenge, &Sequential)
+    adjudicate_with_strategy::<H, P>(context, header, roots, now, challenge, &Sequential)
 }
 
 /// Checks one challenge through the inclusive deadline using the supplied execution strategy.
 pub fn adjudicate_with_strategy<H, P>(
-    header: &Header<P, H::Digest>,
+    context: &CloseContext<P, H::Digest>,
+    header: &Header<H::Digest>,
+    roots: &RootBundle<H::Digest>,
     now: u64,
     challenge: &Challenge<P, H::Digest>,
     strategy: &impl Strategy,
@@ -591,15 +551,18 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    if now > header.challenge_deadline {
+    if now > context.challenge_deadline() {
         return Err(ChallengeError::Expired);
     }
     if challenge.batch() != &header.batch_id::<H>() {
         return Err(ChallengeError::WrongBatch);
     }
-    let context = &header.context;
-    let opening_root = &header.opening_root;
-    let change_root = &header.change_root;
+    if !header.verify::<H, P>(context.payment(), roots) {
+        return Err(ChallengeError::HeaderRoot);
+    }
+    let context = context.payment();
+    let opening_root = &roots.opening;
+    let change_root = &roots.change;
     match challenge {
         Challenge::LatestAcknowledgedSend { payment, payer, .. } => {
             let (_, resolved) = strategy.try_run(
@@ -842,39 +805,29 @@ impl<P: PublicKey, D: Digest> Read for Challenge<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for Challenge<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         let tag = u8::read(buf)?;
         let batch = BatchId::read(buf)?;
         match tag {
             1 => Ok(Self::LatestAcknowledgedSend {
                 batch,
-                payment: Box::new(Payment::read_with_public_keys(buf, public_keys)?),
-                payer: Box::new(AccountLookup::read_with_public_keys(buf, public_keys)?),
+                payment: Box::new(Payment::read(buf)?),
+                payer: Box::new(AccountLookup::read(buf)?),
             }),
             2 => Ok(Self::HigherShardTip {
                 batch,
-                payment: Box::new(Payment::read_with_public_keys(buf, public_keys)?),
-                recipient: Box::new(AccountLookup::read_with_public_keys(buf, public_keys)?),
-                shard: Box::new(ShardLookup::read_with_public_keys(buf, public_keys)?),
+                payment: Box::new(Payment::read(buf)?),
+                recipient: Box::new(AccountLookup::read(buf)?),
+                shard: Box::new(ShardLookup::read(buf)?),
             }),
             3 => Ok(Self::InconsistentReceiptRange {
                 batch,
-                upper: Box::new(Payment::read_with_public_keys(buf, public_keys)?),
-                lower: RangeLower::read_with_public_keys(buf, public_keys)?,
+                upper: Box::new(Payment::read(buf)?),
+                lower: RangeLower::read(buf)?,
             }),
             4 => Ok(Self::ReceiptFork {
                 batch,
-                left: Box::new(Payment::read_with_public_keys(buf, public_keys)?),
-                right: Box::new(Payment::read_with_public_keys(buf, public_keys)?),
+                left: Box::new(Payment::read(buf)?),
+                right: Box::new(Payment::read(buf)?),
             }),
             _ => Err(CodecError::InvalidEnum(tag)),
         }
@@ -904,9 +857,9 @@ pub enum ChallengeError {
     /// Inclusive challenge deadline has passed.
     #[error("challenge deadline has passed")]
     Expired,
-    /// Header roots have unexpected semantic types.
-    #[error("challenge was supplied roots of the wrong semantic type")]
-    WrongRootKind,
+    /// Supplied roots do not open the contextual header.
+    #[error("challenge roots do not open the admitted header")]
+    HeaderRoot,
     /// Lookup is for another account or shard.
     #[error("authenticated lookup is for another key")]
     LookupKey,
@@ -940,19 +893,19 @@ pub enum ChallengeError {
 mod tests {
     use super::*;
     use crate::bajillion::{
+        boundary::{DepositBatch, WithdrawalBatch},
         commitment::{Builder, Tree},
         credit::{ShardHead, ShardSet},
         payment::{PaymentContext, PaymentError, ReceiptBody, SendBody, SignedReceipt, SignedSend},
         state::{AccountState, Prefix},
-        transition::Header,
+        transition::{Assignment, CloseLimits, StateCache},
     };
     use alloc::vec::Vec;
     use bytes::Bytes;
     use commonware_codec::Encode;
-    use commonware_cryptography::{
-        Sha256, Signer as _,
-        curve25519::{Signature, SigningKey, VerifyingKey},
-        sha256::Digest as ShaDigest,
+    use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as ShaDigest};
+    use commonware_cryptography_curve25519::signing::{
+        Signature, SigningKey, StrictVerifyingKey as VerifyingKey,
     };
     use commonware_parallel::{Rayon, Sequential};
     use core::{fmt, ops::Deref};
@@ -1028,11 +981,10 @@ mod tests {
     impl commonware_cryptography::PublicKey for CountingKey {}
 
     struct Fixture {
-        context: PaymentContext<VerifyingKey, ShaDigest>,
-        header: Header<VerifyingKey, ShaDigest>,
+        context: CloseContext<VerifyingKey, ShaDigest>,
+        header: Header<ShaDigest>,
+        roots: RootBundle<ShaDigest>,
         batch: BatchId<ShaDigest>,
-        opening_root: VectorRoot<ShaDigest>,
-        change_root: VectorRoot<ShaDigest>,
         state_tree: Tree<ShaDigest>,
         change_tree: Tree<ShaDigest>,
         leaves: Vec<StateLeaf<VerifyingKey>>,
@@ -1106,7 +1058,7 @@ mod tests {
         for value in values {
             builder.add_encoded(value.encode().as_ref()).unwrap();
         }
-        builder.build().unwrap()
+        builder.build(&Sequential).unwrap()
     }
 
     fn fixture() -> Fixture {
@@ -1114,13 +1066,39 @@ mod tests {
         let payer = SigningKey::from_seed(2);
         let recipient = SigningKey::from_seed(3);
         let dormant = SigningKey::from_seed(4);
-        let context = PaymentContext::new(
-            Sha256::hash(&[b"challenge-anchor"]),
+        let mut leaves = vec![
+            StateLeaf {
+                account: payer.public_key(),
+                state: state(100),
+            },
+            StateLeaf {
+                account: recipient.public_key(),
+                state: state(40),
+            },
+            StateLeaf {
+                account: dormant.public_key(),
+                state: state(25),
+            },
+        ];
+        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let cache = StateCache::new::<Sha256>(leaves.clone()).unwrap();
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let context = CloseContext::new::<Sha256>(
+            Sha256::hash(&[b"challenge-deployment"]),
             7,
             operator.public_key(),
-        );
+            &cache,
+            &deposits,
+            &withdrawals,
+            99,
+            100,
+            CloseLimits::protocol_maximum(),
+            Assignment::new(Sha256::hash(&[b"challenge-committee"]), 0).unwrap(),
+        )
+        .unwrap();
         let accepted = payment(
-            &context,
+            context.payment(),
             &operator,
             &payer,
             recipient.public_key(),
@@ -1130,9 +1108,9 @@ mod tests {
             0,
             0,
         );
-        let payer_shards = ShardSet::empty(context.epoch(), payer.public_key());
+        let payer_shards = ShardSet::empty(context.payment().epoch(), payer.public_key());
         let recipient_shards = ShardSet::new(
-            context.epoch(),
+            context.payment().epoch(),
             recipient.public_key(),
             vec![ShardHead::new(0, accepted.clone())],
         )
@@ -1168,40 +1146,20 @@ mod tests {
         let mut shards = vec![payer_shards, recipient_shards];
         shards.sort_unstable_by(|left, right| left.recipient().cmp(right.recipient()));
 
-        let mut leaves = vec![
-            StateLeaf {
-                account: payer.public_key(),
-                state: state(100),
-            },
-            StateLeaf {
-                account: recipient.public_key(),
-                state: state(40),
-            },
-            StateLeaf {
-                account: dormant.public_key(),
-                state: state(25),
-            },
-        ];
-        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
         let state_tree = tree(VectorKind::State, &leaves);
         let change_tree = tree(VectorKind::Change, &rows);
-        let header = Header {
-            context: context.clone(),
-            opening_root: state_tree.root(),
-            change_root: change_tree.root(),
-            closing_root: state_tree.root(),
-            totals: Prefix::default(),
-            opening_liability: 165,
-            closing_liability: 165,
-            challenge_deadline: 100,
+        let roots = RootBundle {
+            opening: state_tree.root(),
+            change: change_tree.root(),
+            closing: state_tree.root(),
         };
+        let header = Header::new::<Sha256, _>(context.payment(), &roots);
         let batch = header.batch_id::<Sha256>();
         Fixture {
             context,
             header,
+            roots,
             batch,
-            opening_root: state_tree.root(),
-            change_root: change_tree.root(),
             state_tree,
             change_tree,
             leaves,
@@ -1248,7 +1206,13 @@ mod tests {
     }
 
     fn adjudicate(fixture: &Fixture, challenge: &TestChallenge) -> Result<Verdict, ChallengeError> {
-        super::adjudicate::<Sha256, _>(&fixture.header, 100, challenge)
+        super::adjudicate::<Sha256, _>(
+            &fixture.context,
+            &fixture.header,
+            &fixture.roots,
+            100,
+            challenge,
+        )
     }
 
     fn adjudicate_strategies(
@@ -1257,15 +1221,29 @@ mod tests {
         challenge: &TestChallenge,
         rayon: &Rayon,
     ) -> Result<Verdict, ChallengeError> {
-        let wrapped = super::adjudicate::<Sha256, _>(&fixture.header, now, challenge);
-        let sequential = super::adjudicate_with_strategy::<Sha256, _>(
+        let wrapped = super::adjudicate::<Sha256, _>(
+            &fixture.context,
             &fixture.header,
+            &fixture.roots,
+            now,
+            challenge,
+        );
+        let sequential = super::adjudicate_with_strategy::<Sha256, _>(
+            &fixture.context,
+            &fixture.header,
+            &fixture.roots,
             now,
             challenge,
             &Sequential,
         );
-        let parallel =
-            super::adjudicate_with_strategy::<Sha256, _>(&fixture.header, now, challenge, rayon);
+        let parallel = super::adjudicate_with_strategy::<Sha256, _>(
+            &fixture.context,
+            &fixture.header,
+            &fixture.roots,
+            now,
+            challenge,
+            rayon,
+        );
         assert_eq!(format!("{wrapped:?}"), format!("{sequential:?}"));
         assert_eq!(format!("{wrapped:?}"), format!("{parallel:?}"));
         wrapped
@@ -1294,8 +1272,8 @@ mod tests {
     fn counting_payment(fixture: &Fixture, next_key: &mut u8) -> Payment<CountingKey, ShaDigest> {
         let send = SignedSend::from_raw_unchecked(
             SendBody::from_raw_unchecked(
-                *fixture.context.anchor(),
-                fixture.context.epoch(),
+                *fixture.context.payment().anchor(),
+                fixture.context.payment().epoch(),
                 counting_key(next_key),
                 counting_key(next_key),
                 1,
@@ -1305,8 +1283,8 @@ mod tests {
         );
         let receipt = SignedReceipt::from_raw_unchecked(
             ReceiptBody::from_raw_unchecked(
-                *fixture.context.anchor(),
-                fixture.context.epoch(),
+                *fixture.context.payment().anchor(),
+                fixture.context.payment().epoch(),
                 counting_key(next_key),
                 0,
                 1,
@@ -1320,14 +1298,14 @@ mod tests {
     }
 
     #[test]
-    fn higher_shard_tip_decodes_each_distinct_public_key_once() {
+    fn higher_shard_tip_decodes_each_public_key_occurrence() {
         let fixture = fixture();
         let payer = CountingKey([1]);
         let recipient = CountingKey([2]);
         let send = SignedSend::from_raw_unchecked(
             SendBody::from_raw_unchecked(
-                *fixture.context.anchor(),
-                fixture.context.epoch(),
+                *fixture.context.payment().anchor(),
+                fixture.context.payment().epoch(),
                 payer.clone(),
                 recipient.clone(),
                 10,
@@ -1337,8 +1315,8 @@ mod tests {
         );
         let receipt = SignedReceipt::from_raw_unchecked(
             ReceiptBody::from_raw_unchecked(
-                *fixture.context.anchor(),
-                fixture.context.epoch(),
+                *fixture.context.payment().anchor(),
+                fixture.context.payment().epoch(),
                 recipient,
                 0,
                 10,
@@ -1379,14 +1357,14 @@ mod tests {
         PUBLIC_KEY_DECODE_SUCCESSES.store(0, Ordering::Relaxed);
         let decoded = Challenge::<CountingKey, ShaDigest>::decode(encoded.clone()).unwrap();
 
-        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 2);
-        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 2);
+        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 10);
+        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 10);
         assert_eq!(decoded.encode(), encoded);
         assert_eq!(decoded.encode_size(), encoded.len());
 
         Challenge::<CountingKey, ShaDigest>::decode(encoded).unwrap();
-        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 4);
-        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 4);
+        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 20);
+        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 20);
     }
 
     #[test]
@@ -1729,7 +1707,7 @@ mod tests {
     fn latest_acknowledged_send_uses_present_and_absent_accounts() {
         let fixture = fixture();
         let later = payment(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             &fixture.payer,
             fixture.recipient.public_key(),
@@ -1750,7 +1728,7 @@ mod tests {
         );
 
         let omitted = payment(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             &fixture.dormant,
             fixture.recipient.public_key(),
@@ -1785,7 +1763,7 @@ mod tests {
     fn equal_debit_with_another_accepted_body_is_a_latest_send_fault() {
         let fixture = fixture();
         let conflict = payment(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             &fixture.payer,
             fixture.dormant.public_key(),
@@ -1810,7 +1788,7 @@ mod tests {
     fn higher_shard_tip_uses_membership_and_ordered_absence() {
         let fixture = fixture();
         let later = payment(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             &fixture.payer,
             fixture.recipient.public_key(),
@@ -1841,11 +1819,22 @@ mod tests {
         );
 
         for (credit, index) in [(11, 1), (9, 2)] {
-            let send =
-                SignedSend::sign_next(&fixture.context, &fixture.payer, recipient.clone(), 1, 10)
-                    .unwrap();
-            let retained =
-                payment_with_endpoint(&fixture.context, &fixture.operator, send, 0, credit, index);
+            let send = SignedSend::sign_next(
+                fixture.context.payment(),
+                &fixture.payer,
+                recipient.clone(),
+                1,
+                10,
+            )
+            .unwrap();
+            let retained = payment_with_endpoint(
+                fixture.context.payment(),
+                &fixture.operator,
+                send,
+                0,
+                credit,
+                index,
+            );
             let challenge = Challenge::HigherShardTip {
                 batch: fixture.batch,
                 payment: Box::new(retained),
@@ -1863,7 +1852,7 @@ mod tests {
         }
 
         let absent_shard = payment(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             &fixture.payer,
             recipient.clone(),
@@ -1893,14 +1882,15 @@ mod tests {
     fn inconsistent_range_checks_start_and_linked_lower_endpoint() {
         let fixture = fixture();
         let send = SignedSend::sign_next(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.payer,
             fixture.recipient.public_key(),
             5,
             10,
         )
         .unwrap();
-        let impossible = payment_with_endpoint(&fixture.context, &fixture.operator, send, 0, 14, 2);
+        let impossible =
+            payment_with_endpoint(fixture.context.payment(), &fixture.operator, send, 0, 14, 2);
         let challenge = Challenge::InconsistentReceiptRange {
             batch: fixture.batch,
             upper: Box::new(impossible),
@@ -1912,10 +1902,10 @@ mod tests {
         );
 
         let impossible = payment_with_endpoint(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             SignedSend::sign_next(
-                &fixture.context,
+                fixture.context.payment(),
                 &fixture.dormant,
                 fixture.recipient.public_key(),
                 5,
@@ -1951,7 +1941,7 @@ mod tests {
     fn zero_endpoint_receipt_contradicts_shard_start() {
         let fixture = fixture();
         let zero_endpoint = payment_with_endpoint(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             fixture.payment.send().clone(),
             0,
@@ -1978,7 +1968,7 @@ mod tests {
     fn receipt_fork_covers_same_index_and_reused_transaction() {
         let fixture = fixture();
         let other = payment(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             &fixture.dormant,
             fixture.recipient.public_key(),
@@ -1995,7 +1985,7 @@ mod tests {
         );
 
         let reused = payment_with_endpoint(
-            &fixture.context,
+            fixture.context.payment(),
             &fixture.operator,
             fixture.payment.send().clone(),
             4,
@@ -2038,44 +2028,48 @@ mod tests {
         ));
 
         assert!(matches!(
-            super::adjudicate::<Sha256, _>(&fixture.header, 101, &challenge),
+            super::adjudicate::<Sha256, _>(
+                &fixture.context,
+                &fixture.header,
+                &fixture.roots,
+                101,
+                &challenge,
+            ),
             Err(ChallengeError::Expired)
         ));
-        let mut other_header = fixture.header;
-        other_header.closing_liability += 1;
+        let mut other_roots = fixture.roots;
+        other_roots.closing.digest = Sha256::hash(&[b"other-closing"]);
+        let other_header = Header::new::<Sha256, _>(fixture.context.payment(), &other_roots);
         assert!(matches!(
-            super::adjudicate::<Sha256, _>(&other_header, 100, &challenge),
+            super::adjudicate::<Sha256, _>(
+                &fixture.context,
+                &other_header,
+                &other_roots,
+                100,
+                &challenge,
+            ),
             Err(ChallengeError::WrongBatch)
+        ));
+
+        assert!(matches!(
+            super::adjudicate::<Sha256, _>(
+                &fixture.context,
+                &fixture.header,
+                &other_roots,
+                100,
+                &challenge,
+            ),
+            Err(ChallengeError::HeaderRoot)
         ));
     }
 
     #[test]
     fn adjudication_rejects_batch_id_mixed_with_another_header() {
         let fixture = fixture();
-        let header_a = Header {
-            context: PaymentContext::new(
-                Sha256::hash(&[b"header-a-anchor"]),
-                8,
-                SigningKey::from_seed(5).public_key(),
-            ),
-            opening_root: crate::bajillion::commitment::empty_root::<Sha256>(VectorKind::State),
-            change_root: crate::bajillion::commitment::empty_root::<Sha256>(VectorKind::Change),
-            closing_root: crate::bajillion::commitment::empty_root::<Sha256>(VectorKind::State),
-            totals: Prefix::default(),
-            opening_liability: 0,
-            closing_liability: 0,
-            challenge_deadline: 200,
-        };
-        let header_b = Header {
-            context: fixture.context.clone(),
-            opening_root: fixture.opening_root,
-            change_root: fixture.change_root,
-            closing_root: fixture.opening_root,
-            totals: Prefix::default(),
-            opening_liability: 165,
-            closing_liability: 165,
-            challenge_deadline: 100,
-        };
+        let mut roots_a = fixture.roots;
+        roots_a.closing.digest = Sha256::hash(&[b"header-a-closing"]);
+        let header_a = Header::new::<Sha256, _>(fixture.context.payment(), &roots_a);
+        let header_b = fixture.header;
         let batch_a = header_a.batch_id::<Sha256>();
         assert_ne!(batch_a, header_b.batch_id::<Sha256>());
 
@@ -2084,8 +2078,13 @@ mod tests {
             payment: Box::new(fixture.payment.clone()),
             payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
         };
-        let result =
-            super::adjudicate::<Sha256, _>(&header_b, header_b.challenge_deadline, &challenge);
+        let result = super::adjudicate::<Sha256, _>(
+            &fixture.context,
+            &header_b,
+            &fixture.roots,
+            fixture.context.challenge_deadline(),
+            &challenge,
+        );
         assert!(
             matches!(&result, Err(ChallengeError::WrongBatch)),
             "a batch ID from header A must not authorize header B inputs: {result:?}"
@@ -2111,8 +2110,8 @@ mod tests {
         }
         assert!(matches!(
             lookup.resolve::<Sha256>(
-                &fixture.opening_root,
-                &fixture.change_root,
+                &fixture.roots.opening,
+                &fixture.roots.change,
                 &fixture.dormant.public_key(),
             ),
             Err(ChallengeError::LookupOrder)

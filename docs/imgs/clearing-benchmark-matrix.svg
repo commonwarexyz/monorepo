@@ -52,9 +52,9 @@
   <text class="value green-text" x="172" y="213">330</text>
   <text class="value green-text" x="350" y="181">403</text>
 
-  <!-- Proof-slice assembly. -->
+  <!-- All-piece proof construction. -->
   <rect class="frame" x="460" y="90" width="400" height="360" rx="3"/>
-  <text class="panel-title" x="660" y="122">Operator: Assemble Proof Slices</text>
+  <text class="panel-title" x="660" y="122">Operator: Build Piece Proofs</text>
   <text class="axis" x="525" y="138" text-anchor="end">ms</text>
   <line class="grid" x1="535" y1="150" x2="825" y2="150"/>
   <line class="grid" x1="535" y1="205" x2="825" y2="205"/>
@@ -79,9 +79,9 @@
   <text class="value green-text" x="602" y="204">351</text>
   <text class="value green-text" x="780" y="179">406</text>
 
-  <!-- Complete seal for the busiest validator assignment. -->
+  <!-- Maximum-load validator. -->
   <rect class="frame" x="890" y="90" width="400" height="360" rx="3"/>
-  <text class="panel-title" x="1090" y="122">Validator: Seal Assignment</text>
+  <text class="panel-title" x="1090" y="122">Validator: Check and Sign</text>
   <text class="axis" x="955" y="138" text-anchor="end">ms</text>
   <line class="grid" x1="965" y1="150" x2="1255" y2="150"/>
   <line class="grid" x1="965" y1="205" x2="1255" y2="205"/>

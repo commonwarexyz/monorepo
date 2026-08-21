@@ -19,10 +19,7 @@ fn bench_update(c: &mut Criterion) {
                 b.iter(|| {
                     let update = fixture
                         .tree
-                        .update_with_strategy::<Sha256>(
-                            black_box(&fixture.changes),
-                            black_box(&strategy),
-                        )
+                        .update::<Sha256>(black_box(&fixture.changes), black_box(&strategy))
                         .expect("benchmark update is valid");
                     black_box(update)
                 });

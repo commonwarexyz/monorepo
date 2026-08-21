@@ -1,4 +1,4 @@
-//! Deterministic proof-slice assignment and exact-quorum header admission.
+//! Deterministic dealings and exact-quorum header admission.
 
 mod certificate;
 
@@ -9,29 +9,25 @@ use crate::bajillion::{
         SignedReceipt, SignedSend,
     },
     transition::{
-        Assignment, CloseContext, Header, ProofSlice, validate_slice_header,
+        Assignment, CloseContext, Header, ProofSlice, RootBundle, validate_slice_header,
         validate_slice_structure_after_header,
     },
 };
 use ahash::RandomState;
 use alloc::vec::Vec;
 pub use certificate::{
-    COMMITTEE_HASH_NAMESPACE, Committee, Error as AdmissionError, HEADER_NAMESPACE, HeaderSubject,
-    MAX_COMMITTEE_SIZE, curve25519,
+    COMMITTEE_HASH_NAMESPACE, Committee, Error as AdmissionError, HEADER_NAMESPACE,
+    MAX_COMMITTEE_SIZE, bls12381,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::{
-    BatchVerifier, Digest, Hasher, PublicKey,
-    certificate::{Attestation, Scheme as CertificateScheme},
-    curve25519::VerifyingKey as ValidatorVerifyingKey,
-};
+use commonware_cryptography::{BatchVerifier, Digest, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use commonware_utils::Participant;
 use hashbrown::HashSet;
 use rand_core::CryptoRng;
 
 /// One exact-quorum validator attestation over a clearing header.
-pub type Vote<P> = Attestation<curve25519::Scheme<P>>;
+pub type Vote = bls12381::Vote;
 
 fn verify_payment_signatures<'a, P, D, B, R, I>(
     context: &PaymentContext<P, D>,
@@ -51,6 +47,10 @@ where
     if payments.peek().is_none() {
         return true;
     }
+
+    // Randomized hashing bounds collision-amplification from adversarial envelopes. Deduplication
+    // still uses exact envelope equality, including the signature, and keeps send and receipt
+    // domains separate.
     let hasher = RandomState::with_seeds(
         rng.next_u64(),
         rng.next_u64(),
@@ -75,15 +75,18 @@ where
     };
     drop(unique_sends);
     drop(unique_receipts);
+
+    // Encode independent message bodies through the supplied strategy, then queue every distinct
+    // signature into one randomized aggregate verification.
     let mut batch = B::new(signature_count);
     let send_messages =
         strategy.map_collect_vec(sends.iter().copied(), |send| send.body().encode());
     let mut queued = true;
     for (send, message) in sends.into_iter().zip(send_messages) {
-        queued &= B::add_owned(
+        queued &= B::add(
             &mut batch,
             SEND_SIGNATURE_NAMESPACE,
-            message,
+            &message,
             send.body().payer(),
             send.signature(),
         );
@@ -91,10 +94,10 @@ where
     let receipt_messages =
         strategy.map_collect_vec(receipts.iter().copied(), |receipt| receipt.body().encode());
     for (receipt, message) in receipts.into_iter().zip(receipt_messages) {
-        queued &= B::add_owned(
+        queued &= B::add(
             &mut batch,
             RECEIPT_SIGNATURE_NAMESPACE,
-            message,
+            &message,
             context.operator(),
             receipt.signature(),
         );
@@ -104,7 +107,7 @@ where
 
 /// Deterministically derives the exact quorum retaining one proof slice.
 pub fn slice_holders<H, D>(
-    committee: &Committee<ValidatorVerifyingKey>,
+    committee: &Committee,
     assignment: &Assignment<D>,
     slice: u16,
 ) -> Result<Vec<Participant>, AdmissionError>
@@ -137,9 +140,9 @@ where
     Ok(holders)
 }
 
-/// Derives every slice that one validator must authenticate and retain.
+/// Derives every slice in one validator's dealing.
 pub fn assigned_slice_indices<H, D>(
-    committee: &Committee<ValidatorVerifyingKey>,
+    committee: &Committee,
     assignment: &Assignment<D>,
     validator: Participant,
 ) -> Result<Vec<u16>, AdmissionError>
@@ -181,31 +184,37 @@ where
     Ok(slices)
 }
 
-/// A sealing validator's proof-slice assignment retained through the challenge deadline.
+/// A validator's sealed dealing retained through the challenge deadline.
 #[derive(Clone, Debug)]
 pub struct RetainedAssignment<P: PublicKey, D: Digest> {
     validator: Participant,
-    header: Header<P, D>,
+    header: Header<D>,
+    roots: RootBundle<D>,
     slices: Vec<ProofSlice<P, D>>,
 }
 
 impl<P: PublicKey, D: Digest> RetainedAssignment<P, D> {
-    /// Validator that sealed and owns this assignment.
+    /// Validator that sealed and owns this dealing.
     pub const fn validator(&self) -> Participant {
         self.validator
     }
 
-    /// Header signed after the assignment was authenticated.
-    pub const fn header(&self) -> &Header<P, D> {
+    /// Header signed after the dealing was authenticated.
+    pub const fn header(&self) -> &Header<D> {
         &self.header
     }
 
-    /// Canonically ordered retained slices.
+    /// Root bundle needed to authenticate later challenges and finalization.
+    pub const fn roots(&self) -> &RootBundle<D> {
+        &self.roots
+    }
+
+    /// Canonically ordered proof slices comprising the dealing.
     pub fn slices(&self) -> &[ProofSlice<P, D>] {
         &self.slices
     }
 
-    /// Consumes the retained assignment and returns its owned slices.
+    /// Consumes the retained dealing and returns its proof slices.
     pub fn into_slices(self) -> Vec<ProofSlice<P, D>> {
         self.slices
     }
@@ -219,23 +228,23 @@ impl<P: PublicKey, D: Digest> RetainedAssignment<P, D> {
     }
 }
 
-/// Authenticates and takes ownership of a validator's complete assignment, then signs the header.
+/// Authenticates and takes ownership of one validator's dealing, then signs the header.
 ///
-/// Every validator independently authenticates its exact assigned slices and batch-verifies every
-/// distinct signed envelope they carry. Applications must make the returned assignment durable
-/// before publishing the accompanying vote.
+/// A dealing is the complete, canonically ordered set of proof slices assigned to one validator.
+/// `seal` verifies every distinct signed send and receipt in one randomized aggregate batch.
+/// Applications must make the returned dealing durable before publishing the accompanying vote.
 #[allow(clippy::too_many_arguments)]
 pub fn seal<H, P, D, B, R>(
-    scheme: &curve25519::Scheme<P>,
-    committee: &Committee<ValidatorVerifyingKey>,
+    scheme: &bls12381::Scheme,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
-    header: &Header<P, D>,
-    slices: Vec<ProofSlice<P, D>>,
+    header: &Header<D>,
+    roots: &RootBundle<D>,
+    dealing: Vec<ProofSlice<P, D>>,
     rng: &mut R,
     strategy: &impl Strategy,
-) -> Result<(Vote<P>, RetainedAssignment<P, D>), AdmissionError>
+) -> Result<(Vote, RetainedAssignment<P, D>), AdmissionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey + Ord + 'static,
@@ -243,34 +252,37 @@ where
     B: BatchVerifier<PublicKey = P>,
     R: CryptoRng,
 {
-    if scheme.participants() != committee.participants() {
-        return Err(AdmissionError::CommitteeMismatch);
-    }
+    let committee = scheme.committee();
     let validator = scheme.me().ok_or(AdmissionError::SigningUnavailable)?;
+
+    // The dealing must contain exactly the validator's deterministic assignment before any local
+    // proof work can be accepted.
     let expected = assigned_slice_indices::<H, D>(committee, context.assignment(), validator)?;
-    if slices.len() != expected.len()
-        || slices
+    if dealing.len() != expected.len()
+        || dealing
             .iter()
             .map(|slice| slice.index)
             .ne(expected.iter().copied())
     {
         return Err(AdmissionError::IncompleteAssignment);
     }
-    validate_slice_header::<H, P, D>(context, deposits, withdrawals, header)
+    validate_slice_header::<H, P, D>(context, deposits, withdrawals, header, roots)
         .map_err(|_| AdmissionError::InvalidSlice)?;
     strategy
-        .try_map_collect_vec(&slices, |slice| {
+        .try_map_collect_vec(&dealing, |slice| {
             validate_slice_structure_after_header::<H, P, D>(
                 context,
                 deposits,
                 withdrawals,
-                header,
+                roots,
                 slice,
             )
         })
         .map_err(|_| AdmissionError::InvalidSlice)?;
 
-    let payment_count = slices
+    // Structural validation makes every payment reference safe to collect. The complete dealing
+    // then contributes all of its distinct signatures to one randomized aggregate batch.
+    let payment_count = dealing
         .iter()
         .try_fold(0_usize, |total, slice| {
             let outgoing = slice
@@ -289,7 +301,7 @@ where
         .ok_or(AdmissionError::InvalidSlice)?;
     if !verify_payment_signatures::<P, D, B, R, _>(
         context.payment(),
-        slices.iter().flat_map(|slice| {
+        dealing.iter().flat_map(|slice| {
             slice
                 .changes
                 .rows
@@ -309,13 +321,15 @@ where
         return Err(AdmissionError::InvalidSlice);
     }
 
+    // Return the exact authenticated buffers with the vote so the caller can durably retain the
+    // dealing before publishing its attestation.
     let retained = RetainedAssignment {
         validator,
-        header: header.clone(),
-        slices,
+        header: *header,
+        roots: *roots,
+        slices: dealing,
     };
-    let vote = CertificateScheme::sign(scheme, HeaderSubject::from_header(header))
-        .ok_or(AdmissionError::SigningUnavailable)?;
+    let vote = scheme.sign(header)?;
     Ok((vote, retained))
 }
 
@@ -331,13 +345,18 @@ mod tests {
             Assignment, CloseLimits, StateCache, assemble_slices, build_close, validate_close,
         },
     };
-    use bytes::Bytes;
     use commonware_cryptography::{
         Hasher, Sha256, Signer as _, Verifier,
-        curve25519::{
-            BatchVerifier as PaymentBatchVerifier, SigningKey, VerifyingKey as AccountVerifyingKey,
+        bls12381::primitives::{
+            group::{Private as ValidatorSigningKey, Scalar},
+            ops::compute_public,
+            variant::MinSig,
         },
         sha256::Digest as ShaDigest,
+    };
+    use commonware_cryptography_curve25519::signing::{
+        BatchVerifier as PaymentBatchVerifier, SigningKey,
+        StrictVerifyingKey as AccountVerifyingKey,
     };
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
@@ -349,8 +368,7 @@ mod tests {
     static HASH_CALLS: AtomicUsize = AtomicUsize::new(0);
     static PAYMENT_BATCH_CREATIONS: AtomicUsize = AtomicUsize::new(0);
     static PAYMENT_BATCH_VERIFICATIONS: AtomicUsize = AtomicUsize::new(0);
-    static PAYMENT_BATCH_BORROWED_ADDS: AtomicUsize = AtomicUsize::new(0);
-    static PAYMENT_BATCH_OWNED_ADDS: AtomicUsize = AtomicUsize::new(0);
+    static PAYMENT_BATCH_ADDS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Default)]
     struct CountingSha256(Sha256);
@@ -378,12 +396,26 @@ mod tests {
         }
     }
 
-    fn validator_keys(count: u64) -> Vec<SigningKey> {
-        (0..count).map(SigningKey::from_seed).collect()
+    #[derive(Clone)]
+    struct ValidatorKey {
+        signing: ValidatorSigningKey,
     }
 
-    fn committee(keys: &[SigningKey]) -> Committee<ValidatorVerifyingKey> {
-        Committee::new(keys.iter().map(|key| key.public_key()).collect()).unwrap()
+    fn validator_keys(count: u64) -> Vec<ValidatorKey> {
+        (0..count)
+            .map(|index| ValidatorKey {
+                signing: ValidatorSigningKey::new(Scalar::from(index + 1)),
+            })
+            .collect()
+    }
+
+    fn committee(keys: &[ValidatorKey]) -> Committee {
+        Committee::new(
+            keys.iter()
+                .map(|key| compute_public::<MinSig>(&key.signing))
+                .collect(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -496,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn validator_seals_only_its_exact_assignment() {
+    fn validator_seals_only_its_exact_dealing() {
         let validators = validator_keys(4);
         let committee = committee(&validators);
         let operator = SigningKey::from_seed(100);
@@ -545,11 +577,8 @@ mod tests {
             &Sequential,
         )
         .unwrap();
-        let scheme = curve25519::Scheme::<ValidatorVerifyingKey>::signer(
-            committee.clone(),
-            validators[0].clone(),
-        )
-        .unwrap();
+        let scheme =
+            bls12381::Scheme::signer(committee.clone(), validators[0].signing.clone()).unwrap();
         let expected = assigned_slice_indices::<Sha256, _>(
             &committee,
             context.assignment(),
@@ -563,11 +592,11 @@ mod tests {
         let mut rng = test_rng();
         let (vote, retained) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &scheme,
-            &committee,
             &context,
             &deposits,
             &withdrawals,
             &close.header,
+            &close.roots,
             slices.clone(),
             &mut rng,
             &Sequential,
@@ -580,11 +609,11 @@ mod tests {
 
         let (parallel_vote, parallel_retained) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &scheme,
-            &committee,
             &context,
             &deposits,
             &withdrawals,
             &close.header,
+            &close.roots,
             slices.clone(),
             &mut test_rng(),
             &Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap(),
@@ -596,11 +625,11 @@ mod tests {
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 slices[..slices.len() - 1].to_vec(),
                 &mut rng,
                 &Sequential,
@@ -615,11 +644,11 @@ mod tests {
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 duplicate,
                 &mut rng,
                 &Sequential,
@@ -633,11 +662,11 @@ mod tests {
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 malformed,
                 &mut rng,
                 &Sequential,
@@ -667,19 +696,7 @@ mod tests {
             _public_key: &Self::PublicKey,
             _signature: &<Self::PublicKey as Verifier>::Signature,
         ) -> bool {
-            PAYMENT_BATCH_BORROWED_ADDS.fetch_add(1, Ordering::Relaxed);
-            self.items += 1;
-            true
-        }
-
-        fn add_owned(
-            &mut self,
-            _namespace: &[u8],
-            _message: Bytes,
-            _public_key: &Self::PublicKey,
-            _signature: &<Self::PublicKey as Verifier>::Signature,
-        ) -> bool {
-            PAYMENT_BATCH_OWNED_ADDS.fetch_add(1, Ordering::Relaxed);
+            PAYMENT_BATCH_ADDS.fetch_add(1, Ordering::Relaxed);
             self.items += 1;
             true
         }
@@ -858,13 +875,13 @@ mod tests {
             slice_holders::<Sha256, ShaDigest>(&committee, context.assignment(), 0).unwrap()[0];
         let validator_key = validators
             .iter()
-            .find(|key| key.public_key() == committee.members()[usize::from(validator)])
+            .find(|key| {
+                compute_public::<MinSig>(&key.signing)
+                    == committee.members()[usize::from(validator)]
+            })
             .unwrap();
-        let scheme = curve25519::Scheme::<ValidatorVerifyingKey>::signer(
-            committee.clone(),
-            validator_key.clone(),
-        )
-        .unwrap();
+        let scheme =
+            bls12381::Scheme::signer(committee.clone(), validator_key.signing.clone()).unwrap();
         let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
 
         let mut mutated_outgoing = all.clone();
@@ -886,11 +903,11 @@ mod tests {
         assert_eq!(
             seal::<Sha256, _, _, ExactPaymentBatch, _>(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 mutated_outgoing,
                 &mut test_rng(),
                 &strategy,
@@ -921,11 +938,11 @@ mod tests {
         assert_eq!(
             seal::<Sha256, _, _, ExactPaymentBatch, _>(
                 &scheme,
-                &committee,
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
+                &close.roots,
                 mutated_incoming,
                 &mut test_rng(),
                 &strategy,
@@ -936,15 +953,14 @@ mod tests {
 
         PAYMENT_BATCH_CREATIONS.store(0, Ordering::Relaxed);
         PAYMENT_BATCH_VERIFICATIONS.store(0, Ordering::Relaxed);
-        PAYMENT_BATCH_BORROWED_ADDS.store(0, Ordering::Relaxed);
-        PAYMENT_BATCH_OWNED_ADDS.store(0, Ordering::Relaxed);
+        PAYMENT_BATCH_ADDS.store(0, Ordering::Relaxed);
         let (_, retained) = seal::<Sha256, _, _, ExactPaymentBatch, _>(
             &scheme,
-            &committee,
             &context,
             &deposits,
             &withdrawals,
             &close.header,
+            &close.roots,
             all,
             &mut test_rng(),
             &strategy,
@@ -953,7 +969,6 @@ mod tests {
         assert_eq!(retained.slices().len(), 1);
         assert_eq!(PAYMENT_BATCH_CREATIONS.load(Ordering::Relaxed), 1);
         assert_eq!(PAYMENT_BATCH_VERIFICATIONS.load(Ordering::Relaxed), 1);
-        assert_eq!(PAYMENT_BATCH_BORROWED_ADDS.load(Ordering::Relaxed), 0);
-        assert_eq!(PAYMENT_BATCH_OWNED_ADDS.load(Ordering::Relaxed), 2);
+        assert_eq!(PAYMENT_BATCH_ADDS.load(Ordering::Relaxed), 2);
     }
 }

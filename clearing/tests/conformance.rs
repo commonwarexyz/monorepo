@@ -1,7 +1,10 @@
 #![cfg(feature = "arbitrary")]
 
 use commonware_clearing::bajillion::{
-    admission::{Committee, curve25519::Certificate},
+    admission::{
+        Committee,
+        bls12381::{Certificate, Vote},
+    },
     boundary::{
         DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalBatch, WithdrawalBody,
         WithdrawalId,
@@ -14,15 +17,18 @@ use commonware_clearing::bajillion::{
     payment::{Payment, PaymentContext, ReceiptBody, SendBody, SignedReceipt, SignedSend, TxId},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, BatchId, ChangeRange, Close, CloseLimits, Header, ProofSlice, StateBounds,
+        Assignment, BatchId, ChangeRange, Close, CloseLimits, Header, ProofSlice, RootBundle,
+        StateBounds,
     },
 };
 use commonware_codec::conformance::CodecConformance;
-use commonware_cryptography::{curve25519::VerifyingKey, sha256::Digest as Sha256Digest};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography_curve25519::signing::StrictVerifyingKey as VerifyingKey;
 
 commonware_conformance::conformance_tests! {
     CodecConformance<Certificate> => 1024,
-    CodecConformance<Committee<VerifyingKey>> => 1024,
+    CodecConformance<Vote> => 1024,
+    CodecConformance<Committee> => 1024,
     CodecConformance<DepositRecord<VerifyingKey>> => 1024,
     CodecConformance<DepositBatch<VerifyingKey>> => 1024,
     CodecConformance<WithdrawalId<Sha256Digest>>,
@@ -36,6 +42,7 @@ commonware_conformance::conformance_tests! {
     CodecConformance<Challenge<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<VectorKind>,
     CodecConformance<VectorRoot<Sha256Digest>>,
+    CodecConformance<RootBundle<Sha256Digest>>,
     CodecConformance<Opening<Sha256Digest>> => 1024,
     CodecConformance<RangeOpening<Sha256Digest>> => 1024,
     CodecConformance<RangeUpdate<Sha256Digest>> => 1024,
@@ -59,7 +66,7 @@ commonware_conformance::conformance_tests! {
     CodecConformance<AccountRow<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<Assignment<Sha256Digest>>,
     CodecConformance<BatchId<Sha256Digest>>,
-    CodecConformance<Header<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<Header<Sha256Digest>>,
     CodecConformance<CloseLimits>,
     CodecConformance<ChangeRange<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<StateBounds<VerifyingKey, Sha256Digest>> => 1024,

@@ -1,7 +1,10 @@
 #![no_main]
 
 use commonware_clearing::bajillion::{
-    admission::{Committee, curve25519::Certificate},
+    admission::{
+        Committee,
+        bls12381::{Certificate, Vote},
+    },
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalBatch, WithdrawalBody},
     challenge::{
         AccountLookup, Challenge, ChallengeError, RangeLower, RowOpening, StateOpening, adjudicate,
@@ -13,18 +16,15 @@ use commonware_clearing::bajillion::{
     },
     credit::{CreditRoot, ShardHead, ShardLookup, ShardOpening, ShardSet},
     payment::{Payment, PaymentContext},
-    state::{AccountRow, Prefix},
+    state::AccountRow,
     transition::{
-        Assignment, BatchId, ChangeRange, Close, CloseLimits, Header, ProofSlice, SliceCodecConfig,
-        StateBounds,
+        Assignment, BatchId, ChangeRange, Close, CloseContext, CloseLimits, Header, ProofSlice,
+        RootBundle, SliceCodecConfig, StateBounds, StateCache,
     },
 };
 use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg, Read};
-use commonware_cryptography::{
-    Hasher, Sha256, Signer,
-    curve25519::{SigningKey, VerifyingKey},
-    sha256::Digest,
-};
+use commonware_cryptography::{Hasher, Sha256, Signer, sha256::Digest};
+use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
 use libfuzzer_sys::fuzz_target;
 use std::fmt::Debug;
 
@@ -49,24 +49,38 @@ where
     assert_eq!(decoded, value);
 }
 
-fn semantic_header(seed: u8) -> Header<VerifyingKey, Digest> {
+fn semantic_header(
+    seed: u8,
+) -> (
+    CloseContext<VerifyingKey, Digest>,
+    Header<Digest>,
+    RootBundle<Digest>,
+) {
     let operator = SigningKey::from_seed(u64::from(seed));
-    let context = PaymentContext::new(
+    let cache = StateCache::new::<Sha256>(Vec::new()).expect("empty cache is canonical");
+    let deposits = DepositBatch::empty();
+    let withdrawals = WithdrawalBatch::empty();
+    let context = CloseContext::new::<Sha256>(
         Sha256::hash(&[b"wire-decode-challenge", &[seed]]),
         u64::from(seed),
         operator.public_key(),
-    );
-    let opening_root = empty_root::<Sha256>(VectorKind::State);
-    Header {
-        context,
-        opening_root,
-        change_root: empty_root::<Sha256>(VectorKind::Change),
-        closing_root: opening_root,
-        totals: Prefix::default(),
-        opening_liability: 0,
-        closing_liability: 0,
-        challenge_deadline: u64::from(seed),
-    }
+        &cache,
+        &deposits,
+        &withdrawals,
+        u64::from(seed),
+        u64::from(seed) + 1,
+        CloseLimits::protocol_maximum(),
+        Assignment::new(Sha256::hash(&[b"wire-decode-committee"]), 0)
+            .expect("zero-bit assignment is valid"),
+    )
+    .expect("bounded semantic context must construct");
+    let roots = RootBundle {
+        opening: cache.root(),
+        change: empty_root::<Sha256>(VectorKind::Change),
+        closing: cache.root(),
+    };
+    let header = Header::new::<Sha256, _>(context.payment(), &roots);
+    (context, header, roots)
 }
 
 fn rebind_batch(challenge: &mut Challenge<VerifyingKey, Digest>, batch: BatchId<Digest>) {
@@ -89,10 +103,16 @@ fn challenge_roundtrip(bytes: &[u8], seed: u8) {
         .expect("encoded challenge must remain bounded and decodable");
     assert_eq!(decoded, challenge);
 
-    let header = semantic_header(seed);
+    let (context, header, roots) = semantic_header(seed);
     let mut semantic = decoded;
     rebind_batch(&mut semantic, header.batch_id::<Sha256>());
-    let _ = adjudicate::<Sha256, _>(&header, header.challenge_deadline, &semantic);
+    let _ = adjudicate::<Sha256, _>(
+        &context,
+        &header,
+        &roots,
+        context.challenge_deadline(),
+        &semantic,
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -119,7 +139,7 @@ fuzz_target!(|data: &[u8]| {
         u64::MAX,
         u64::MAX,
     );
-    match selector % 32 {
+    match selector % 34 {
         0 => roundtrip::<DepositBatch<VerifyingKey>>(bytes, &RangeCfg::new(..=item_limit)),
         1 => roundtrip::<WithdrawalBody<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         2 => roundtrip::<SignedWithdrawal<VerifyingKey, Digest>>(
@@ -133,7 +153,7 @@ fuzz_target!(|data: &[u8]| {
                 RangeCfg::new(..=destination_limit),
             ),
         ),
-        4 => roundtrip::<Committee<VerifyingKey>>(bytes, &item_limit),
+        4 => roundtrip::<Committee>(bytes, &item_limit),
         5 => roundtrip::<Certificate>(bytes, &item_limit),
         6 => roundtrip::<AccountRow<VerifyingKey, Digest>>(bytes, &()),
         7 => roundtrip::<Opening<Digest>>(bytes, &()),
@@ -150,7 +170,7 @@ fuzz_target!(|data: &[u8]| {
         18 => roundtrip::<Close<VerifyingKey, Digest>>(bytes, &close_limits),
         19 => roundtrip::<PaymentContext<VerifyingKey, Digest>>(bytes, &()),
         20 => roundtrip::<Payment<VerifyingKey, Digest>>(bytes, &()),
-        21 => roundtrip::<Header<VerifyingKey, Digest>>(bytes, &()),
+        21 => roundtrip::<Header<Digest>>(bytes, &()),
         22 => roundtrip::<CreditRoot<Digest>>(bytes, &()),
         23 => roundtrip::<VectorRoot<Digest>>(bytes, &()),
         24 => roundtrip::<ShardHead<VerifyingKey, Digest>>(bytes, &()),
@@ -164,6 +184,8 @@ fuzz_target!(|data: &[u8]| {
             bytes,
             &SliceCodecConfig::new(close_limits, item_limit),
         ),
+        32 => roundtrip::<RootBundle<Digest>>(bytes, &()),
+        33 => roundtrip::<Vote>(bytes, &()),
         _ => unreachable!(),
     }
 

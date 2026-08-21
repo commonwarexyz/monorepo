@@ -7,6 +7,7 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
+use commonware_parallel::Sequential;
 use thiserror::Error;
 
 fn vector_len(len: usize) -> Result<u32, commitment::Error> {
@@ -159,7 +160,7 @@ impl<P: PublicKey> DepositBatch<P> {
         for record in &self.records {
             builder.add_encoded(record.encode().as_ref())?;
         }
-        Ok(builder.build()?.root())
+        Ok(builder.build(&Sequential)?.root())
     }
 }
 
@@ -639,7 +640,7 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
         for request in &self.requests {
             builder.add_encoded(request.encode().as_ref())?;
         }
-        Ok(builder.build()?.root())
+        Ok(builder.build(&Sequential)?.root())
     }
 }
 
@@ -822,10 +823,9 @@ mod arbitrary_impls {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{
-        Sha256,
-        curve25519::{SigningKey, VerifyingKey},
-        sha256::Digest as ShaDigest,
+    use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
+    use commonware_cryptography_curve25519::signing::{
+        SigningKey, StrictVerifyingKey as VerifyingKey,
     };
 
     type TestDeposits = DepositBatch<VerifyingKey>;
@@ -919,25 +919,42 @@ mod tests {
             DepositRecord::new(b.public_key(), 1).unwrap(),
         ])
         .unwrap();
+        let deposit_root = deposits.root::<Sha256>().unwrap();
+        assert_ne!(deposit_root, reversed_amounts.root::<Sha256>().unwrap());
+        let mut state_domain = commitment::Builder::<Sha256>::new(
+            VectorKind::State,
+            u32::try_from(deposits.records().len()).unwrap(),
+        )
+        .unwrap();
+        for record in deposits.records() {
+            state_domain.add_encoded(record.encode().as_ref()).unwrap();
+        }
         assert_ne!(
-            deposits.root::<Sha256>().unwrap(),
-            reversed_amounts.root::<Sha256>().unwrap()
+            deposit_root,
+            state_domain.build(&Sequential).unwrap().root()
         );
-        assert_eq!(deposits.root::<Sha256>().unwrap().kind, VectorKind::Deposit);
 
         let withdrawals = WithdrawalBatch::new(vec![
             withdrawal(&b, 2, false, b"b"),
             withdrawal(&a, 1, false, b"a"),
         ])
         .unwrap();
-        assert_eq!(
-            withdrawals.root::<Sha256>().unwrap().kind,
-            VectorKind::Withdrawal
-        );
+        let withdrawal_root = withdrawals.root::<Sha256>().unwrap();
+        let mut deposit_domain = commitment::Builder::<Sha256>::new(
+            VectorKind::Deposit,
+            u32::try_from(withdrawals.requests().len()).unwrap(),
+        )
+        .unwrap();
+        for request in withdrawals.requests() {
+            deposit_domain
+                .add_encoded(request.encode().as_ref())
+                .unwrap();
+        }
         assert_ne!(
-            deposits.root::<Sha256>().unwrap().digest,
-            withdrawals.root::<Sha256>().unwrap().digest
+            withdrawal_root,
+            deposit_domain.build(&Sequential).unwrap().root()
         );
+        assert_ne!(deposit_root, withdrawal_root);
     }
 
     #[test]

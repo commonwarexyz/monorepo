@@ -165,11 +165,9 @@ $$
 
 The totals are the terminal row's prefix: gross debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and shard counts alongside. To verify them, the chain is handed the terminal row and its Merkle opening once, checks the row against $\mathsf{ChangeRoot}_e$, and retains neither. The shard vectors, remaining changed rows, and paired witness stay off the chain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$.
 
-## Authenticate Every Proof Slice Before Sealing
+## Validate Everything Up Front
 
-Before the chain queues a close for finalization, every slice required by admission must be authenticated, but the work is collective. The operator assembles an exhaustive set of proof slices from the public corpus, one for each deterministic account interval, for dissemination. The registered committee and slice index deterministically select each slice's holders. Each honest validator receives exactly its complete, canonically ordered assignment rather than first receiving or authenticating the corpus as a whole.
-
-To seal the header, a validator authenticates its exact assigned slices and checks every local row equation and shard commitment, the exact sparse update and prefix continuity (including terminal totals when a slice reaches the end), and the header's payment and custody conservation equations. Across its assignment, it verifies every distinct signed send and receipt envelope in one aggregate batch, retains the slices through $\Delta_e$, and signs the header. Together, these checks exhaustively cover the row, shard, exact-update, prefix, conservation, and signature predicates represented in the slices and shared header. That is the certificate's admission claim; it does not assert a relation the slice format does not encode.
+Before the chain queues a close for finalization, someone must check all of it. A validator committee verifies the complete public close, every row, every prefix, and the exact state transition, and signs the header only when all of it holds. Exhaustive validation keeps malformed or inexact closes out of the finalization queue and reduces any remaining private-receipt dispute to one tagged, non-interactive submission.
 
 Prefix continuity ties the header's totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
 
@@ -183,7 +181,7 @@ $$
 \boxed{L_{e+1}=L_e+F_e-W_e.}
 $$
 
-Every slice is assigned to exactly $q$ holders, and the admission certificate contains exactly $q$ distinct signers of the shared header. With $n$ validators, $f$ tolerated faults, and quorum $q$, every slice $j$'s holders share more than $f$ validators with the certificate's signers:
+The public corpus is partitioned into deterministic, exhaustive account intervals. Every certificate signer signs the same header. Each evidence piece is assigned to a quorum of validators who check and retain it. Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. With $n$ validators, $f$ tolerated faults, and quorum $q$, every piece $j$'s holders share more than $f$ validators with the certificate's signers:
 
 $$
 \begin{aligned}
@@ -192,11 +190,9 @@ n&=100,\qquad f=33,\qquad q=2f+1=67,\\[0.3em]
 \end{aligned}
 $$
 
-At most $f$ validators are faulty, so the intersection contains an honest certificate signer that has authenticated and retains slice $j$. Applying that argument to every slice gives collective, exhaustive honest authentication of the represented predicates, even though no validator authenticates all of $\mathcal D_e$ and the honest validator may differ from slice to slice.
-
 ## The Unavoidable Challenge
 
-Admission establishes that the bound corpus satisfies those represented predicates. However, it cannot establish that the corpus contains every receipt the operator signed and delivered privately.
+Validation establishes that the bound corpus satisfies the public relation. However, it cannot establish that the corpus contains every receipt the operator signed and delivered privately.
 
 Fix a public corpus $\mathcal D_e$ and accepting certificate, proof, or attestation $\zeta$. Compare two executions: in $\Xi_0$ the operator signs exactly the receipts represented by $\mathcal D_e$, while in $\Xi_1$ it produces the same $(\mathcal D_e,\zeta)$ and privately delivers one more valid receipt $R^+$. The close verifier has the same view in both:
 
@@ -226,11 +222,9 @@ $$
 Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr).
 $$
 
-$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, a destination $v$, an amount $x$, a full-close flag $\gamma$, and an absolute deadline $\tau$. For an ordinary withdrawal, $x$ is exact. For a full close, $x$ is a minimum floor: clean finalization releases the account's complete authenticated balance, and terminal unwind releases the complete balance in the surviving root. The operator neither submits nor approves it, and its cooperation decides only whether the withdrawal settles through a clean close or through terminal unwind. Since $v$ may be any destination the asset adapter accepts, paying an unregistered recipient is just a withdrawal to its address.
+$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, a destination $v$, an amount $x$, a full-close flag $\gamma$, and an absolute deadline $\tau$. The operator neither submits nor approves it, and its cooperation decides only whether the withdrawal settles through a clean close or through terminal unwind. Since $v$ may be any destination the asset adapter accepts, paying an unregistered recipient is just a withdrawal to its address.
 
 Queueing proves the withdrawal affordable at every pending root, and each later queued close re-proves it, so whichever root survives can pay it. Deposits need no deadline at all: an unconsumed deposit simply returns in the terminal payout.
-
-Every published row still denotes an actual state change. If an ordinary withdrawal would exactly offset a same-account staged deposit, the withdrawal is sealed first and the deposit remains staged for the following close.
 
 What makes the exit credible is that custody never leaves the chain. With finalized liability $L_z$, pending slots $z+1,\ldots,\ell$ carrying boundary flows $(F_i,W_i)$, and deposits not yet included in a pending close $F_\star$:
 
@@ -241,7 +235,7 @@ E=L_z+\sum_{i=z+1}^{\ell}F_i+F_\star
 }
 $$
 
-$W_i$ is the exact amount applied by slot $i$, including the complete authenticated balance for a full close rather than merely its signed floor. Withdrawals stay inside custody until their own slot finalizes at the queue front, so a speculative descendant can never spend assets out from under an ancestor. The operator can stop serving payments, but it cannot take funds or send them without authorization.
+Withdrawals stay inside custody until their own slot finalizes at the queue front, so a speculative descendant can never spend assets out from under an ancestor. The operator can stop serving payments, but it cannot take funds or send them without authorization.
 
 If $Q$ is still unreleased at $t\ge\tau$, the first time-aware onchain call to observe the deadline permanently freezes new work. The pending slots then resolve from the front, each finalizing once its challenge window closes or falling to a challenge, and terminal unwind opens against the last root standing. Queued withdrawals pay to their signed destinations, and every account uses one Merkle proof against that root to claim its remaining balance and any unconsumed deposit.
 
@@ -279,18 +273,7 @@ Rollover changes only live serving state, without changing the evidence required
 
 ## The Close Never Grows (with Payments)
 
-Every profile below runs one fixture: a registry of $N=1{,}000{,}000$ accounts, a 100-validator committee, a corpus split into 256 slices for validator assignment, and an eight-thread worker pool. Every changed account sends, and the same 512 credited accounts receive, spaced evenly among the senders. These retained measurements came from the reference worker pool. The primitive's [runtime-agnostic benchmark harness](../../clearing/src/bajillion/benches/blog_chain.rs) reconstructs the same four corpus shapes and passes one adaptive eight-worker strategy through proof-slice assembly, validator sealing, certificate verification, and challenge adjudication. The table remains the retained reference run; compare it with current results by the benchmark's exact operation labels because cryptography and canonical framing may evolve at ALPHA.
-
-Run the current harness once per full profile for a direct comparison:
-
-```bash
-for profile in 0 1 2 3; do
-  COMMONWARE_CLEARING_PROFILE="$profile" \
-  COMMONWARE_CLEARING_BENCH=blog-chain \
-  RUSTFLAGS='--cfg full_bench' \
-  cargo bench -p commonware-clearing --bench bajillion
-done
-```
+Every profile below runs one fixture: a registry of $N=1{,}000{,}000$ accounts, a 100-validator committee, a corpus split into 256 pieces for validator assignment, and an eight-thread worker pool. Every changed account sends, and the same 512 credited accounts receive, spaced evenly among the senders.
 
 The matrix independently varies $A$, the number of changed accounts, and $h$, the number of receive shards on each credited account. No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$.
 
@@ -327,7 +310,7 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
       <td style="text-align:right;">403 ms</td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">assemble proof slices</td>
+      <td style="padding-left:20px;">build piece proofs</td>
       <td style="text-align:right;">1.25 ms</td>
       <td style="text-align:right;">41.2 ms</td>
       <td style="text-align:right;">351 ms</td>
@@ -342,7 +325,7 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
       <td style="text-align:right;">514 MB <span style="color:#666;">(-33%)</span></td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">seal</td>
+      <td style="padding-left:20px;">check and sign</td>
       <td style="text-align:right;">2.53 ms</td>
       <td style="text-align:right;">204 ms</td>
       <td style="text-align:right;">0.99 s</td>
@@ -383,7 +366,7 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
 ```
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's assembly of proof slices, and the validator's seal on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
 ```
 
 ::: {.image-caption}
@@ -392,7 +375,7 @@ Figure 4: These are four measured profiles, not an interpolation. Points are ari
 
 Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated shard leaves and signatures behind each credited row.
 
-Even the busiest validator assignment is 32–33% smaller than the public corpus because it contains only that validator's assigned slices. At $A=1{,}024$ and $h=1$, it is 1.39 MB despite a registry of one million accounts. Distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments. The validator row times the complete seal for that busiest assignment; no validator authenticates the whole corpus.
+Even the busiest validator assignment is 32–33% smaller than the public corpus because it contains only that validator's assigned pieces. At $A=1{,}024$ and $h=1$, it is 1.39 MB despite a registry of one million accounts. Distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments.
 
 The offchain public corpus is constant for a profile, so accepted payments only divide it. Ten million payments spread the sparse profile's 2.07 MB to about 0.2 offchain bytes per payment; a billion spread it to 0.002 offchain bytes per payment. The onchain commitment remains 5.62–5.94 KB per epoch across the four profiles: 0.0056–0.0059 bytes per payment at one million, and 0.0000056–0.0000059 at one billion. It carries only the header, quorum certificate, and terminal prefix opening rather than the rows or shard leaves.
 

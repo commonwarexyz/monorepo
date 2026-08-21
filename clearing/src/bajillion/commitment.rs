@@ -111,21 +111,15 @@ impl arbitrary::Arbitrary<'_> for VectorKind {
     }
 }
 
-/// A typed commitment to an exact-length vector.
+/// A digest commitment to a domain-separated, exact-length vector.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct VectorRoot<D: Digest> {
-    /// Semantic vector type.
-    pub kind: VectorKind,
-    /// Exact number of committed values.
-    pub len: u32,
-    /// Domain-separated digest wrapping the finalized BMT root.
+    /// Domain-separated digest wrapping the length-bound BMT root.
     pub digest: D,
 }
 
 impl<D: Digest> Write for VectorRoot<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.kind.write(writer);
-        self.len.write(writer);
         self.digest.write(writer);
     }
 }
@@ -134,23 +128,14 @@ impl<D: Digest> Read for VectorRoot<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let root = Self {
-            kind: VectorKind::read(reader)?,
-            len: u32::read(reader)?,
+        Ok(Self {
             digest: D::read(reader)?,
-        };
-        if root.len > MAX_VECTOR_LENGTH {
-            return Err(CodecError::Invalid(
-                "VectorRoot",
-                "vector length exceeds the protocol bound",
-            ));
-        }
-        Ok(root)
+        })
     }
 }
 
 impl<D: Digest> FixedSize for VectorRoot<D> {
-    const SIZE: usize = VectorKind::SIZE + u32::SIZE + D::SIZE;
+    const SIZE: usize = D::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
@@ -160,8 +145,6 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            kind: u.arbitrary()?,
-            len: u.int_in_range(0..=MAX_VECTOR_LENGTH)?,
             digest: u.arbitrary()?,
         })
     }
@@ -195,30 +178,6 @@ pub enum Error {
     /// Positions are not strictly increasing, unique, and in range.
     #[error("proof positions are not in canonical order")]
     NonCanonicalPositions,
-    /// A proof's declared BMT leaf count differs from the vector length.
-    #[error("proof declares {actual} leaves but vector has {expected}")]
-    ProofLengthMismatch {
-        /// Exact vector length.
-        expected: u32,
-        /// Leaf count declared by the BMT proof.
-        actual: u32,
-    },
-    /// A sparse update and supplied root use different vector kinds.
-    #[error("root kind mismatch: expected {expected:?}, got {actual:?}")]
-    RootKindMismatch {
-        /// Kind committed by the sparse update.
-        expected: VectorKind,
-        /// Kind carried by the supplied root.
-        actual: VectorKind,
-    },
-    /// A sparse update and supplied root use different vector lengths.
-    #[error("root length mismatch: expected {expected}, got {actual}")]
-    RootLengthMismatch {
-        /// Length committed by the sparse update.
-        expected: u32,
-        /// Length carried by the supplied root.
-        actual: u32,
-    },
     /// The disclosed value does not authenticate to the expected root.
     #[error("opening does not authenticate to the expected root")]
     InvalidOpening,
@@ -299,8 +258,6 @@ fn leaf_digest_pair<H: Hasher>(
 
 fn bind_root<H: Hasher>(kind: VectorKind, len: u32, bmt_root: &H::Digest) -> VectorRoot<H::Digest> {
     VectorRoot {
-        kind,
-        len,
         digest: H::hash(&[kind.root_domain(), &len.to_be_bytes(), bmt_root.as_ref()]),
     }
 }
@@ -332,7 +289,7 @@ fn check_positions(positions: &[u32], len: u32, allow_empty: bool) -> Result<(),
 /// Returns the canonical root of an empty vector of `kind`.
 #[must_use]
 pub fn empty_root<H: Hasher>(kind: VectorKind) -> VectorRoot<H::Digest> {
-    let tree = bmt::Builder::<H>::new(0).build();
+    let tree = bmt::Builder::<H>::new(0).build(&Sequential);
     bind_root::<H>(kind, 0, &tree.root())
 }
 
@@ -373,11 +330,7 @@ impl<H: Hasher> Builder<H> {
     }
 
     /// Canonically encodes and appends a slice using the supplied execution strategy.
-    pub fn add_values_with_strategy<T>(
-        &mut self,
-        values: &[T],
-        strategy: &impl Strategy,
-    ) -> Result<(), Error>
+    pub fn add_values<T>(&mut self, values: &[T], strategy: &impl Strategy) -> Result<(), Error>
     where
         T: Encode + Sync,
     {
@@ -436,28 +389,30 @@ impl<H: Hasher> Builder<H> {
         Ok(())
     }
 
-    /// Finishes construction after checking the declared exact length.
-    pub fn build(self) -> Result<Tree<H::Digest>, Error> {
-        self.build_with_strategy(&Sequential)
-    }
-
-    /// Finishes construction using the supplied execution strategy.
-    pub fn build_with_strategy(self, strategy: &impl Strategy) -> Result<Tree<H::Digest>, Error> {
+    /// Finishes construction with the supplied strategy after checking the declared exact length.
+    pub fn build(self, strategy: &impl Strategy) -> Result<Tree<H::Digest>, Error> {
         if self.added != self.len {
             return Err(Error::LengthMismatch {
                 expected: self.len,
                 actual: self.added,
             });
         }
-        let inner = self.inner.build_with_strategy(strategy);
+        let inner = self.inner.build(strategy);
         let root = bind_root::<H>(self.kind, self.len, &inner.root());
-        Ok(Tree { root, inner })
+        Ok(Tree {
+            kind: self.kind,
+            len: self.len,
+            root,
+            inner,
+        })
     }
 }
 
 /// A constructed vector commitment capable of producing bounded BMT openings.
 #[derive(Clone, Debug)]
 pub struct Tree<D: Digest> {
+    kind: VectorKind,
+    len: u32,
     root: VectorRoot<D>,
     inner: bmt::Tree<D>,
 }
@@ -483,7 +438,7 @@ impl<D: Digest> PreparedUpdate<D> {
 }
 
 impl<D: Digest> Tree<D> {
-    /// Returns the typed exact-length root.
+    /// Returns the domain-separated, exact-length root digest.
     #[must_use]
     pub const fn root(&self) -> VectorRoot<D> {
         self.root
@@ -491,7 +446,7 @@ impl<D: Digest> Tree<D> {
 
     /// Opens one vector position.
     pub fn opening(&self, position: u32) -> Result<Opening<D>, Error> {
-        check_positions(core::slice::from_ref(&position), self.root.len, false)?;
+        check_positions(core::slice::from_ref(&position), self.len, false)?;
         Ok(Opening {
             position,
             proof: self.inner.proof(position)?,
@@ -502,9 +457,9 @@ impl<D: Digest> Tree<D> {
     ///
     /// The empty position list is canonical only for an empty vector.
     pub fn multi_opening(&self, positions: &[u32]) -> Result<MultiOpening<D>, Error> {
-        check_positions(positions, self.root.len, true)?;
+        check_positions(positions, self.len, true)?;
         let proof = if positions.is_empty() {
-            if self.root.len != 0 {
+            if self.len != 0 {
                 return Err(Error::MalformedEmpty);
             }
             bmt::Proof::default()
@@ -522,7 +477,7 @@ impl<D: Digest> Tree<D> {
     /// A zero-length range is canonical only for the empty vector at position zero.
     pub fn range_opening(&self, start: u32, count: u32) -> Result<RangeOpening<D>, Error> {
         if count == 0 {
-            return if start == 0 && self.root.len == 0 {
+            return if start == 0 && self.len == 0 {
                 Ok(RangeOpening {
                     start,
                     proof: bmt::Proof::default(),
@@ -533,7 +488,7 @@ impl<D: Digest> Tree<D> {
         }
         let end = start
             .checked_add(count)
-            .filter(|end| *end <= self.root.len)
+            .filter(|end| *end <= self.len)
             .ok_or(Error::NonCanonicalPositions)?;
         Ok(RangeOpening {
             start,
@@ -546,18 +501,16 @@ impl<D: Digest> Tree<D> {
     /// An empty update is represented by an empty sibling list and may only verify when the two
     /// roots are identical.
     pub fn sparse_update(&self, positions: &[u32]) -> Result<SparseUpdate<D>, Error> {
-        check_positions(positions, self.root.len, true)?;
+        check_positions(positions, self.len, true)?;
         let proof = if positions.is_empty() {
             bmt::Proof {
-                leaf_count: self.root.len,
+                leaf_count: self.len,
                 siblings: Vec::new(),
             }
         } else {
             self.inner.multi_proof(positions)?
         };
         Ok(SparseUpdate {
-            kind: self.root.kind,
-            len: self.root.len,
             positions: positions.to_vec(),
             proof,
         })
@@ -572,34 +525,19 @@ impl<D: Digest> Tree<D> {
         positions: &[u32],
         closing_values: &[B],
         boundaries: &[u32],
-    ) -> Result<(VectorRoot<D>, Vec<RangeUpdate<D>>), Error>
-    where
-        H: Hasher<Digest = D>,
-        B: AsRef<[u8]> + Sync,
-    {
-        self.range_updates_with_strategy::<H, B>(positions, closing_values, boundaries, &Sequential)
-    }
-
-    /// Builds paired proofs using the supplied execution strategy.
-    pub fn range_updates_with_strategy<H, B>(
-        &self,
-        positions: &[u32],
-        closing_values: &[B],
-        boundaries: &[u32],
         strategy: &impl Strategy,
     ) -> Result<(VectorRoot<D>, Vec<RangeUpdate<D>>), Error>
     where
         H: Hasher<Digest = D>,
         B: AsRef<[u8]> + Sync,
     {
-        let update =
-            self.prepare_update_with_strategy::<H, B>(positions, closing_values, strategy)?;
+        let update = self.prepare_update::<H, B>(positions, closing_values, strategy)?;
         let root = update.root();
         let ranges = self.range_updates_from_prepared(&update, boundaries, strategy)?;
         Ok((root, ranges))
     }
 
-    pub(crate) fn prepare_update_with_strategy<H, B>(
+    pub(crate) fn prepare_update<H, B>(
         &self,
         positions: &[u32],
         closing_values: &[B],
@@ -609,7 +547,7 @@ impl<D: Digest> Tree<D> {
         H: Hasher<Digest = D>,
         B: AsRef<[u8]> + Sync,
     {
-        check_positions(positions, self.root.len, true)?;
+        check_positions(positions, self.len, true)?;
         if positions.len() != closing_values.len() {
             return Err(Error::OpeningLengthMismatch {
                 positions: positions.len(),
@@ -622,8 +560,8 @@ impl<D: Digest> Tree<D> {
                 match (positions, values) {
                     ([first_position, second_position], [first, second]) => {
                         let (first, second) = leaf_digest_pair::<H>(
-                            self.root.kind,
-                            self.root.len,
+                            self.kind,
+                            self.len,
                             *first_position,
                             first.as_ref(),
                             *second_position,
@@ -634,12 +572,7 @@ impl<D: Digest> Tree<D> {
                     ([position], [value]) => Ok((
                         (
                             *position,
-                            leaf_digest::<H>(
-                                self.root.kind,
-                                self.root.len,
-                                *position,
-                                value.as_ref(),
-                            )?,
+                            leaf_digest::<H>(self.kind, self.len, *position, value.as_ref())?,
                         ),
                         None,
                     )),
@@ -654,11 +587,11 @@ impl<D: Digest> Tree<D> {
                 changes.push(second);
             }
         }
-        let inner = self.inner.update_with_strategy::<H>(&changes, strategy)?;
-        let root = bind_root::<H>(self.root.kind, self.root.len, &inner.root());
+        let inner = self.inner.update::<H>(&changes, strategy)?;
+        let root = bind_root::<H>(self.kind, self.len, &inner.root());
         Ok(PreparedUpdate {
-            kind: self.root.kind,
-            len: self.root.len,
+            kind: self.kind,
+            len: self.len,
             positions: positions.to_vec(),
             root,
             inner,
@@ -671,21 +604,12 @@ impl<D: Digest> Tree<D> {
         boundaries: &[u32],
         strategy: &impl Strategy,
     ) -> Result<Vec<RangeUpdate<D>>, Error> {
-        if update.kind != self.root.kind {
-            return Err(Error::RootKindMismatch {
-                expected: self.root.kind,
-                actual: update.kind,
-            });
+        if update.kind != self.kind || update.len != self.len {
+            return Err(Error::InvalidOpeningRoot);
         }
-        if update.len != self.root.len {
-            return Err(Error::RootLengthMismatch {
-                expected: self.root.len,
-                actual: update.len,
-            });
-        }
-        let proofs =
-            self.inner
-                .range_update_proofs_with_strategy(&update.inner, boundaries, strategy)?;
+        let proofs = self
+            .inner
+            .range_update_proofs(&update.inner, boundaries, strategy)?;
         let ranges = boundaries
             .windows(2)
             .zip(proofs)
@@ -697,8 +621,6 @@ impl<D: Digest> Tree<D> {
                     .positions
                     .partition_point(|position| *position < interval[1]);
                 RangeUpdate {
-                    kind: self.root.kind,
-                    len: self.root.len,
                     start: interval[0],
                     end: interval[1],
                     positions: update.positions[first..last].to_vec(),
@@ -716,10 +638,6 @@ impl<D: Digest> Tree<D> {
 /// position inside it unchanged.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RangeUpdate<D: Digest> {
-    /// Semantic vector type.
-    pub kind: VectorKind,
-    /// Exact opening and closing vector length.
-    pub len: u32,
     /// First position in the proved interval.
     pub start: u32,
     /// Exclusive end of the proved interval.
@@ -732,11 +650,12 @@ pub struct RangeUpdate<D: Digest> {
 
 impl<D: Digest> RangeUpdate<D> {
     fn validate_shape(&self) -> Result<(), Error> {
-        check_len(self.len)?;
-        if self.start > self.end || self.end > self.len || self.proof.leaf_count != self.len {
+        let len = self.proof.leaf_count;
+        check_len(len)?;
+        if self.start > self.end || self.end > len {
             return Err(Error::NonCanonicalPositions);
         }
-        check_positions(&self.positions, self.len, true)?;
+        check_positions(&self.positions, len, true)?;
         if self
             .positions
             .first()
@@ -751,25 +670,10 @@ impl<D: Digest> RangeUpdate<D> {
         Ok(())
     }
 
-    fn check_root(&self, root: &VectorRoot<D>) -> Result<(), Error> {
-        if root.kind != self.kind {
-            return Err(Error::RootKindMismatch {
-                expected: self.kind,
-                actual: root.kind,
-            });
-        }
-        if root.len != self.len {
-            return Err(Error::RootLengthMismatch {
-                expected: self.len,
-                actual: root.len,
-            });
-        }
-        Ok(())
-    }
-
     /// Verifies every disclosed change and the absence of hidden changes in this interval.
     pub fn verify<H, O, C>(
         &self,
+        kind: VectorKind,
         opening_root: &VectorRoot<D>,
         closing_root: &VectorRoot<D>,
         opening_values: &[O],
@@ -781,8 +685,7 @@ impl<D: Digest> RangeUpdate<D> {
         C: AsRef<[u8]>,
     {
         self.validate_shape()?;
-        self.check_root(opening_root)?;
-        self.check_root(closing_root)?;
+        let len = self.proof.leaf_count;
         if self.positions.len() != opening_values.len() {
             return Err(Error::OpeningLengthMismatch {
                 positions: self.positions.len(),
@@ -805,14 +708,14 @@ impl<D: Digest> RangeUpdate<D> {
             .zip(closing_values)
         {
             opening.push(leaf_digest::<H>(
-                self.kind,
-                self.len,
+                kind,
+                len,
                 position,
                 opening_value.as_ref(),
             )?);
             closing.push(leaf_digest::<H>(
-                self.kind,
-                self.len,
+                kind,
+                len,
                 position,
                 closing_value.as_ref(),
             )?);
@@ -820,10 +723,10 @@ impl<D: Digest> RangeUpdate<D> {
         let (opening_inner, closing_inner) =
             self.proof
                 .roots::<H>(self.start..self.end, &self.positions, &opening, &closing)?;
-        if bind_root::<H>(self.kind, self.len, &opening_inner) != *opening_root {
+        if bind_root::<H>(kind, len, &opening_inner) != *opening_root {
             return Err(Error::InvalidOpeningRoot);
         }
-        if bind_root::<H>(self.kind, self.len, &closing_inner) != *closing_root {
+        if bind_root::<H>(kind, len, &closing_inner) != *closing_root {
             return Err(Error::HiddenChange);
         }
         Ok(())
@@ -832,8 +735,6 @@ impl<D: Digest> RangeUpdate<D> {
 
 impl<D: Digest> Write for RangeUpdate<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.kind.write(writer);
-        self.len.write(writer);
         self.start.write(writer);
         self.end.write(writer);
         self.positions.write(writer);
@@ -843,9 +744,7 @@ impl<D: Digest> Write for RangeUpdate<D> {
 
 impl<D: Digest> EncodeSize for RangeUpdate<D> {
     fn encode_size(&self) -> usize {
-        self.kind.encode_size()
-            + self.len.encode_size()
-            + self.start.encode_size()
+        self.start.encode_size()
             + self.end.encode_size()
             + self.positions.encode_size()
             + self.proof.encode_size()
@@ -861,8 +760,6 @@ impl<D: Digest> Read for RangeUpdate<D> {
         (max_positions, max_shared, max_outside): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         let update = Self {
-            kind: VectorKind::read(reader)?,
-            len: u32::read(reader)?,
             start: u32::read(reader)?,
             end: u32::read(reader)?,
             positions: Vec::<u32>::read_range(reader, ..=*max_positions)?,
@@ -882,8 +779,6 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            kind: u.arbitrary()?,
-            len: u.int_in_range(0..=MAX_VECTOR_LENGTH)?,
             start: u.arbitrary()?,
             end: u.arbitrary()?,
             positions: u.arbitrary()?,
@@ -914,21 +809,21 @@ impl<D: Digest> RangeOpening<D> {
         Ok(())
     }
 
-    /// Verifies contiguous encoded values against a typed exact-length root.
-    pub fn verify<H, B>(&self, root: &VectorRoot<D>, encoded_values: &[B]) -> Result<(), Error>
+    /// Verifies contiguous encoded values against a domain-separated root.
+    pub fn verify<H, B>(
+        &self,
+        kind: VectorKind,
+        root: &VectorRoot<D>,
+        encoded_values: &[B],
+    ) -> Result<(), Error>
     where
         H: Hasher<Digest = D>,
         B: AsRef<[u8]>,
     {
         self.validate_shape()?;
-        if self.proof.leaf_count != root.len {
-            return Err(Error::ProofLengthMismatch {
-                expected: root.len,
-                actual: self.proof.leaf_count,
-            });
-        }
+        let len = self.proof.leaf_count;
         if encoded_values.is_empty() {
-            return if root.len == 0 && self.start == 0 && *root == empty_root::<H>(root.kind) {
+            return if len == 0 && self.start == 0 && *root == empty_root::<H>(kind) {
                 Ok(())
             } else {
                 Err(Error::MalformedEmpty)
@@ -939,17 +834,19 @@ impl<D: Digest> RangeOpening<D> {
         let end = self
             .start
             .checked_add(count)
-            .filter(|end| *end <= root.len)
+            .filter(|end| *end <= len)
             .ok_or(Error::NonCanonicalPositions)?;
         let mut leaves = Vec::with_capacity(encoded_values.len());
         for (position, encoded) in (self.start..end).zip(encoded_values) {
             leaves.push((
-                leaf_digest::<H>(root.kind, root.len, position, encoded.as_ref())?,
+                leaf_digest::<H>(kind, len, position, encoded.as_ref())?,
                 position,
             ));
         }
-        let inner = self.proof.root_from_multi_inclusion::<H>(&leaves)?;
-        if bind_root::<H>(root.kind, root.len, &inner) == *root {
+        let inner = self
+            .proof
+            .root_from_multi_inclusion::<H>(&leaves, &Sequential)?;
+        if bind_root::<H>(kind, len, &inner) == *root {
             Ok(())
         } else {
             Err(Error::InvalidOpening)
@@ -1018,37 +915,30 @@ impl<D: Digest> Opening<D> {
         )
     }
 
-    /// Reconstructs the typed vector root authenticated by `encoded`.
-    ///
-    /// This is useful when a higher-level root wraps the vector root with additional metadata.
+    /// Reconstructs the domain-separated vector root authenticated by `encoded`.
     pub fn reconstruct<H: Hasher<Digest = D>>(
         &self,
         kind: VectorKind,
-        len: u32,
         encoded: &[u8],
     ) -> Result<VectorRoot<D>, Error> {
+        let len = self.proof.leaf_count;
         check_len(len)?;
-        if self.proof.leaf_count != len {
-            return Err(Error::ProofLengthMismatch {
-                expected: len,
-                actual: self.proof.leaf_count,
-            });
-        }
         check_positions(core::slice::from_ref(&self.position), len, false)?;
         let leaf = leaf_digest::<H>(kind, len, self.position, encoded)?;
         let inner = self
             .proof
-            .root_from_multi_inclusion::<H>(&[(leaf, self.position)])?;
+            .root_from_multi_inclusion::<H>(&[(leaf, self.position)], &Sequential)?;
         Ok(bind_root::<H>(kind, len, &inner))
     }
 
     /// Verifies one already-encoded value against a typed root.
     pub fn verify<H: Hasher<Digest = D>>(
         &self,
+        kind: VectorKind,
         root: &VectorRoot<D>,
         encoded: &[u8],
     ) -> Result<(), Error> {
-        if self.reconstruct::<H>(root.kind, root.len, encoded)? == *root {
+        if self.reconstruct::<H>(kind, encoded)? == *root {
             Ok(())
         } else {
             Err(Error::InvalidOpening)
@@ -1119,17 +1009,23 @@ impl<D: Digest> MultiOpening<D> {
     }
 
     /// Verifies already-encoded values in the same order as [`Self::positions`].
-    pub fn verify<H, B>(&self, root: &VectorRoot<D>, encoded_values: &[B]) -> Result<(), Error>
+    pub fn verify<H, B>(
+        &self,
+        kind: VectorKind,
+        root: &VectorRoot<D>,
+        encoded_values: &[B],
+    ) -> Result<(), Error>
     where
         H: Hasher<Digest = D>,
         B: AsRef<[u8]>,
     {
         self.validate_shape()?;
-        verify_multi_opening::<H, D, B>(&self.positions, &self.proof, root, encoded_values)
+        verify_multi_opening::<H, D, B>(kind, &self.positions, &self.proof, root, encoded_values)
     }
 }
 
 pub(crate) fn verify_multi_opening<H, D, B>(
+    kind: VectorKind,
     positions: &[u32],
     proof: &bmt::Proof<D>,
     root: &VectorRoot<D>,
@@ -1146,21 +1042,16 @@ where
             values: encoded_values.len(),
         });
     }
-    if proof.leaf_count != root.len {
-        return Err(Error::ProofLengthMismatch {
-            expected: root.len,
-            actual: proof.leaf_count,
-        });
-    }
+    let len = proof.leaf_count;
     let mut leaves = Vec::with_capacity(positions.len());
     for (&position, encoded) in positions.iter().zip(encoded_values) {
         leaves.push((
-            leaf_digest::<H>(root.kind, root.len, position, encoded.as_ref())?,
+            leaf_digest::<H>(kind, len, position, encoded.as_ref())?,
             position,
         ));
     }
-    let inner = proof.root_from_multi_inclusion::<H>(&leaves)?;
-    if bind_root::<H>(root.kind, root.len, &inner) == *root {
+    let inner = proof.root_from_multi_inclusion::<H>(&leaves, &Sequential)?;
+    if bind_root::<H>(kind, len, &inner) == *root {
         Ok(())
     } else {
         Err(Error::InvalidOpening)
@@ -1213,10 +1104,6 @@ where
 /// successful reconstruction proves that every undisclosed position is unchanged.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SparseUpdate<D: Digest> {
-    /// Semantic vector type.
-    pub kind: VectorKind,
-    /// Exact vector length on both sides.
-    pub len: u32,
     /// Strictly increasing, unique changed positions.
     pub positions: Vec<u32>,
     /// Shared BMT authentication frontier.
@@ -1225,32 +1112,11 @@ pub struct SparseUpdate<D: Digest> {
 
 impl<D: Digest> SparseUpdate<D> {
     fn validate_shape(&self) -> Result<(), Error> {
-        check_len(self.len)?;
-        if self.proof.leaf_count != self.len {
-            return Err(Error::ProofLengthMismatch {
-                expected: self.len,
-                actual: self.proof.leaf_count,
-            });
-        }
-        check_positions(&self.positions, self.len, true)?;
+        let len = self.proof.leaf_count;
+        check_len(len)?;
+        check_positions(&self.positions, len, true)?;
         if self.positions.is_empty() && !self.proof.siblings.is_empty() {
             return Err(Error::MalformedEmpty);
-        }
-        Ok(())
-    }
-
-    fn check_root(&self, root: &VectorRoot<D>) -> Result<(), Error> {
-        if root.kind != self.kind {
-            return Err(Error::RootKindMismatch {
-                expected: self.kind,
-                actual: root.kind,
-            });
-        }
-        if root.len != self.len {
-            return Err(Error::RootLengthMismatch {
-                expected: self.len,
-                actual: root.len,
-            });
         }
         Ok(())
     }
@@ -1260,12 +1126,17 @@ impl<D: Digest> SparseUpdate<D> {
     /// `closing_values` must correspond one-for-one with [`Self::positions`]. This operation does
     /// not scan dormant leaves. It cannot determine whether a disclosed value changed because no
     /// opening values are supplied; [`Self::verify`] performs that exact-change check.
-    pub fn reconstruct_closing<H, C>(&self, closing_values: &[C]) -> Result<VectorRoot<D>, Error>
+    pub fn reconstruct_closing<H, C>(
+        &self,
+        kind: VectorKind,
+        closing_values: &[C],
+    ) -> Result<VectorRoot<D>, Error>
     where
         H: Hasher<Digest = D>,
         C: AsRef<[u8]>,
     {
         self.validate_shape()?;
+        let len = self.proof.leaf_count;
         if self.positions.len() != closing_values.len() {
             return Err(Error::OpeningLengthMismatch {
                 positions: self.positions.len(),
@@ -1273,8 +1144,8 @@ impl<D: Digest> SparseUpdate<D> {
             });
         }
         if self.positions.is_empty() {
-            return if self.len == 0 {
-                Ok(empty_root::<H>(self.kind))
+            return if len == 0 {
+                Ok(empty_root::<H>(kind))
             } else {
                 Err(Error::MalformedEmpty)
             };
@@ -1283,12 +1154,14 @@ impl<D: Digest> SparseUpdate<D> {
         let mut closing_leaves = Vec::with_capacity(self.positions.len());
         for (&position, closing) in self.positions.iter().zip(closing_values) {
             closing_leaves.push((
-                leaf_digest::<H>(self.kind, self.len, position, closing.as_ref())?,
+                leaf_digest::<H>(kind, len, position, closing.as_ref())?,
                 position,
             ));
         }
-        let closing_inner = self.proof.root_from_multi_inclusion::<H>(&closing_leaves)?;
-        Ok(bind_root::<H>(self.kind, self.len, &closing_inner))
+        let closing_inner = self
+            .proof
+            .root_from_multi_inclusion::<H>(&closing_leaves, &Sequential)?;
+        Ok(bind_root::<H>(kind, len, &closing_inner))
     }
 
     /// Verifies the exact disclosed transition using one shared BMT proof.
@@ -1299,6 +1172,7 @@ impl<D: Digest> SparseUpdate<D> {
     /// canonical domain-separated empty root.
     pub fn verify<H, O, C>(
         &self,
+        kind: VectorKind,
         opening_root: &VectorRoot<D>,
         closing_root: &VectorRoot<D>,
         opening_values: &[O],
@@ -1310,8 +1184,7 @@ impl<D: Digest> SparseUpdate<D> {
         C: AsRef<[u8]>,
     {
         self.validate_shape()?;
-        self.check_root(opening_root)?;
-        self.check_root(closing_root)?;
+        let len = self.proof.leaf_count;
         if self.positions.len() != opening_values.len() {
             return Err(Error::OpeningLengthMismatch {
                 positions: self.positions.len(),
@@ -1329,7 +1202,7 @@ impl<D: Digest> SparseUpdate<D> {
             if opening_root != closing_root {
                 return Err(Error::HiddenChange);
             }
-            if self.len == 0 && *opening_root != empty_root::<H>(self.kind) {
+            if len == 0 && *opening_root != empty_root::<H>(kind) {
                 return Err(Error::InvalidOpeningRoot);
             }
             return Ok(());
@@ -1346,16 +1219,18 @@ impl<D: Digest> SparseUpdate<D> {
                 return Err(Error::UnchangedPosition(position));
             }
             opening_leaves.push((
-                leaf_digest::<H>(self.kind, self.len, position, opening.as_ref())?,
+                leaf_digest::<H>(kind, len, position, opening.as_ref())?,
                 position,
             ));
         }
 
-        let opening_inner = self.proof.root_from_multi_inclusion::<H>(&opening_leaves)?;
-        if bind_root::<H>(self.kind, self.len, &opening_inner) != *opening_root {
+        let opening_inner = self
+            .proof
+            .root_from_multi_inclusion::<H>(&opening_leaves, &Sequential)?;
+        if bind_root::<H>(kind, len, &opening_inner) != *opening_root {
             return Err(Error::InvalidOpeningRoot);
         }
-        if self.reconstruct_closing::<H, _>(closing_values)? != *closing_root {
+        if self.reconstruct_closing::<H, _>(kind, closing_values)? != *closing_root {
             return Err(Error::HiddenChange);
         }
         Ok(())
@@ -1364,8 +1239,6 @@ impl<D: Digest> SparseUpdate<D> {
 
 impl<D: Digest> Write for SparseUpdate<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.kind.write(writer);
-        self.len.write(writer);
         self.positions.write(writer);
         self.proof.write(writer);
     }
@@ -1375,16 +1248,9 @@ impl<D: Digest> Read for SparseUpdate<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let kind = VectorKind::read(reader)?;
-        let len = u32::read(reader)?;
         let positions = Vec::<u32>::read_range(reader, ..=MAX_VECTOR_LENGTH as usize)?;
         let proof = bmt::Proof::read_cfg(reader, &positions.len())?;
-        let update = Self {
-            kind,
-            len,
-            positions,
-            proof,
-        };
+        let update = Self { positions, proof };
         update.validate_shape().map_err(|_| {
             CodecError::Invalid("SparseUpdate", "sparse update shape is not canonical")
         })?;
@@ -1394,10 +1260,7 @@ impl<D: Digest> Read for SparseUpdate<D> {
 
 impl<D: Digest> EncodeSize for SparseUpdate<D> {
     fn encode_size(&self) -> usize {
-        self.kind.encode_size()
-            + self.len.encode_size()
-            + self.positions.encode_size()
-            + self.proof.encode_size()
+        self.positions.encode_size() + self.proof.encode_size()
     }
 }
 
@@ -1408,8 +1271,6 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            kind: u.arbitrary()?,
-            len: u.int_in_range(0..=MAX_VECTOR_LENGTH)?,
             positions: u.arbitrary()?,
             proof: u.arbitrary()?,
         })
@@ -1429,7 +1290,7 @@ mod tests {
         for value in values {
             builder.add_encoded(value).unwrap();
         }
-        builder.build().unwrap()
+        builder.build(&Sequential).unwrap()
     }
 
     #[test]
@@ -1459,12 +1320,12 @@ mod tests {
         for value in &values {
             scalar.add_encoded(value.encode().as_ref()).unwrap();
         }
-        let scalar = scalar.build().unwrap();
+        let scalar = scalar.build(&Sequential).unwrap();
 
         let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
         let mut bulk = Builder::<Sha256>::new(VectorKind::Change, 257).unwrap();
-        bulk.add_values_with_strategy(&values, &parallel).unwrap();
-        let bulk = bulk.build_with_strategy(&parallel).unwrap();
+        bulk.add_values(&values, &parallel).unwrap();
+        let bulk = bulk.build(&parallel).unwrap();
         assert_eq!(bulk.root(), scalar.root());
         assert_eq!(
             bulk.multi_opening(&[0, 128, 256]).unwrap(),
@@ -1472,15 +1333,9 @@ mod tests {
         );
 
         let mut bounded = Builder::<Sha256>::new(VectorKind::Change, 1).unwrap();
-        assert!(
-            bounded
-                .add_values_with_strategy(&values[..2], &Sequential)
-                .is_err()
-        );
-        bounded
-            .add_values_with_strategy(&values[..1], &Sequential)
-            .unwrap();
-        assert!(bounded.build().is_ok());
+        assert!(bounded.add_values(&values[..2], &Sequential).is_err());
+        bounded.add_values(&values[..1], &Sequential).unwrap();
+        assert!(bounded.build(&Sequential).is_ok());
     }
 
     #[test]
@@ -1495,12 +1350,22 @@ mod tests {
         let tree = tree(VectorKind::Change, &values);
         let root = tree.root();
         let opening = tree.opening(4).unwrap();
-        opening.verify::<Sha256>(&root, values[4]).unwrap();
-        assert!(opening.verify::<Sha256>(&root, b"tampered").is_err());
+        opening
+            .verify::<Sha256>(VectorKind::Change, &root, values[4])
+            .unwrap();
+        assert!(
+            opening
+                .verify::<Sha256>(VectorKind::Change, &root, b"tampered")
+                .is_err()
+        );
 
         let multi = tree.multi_opening(&[0, 2, 4]).unwrap();
         multi
-            .verify::<Sha256, _>(&root, &[values[0], values[2], values[4]])
+            .verify::<Sha256, _>(
+                VectorKind::Change,
+                &root,
+                &[values[0], values[2], values[4]],
+            )
             .unwrap();
         assert!(tree.multi_opening(&[2, 2]).is_err());
         assert!(tree.multi_opening(&[4, 2]).is_err());
@@ -1522,9 +1387,19 @@ mod tests {
         let change_tree = tree(VectorKind::Change, &values);
         let root = change_tree.root();
         let opening = change_tree.range_opening(1, 3).unwrap();
-        opening.verify::<Sha256, _>(&root, &values[1..4]).unwrap();
-        assert!(opening.verify::<Sha256, _>(&root, &values[0..3]).is_err());
-        assert!(opening.verify::<Sha256, _>(&root, &values[1..3]).is_err());
+        opening
+            .verify::<Sha256, _>(VectorKind::Change, &root, &values[1..4])
+            .unwrap();
+        assert!(
+            opening
+                .verify::<Sha256, _>(VectorKind::Change, &root, &values[0..3])
+                .is_err()
+        );
+        assert!(
+            opening
+                .verify::<Sha256, _>(VectorKind::Change, &root, &values[1..3])
+                .is_err()
+        );
         assert!(change_tree.range_opening(4, 2).is_err());
         assert!(change_tree.range_opening(1, 0).is_err());
 
@@ -1533,7 +1408,9 @@ mod tests {
 
         let empty = tree(VectorKind::Change, &[]);
         let opening = empty.range_opening(0, 0).unwrap();
-        opening.verify::<Sha256, &[u8]>(&empty.root(), &[]).unwrap();
+        opening
+            .verify::<Sha256, &[u8]>(VectorKind::Change, &empty.root(), &[])
+            .unwrap();
     }
 
     #[test]
@@ -1559,11 +1436,12 @@ mod tests {
                 &[1, 3],
                 &[closing_values[1], closing_values[3]],
                 &[0, 2, 5],
+                &Sequential,
             )
             .unwrap();
         let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
         let (parallel_root, parallel_ranges) = opening_tree
-            .range_updates_with_strategy::<Sha256, _>(
+            .range_updates::<Sha256, _>(
                 &[1, 3],
                 &[closing_values[1], closing_values[3]],
                 &[0, 2, 5],
@@ -1576,6 +1454,7 @@ mod tests {
         assert_eq!(ranges.len(), 2);
         ranges[0]
             .verify::<Sha256, _, _>(
+                VectorKind::State,
                 &opening_tree.root(),
                 &closing_root,
                 &[opening_values[1]],
@@ -1584,6 +1463,7 @@ mod tests {
             .unwrap();
         ranges[1]
             .verify::<Sha256, _, _>(
+                VectorKind::State,
                 &opening_tree.root(),
                 &closing_root,
                 &[opening_values[3]],
@@ -1595,7 +1475,13 @@ mod tests {
         hidden.positions.clear();
         assert!(
             hidden
-                .verify::<Sha256, &[u8], &[u8]>(&opening_tree.root(), &closing_root, &[], &[],)
+                .verify::<Sha256, &[u8], &[u8]>(
+                    VectorKind::State,
+                    &opening_tree.root(),
+                    &closing_root,
+                    &[],
+                    &[],
+                )
                 .is_err()
         );
     }
@@ -1621,6 +1507,7 @@ mod tests {
         let update = opening.sparse_update(&[0, 3]).unwrap();
         update
             .verify::<Sha256, _, _>(
+                VectorKind::State,
                 &opening.root(),
                 &closing.root(),
                 &[opening_values[0], opening_values[3]],
@@ -1630,6 +1517,7 @@ mod tests {
 
         assert!(matches!(
             update.verify::<Sha256, _, _>(
+                VectorKind::State,
                 &opening.root(),
                 &closing.root(),
                 &[opening_values[0], opening_values[3]],
@@ -1648,6 +1536,7 @@ mod tests {
         let hidden = tree(VectorKind::State, &hidden_values);
         assert!(matches!(
             update.verify::<Sha256, _, _>(
+                VectorKind::State,
                 &opening.root(),
                 &hidden.root(),
                 &[opening_values[0], opening_values[3]],
@@ -1658,25 +1547,44 @@ mod tests {
     }
 
     #[test]
-    fn sparse_update_rejects_kind_length_and_empty_malleability() {
+    fn sparse_update_binds_kind_length_and_empty_shape() {
         let values = [b"a".as_slice()];
         let state = tree(VectorKind::State, &values);
         let update = state.sparse_update(&[]).unwrap();
         update
-            .verify::<Sha256, &[u8], &[u8]>(&state.root(), &state.root(), &[], &[])
+            .verify::<Sha256, &[u8], &[u8]>(
+                VectorKind::State,
+                &state.root(),
+                &state.root(),
+                &[],
+                &[],
+            )
             .unwrap();
 
         let change = tree(VectorKind::Change, &values);
-        assert!(matches!(
-            update.verify::<Sha256, &[u8], &[u8]>(&state.root(), &change.root(), &[], &[],),
-            Err(Error::RootKindMismatch { .. })
-        ));
+        assert!(
+            update
+                .verify::<Sha256, &[u8], &[u8]>(
+                    VectorKind::Change,
+                    &state.root(),
+                    &change.root(),
+                    &[],
+                    &[],
+                )
+                .is_err()
+        );
 
         let empty = tree(VectorKind::State, &[]);
         let mut empty_update = empty.sparse_update(&[]).unwrap();
         empty_update.proof.siblings.push(Sha256::hash(&[b"extra"]));
         assert!(matches!(
-            empty_update.verify::<Sha256, &[u8], &[u8]>(&empty.root(), &empty.root(), &[], &[],),
+            empty_update.verify::<Sha256, &[u8], &[u8]>(
+                VectorKind::State,
+                &empty.root(),
+                &empty.root(),
+                &[],
+                &[],
+            ),
             Err(Error::MalformedEmpty)
         ));
     }

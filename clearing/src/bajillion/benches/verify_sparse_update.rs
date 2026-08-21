@@ -1,4 +1,5 @@
 use super::fixtures::{SPARSE_PROFILES, sparse_fixture};
+use commonware_clearing::bajillion::commitment::VectorKind;
 use commonware_cryptography::Sha256;
 use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
@@ -15,6 +16,7 @@ fn bench_verify_sparse_update(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(&fixture.update)
                         .verify::<Sha256, _, _>(
+                            VectorKind::State,
                             black_box(&fixture.opening_root),
                             black_box(&fixture.closing_root),
                             black_box(&fixture.opening_values),

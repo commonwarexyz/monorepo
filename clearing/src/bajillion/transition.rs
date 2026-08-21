@@ -7,7 +7,6 @@ use crate::bajillion::{
     credit::{self, ShardHead, ShardSet},
     payment::{PaymentContext, PaymentError},
     state::{AccountRow, Prefix, StateLeaf},
-    wire::{PublicKeyReader, ReadWithPublicKeys},
 };
 use alloc::{boxed::Box, collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
@@ -28,6 +27,8 @@ pub(crate) use slice::{validate_slice_header, validate_slice_structure_after_hea
 
 /// Hash namespace for canonical close header identifiers.
 pub const BATCH_ID_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BATCH_ID";
+/// Hash namespace for contextual commitments to the three close roots.
+pub const HEADER_ROOT_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_HEADER_ROOT";
 /// Hash namespace for canonical epoch payment anchors.
 pub const EPOCH_ANCHOR_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_EPOCH_ANCHOR";
 /// Maximum number of high-order account-key bits used for deterministic proof slices.
@@ -160,87 +161,113 @@ where
     }
 }
 
-/// Fixed-size header retained by the settlement layer.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Header<P: PublicKey, D: Digest> {
-    /// Exact payment anchor, epoch, and receipt signer.
-    pub context: PaymentContext<P, D>,
+/// The three vector roots authenticated by one close header.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RootBundle<D: Digest> {
     /// Complete opening account-state vector.
-    pub opening_root: VectorRoot<D>,
+    pub opening: VectorRoot<D>,
     /// Exact sorted changed-account vector.
-    pub change_root: VectorRoot<D>,
+    pub change: VectorRoot<D>,
     /// Complete closing account-state vector.
-    pub closing_root: VectorRoot<D>,
-    /// Terminal prefix carrying all public close totals.
-    pub totals: Prefix,
-    /// Sum of opening account balances.
-    pub opening_liability: u64,
-    /// Sum of closing account balances.
-    pub closing_liability: u64,
-    /// Inclusive deadline through which receipt challenges are accepted.
-    pub challenge_deadline: Deadline,
+    pub closing: VectorRoot<D>,
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for Header<P, D>
+impl<D> arbitrary::Arbitrary<'_> for RootBundle<D>
 where
-    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
     D: Digest + for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            context: u.arbitrary()?,
-            opening_root: u.arbitrary()?,
-            change_root: u.arbitrary()?,
-            closing_root: u.arbitrary()?,
-            totals: u.arbitrary()?,
-            opening_liability: u.arbitrary()?,
-            closing_liability: u.arbitrary()?,
-            challenge_deadline: u.arbitrary()?,
+            opening: u.arbitrary()?,
+            change: u.arbitrary()?,
+            closing: u.arbitrary()?,
         })
     }
 }
 
-impl<P: PublicKey, D: Digest> Header<P, D> {
-    /// Derives the canonical identifier of this exact header.
-    pub fn batch_id<H: Hasher<Digest = D>>(&self) -> BatchId<D> {
-        let encoded = self.encode();
-        BatchId(H::hash(&[BATCH_ID_HASH_NAMESPACE, encoded.as_ref()]))
-    }
-}
-
-impl<P: PublicKey, D: Digest> Write for Header<P, D> {
+impl<D: Digest> Write for RootBundle<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.context.write(writer);
-        self.opening_root.write(writer);
-        self.change_root.write(writer);
-        self.closing_root.write(writer);
-        self.totals.write(writer);
-        self.opening_liability.write(writer);
-        self.closing_liability.write(writer);
-        self.challenge_deadline.write(writer);
+        self.opening.write(writer);
+        self.change.write(writer);
+        self.closing.write(writer);
     }
 }
 
-impl<P: PublicKey, D: Digest> FixedSize for Header<P, D> {
-    const SIZE: usize =
-        PaymentContext::<P, D>::SIZE + VectorRoot::<D>::SIZE * 3 + Prefix::SIZE + u64::SIZE * 3;
+impl<D: Digest> FixedSize for RootBundle<D> {
+    const SIZE: usize = VectorRoot::<D>::SIZE * 3;
 }
 
-impl<P: PublicKey, D: Digest> Read for Header<P, D> {
+impl<D: Digest> Read for RootBundle<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
-            context: PaymentContext::read(reader)?,
-            opening_root: VectorRoot::read(reader)?,
-            change_root: VectorRoot::read(reader)?,
-            closing_root: VectorRoot::read(reader)?,
-            totals: Prefix::read(reader)?,
-            opening_liability: u64::read(reader)?,
-            closing_liability: u64::read(reader)?,
-            challenge_deadline: Deadline::read(reader)?,
+            opening: VectorRoot::read(reader)?,
+            change: VectorRoot::read(reader)?,
+            closing: VectorRoot::read(reader)?,
         })
+    }
+}
+
+/// Context-bound digest committing to one [`RootBundle`].
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct Header<D: Digest>(D);
+
+impl<D: Digest> Header<D> {
+    /// Commits to the exact root roles under one authenticated payment context.
+    pub fn new<H, P>(context: &PaymentContext<P, D>, roots: &RootBundle<D>) -> Self
+    where
+        H: Hasher<Digest = D>,
+        P: PublicKey,
+    {
+        let context = context.encode();
+        Self(H::hash(&[
+            HEADER_ROOT_HASH_NAMESPACE,
+            context.as_ref(),
+            roots.opening.digest.as_ref(),
+            roots.change.digest.as_ref(),
+            roots.closing.digest.as_ref(),
+        ]))
+    }
+
+    /// Returns whether `roots` are the unique contextual opening of this header.
+    pub fn verify<H, P>(&self, context: &PaymentContext<P, D>, roots: &RootBundle<D>) -> bool
+    where
+        H: Hasher<Digest = D>,
+        P: PublicKey,
+    {
+        *self == Self::new::<H, P>(context, roots)
+    }
+
+    /// Returns the underlying header digest.
+    pub const fn digest(&self) -> &D {
+        &self.0
+    }
+
+    /// Derives the canonical identifier of this contextual header.
+    pub fn batch_id<H: Hasher<Digest = D>>(&self) -> BatchId<D> {
+        BatchId(H::hash(&[BATCH_ID_HASH_NAMESPACE, self.0.as_ref()]))
+    }
+}
+
+impl<D: Digest> Write for Header<D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl<D: Digest> FixedSize for Header<D> {
+    const SIZE: usize = D::SIZE;
+}
+
+impl<D: Digest> Read for Header<D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self(D::read(reader)?))
     }
 }
 
@@ -497,7 +524,9 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Close<P: PublicKey, D: Digest> {
     /// Settlement header produced by this corpus.
-    pub header: Header<P, D>,
+    pub header: Header<D>,
+    /// Root preimage authenticated by `header`.
+    pub roots: RootBundle<D>,
     /// Strictly account-sorted changed rows.
     pub rows: Vec<AccountRow<P, D>>,
     /// Terminal shard sets aligned one-for-one with `rows`.
@@ -580,7 +609,8 @@ impl<P, D> arbitrary::Arbitrary<'_> for Close<P, D>
 where
     P: PublicKey,
     D: Digest,
-    Header<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    Header<D>: for<'a> arbitrary::Arbitrary<'a>,
+    RootBundle<D>: for<'a> arbitrary::Arbitrary<'a>,
     AccountRow<P, D>: for<'a> arbitrary::Arbitrary<'a>,
     ShardSet<P, D>: for<'a> arbitrary::Arbitrary<'a>,
     SparseUpdate<D>: for<'a> arbitrary::Arbitrary<'a>,
@@ -595,6 +625,7 @@ where
         }
         Ok(Self {
             header: u.arbitrary()?,
+            roots: u.arbitrary()?,
             rows,
             shard_sets,
             update: u.arbitrary()?,
@@ -605,6 +636,7 @@ where
 impl<P: PublicKey, D: Digest> Write for Close<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.header.write(writer);
+        self.roots.write(writer);
         self.rows.write(writer);
         self.shard_sets.write(writer);
         self.update.write(writer);
@@ -614,6 +646,7 @@ impl<P: PublicKey, D: Digest> Write for Close<P, D> {
 impl<P: PublicKey, D: Digest> EncodeSize for Close<P, D> {
     fn encode_size(&self) -> usize {
         self.header.encode_size()
+            + self.roots.encode_size()
             + self.rows.encode_size()
             + self.shard_sets.encode_size()
             + self.update.encode_size()
@@ -634,8 +667,7 @@ fn read_shard_sets<P: PublicKey, D: Digest>(
     let mut total = 0_u64;
     for _ in 0..count {
         let epoch = u64::read(reader)?;
-        let mut public_keys = PublicKeyReader::new();
-        let recipient = public_keys.read(reader)?;
+        let recipient = P::read(reader)?;
         let remaining = limits.max_total_shards.saturating_sub(total);
         let head_limit = limits
             .max_shards_per_account
@@ -650,7 +682,7 @@ fn read_shard_sets<P: PublicKey, D: Digest>(
         let head_count = usize::read_cfg(reader, &RangeCfg::new(..=head_limit))?;
         let mut heads = Vec::with_capacity(head_count.min(reader.remaining()));
         for _ in 0..head_count {
-            heads.push(ShardHead::read_with_public_keys(reader, &mut public_keys)?);
+            heads.push(ShardHead::read(reader)?);
         }
         total = total
             .checked_add(u64::try_from(heads.len()).map_err(|_| {
@@ -677,17 +709,10 @@ fn read_sparse_update<D: Digest>(
     reader: &mut impl Buf,
     rows: usize,
 ) -> Result<SparseUpdate<D>, CodecError> {
-    let kind = VectorKind::read(reader)?;
-    let len = u32::read(reader)?;
-    if len > commitment::MAX_VECTOR_LENGTH {
-        return Err(codec_invalid(
-            "clearing::Close",
-            "state vector exceeds protocol bound",
-        ));
-    }
     let positions = Vec::<u32>::read_cfg(reader, &(RangeCfg::exact(rows), ()))?;
     let proof = bmt::Proof::read_cfg(reader, &positions.len())?;
-    if proof.leaf_count != len
+    let len = proof.leaf_count;
+    if len > commitment::MAX_VECTOR_LENGTH
         || positions.first().is_some_and(|position| *position >= len)
         || positions
             .windows(2)
@@ -699,12 +724,7 @@ fn read_sparse_update<D: Digest>(
             "sparse update shape is not canonical",
         ));
     }
-    Ok(SparseUpdate {
-        kind,
-        len,
-        positions,
-        proof,
-    })
+    Ok(SparseUpdate { positions, proof })
 }
 
 impl<P: PublicKey, D: Digest> Read for Close<P, D> {
@@ -712,6 +732,7 @@ impl<P: PublicKey, D: Digest> Read for Close<P, D> {
 
     fn read_cfg(reader: &mut impl Buf, limits: &Self::Cfg) -> Result<Self, CodecError> {
         let header = Header::read(reader)?;
+        let roots = RootBundle::read(reader)?;
         let row_limit = limits
             .max_rows
             .min(u64::from(commitment::MAX_VECTOR_LENGTH));
@@ -722,6 +743,7 @@ impl<P: PublicKey, D: Digest> Read for Close<P, D> {
         let update = read_sparse_update(reader, rows.len())?;
         Ok(Self {
             header,
+            roots,
             rows,
             shard_sets,
             update,
@@ -794,7 +816,7 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
         }
         Ok(Self {
             leaves,
-            tree: builder.build()?,
+            tree: builder.build(&Sequential)?,
             liability,
             byte_boundaries,
         })
@@ -984,12 +1006,12 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
             return Err(TransitionError::NonCanonicalRows);
         }
         let tree = change_tree::<H, P, D>(&close.rows)?;
-        if tree.root() != close.header.change_root {
+        if tree.root() != close.roots.change {
             return Err(TransitionError::ChangeRoot);
         }
         Ok(Self {
-            opening_root: close.header.opening_root,
-            change_root: close.header.change_root,
+            opening_root: close.roots.opening,
+            change_root: close.roots.change,
             rows: close.rows.clone(),
             tree,
         })
@@ -1067,8 +1089,8 @@ where
 {
     let len = u32::try_from(rows.len()).map_err(|_| TransitionError::TooManyRows)?;
     let mut builder = commitment::Builder::<H>::new(VectorKind::Change, len)?;
-    builder.add_values_with_strategy(rows, strategy)?;
-    Ok(builder.build_with_strategy(strategy)?)
+    builder.add_values(rows, strategy)?;
+    Ok(builder.build(strategy)?)
 }
 
 fn encoded_state_sides<P: PublicKey, D: Digest>(
@@ -1205,24 +1227,19 @@ where
         }
         .encode()
     });
-    let closing =
-        cache
-            .tree
-            .prepare_update_with_strategy::<H, _>(&positions, &closing_values, strategy)?;
+    let closing = cache
+        .tree
+        .prepare_update::<H, _>(&positions, &closing_values, strategy)?;
     let changes = change_tree_with_strategy::<H, P, D>(&rows, strategy)?;
-    let closing_liability =
-        checked_closing_liability(cache.liability, deposits.total(), totals.withdrawal)?;
+    checked_closing_liability(cache.liability, deposits.total(), totals.withdrawal)?;
+    let roots = RootBundle {
+        opening: cache.root(),
+        change: changes.root(),
+        closing: closing.root(),
+    };
     let close = Close {
-        header: Header {
-            context: context.payment.clone(),
-            opening_root: cache.root(),
-            change_root: changes.root(),
-            closing_root: closing.root(),
-            totals,
-            opening_liability: cache.liability,
-            closing_liability,
-            challenge_deadline: context.challenge_deadline,
-        },
+        header: Header::new::<H, P>(&context.payment, &roots),
+        roots,
         rows,
         shard_sets,
         update,
@@ -1235,66 +1252,22 @@ where
     })
 }
 
-/// Validates every close-header invariant decidable from its authenticated epoch context.
-pub fn validate_header<P: PublicKey, D: Digest>(
+/// Validates the contextual root commitment and opening-state ancestry.
+pub fn validate_header<H, P, D>(
     context: &CloseContext<P, D>,
-    header: &Header<P, D>,
-) -> Result<(), TransitionError> {
-    if header.context != context.payment {
-        return Err(TransitionError::Context);
+    header: &Header<D>,
+    roots: &RootBundle<D>,
+) -> Result<(), TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    if !header.verify::<H, P>(&context.payment, roots) {
+        return Err(TransitionError::HeaderRoot);
     }
-    if header.opening_root != context.opening_root {
+    if roots.opening != context.opening_root {
         return Err(TransitionError::OpeningRoot);
-    }
-    if header.opening_liability != context.opening_liability {
-        return Err(TransitionError::OpeningLiability);
-    }
-    if header.challenge_deadline != context.challenge_deadline {
-        return Err(TransitionError::Deadline);
-    }
-    if header.opening_root.kind != VectorKind::State
-        || header.closing_root.kind != VectorKind::State
-        || header.change_root.kind != VectorKind::Change
-    {
-        return Err(TransitionError::RootKind);
-    }
-    if header.opening_root.len != header.closing_root.len
-        || header.change_root.len > header.opening_root.len
-    {
-        return Err(TransitionError::RootLength);
-    }
-
-    let limits = context.limits();
-    if u64::from(header.change_root.len) > limits.max_rows()
-        || header.totals.withdrawals > limits.max_withdrawals()
-        || header.totals.shards > limits.max_total_shards()
-        || header.totals.debit > limits.max_payment_total()
-        || header.totals.credit > limits.max_payment_total()
-        || header.totals.deposit > limits.max_deposit_total()
-        || header.totals.withdrawal > limits.max_withdrawal_total()
-    {
-        return Err(TransitionError::CloseLimit);
-    }
-
-    if header.change_root.len == 0 {
-        if header.totals != Prefix::default() {
-            return Err(TransitionError::TerminalTotals);
-        }
-        if header.opening_root != header.closing_root {
-            return Err(TransitionError::Commitment(commitment::Error::HiddenChange));
-        }
-    }
-
-    if header.totals.debit != header.totals.credit {
-        return Err(TransitionError::PaymentConservation);
-    }
-    let expected_liability = checked_closing_liability(
-        header.opening_liability,
-        header.totals.deposit,
-        header.totals.withdrawal,
-    )?;
-    if header.closing_liability != expected_liability {
-        return Err(TransitionError::LiabilityEquation);
     }
     Ok(())
 }
@@ -1302,14 +1275,8 @@ pub fn validate_header<P: PublicKey, D: Digest>(
 fn validate_corpus_shape<P: PublicKey, D: Digest>(
     close: &Close<P, D>,
 ) -> Result<(), TransitionError> {
-    if close.update.kind != VectorKind::State {
-        return Err(TransitionError::RootKind);
-    }
-    if close.update.len != close.header.opening_root.len {
-        return Err(TransitionError::RootLength);
-    }
     let rows = u32::try_from(close.rows.len()).map_err(|_| TransitionError::TooManyRows)?;
-    if close.header.change_root.len != rows || close.update.positions.len() != close.rows.len() {
+    if rows > commitment::MAX_VECTOR_LENGTH || close.update.positions.len() != close.rows.len() {
         return Err(TransitionError::RowCount);
     }
     if close.rows.len() != close.shard_sets.len() {
@@ -1325,14 +1292,6 @@ fn validate_boundaries<P: PublicKey, D: Digest>(
     close: &Close<P, D>,
 ) -> Result<(), TransitionError> {
     withdrawals.verify_deployment(&context.deployment)?;
-    let withdrawal_count =
-        u64::try_from(withdrawals.len()).map_err(|_| TransitionError::BoundaryTotals)?;
-    if close.header.totals.deposit != deposits.total()
-        || close.header.totals.withdrawal < withdrawals.total()
-        || close.header.totals.withdrawals != withdrawal_count
-    {
-        return Err(TransitionError::BoundaryTotals);
-    }
     for record in deposits.records() {
         if close
             .rows
@@ -1351,6 +1310,40 @@ fn validate_boundaries<P: PublicKey, D: Digest>(
             return Err(TransitionError::BoundaryAccountMissing);
         }
     }
+    Ok(())
+}
+
+pub(crate) fn validate_terminal_prefix<P: PublicKey, D: Digest>(
+    context: &CloseContext<P, D>,
+    deposits: &DepositBatch<P>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    row_count: u32,
+    totals: Prefix,
+) -> Result<(), TransitionError> {
+    let withdrawal_count =
+        u64::try_from(withdrawals.len()).map_err(|_| TransitionError::BoundaryTotals)?;
+    if totals.deposit != deposits.total()
+        || totals.withdrawal < withdrawals.total()
+        || totals.withdrawals != withdrawal_count
+    {
+        return Err(TransitionError::BoundaryTotals);
+    }
+
+    let limits = context.limits();
+    if u64::from(row_count) > limits.max_rows()
+        || totals.withdrawals > limits.max_withdrawals()
+        || totals.shards > limits.max_total_shards()
+        || totals.debit > limits.max_payment_total()
+        || totals.credit > limits.max_payment_total()
+        || totals.deposit > limits.max_deposit_total()
+        || totals.withdrawal > limits.max_withdrawal_total()
+    {
+        return Err(TransitionError::CloseLimit);
+    }
+    if totals.debit != totals.credit {
+        return Err(TransitionError::PaymentConservation);
+    }
+    checked_closing_liability(context.opening_liability, totals.deposit, totals.withdrawal)?;
     Ok(())
 }
 
@@ -1511,7 +1504,7 @@ where
     P: PublicKey,
     D: Digest,
 {
-    validate_header(context, &close.header)?;
+    validate_header::<H, P, D>(context, &close.header, &close.roots)?;
     validate_corpus_shape(close)?;
     if close
         .rows
@@ -1520,7 +1513,11 @@ where
     {
         return Err(TransitionError::NonCanonicalRows);
     }
-    validate_corpus_limits(context, &close.rows, &close.shard_sets, close.header.totals)?;
+    let totals = close
+        .rows
+        .last()
+        .map_or_else(Prefix::default, |row| row.prefix);
+    validate_corpus_limits(context, &close.rows, &close.shard_sets, totals)?;
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
     validate_boundaries(context, deposits, withdrawals, close)
 }
@@ -1546,10 +1543,8 @@ where
             return Err(TransitionError::Prefix);
         }
     }
-    if prefix != close.header.totals {
-        return Err(TransitionError::TerminalTotals);
-    }
-    Ok(())
+    let row_count = u32::try_from(close.rows.len()).map_err(|_| TransitionError::TooManyRows)?;
+    validate_terminal_prefix(context, deposits, withdrawals, row_count, prefix)
 }
 
 fn validate_prepared_close<H, P, D>(
@@ -1568,10 +1563,10 @@ where
     if prepared.slice_bits != context.assignment().slice_bits() {
         return Err(TransitionError::SliceBits);
     }
-    if prepared.changes.root() != close.header.change_root {
+    if prepared.changes.root() != close.roots.change {
         return Err(TransitionError::ChangeRoot);
     }
-    if prepared.closing.root() != close.header.closing_root
+    if prepared.closing.root() != close.roots.closing
         || prepared.closing.positions() != close.update.positions
     {
         return Err(TransitionError::Commitment(commitment::Error::HiddenChange));
@@ -1592,13 +1587,14 @@ where
     D: Digest,
 {
     validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
-    if change_tree::<H, P, D>(&close.rows)?.root() != close.header.change_root {
+    if change_tree::<H, P, D>(&close.rows)?.root() != close.roots.change {
         return Err(TransitionError::ChangeRoot);
     }
     let (opening, closing) = encoded_state_sides(&close.rows);
     close.update.verify::<H, _, _>(
-        &close.header.opening_root,
-        &close.header.closing_root,
+        VectorKind::State,
+        &close.roots.opening,
+        &close.roots.closing,
         &opening,
         &closing,
     )?;
@@ -1647,27 +1643,18 @@ pub enum TransitionError {
     /// A row's opening state does not match its cached account.
     #[error("row does not match the cached opening account state")]
     OpeningLinkage,
-    /// Header and expected payment contexts differ.
-    #[error("header payment context does not match the expected context")]
-    Context,
-    /// Header and expected opening roots differ.
-    #[error("header opening root does not match the expected root")]
+    /// A header does not authenticate its roots under the registered payment context.
+    #[error("header does not authenticate the supplied roots and payment context")]
+    HeaderRoot,
+    /// Root bundle and expected opening roots differ.
+    #[error("root bundle opening root does not match the expected root")]
     OpeningRoot,
-    /// Header and expected opening liabilities differ.
-    #[error("header opening liability does not match the expected liability")]
+    /// Cached and expected opening liabilities differ.
+    #[error("cached opening liability does not match the expected liability")]
     OpeningLiability,
-    /// Header and expected challenge deadlines differ.
-    #[error("header challenge deadline does not match the expected deadline")]
-    Deadline,
     /// Admission does not precede a challenge deadline with a representable resolution time.
     #[error("admission must precede a challenge deadline below the maximum timestamp")]
     DeadlineOrder,
-    /// A typed vector root has the wrong semantic kind.
-    #[error("close contains a root with the wrong semantic kind")]
-    RootKind,
-    /// Opening, closing, and update vector lengths differ.
-    #[error("state root or sparse update lengths differ")]
-    RootLength,
     /// Change-root or sparse-update row counts differ from the corpus.
     #[error("close row counts are inconsistent")]
     RowCount,
@@ -1728,9 +1715,6 @@ pub enum TransitionError {
     /// A row does not carry the exact next running prefix.
     #[error("changed row prefix is not continuous")]
     Prefix,
-    /// The header totals do not equal the terminal row prefix.
-    #[error("header totals do not equal the terminal prefix")]
-    TerminalTotals,
     /// Gross payment debit and credit differ.
     #[error("gross payment debit and credit are not conserved")]
     PaymentConservation,
@@ -1758,17 +1742,16 @@ pub enum TransitionError {
 mod tests {
     use super::*;
     use crate::bajillion::{
-        boundary::SignedWithdrawal,
+        boundary::{DepositRecord, SignedWithdrawal},
         credit::ShardHead,
         payment::{Payment, SignedReceipt, SignedSend},
         state::AccountState,
     };
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{
-        Sha256, Signer as _,
-        curve25519::{Signature, SigningKey, VerifyingKey},
-        sha256::Digest as ShaDigest,
+    use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as ShaDigest};
+    use commonware_cryptography_curve25519::signing::{
+        Signature, SigningKey, StrictVerifyingKey as VerifyingKey,
     };
     use commonware_parallel::{Rayon, Sequential};
     use core::{
@@ -2167,7 +2150,11 @@ mod tests {
         assert_eq!(opening.leaf, cache.leaves()[2]);
         opening
             .proof
-            .verify::<Sha256>(&cache.root(), opening.leaf.encode().as_ref())
+            .verify::<Sha256>(
+                VectorKind::State,
+                &cache.root(),
+                opening.leaf.encode().as_ref(),
+            )
             .unwrap();
 
         let unknown = SigningKey::from_seed(999).public_key();
@@ -2178,13 +2165,14 @@ mod tests {
         assert_eq!(HASH_CALLS.load(Ordering::Relaxed), 0);
     }
 
-    fn rebind_state(close: &mut TestClose) {
-        close.header.change_root = change_tree::<Sha256, _, _>(&close.rows).unwrap().root();
+    fn rebind_state(context: &TestContext, close: &mut TestClose) {
+        close.roots.change = change_tree::<Sha256, _, _>(&close.rows).unwrap().root();
         let (_, closing) = encoded_state_sides(&close.rows);
-        close.header.closing_root = close
+        close.roots.closing = close
             .update
-            .reconstruct_closing::<Sha256, _>(&closing)
+            .reconstruct_closing::<Sha256, _>(VectorKind::State, &closing)
             .unwrap();
+        close.header = Header::new::<Sha256, _>(context.payment(), &close.roots);
     }
 
     #[test]
@@ -2210,7 +2198,7 @@ mod tests {
     }
 
     #[test]
-    fn close_decode_reuses_keys_across_many_segmented_shard_heads() {
+    fn close_decode_reads_each_key_occurrence_across_segments() {
         const HEAD_COUNT: usize = 32;
 
         let operator = SigningKey::from_seed(30);
@@ -2246,7 +2234,7 @@ mod tests {
         .unwrap();
         assert_eq!(segmented.remaining(), 0);
         assert_eq!(decoded[0].heads().len(), HEAD_COUNT);
-        assert_eq!(KEY_DECODES.load(Ordering::Relaxed), 2);
+        assert_eq!(KEY_DECODES.load(Ordering::Relaxed), 1 + 3 * HEAD_COUNT);
 
         let head_start =
             1_usize.encode_size() + u64::SIZE + VerifyingKey::SIZE + HEAD_COUNT.encode_size();
@@ -2263,98 +2251,46 @@ mod tests {
             ),
             Err(CodecError::EndOfBuffer)
         ));
-        assert_eq!(KEY_DECODES.load(Ordering::Relaxed), 1);
+        assert_eq!(KEY_DECODES.load(Ordering::Relaxed), 2);
     }
 
     #[test]
-    fn header_validation_rejects_adversarial_mutations() {
+    fn header_is_one_context_bound_root_of_ordered_roots() {
         let fixture = payment_fixture();
         let header = &fixture.close.header;
-        validate_header(&fixture.context, header).unwrap();
+        assert_eq!(Header::<ShaDigest>::SIZE, ShaDigest::SIZE);
+        assert_eq!(header.encode().len(), ShaDigest::SIZE);
+        validate_header::<Sha256, _, _>(&fixture.context, header, &fixture.close.roots).unwrap();
 
-        let mut mutated = header.clone();
-        mutated.context = empty_fixture().0.payment().clone();
+        let mut reordered = fixture.close.roots;
+        core::mem::swap(&mut reordered.opening, &mut reordered.closing);
         assert!(matches!(
-            validate_header(&fixture.context, &mutated),
-            Err(TransitionError::Context)
+            validate_header::<Sha256, _, _>(&fixture.context, header, &reordered),
+            Err(TransitionError::HeaderRoot)
         ));
 
-        let mut mutated = header.clone();
-        mutated.opening_root.digest = Sha256::hash(&[b"other-opening"]);
+        let other_context = empty_fixture().0;
+        assert!(!header.verify::<Sha256, _>(other_context.payment(), &fixture.close.roots));
+
+        let mut other_opening = fixture.close.roots;
+        other_opening.opening.digest = Sha256::hash(&[b"other-opening"]);
+        let rebound = Header::new::<Sha256, _>(fixture.context.payment(), &other_opening);
         assert!(matches!(
-            validate_header(&fixture.context, &mutated),
+            validate_header::<Sha256, _, _>(&fixture.context, &rebound, &other_opening),
             Err(TransitionError::OpeningRoot)
-        ));
-
-        let mut mutated = header.clone();
-        mutated.opening_liability += 1;
-        assert!(matches!(
-            validate_header(&fixture.context, &mutated),
-            Err(TransitionError::OpeningLiability)
-        ));
-
-        let mut mutated = header.clone();
-        mutated.challenge_deadline += 1;
-        assert!(matches!(
-            validate_header(&fixture.context, &mutated),
-            Err(TransitionError::Deadline)
-        ));
-
-        let mut mutated = header.clone();
-        mutated.closing_root.kind = VectorKind::Change;
-        assert!(matches!(
-            validate_header(&fixture.context, &mutated),
-            Err(TransitionError::RootKind)
-        ));
-
-        let mut mutated = header.clone();
-        mutated.closing_root.len -= 1;
-        assert!(matches!(
-            validate_header(&fixture.context, &mutated),
-            Err(TransitionError::RootLength)
-        ));
-
-        let mut mutated = header.clone();
-        mutated.change_root.len = mutated.opening_root.len + 1;
-        assert!(matches!(
-            validate_header(&fixture.context, &mutated),
-            Err(TransitionError::RootLength)
-        ));
-
-        let mut limited = fixture.context.clone();
-        limited.limits = CloseLimits::new(2, 0, 1, 1, 20, 0, 0);
-        let mut mutated = header.clone();
-        mutated.totals.withdrawals = 1;
-        assert!(matches!(
-            validate_header(&limited, &mutated),
-            Err(TransitionError::CloseLimit)
-        ));
-
-        let mut mutated = header.clone();
-        mutated.totals.credit -= 1;
-        assert!(matches!(
-            validate_header(&fixture.context, &mutated),
-            Err(TransitionError::PaymentConservation)
-        ));
-
-        let mut mutated = header.clone();
-        mutated.closing_liability += 1;
-        assert!(matches!(
-            validate_header(&fixture.context, &mutated),
-            Err(TransitionError::LiabilityEquation)
         ));
     }
 
     #[test]
-    fn header_liability_uses_widened_checked_arithmetic() {
+    fn terminal_prefix_liability_uses_widened_checked_arithmetic() {
         let operator = SigningKey::from_seed(104);
         let account = SigningKey::from_seed(105).public_key();
         let cache = StateCache::new::<Sha256>(vec![StateLeaf {
-            account,
+            account: account.clone(),
             state: state(u64::MAX),
         }])
         .unwrap();
-        let deposits = DepositBatch::empty();
+        let deposits = DepositBatch::new(vec![DepositRecord::new(account, 1).unwrap()]).unwrap();
         let withdrawals = WithdrawalBatch::empty();
         let context = CloseContext::new::<Sha256>(
             Sha256::hash(&[b"deployment"]),
@@ -2369,29 +2305,16 @@ mod tests {
             assignment(0),
         )
         .unwrap();
-        let mut header = Header {
-            context: context.payment().clone(),
-            opening_root: cache.root(),
-            change_root: VectorRoot {
-                kind: VectorKind::Change,
-                len: 1,
-                digest: Sha256::hash(&[b"change"]),
-            },
-            closing_root: cache.root(),
-            totals: Prefix {
-                deposit: 1,
-                withdrawal: 1,
-                ..Prefix::default()
-            },
-            opening_liability: u64::MAX,
-            closing_liability: u64::MAX,
-            challenge_deadline: context.challenge_deadline(),
+        let mut totals = Prefix {
+            deposit: 1,
+            withdrawal: 1,
+            ..Prefix::default()
         };
-        validate_header(&context, &header).unwrap();
+        validate_terminal_prefix(&context, &deposits, &withdrawals, 1, totals).unwrap();
 
-        header.totals.withdrawal = 0;
+        totals.withdrawal = 0;
         assert!(matches!(
-            validate_header(&context, &header),
+            validate_terminal_prefix(&context, &deposits, &withdrawals, 1, totals),
             Err(TransitionError::LiabilityOverflow)
         ));
     }
@@ -2438,6 +2361,7 @@ mod tests {
                 &fixture.deposits,
                 &fixture.withdrawals,
                 &fixture.close.header,
+                &fixture.close.roots,
                 slice,
             )
             .unwrap();
@@ -2580,6 +2504,7 @@ mod tests {
                 &fixture.deposits,
                 &fixture.withdrawals,
                 &fixture.close.header,
+                &fixture.close.roots,
                 &omitted,
             )
             .is_err()
@@ -2593,6 +2518,7 @@ mod tests {
                 &fixture.deposits,
                 &fixture.withdrawals,
                 &fixture.close.header,
+                &fixture.close.roots,
                 &shifted,
             )
             .is_err()
@@ -2606,6 +2532,7 @@ mod tests {
                 &fixture.deposits,
                 &fixture.withdrawals,
                 &fixture.close.header,
+                &fixture.close.roots,
                 &wrong_index,
             )
             .is_err()
@@ -2654,8 +2581,15 @@ mod tests {
         for slice in &slices {
             assert!(slice.changes.rows.is_empty());
             assert!(slice.state_bounds.leaves.is_empty());
-            validate_slice::<Sha256, _, _>(&context, &deposits, &withdrawals, &close.header, slice)
-                .unwrap();
+            validate_slice::<Sha256, _, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &close.header,
+                &close.roots,
+                slice,
+            )
+            .unwrap();
         }
     }
 
@@ -2808,6 +2742,7 @@ mod tests {
 
         let mut wire = BytesMut::new();
         fixture.close.header.write(&mut wire);
+        fixture.close.roots.write(&mut wire);
         vec![fixture.close.rows[position].clone()].write(&mut wire);
         1_usize.write(&mut wire);
         set.epoch().write(&mut wire);
@@ -3030,13 +2965,13 @@ mod tests {
     fn challenge_index_builds_present_and_absent_account_evidence() {
         let fixture = payment_fixture();
         let index = ChallengeIndex::new::<Sha256>(&fixture.close).unwrap();
-        assert_eq!(index.root(), fixture.close.header.change_root);
+        assert_eq!(index.root(), fixture.close.roots.change);
         let payer = fixture.payment.payer();
         let present = index.account_lookup(&fixture.cache, payer).unwrap();
         let resolved = present
             .resolve::<Sha256>(
-                &fixture.close.header.opening_root,
-                &fixture.close.header.change_root,
+                &fixture.close.roots.opening,
+                &fixture.close.roots.change,
                 payer,
             )
             .unwrap();
@@ -3076,11 +3011,7 @@ mod tests {
         let index = ChallengeIndex::new::<Sha256>(&close).unwrap();
         let absent = index.account_lookup(&cache, &dormant).unwrap();
         let resolved = absent
-            .resolve::<Sha256>(
-                &close.header.opening_root,
-                &close.header.change_root,
-                &dormant,
-            )
+            .resolve::<Sha256>(&close.roots.opening, &close.roots.change, &dormant)
             .unwrap();
         assert!(resolved.row.is_none());
         assert_eq!(resolved.opening, resolved.closing);
@@ -3092,35 +3023,21 @@ mod tests {
         assert!(close.rows.is_empty());
         assert!(close.shard_sets.is_empty());
         assert!(close.update.positions.is_empty());
-        assert_eq!(close.header.opening_root, close.header.closing_root);
-        assert_eq!(close.header.totals, Prefix::default());
+        assert_eq!(close.roots.opening, close.roots.closing);
+        assert_eq!(close.rows.last().map(|row| row.prefix), None);
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
     }
 
     #[test]
-    fn empty_header_requires_zero_totals_and_an_unchanged_state_root() {
-        let (context, _, _, close) = empty_fixture();
-        validate_header(&context, &close.header).unwrap();
+    fn empty_close_requires_an_unchanged_state_root() {
+        let (context, deposits, withdrawals, mut close) = empty_fixture();
+        validate_header::<Sha256, _, _>(&context, &close.header, &close.roots).unwrap();
 
-        let mut mutated = close.header.clone();
-        mutated.totals.shards = 1;
+        close.roots.closing.digest = Sha256::hash(&[b"hidden-empty-change"]);
+        close.header = Header::new::<Sha256, _>(context.payment(), &close.roots);
         assert!(matches!(
-            validate_header(&context, &mutated),
-            Err(TransitionError::TerminalTotals)
-        ));
-
-        let mut mutated = close.header.clone();
-        mutated.closing_root.digest = Sha256::hash(&[b"hidden-empty-change"]);
-        assert!(matches!(
-            validate_header(&context, &mutated),
+            validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close),
             Err(TransitionError::Commitment(commitment::Error::HiddenChange))
-        ));
-
-        let mut mutated = close.header;
-        mutated.closing_liability += 1;
-        assert!(matches!(
-            validate_header(&context, &mutated),
-            Err(TransitionError::LiabilityEquation)
         ));
     }
 
@@ -3153,12 +3070,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            close.header.opening_root,
+            close.roots.opening,
             commitment::empty_root::<Sha256>(VectorKind::State)
         );
-        assert_eq!(close.header.opening_root, close.header.closing_root);
+        assert_eq!(close.roots.opening, close.roots.closing);
         assert_eq!(
-            close.header.change_root,
+            close.roots.change,
             commitment::empty_root::<Sha256>(VectorKind::Change)
         );
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
@@ -3317,8 +3234,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(withdrawals.total(), 0);
-        assert_eq!(close.header.totals.withdrawal, 10);
-        assert_eq!(close.header.closing_liability, 0);
+        assert_eq!(close.rows.last().unwrap().prefix.withdrawal, 10);
+        assert_eq!(
+            checked_closing_liability(context.opening_liability(), 0, 10).unwrap(),
+            0
+        );
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
     }
 
@@ -3376,7 +3296,10 @@ mod tests {
         )
         .unwrap();
         assert!(close.rows[0].closing.active);
-        assert_eq!(close.header.closing_liability, 5);
+        assert_eq!(
+            checked_closing_liability(context.opening_liability(), 5, 0).unwrap(),
+            5
+        );
 
         let opening = AccountState {
             active: true,
@@ -3524,7 +3447,8 @@ mod tests {
     #[test]
     fn hidden_change_is_rejected() {
         let (context, deposits, withdrawals, mut close) = empty_fixture();
-        close.header.closing_root.digest = Sha256::hash(&[b"hidden"]);
+        close.roots.closing.digest = Sha256::hash(&[b"hidden"]);
+        close.header = Header::new::<Sha256, _>(context.payment(), &close.roots);
         assert!(matches!(
             validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close),
             Err(TransitionError::Commitment(commitment::Error::HiddenChange))
@@ -3536,9 +3460,7 @@ mod tests {
         let mut fixture = payment_fixture();
         fixture.close.rows[0].prefix.debit =
             fixture.close.rows[0].prefix.debit.checked_add(1).unwrap();
-        fixture.close.header.change_root = change_tree::<Sha256, _, _>(&fixture.close.rows)
-            .unwrap()
-            .root();
+        rebind_state(&fixture.context, &mut fixture.close);
         assert!(matches!(
             validate_close::<Sha256, _, _>(
                 &fixture.context,
@@ -3551,7 +3473,7 @@ mod tests {
 
         let mut fixture = payment_fixture();
         fixture.close.rows[0].closing.balance += 1;
-        rebind_state(&mut fixture.close);
+        rebind_state(&fixture.context, &mut fixture.close);
         assert!(matches!(
             validate_close::<Sha256, _, _>(
                 &fixture.context,
@@ -3581,9 +3503,7 @@ mod tests {
             invalid_send,
             original.receipt().clone(),
         ));
-        fixture.close.header.change_root = change_tree::<Sha256, _, _>(&fixture.close.rows)
-            .unwrap()
-            .root();
+        rebind_state(&fixture.context, &mut fixture.close);
         assert!(matches!(
             validate_close::<Sha256, _, _>(
                 &fixture.context,

@@ -3,7 +3,6 @@ set -eo pipefail
 
 no_std_packages=(
   commonware-codec
-  commonware-clearing
   commonware-utils
   commonware-cryptography
   commonware-cryptography-curve25519

@@ -23,6 +23,7 @@
 //! ```rust
 //! use commonware_storage::bmt::{Builder, Tree};
 //! use commonware_cryptography::{Sha256, sha256::Digest, Hasher as _};
+//! use commonware_parallel::Sequential;
 //!
 //! // Create transactions and compute their digests
 //! let txs = [b"tx1", b"tx2", b"tx3", b"tx4"];
@@ -33,7 +34,7 @@
 //! for digest in &digests {
 //!    builder.add(digest);
 //! }
-//! let tree = builder.build();
+//! let tree = builder.build(&Sequential);
 //! let root = tree.root();
 //!
 //! // Generate a proof for leaf at index 1
@@ -50,7 +51,7 @@ use alloc::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
@@ -122,20 +123,13 @@ impl<H: Hasher> Builder<H> {
         position
     }
 
-    /// Builds the Binary Merkle Tree.
+    /// Builds the Binary Merkle Tree using `strategy` for independent hashes.
     ///
     /// It is valid to build a tree with no leaves, in which case
     /// just an "empty" node is included (no leaves will be provable).
-    pub fn build(self) -> Tree<H::Digest> {
-        self.build_with_strategy(&Sequential)
-    }
-
-    /// Builds the Binary Merkle Tree using `strategy` for independent hashes.
-    ///
     /// Position-hashed leaves and independent parents within each tree level are
-    /// computed concurrently when selected by `strategy`. The resulting tree is
-    /// identical to [`Builder::build`].
-    pub fn build_with_strategy(self, strategy: &impl Strategy) -> Tree<H::Digest> {
+    /// computed concurrently when selected by `strategy`.
+    pub fn build(self, strategy: &impl Strategy) -> Tree<H::Digest> {
         let mut leaves = self.leaves;
         let _: Vec<()> =
             strategy.map_collect_vec(leaves.chunks_mut(2).enumerate(), |(pair_index, chunk)| {
@@ -156,7 +150,7 @@ impl<H: Hasher> Builder<H> {
                     _ => unreachable!("chunks(2) yields one or two elements"),
                 }
             });
-        Tree::new_with_strategy::<H>(leaves, strategy)
+        Tree::new::<H>(leaves, strategy)
     }
 }
 
@@ -187,10 +181,7 @@ impl<D: Digest> Tree<D> {
     }
 
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
-    fn new_with_strategy<H: Hasher<Digest = D>>(
-        mut leaves: Vec<D>,
-        strategy: &impl Strategy,
-    ) -> Self {
+    fn new<H: Hasher<Digest = D>>(mut leaves: Vec<D>, strategy: &impl Strategy) -> Self {
         // If no leaves, add an empty node.
         //
         // Because this node only includes a position, there is no way a valid proof
@@ -359,15 +350,9 @@ impl<D: Digest> Tree<D> {
     /// Each change is `(position, closing_leaf)`, where `closing_leaf` has not been
     /// position-hashed. Changes must be strictly increasing, in bounds, and different
     /// from the corresponding opening leaves. Construction touches only the changed
-    /// paths and does not clone or scan dormant leaves.
-    pub fn update<H: Hasher<Digest = D>>(&self, changes: &[(u32, D)]) -> Result<Update<D>, Error> {
-        self.update_with_strategy::<H>(changes, &Sequential)
-    }
-
-    /// Builds a sparse overlay using `strategy` for independent hashes.
-    ///
-    /// Validation and output ordering are identical to [`Tree::update`].
-    pub fn update_with_strategy<H: Hasher<Digest = D>>(
+    /// paths and does not clone or scan dormant leaves. Independent hashes use
+    /// `strategy`.
+    pub fn update<H: Hasher<Digest = D>>(
         &self,
         changes: &[(u32, D)],
         strategy: &impl Strategy,
@@ -489,20 +474,10 @@ impl<D: Digest> Tree<D> {
     ///
     /// Boundaries must begin at zero, end at the tree's leaf count, and be
     /// nondecreasing. Equal adjacent boundaries produce a proof for an empty interval.
+    /// The complete update and boundary domain is validated before independent
+    /// intervals are dispatched by `strategy`. Output follows boundary order,
+    /// including repeated boundaries for empty intervals.
     pub fn range_update_proofs(
-        &self,
-        update: &Update<D>,
-        boundaries: &[u32],
-    ) -> Result<Vec<RangeUpdateProof<D>>, Error> {
-        self.range_update_proofs_with_strategy(update, boundaries, &Sequential)
-    }
-
-    /// Builds paired update proofs using `strategy` for independent intervals.
-    ///
-    /// The complete update and boundary domain is validated before any interval is
-    /// dispatched. Strategy collection preserves boundary order, including repeated
-    /// boundaries for empty intervals.
-    pub fn range_update_proofs_with_strategy(
         &self,
         update: &Update<D>,
         boundaries: &[u32],
@@ -652,6 +627,11 @@ where
     }
 }
 
+/// Emits the canonical left-to-right frontier for one update interval.
+///
+/// Exterior subtrees carry opening and closing digests, while unchanged interior
+/// subtrees carry one shared digest. Verification consumes both streams in this
+/// same maximal-subtree order, preventing alternate encodings of one update.
 struct RangeUpdateFrontierBuilder<'a, D: Digest> {
     tree: &'a Tree<D>,
     update: &'a Update<D>,
@@ -713,6 +693,10 @@ impl<D: Digest> RangeUpdateFrontierBuilder<'_, D> {
     }
 }
 
+/// Reconstructs paired roots by consuming the canonical frontier exactly once.
+///
+/// The shared and exterior streams must follow the builder's left-to-right
+/// maximal-subtree partition and be exhausted when reconstruction completes.
 struct RangeUpdateVerifier<'a, D: Digest> {
     start: u64,
     end: u64,
@@ -791,6 +775,8 @@ impl<D: Digest> RangeUpdateProof<D> {
         opening_leaves: &[D],
         closing_leaves: &[D],
     ) -> Result<(D, D), Error> {
+        // Validate the complete adversarial domain before recursive reconstruction
+        // indexes aligned leaf slices or consumes either proof stream.
         let (start, end) = (range.start, range.end);
         if start > end || end > self.leaf_count {
             return Err(Error::InvalidRange(start, end));
@@ -830,6 +816,8 @@ impl<D: Digest> RangeUpdateProof<D> {
             return Ok((finalized, finalized));
         }
 
+        // The recursive walk owns canonical proof consumption. Requiring both
+        // streams to finish rejects missing, extra, and reordered frontier nodes.
         let mut verifier = RangeUpdateVerifier {
             start: u64::from(start),
             end: u64::from(end),
@@ -1164,25 +1152,14 @@ impl<D: Digest> Proof<D> {
 
     /// Reconstructs the finalized Binary Merkle Tree root from `elements` and this proof.
     ///
-    /// Elements can be provided in any order. Positions are sorted internally.
-    /// Duplicate positions, invalid positions, and proofs with missing or extra siblings
-    /// will return an error.
+    /// Elements can be provided in any order. Positions are validated and sorted before
+    /// independent hashes are dispatched by `strategy`. Duplicate or invalid positions
+    /// and proofs with missing or extra siblings return an error.
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation. This method does not compare the reconstructed root against a trusted
     /// root. Use [`Proof::verify_multi_inclusion`] to perform that comparison.
     pub fn root_from_multi_inclusion<H: Hasher<Digest = D>>(
-        &self,
-        elements: &[(D, u32)],
-    ) -> Result<D, Error> {
-        self.root_from_multi_inclusion_with_strategy::<H>(elements, &Sequential)
-    }
-
-    /// Reconstructs the finalized root using `strategy` for independent hashes.
-    ///
-    /// Elements are validated and placed in canonical position order before hashing.
-    /// The result and errors are identical to [`Proof::root_from_multi_inclusion`].
-    pub fn root_from_multi_inclusion_with_strategy<H: Hasher<Digest = D>>(
         &self,
         elements: &[(D, u32)],
         strategy: &impl Strategy,
@@ -1339,7 +1316,8 @@ impl<D: Digest> Proof<D> {
         elements: &[(D, u32)],
         root: &D,
     ) -> Result<(), Error> {
-        let finalized = self.root_from_multi_inclusion::<H>(elements)?;
+        let finalized =
+            self.root_from_multi_inclusion::<H>(elements, &commonware_parallel::Sequential)?;
 
         if finalized == *root {
             Ok(())
@@ -1412,7 +1390,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Get a valid proof for position 0
@@ -1455,7 +1433,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Build proof
@@ -1484,7 +1462,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Build proof
@@ -1512,7 +1490,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 2.
@@ -1538,7 +1516,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 1.
@@ -1563,7 +1541,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Generate a valid proof for leaf at index 0.
         let proof = tree.proof(0).unwrap();
@@ -1588,7 +1566,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
@@ -1610,7 +1588,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
@@ -1632,7 +1610,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate a valid proof for leaf at index 2.
@@ -1658,7 +1636,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // The tree was built with 3 leaves; index 2 is the last valid index.
@@ -1695,7 +1673,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test range proof for elements 2-5
@@ -1730,7 +1708,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test single element range proof
@@ -1754,7 +1732,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test full tree range proof
@@ -1778,7 +1756,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test first half
@@ -1818,7 +1796,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Test invalid ranges
         assert!(tree.range_proof(8, 8).is_err()); // Start out of bounds
@@ -1839,7 +1817,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Get valid range proof
@@ -1898,7 +1876,7 @@ mod tests {
             for digest in &digests {
                 builder.add(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
             let root = tree.root();
 
             // Test various range sizes
@@ -1935,7 +1913,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Get valid range proof for position 2 to 4
@@ -1967,7 +1945,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Get valid range proof for position 2 to 4
@@ -1994,7 +1972,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Get valid range proof
@@ -2022,7 +2000,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Get valid range proof for a single element (which needs siblings)
@@ -2053,7 +2031,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Test overflow in range_proof generation
         assert!(tree.range_proof(u32::MAX, u32::MAX).is_err());
@@ -2073,7 +2051,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Get valid range proof
@@ -2113,7 +2091,7 @@ mod tests {
             for digest in &digests {
                 builder.add(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
             let root = tree.root();
 
             // Test edge cases
@@ -2152,7 +2130,7 @@ mod tests {
     fn test_empty_tree_proof() {
         // Build an empty tree
         let builder = Builder::<Sha256>::new(0);
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Empty tree should fail for any position since there are no elements
         assert!(tree.proof(0).is_err());
@@ -2164,7 +2142,7 @@ mod tests {
     fn test_empty_tree_range_proof() {
         // Build an empty tree
         let builder = Builder::<Sha256>::new(0);
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Empty tree should return default proof only for (0, 0)
@@ -2233,7 +2211,7 @@ mod tests {
         let mut roots = Vec::new();
         for _ in 0..5 {
             let builder = Builder::<Sha256>::new(0);
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
             roots.push(tree.root());
         }
 
@@ -2263,7 +2241,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         let range_proof = tree.range_proof(start, start + count - 1).unwrap();
@@ -2302,7 +2280,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test range including the last element (which may require duplicate handling)
@@ -2329,7 +2307,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test multi-proof for non-contiguous positions [0, 3, 5]
@@ -2357,7 +2335,7 @@ mod tests {
             for digest in &digests {
                 builder.add(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
 
             let mut positions = vec![0, tree_size as u32 - 1];
             if tree_size > 3 {
@@ -2374,17 +2352,17 @@ mod tests {
 
             assert_eq!(
                 proof
-                    .root_from_multi_inclusion::<Sha256>(&elements)
+                    .root_from_multi_inclusion::<Sha256>(&elements, &Sequential)
                     .unwrap(),
                 tree.root(),
                 "failed for tree_size={tree_size}"
             );
         }
 
-        let empty_tree = Builder::<Sha256>::new(0).build();
+        let empty_tree = Builder::<Sha256>::new(0).build(&Sequential);
         assert_eq!(
             Proof::<Digest>::default()
-                .root_from_multi_inclusion::<Sha256>(&[])
+                .root_from_multi_inclusion::<Sha256>(&[], &Sequential)
                 .unwrap(),
             empty_tree.root()
         );
@@ -2402,7 +2380,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test single element multi-proof for each position
@@ -2430,7 +2408,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test multi-proof for all elements
@@ -2463,7 +2441,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test adjacent positions (should deduplicate shared siblings)
@@ -2493,7 +2471,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test widely separated positions
@@ -2515,7 +2493,7 @@ mod tests {
     fn test_multi_proof_empty_tree() {
         // Build empty tree
         let builder = Builder::<Sha256>::new(0);
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Empty tree with empty positions should return NoLeaves error
         // (we can't prove zero elements)
@@ -2543,7 +2521,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Empty positions should return error
         assert!(matches!(
@@ -2564,7 +2542,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Duplicate positions should return error
         assert!(matches!(
@@ -2589,7 +2567,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Test with unsorted positions (should work - internal sorting)
@@ -2655,7 +2633,7 @@ mod tests {
             for digest in &digests {
                 builder.add(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
 
             for mask in 1..1u16 << leaf_count {
                 let positions: Vec<u32> = (0..leaf_count)
@@ -2713,7 +2691,7 @@ mod tests {
             for digest in &digests {
                 builder.add(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
             let root = tree.root();
 
             // Test various position combinations
@@ -2764,7 +2742,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof
@@ -2796,7 +2774,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof
@@ -2828,7 +2806,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Generate valid proof
         let positions = [0, 3, 5];
@@ -2860,7 +2838,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof
@@ -2878,7 +2856,7 @@ mod tests {
         modified.siblings[0] = Sha256::hash(&[b"tampered"]);
         assert_ne!(
             modified
-                .root_from_multi_inclusion::<Sha256>(&elements)
+                .root_from_multi_inclusion::<Sha256>(&elements, &Sequential)
                 .unwrap(),
             root
         );
@@ -2892,7 +2870,7 @@ mod tests {
         let mut extra = multi_proof.clone();
         extra.siblings.push(Sha256::hash(&[b"extra"]));
         assert!(matches!(
-            extra.root_from_multi_inclusion::<Sha256>(&elements),
+            extra.root_from_multi_inclusion::<Sha256>(&elements, &Sequential),
             Err(Error::UnalignedProof)
         ));
         assert!(
@@ -2905,7 +2883,7 @@ mod tests {
         let mut missing = multi_proof;
         missing.siblings.pop();
         assert!(matches!(
-            missing.root_from_multi_inclusion::<Sha256>(&elements),
+            missing.root_from_multi_inclusion::<Sha256>(&elements, &Sequential),
             Err(Error::UnalignedProof)
         ));
         assert!(
@@ -2927,7 +2905,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Get individual proofs
         let individual_siblings: usize = [0u32, 1, 8, 9]
@@ -2959,7 +2937,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate proof
@@ -2996,7 +2974,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Generate proof
         let positions = [0, 3, 5];
@@ -3022,7 +3000,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Generate proof
         let positions = [0, 3, 5];
@@ -3059,7 +3037,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         // Test out of bounds position
         assert!(matches!(
@@ -3084,7 +3062,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof
@@ -3113,7 +3091,7 @@ mod tests {
             for digest in &digests {
                 builder.add(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
             let root = tree.root();
 
             // Test with positions including the last element
@@ -3144,7 +3122,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof
@@ -3170,7 +3148,7 @@ mod tests {
 
         // Build empty tree to get the empty root
         let builder = Builder::<Sha256>::new(0);
-        let empty_tree = builder.build();
+        let empty_tree = builder.build(&Sequential);
         let empty_root = empty_tree.root();
 
         assert!(
@@ -3196,7 +3174,7 @@ mod tests {
         // Build single-leaf tree
         let mut builder = Builder::<Sha256>::new(1);
         builder.add(&digest);
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate multi-proof for the only leaf
@@ -3251,7 +3229,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof and tamper with leaf_count
@@ -3283,7 +3261,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof and inflate leaf_count
@@ -3319,7 +3297,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof and deflate leaf_count
@@ -3352,7 +3330,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate proof for 2 positions
@@ -3389,7 +3367,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof with multiple siblings
@@ -3427,7 +3405,7 @@ mod tests {
         for digest in &digests {
             builder.add(digest);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Generate valid proof
@@ -3457,7 +3435,7 @@ mod tests {
         for leaf in leaves {
             builder.add(leaf);
         }
-        builder.build()
+        builder.build(&Sequential)
     }
 
     fn update_test_tree_with_strategy(leaves: &[Digest], strategy: &impl Strategy) -> Tree<Digest> {
@@ -3465,7 +3443,7 @@ mod tests {
         for leaf in leaves {
             builder.add(leaf);
         }
-        builder.build_with_strategy(strategy)
+        builder.build(strategy)
     }
 
     fn assert_same_tree(left: &Tree<Digest>, right: &Tree<Digest>) {
@@ -3495,11 +3473,9 @@ mod tests {
             let leaves: Vec<_> = (0..leaf_count as u32)
                 .map(|position| update_test_digest(b"build", position))
                 .collect();
-            let legacy = update_test_tree(&leaves);
             let sequential = update_test_tree_with_strategy(&leaves, &Sequential);
             let rayon = update_test_tree_with_strategy(&leaves, &parallel);
-            assert_same_tree(&legacy, &sequential);
-            assert_same_tree(&legacy, &rayon);
+            assert_same_tree(&sequential, &rayon);
         }
     }
 
@@ -3508,17 +3484,15 @@ mod tests {
         let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
 
         let empty = update_test_tree(&[]);
-        let empty_update = empty.update::<Sha256>(&[]).unwrap();
-        let empty_parallel = empty
-            .update_with_strategy::<Sha256>(&[], &parallel)
-            .unwrap();
+        let empty_update = empty.update::<Sha256>(&[], &Sequential).unwrap();
+        let empty_parallel = empty.update::<Sha256>(&[], &parallel).unwrap();
         assert_same_update(&empty_update, &empty_parallel);
         assert_eq!(
             empty
-                .range_update_proofs(&empty_update, &[0, 0, 0])
+                .range_update_proofs(&empty_update, &[0, 0, 0], &Sequential)
                 .unwrap(),
             empty
-                .range_update_proofs_with_strategy(&empty_parallel, &[0, 0, 0], &parallel)
+                .range_update_proofs(&empty_parallel, &[0, 0, 0], &parallel)
                 .unwrap()
         );
 
@@ -3540,25 +3514,17 @@ mod tests {
         let boundaries = [0, 0, 1, 1, 4, 8, 9, 9];
 
         for changes in change_sets {
-            let legacy = tree.update::<Sha256>(&changes).unwrap();
-            let sequential = tree
-                .update_with_strategy::<Sha256>(&changes, &Sequential)
-                .unwrap();
-            let rayon = tree
-                .update_with_strategy::<Sha256>(&changes, &parallel)
-                .unwrap();
-            assert_same_update(&legacy, &sequential);
-            assert_same_update(&legacy, &rayon);
+            let sequential = tree.update::<Sha256>(&changes, &Sequential).unwrap();
+            let rayon = tree.update::<Sha256>(&changes, &parallel).unwrap();
+            assert_same_update(&sequential, &rayon);
 
-            let legacy_proofs = tree.range_update_proofs(&legacy, &boundaries).unwrap();
             let sequential_proofs = tree
-                .range_update_proofs_with_strategy(&sequential, &boundaries, &Sequential)
+                .range_update_proofs(&sequential, &boundaries, &Sequential)
                 .unwrap();
             let rayon_proofs = tree
-                .range_update_proofs_with_strategy(&rayon, &boundaries, &parallel)
+                .range_update_proofs(&rayon, &boundaries, &parallel)
                 .unwrap();
-            assert_eq!(legacy_proofs, sequential_proofs);
-            assert_eq!(legacy_proofs, rayon_proofs);
+            assert_eq!(sequential_proofs, rayon_proofs);
         }
     }
 
@@ -3567,9 +3533,11 @@ mod tests {
         let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
         let empty = Proof::<Digest>::default();
         assert_eq!(
-            empty.root_from_multi_inclusion::<Sha256>(&[]).unwrap(),
             empty
-                .root_from_multi_inclusion_with_strategy::<Sha256>(&[], &parallel)
+                .root_from_multi_inclusion::<Sha256>(&[], &Sequential)
+                .unwrap(),
+            empty
+                .root_from_multi_inclusion::<Sha256>(&[], &parallel)
                 .unwrap()
         );
 
@@ -3585,18 +3553,14 @@ mod tests {
                 .map(|position| (leaves[position as usize], position))
                 .collect();
             elements.reverse();
-            let legacy = proof
-                .root_from_multi_inclusion::<Sha256>(&elements)
-                .unwrap();
             let sequential = proof
-                .root_from_multi_inclusion_with_strategy::<Sha256>(&elements, &Sequential)
+                .root_from_multi_inclusion::<Sha256>(&elements, &Sequential)
                 .unwrap();
             let rayon = proof
-                .root_from_multi_inclusion_with_strategy::<Sha256>(&elements, &parallel)
+                .root_from_multi_inclusion::<Sha256>(&elements, &parallel)
                 .unwrap();
-            assert_eq!(legacy, tree.root());
-            assert_eq!(legacy, sequential);
-            assert_eq!(legacy, rayon);
+            assert_eq!(sequential, tree.root());
+            assert_eq!(sequential, rayon);
         }
     }
 
@@ -3615,12 +3579,12 @@ mod tests {
             vec![(4, opening[4])],
         ] {
             assert_eq!(
-                rejected(tree.update::<Sha256>(&changes)),
-                rejected(tree.update_with_strategy::<Sha256>(&changes, &parallel))
+                rejected(tree.update::<Sha256>(&changes, &Sequential)),
+                rejected(tree.update::<Sha256>(&changes, &parallel))
             );
         }
 
-        let update = tree.update::<Sha256>(&[(4, changed)]).unwrap();
+        let update = tree.update::<Sha256>(&[(4, changed)], &Sequential).unwrap();
         for boundaries in [
             &[][..],
             &[0][..],
@@ -3629,8 +3593,8 @@ mod tests {
             &[0, 5, 4, 9][..],
         ] {
             assert_eq!(
-                rejected(tree.range_update_proofs(&update, boundaries)),
-                rejected(tree.range_update_proofs_with_strategy(&update, boundaries, &parallel,))
+                rejected(tree.range_update_proofs(&update, boundaries, &Sequential)),
+                rejected(tree.range_update_proofs(&update, boundaries, &parallel,))
             );
         }
 
@@ -3640,10 +3604,8 @@ mod tests {
             vec![(opening[4], 9)],
         ] {
             assert_eq!(
-                rejected(proof.root_from_multi_inclusion::<Sha256>(&elements)),
-                rejected(
-                    proof.root_from_multi_inclusion_with_strategy::<Sha256>(&elements, &parallel,)
-                )
+                rejected(proof.root_from_multi_inclusion::<Sha256>(&elements, &Sequential)),
+                rejected(proof.root_from_multi_inclusion::<Sha256>(&elements, &parallel,))
             );
         }
 
@@ -3651,10 +3613,8 @@ mod tests {
         unaligned.siblings.push(update_test_digest(b"extra", 0));
         let elements = [(opening[4], 4)];
         assert_eq!(
-            rejected(unaligned.root_from_multi_inclusion::<Sha256>(&elements)),
-            rejected(
-                unaligned.root_from_multi_inclusion_with_strategy::<Sha256>(&elements, &parallel)
-            )
+            rejected(unaligned.root_from_multi_inclusion::<Sha256>(&elements, &Sequential)),
+            rejected(unaligned.root_from_multi_inclusion::<Sha256>(&elements, &parallel))
         );
     }
 
@@ -3677,7 +3637,7 @@ mod tests {
                 }
 
                 let dense = update_test_tree(&closing);
-                let update = tree.update::<Sha256>(&changes).unwrap();
+                let update = tree.update::<Sha256>(&changes, &Sequential).unwrap();
                 assert_eq!(update.root(), dense.root());
                 assert!(
                     update.levels.iter().map(Vec::len).sum::<usize>()
@@ -3687,7 +3647,7 @@ mod tests {
                 for start in 0..=leaf_count {
                     for end in start..=leaf_count {
                         let proofs = tree
-                            .range_update_proofs(&update, &[0, start, end, leaf_count])
+                            .range_update_proofs(&update, &[0, start, end, leaf_count], &Sequential)
                             .unwrap();
                         let proof = &proofs[1];
                         if leaf_count == 0 {
@@ -3738,23 +3698,23 @@ mod tests {
         let changed = update_test_digest(b"closing", 2);
 
         assert!(matches!(
-            tree.update::<Sha256>(&[(5, changed)]),
+            tree.update::<Sha256>(&[(5, changed)], &Sequential),
             Err(Error::InvalidPosition(5))
         ));
         assert!(matches!(
-            tree.update::<Sha256>(&[(2, changed), (2, changed)]),
+            tree.update::<Sha256>(&[(2, changed), (2, changed)], &Sequential),
             Err(Error::DuplicatePosition(2))
         ));
         assert!(matches!(
-            tree.update::<Sha256>(&[(3, changed), (2, changed)]),
+            tree.update::<Sha256>(&[(3, changed), (2, changed)], &Sequential),
             Err(Error::UnorderedPosition(3, 2))
         ));
         assert!(matches!(
-            tree.update::<Sha256>(&[(2, opening[2])]),
+            tree.update::<Sha256>(&[(2, opening[2])], &Sequential),
             Err(Error::UnchangedPosition(2))
         ));
 
-        let update = tree.update::<Sha256>(&[(2, changed)]).unwrap();
+        let update = tree.update::<Sha256>(&[(2, changed)], &Sequential).unwrap();
         for boundaries in [
             &[][..],
             &[0][..],
@@ -3762,7 +3722,10 @@ mod tests {
             &[0, 4][..],
             &[0, 4, 3, 5][..],
         ] {
-            assert!(tree.range_update_proofs(&update, boundaries).is_err());
+            assert!(
+                tree.range_update_proofs(&update, boundaries, &Sequential)
+                    .is_err()
+            );
         }
 
         let other_opening: Vec<_> = (0..5)
@@ -3770,7 +3733,7 @@ mod tests {
             .collect();
         let other = update_test_tree(&other_opening);
         assert!(matches!(
-            other.range_update_proofs(&update, &[0, 5]),
+            other.range_update_proofs(&update, &[0, 5], &Sequential),
             Err(Error::InvalidUpdate)
         ));
     }
@@ -3791,9 +3754,9 @@ mod tests {
             .iter()
             .map(|&position| (position, closing[position as usize]))
             .collect();
-        let update = tree.update::<Sha256>(&changes).unwrap();
+        let update = tree.update::<Sha256>(&changes, &Sequential).unwrap();
         let mut proof = tree
-            .range_update_proofs(&update, &[0, 3, 7, 9])
+            .range_update_proofs(&update, &[0, 3, 7, 9], &Sequential)
             .unwrap()
             .remove(1);
         assert!(!proof.shared.is_empty());
@@ -4052,9 +4015,9 @@ mod tests {
             .collect();
         let tree = update_test_tree(&opening);
         let closing = update_test_digest(b"closing", 4);
-        let update = tree.update::<Sha256>(&[(4, closing)]).unwrap();
+        let update = tree.update::<Sha256>(&[(4, closing)], &Sequential).unwrap();
         let proof = tree
-            .range_update_proofs(&update, &[0, 3, 7, 9])
+            .range_update_proofs(&update, &[0, 3, 7, 9], &Sequential)
             .unwrap()
             .remove(1);
         let encoded = proof.encode();
@@ -4113,7 +4076,7 @@ mod tests {
                 builder.add(&digest);
                 digests.push(digest);
             }
-            let tree = builder.build();
+            let tree = builder.build(&Sequential);
             let root = tree.root();
 
             // For each leaf, generate and verify its proof

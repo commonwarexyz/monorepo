@@ -1,4 +1,5 @@
 use super::fixtures::{SPARSE_PROFILES, sparse_fixture};
+use commonware_clearing::bajillion::commitment::VectorKind;
 use commonware_cryptography::Sha256;
 use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
@@ -15,7 +16,10 @@ fn bench_reconstruct_closing(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         black_box(&fixture.update)
-                            .reconstruct_closing::<Sha256, _>(black_box(&fixture.closing_values))
+                            .reconstruct_closing::<Sha256, _>(
+                                VectorKind::State,
+                                black_box(&fixture.closing_values),
+                            )
                             .expect("benchmark closing values are valid"),
                     )
                 });

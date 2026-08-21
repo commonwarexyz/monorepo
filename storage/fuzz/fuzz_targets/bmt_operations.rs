@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest as Sha256Digest};
+use commonware_parallel::Sequential;
 use commonware_storage::bmt::{Builder, Proof};
 use libfuzzer_sys::fuzz_target;
 
@@ -132,7 +133,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::BuildFromLeaves => {
                 if let Some(b) = builder.take() {
-                    tree = Some(b.build());
+                    tree = Some(b.build(&Sequential));
                 }
             }
 
@@ -174,7 +175,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::BuildEmptyTree => {
                 let b = Builder::<Sha256>::new(0);
-                tree = Some(b.build());
+                tree = Some(b.build(&Sequential));
                 leaf_values.clear();
             }
 
@@ -188,7 +189,7 @@ fn fuzz(input: FuzzInput) {
                     b.add(&digest);
                     leaf_values.push(i as u64);
                 }
-                tree = Some(b.build());
+                tree = Some(b.build(&Sequential));
             }
 
             // Range proof operations
@@ -320,7 +321,7 @@ fn fuzz(input: FuzzInput) {
                         .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()]), *pos))
                         .collect();
                     let root = t.root();
-                    let _ = mp.root_from_multi_inclusion::<Sha256>(&element_digests);
+                    let _ = mp.root_from_multi_inclusion::<Sha256>(&element_digests, &Sequential);
                     let _ = mp.verify_multi_inclusion::<Sha256>(&element_digests, &root);
                 }
             }
@@ -392,7 +393,7 @@ fn fuzz(input: FuzzInput) {
                         })
                         .collect();
                     let root = t.root();
-                    let _ = mp.root_from_multi_inclusion::<Sha256>(&correct_elements);
+                    let _ = mp.root_from_multi_inclusion::<Sha256>(&correct_elements, &Sequential);
                     let _ = mp.verify_multi_inclusion::<Sha256>(&correct_elements, &root);
                 }
             }
@@ -432,7 +433,7 @@ fn fuzz(input: FuzzInput) {
             BmtOperation::VerifyMultiProofEmptyElements => {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     let root = t.root();
-                    let _ = mp.root_from_multi_inclusion::<Sha256>(&[]);
+                    let _ = mp.root_from_multi_inclusion::<Sha256>(&[], &Sequential);
                     let _ = mp.verify_multi_inclusion::<Sha256>(&[], &root);
                 }
             }

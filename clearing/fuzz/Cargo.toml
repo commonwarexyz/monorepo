@@ -14,19 +14,20 @@ bytes.workspace = true
 commonware-clearing = { workspace = true, features = ["arbitrary", "std"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
+commonware-cryptography-curve25519.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
 libfuzzer-sys.workspace = true
 
 [[bin]]
-name = "wire_decode"
+name = "wire"
 path = "fuzz_targets/wire_decode.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "verify"
+name = "protocol_verification"
 path = "fuzz_targets/verify.rs"
 test = false
 doc = false

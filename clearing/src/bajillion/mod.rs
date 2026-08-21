@@ -14,5 +14,3 @@ pub mod payment;
 pub mod settlement;
 pub mod state;
 pub mod transition;
-
-mod wire;

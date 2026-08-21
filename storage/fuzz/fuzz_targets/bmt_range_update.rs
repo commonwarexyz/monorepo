@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
+use commonware_parallel::Sequential;
 use commonware_storage::bmt::{Builder, RangeUpdateProof};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
@@ -27,7 +28,7 @@ fn tree(leaves: &[Digest]) -> commonware_storage::bmt::Tree<Digest> {
     for leaf in leaves {
         builder.add(leaf);
     }
-    builder.build()
+    builder.build(&Sequential)
 }
 
 fuzz_target!(|input: Input| {
@@ -57,7 +58,7 @@ fuzz_target!(|input: Input| {
         .collect::<Vec<_>>();
     let closing_tree = tree(&closing);
     let update = opening_tree
-        .update::<Sha256>(&changes)
+        .update::<Sha256>(&changes, &Sequential)
         .expect("canonical fuzz changes must build");
     assert_eq!(update.root(), closing_tree.root());
 
@@ -67,7 +68,7 @@ fuzz_target!(|input: Input| {
         .map(|piece| (piece * opening.len() / piece_count) as u32)
         .collect::<Vec<_>>();
     let proofs = opening_tree
-        .range_update_proofs(&update, &boundaries)
+        .range_update_proofs(&update, &boundaries, &Sequential)
         .expect("exhaustive fuzz boundaries must build");
     for (interval, proof) in boundaries.windows(2).zip(&proofs) {
         let local = changes

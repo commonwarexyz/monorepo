@@ -7,7 +7,6 @@
 use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     payment::{Epoch, Payment},
-    wire::{PublicKeyReader, ReadWithPublicKeys},
 };
 use alloc::{boxed::Box, vec::Vec};
 use bytes::{Buf, BufMut};
@@ -15,6 +14,7 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_parallel::Sequential;
 use thiserror::Error;
 
 const CREDIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_ROOT";
@@ -64,19 +64,9 @@ impl<P: PublicKey, D: Digest> Read for ShardHead<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(reader, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for ShardHead<P, D> {
-    fn read_with_public_keys(
-        reader: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
             shard: u64::read(reader)?,
-            payment: Payment::read_with_public_keys(reader, public_keys)?,
+            payment: Payment::read(reader)?,
         })
     }
 }
@@ -263,11 +253,12 @@ impl<P: PublicKey, D: Digest> ShardSet<P, D> {
         for head in &self.heads {
             builder.add_encoded(head.encode().as_ref())?;
         }
-        let tree = builder.build()?;
+        let tree = builder.build(&Sequential)?;
         let root = bind_credit_root::<H, P>(
             self.epoch,
             &self.recipient,
             tree.root(),
+            len,
             total_credit,
             total_receipts,
         );
@@ -342,26 +333,12 @@ impl<P: PublicKey, D: Digest> Read for ShardSet<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(reader, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for ShardSet<P, D> {
-    fn read_with_public_keys(
-        reader: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         let epoch = Epoch::read(reader)?;
-        let recipient = public_keys.read(reader)?;
-        let len = usize::read_cfg(
+        let recipient = P::read(reader)?;
+        let heads = Vec::<ShardHead<P, D>>::read_cfg(
             reader,
-            &RangeCfg::new(..=commitment::MAX_VECTOR_LENGTH as usize),
+            &(RangeCfg::new(..=commitment::MAX_VECTOR_LENGTH as usize), ()),
         )?;
-        let mut heads = Vec::with_capacity(len.min(reader.remaining()));
-        for _ in 0..len {
-            heads.push(ShardHead::read_with_public_keys(reader, public_keys)?);
-        }
         let set = Self {
             epoch,
             recipient,
@@ -435,18 +412,8 @@ impl<P: PublicKey, D: Digest> Read for ShardOpening<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(reader, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for ShardOpening<P, D> {
-    fn read_with_public_keys(
-        reader: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
-            value: ShardHead::read_with_public_keys(reader, public_keys)?,
+            value: ShardHead::read(reader)?,
             proof: commitment::Opening::read(reader)?,
         })
     }
@@ -568,14 +535,10 @@ fn write_optional_opening<P: PublicKey, D: Digest>(
 
 fn read_optional_opening<P: PublicKey, D: Digest>(
     reader: &mut impl Buf,
-    public_keys: &mut PublicKeyReader<P>,
 ) -> Result<Option<Box<ShardOpening<P, D>>>, CodecError> {
     match u8::read(reader)? {
         0 => Ok(None),
-        1 => Ok(Some(Box::new(ShardOpening::read_with_public_keys(
-            reader,
-            public_keys,
-        )?))),
+        1 => Ok(Some(Box::new(ShardOpening::read(reader)?))),
         tag => Err(CodecError::InvalidEnum(tag)),
     }
 }
@@ -609,24 +572,14 @@ impl<P: PublicKey, D: Digest> Read for ShardLookup<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(reader, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for ShardLookup<P, D> {
-    fn read_with_public_keys(
-        reader: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             1 => Ok(Self::Present {
-                opening: Box::new(ShardOpening::read_with_public_keys(reader, public_keys)?),
+                opening: Box::new(ShardOpening::read(reader)?),
             }),
             2 => Ok(Self::Absent {
                 shard: u64::read(reader)?,
-                predecessor: read_optional_opening(reader, public_keys)?,
-                successor: read_optional_opening(reader, public_keys)?,
+                predecessor: read_optional_opening(reader)?,
+                successor: read_optional_opening(reader)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -695,15 +648,14 @@ where
     {
         return Err(Error::InvalidTotals);
     }
-    let vector_root = opening.proof.reconstruct::<H>(
-        VectorKind::Credit,
-        root.len,
-        opening.value.encode().as_ref(),
-    )?;
+    let vector_root = opening
+        .proof
+        .reconstruct::<H>(VectorKind::Credit, opening.value.encode().as_ref())?;
     let reconstructed = bind_credit_root::<H, P>(
         epoch,
         recipient,
         vector_root,
+        root.len,
         root.total_credit,
         root.total_receipts,
     );
@@ -727,6 +679,7 @@ where
         commitment::empty_root::<H>(VectorKind::Credit),
         0,
         0,
+        0,
     )
 }
 
@@ -734,6 +687,7 @@ fn bind_credit_root<H, P>(
     epoch: Epoch,
     recipient: &P,
     vector_root: VectorRoot<H::Digest>,
+    len: u32,
     total_credit: u64,
     total_receipts: u64,
 ) -> CreditRoot<H::Digest>
@@ -741,12 +695,11 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    debug_assert_eq!(vector_root.kind, VectorKind::Credit);
     let recipient_len = u32::try_from(recipient.as_ref().len())
         .expect("a fixed-size public key length fits in u32")
         .to_be_bytes();
     CreditRoot {
-        len: vector_root.len,
+        len,
         total_credit,
         total_receipts,
         digest: H::hash(&[
@@ -754,7 +707,7 @@ where
             &epoch.to_be_bytes(),
             &recipient_len,
             recipient.as_ref(),
-            &vector_root.len.to_be_bytes(),
+            &len.to_be_bytes(),
             &total_credit.to_be_bytes(),
             &total_receipts.to_be_bytes(),
             vector_root.digest.as_ref(),
@@ -811,10 +764,9 @@ mod tests {
     use super::*;
     use crate::bajillion::payment::{PaymentContext, SignedReceipt, SignedSend};
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::{
-        Sha256, Signer as _,
-        curve25519::{SigningKey, VerifyingKey},
-        sha256::Digest as Sha256Digest,
+    use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as Sha256Digest};
+    use commonware_cryptography_curve25519::signing::{
+        SigningKey, StrictVerifyingKey as VerifyingKey,
     };
 
     type TestContext = PaymentContext<VerifyingKey, Sha256Digest>;

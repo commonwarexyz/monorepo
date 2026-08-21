@@ -10,12 +10,12 @@ fn bench_verify_range_update(c: &mut Criterion) {
         let opening_root = fixture.tree.root();
         let update = fixture
             .tree
-            .update_with_strategy::<Sha256>(&fixture.changes, &strategy)
+            .update::<Sha256>(&fixture.changes, &strategy)
             .expect("benchmark update is valid");
         let closing_root = update.root();
         let proofs = fixture
             .tree
-            .range_update_proofs_with_strategy(&update, &fixture.boundaries, &strategy)
+            .range_update_proofs(&update, &fixture.boundaries, &strategy)
             .expect("benchmark boundaries are valid");
         assert_eq!(proofs.len(), fixture.disclosures.len());
 

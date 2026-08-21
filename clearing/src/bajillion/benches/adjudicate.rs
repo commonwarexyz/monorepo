@@ -19,8 +19,10 @@ fn bench_adjudicate(c: &mut Criterion) {
             b.iter(|| {
                 black_box(
                     adjudicate::<Sha256, _>(
+                        black_box(&fixture.context),
                         black_box(&fixture.header),
-                        fixture.header.challenge_deadline,
+                        black_box(&fixture.roots),
+                        fixture.context.challenge_deadline(),
                         black_box(&fixture.challenge),
                     )
                     .expect("benchmark challenge is valid"),

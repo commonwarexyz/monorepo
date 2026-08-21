@@ -4,7 +4,7 @@ edition.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
-description = "Build payment clearing systems."
+description = "Settle payment records at scale."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/clearing"
@@ -18,7 +18,8 @@ ahash = { workspace = true, features = ["no-rng"] }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec = { workspace = true, default-features = false }
-commonware-cryptography = { workspace = true, default-features = false }
+commonware-cryptography = { workspace = true, default-features = false, features = [ "bls12381" ] }
+commonware-cryptography-curve25519 = { workspace = true, default-features = false }
 commonware-macros.workspace = true
 commonware-parallel = { workspace = true, default-features = false }
 commonware-storage = { workspace = true, default-features = false }
@@ -34,10 +35,12 @@ criterion.workspace = true
 
 [features]
 default = [ "std" ]
+mocks = [ "commonware-cryptography/mocks" ]
 std = [
 	"ahash/std",
 	"bytes/std",
 	"commonware-codec/std",
+	"commonware-cryptography-curve25519/std",
 	"commonware-cryptography/std",
 	"commonware-macros/std",
 	"commonware-parallel/std",
@@ -46,6 +49,7 @@ std = [
 ]
 arbitrary = [
 	"commonware-codec/arbitrary",
+	"commonware-cryptography-curve25519/arbitrary",
 	"commonware-cryptography/arbitrary",
 	"commonware-storage/arbitrary",
 	"commonware-utils/arbitrary",

@@ -1,5 +1,5 @@
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, Sequential};
 use commonware_storage::bmt::{Builder, Tree};
 use std::{num::NonZeroUsize, ops::Range};
 
@@ -112,7 +112,7 @@ impl Fixture {
         for leaf in &opening {
             builder.add(leaf);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
 
         let positions = profile.positions();
         assert_eq!(positions.len(), profile.changes as usize);

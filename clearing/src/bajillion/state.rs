@@ -1,10 +1,6 @@
 //! Account state and canonical changed-account rows.
 
-use crate::bajillion::{
-    credit::CreditRoot,
-    payment::Payment,
-    wire::{PublicKeyReader, ReadWithPublicKeys},
-};
+use crate::bajillion::{credit::CreditRoot, payment::Payment};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
@@ -78,18 +74,8 @@ impl<P: PublicKey> Read for StateLeaf<P> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey> ReadWithPublicKeys<P> for StateLeaf<P> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
-            account: public_keys.read(buf)?,
+            account: P::read(buf)?,
             state: AccountState::read(buf)?,
         })
     }
@@ -242,29 +228,11 @@ impl<P: PublicKey, D: Digest> Read for AccountRow<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for AccountRow<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
-        let account = public_keys.read(buf)?;
-        let opening = AccountState::read(buf)?;
-        let closing = AccountState::read(buf)?;
-        let outgoing = if bool::read(buf)? {
-            Some(Payment::read_with_public_keys(buf, public_keys)?)
-        } else {
-            None
-        };
         Ok(Self {
-            account,
-            opening,
-            closing,
-            outgoing,
+            account: P::read(buf)?,
+            opening: AccountState::read(buf)?,
+            closing: AccountState::read(buf)?,
+            outgoing: Option::<Payment<P, D>>::read(buf)?,
             credit_root: CreditRoot::<D>::read(buf)?,
             prefix: Prefix::read(buf)?,
         })

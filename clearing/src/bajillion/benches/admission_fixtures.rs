@@ -3,17 +3,20 @@ use super::fixtures::{
     strategy,
 };
 use commonware_clearing::bajillion::{
-    admission::{Committee, HeaderSubject, Vote, curve25519},
+    admission::{Committee, Vote, bls12381},
     transition::{Assignment, Header, ProofSlice, validate_close},
 };
 use commonware_codec::{Encode as _, EncodeSize};
 use commonware_cryptography::{
-    Sha256, Signer as _,
-    certificate::Scheme as _,
-    curve25519::{SigningKey, VerifyingKey},
+    Sha256,
+    bls12381::primitives::{
+        group::{Private, Scalar},
+        ops::compute_public,
+        variant::MinSig,
+    },
     sha256::Digest,
 };
-use commonware_parallel::Sequential;
+use commonware_cryptography_curve25519::signing::StrictVerifyingKey as VerifyingKey;
 use commonware_utils::Participant;
 
 pub(crate) const VALIDATORS: usize = 100;
@@ -25,8 +28,8 @@ pub(crate) const SLICES: usize = 1 << SLICE_BITS;
 const VALIDATOR_SEED_START: u64 = 1_000_000;
 
 pub(crate) struct Validators {
-    committee: Committee<VerifyingKey>,
-    keys: Vec<SigningKey>,
+    committee: Committee,
+    keys: Vec<Private>,
 }
 
 impl Validators {
@@ -34,18 +37,13 @@ impl Validators {
         let mut validators = (0..VALIDATORS)
             .map(|index| {
                 let index = u64::try_from(index).expect("validator index fits in u64");
-                let private = SigningKey::from_seed(VALIDATOR_SEED_START + index);
-                (private.public_key(), private)
+                let signing = Private::new(Scalar::from(VALIDATOR_SEED_START + index + 1));
+                (compute_public::<MinSig>(&signing), signing)
             })
             .collect::<Vec<_>>();
-        validators.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        let committee = Committee::new(
-            validators
-                .iter()
-                .map(|(public, _)| public.clone())
-                .collect(),
-        )
-        .expect("benchmark committee is canonical");
+        validators.sort_unstable_by_key(|validator| validator.0);
+        let committee = Committee::new(validators.iter().map(|(public, _)| *public).collect())
+            .expect("benchmark committee is canonical");
         assert_eq!(committee.faults(), FAULTS);
         assert_eq!(committee.quorum(), QUORUM);
         Self {
@@ -54,7 +52,7 @@ impl Validators {
         }
     }
 
-    pub(crate) const fn committee(&self) -> &Committee<VerifyingKey> {
+    pub(crate) const fn committee(&self) -> &Committee {
         &self.committee
     }
 
@@ -63,22 +61,19 @@ impl Validators {
             .expect("benchmark assignment is valid")
     }
 
-    pub(crate) fn signer(&self, validator: Participant) -> curve25519::Scheme<VerifyingKey> {
-        curve25519::Scheme::signer(
+    pub(crate) fn signer(&self, validator: Participant) -> bls12381::Scheme {
+        bls12381::Scheme::signer(
             self.committee.clone(),
             self.keys[usize::from(validator)].clone(),
         )
         .expect("benchmark validator belongs to the committee")
     }
 
-    pub(crate) fn attestations(
-        &self,
-        header: &Header<VerifyingKey, Digest>,
-    ) -> Vec<Vote<VerifyingKey>> {
+    pub(crate) fn attestations(&self, header: &Header<Digest>) -> Vec<Vote> {
         (0..QUORUM)
             .map(|index| {
                 self.signer(Participant::from_usize(index))
-                    .sign(HeaderSubject::from_header(header))
+                    .sign(header)
                     .expect("benchmark validator can sign")
             })
             .collect()
@@ -131,11 +126,11 @@ impl Validators {
 }
 
 pub(crate) struct CertificateFixture {
-    pub(crate) header: Header<VerifyingKey, Digest>,
-    pub(crate) assembler: curve25519::Scheme<VerifyingKey>,
-    pub(crate) verifier: curve25519::Scheme<VerifyingKey>,
-    pub(crate) attestations: Vec<Vote<VerifyingKey>>,
-    pub(crate) certificate: curve25519::Certificate,
+    pub(crate) header: Header<Digest>,
+    pub(crate) assembler: bls12381::Scheme,
+    pub(crate) verifier: bls12381::Scheme,
+    pub(crate) attestations: Vec<Vote>,
+    pub(crate) certificate: bls12381::Certificate,
 }
 
 pub(crate) struct ValidatorFixture {
@@ -191,14 +186,14 @@ pub(crate) fn certificate_fixture() -> CertificateFixture {
         .map(|(_, profile)| *profile)
         .expect("at least one active benchmark profile exists");
     let fixture = active_close_fixture_with_assignment(profile, assignment);
-    let header = fixture.prepared.close().header.clone();
+    let header = fixture.prepared.close().header;
     let attestations = validators.attestations(&header);
     assert_eq!(attestations.len(), QUORUM);
     let assembler = validators.signer(Participant::new(0));
     let certificate = assembler
-        .assemble_exact(attestations.clone(), &Sequential)
+        .assemble_exact(attestations.clone())
         .expect("benchmark attestations form an exact certificate");
-    let verifier = curve25519::Scheme::verifier(validators.committee().clone());
+    let verifier = bls12381::Scheme::verifier(validators.committee().clone());
     CertificateFixture {
         header,
         assembler,

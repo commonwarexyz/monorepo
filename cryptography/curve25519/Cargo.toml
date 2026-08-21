@@ -17,6 +17,7 @@ workspace = true
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-cryptography = { workspace = true, default-features = false }
 commonware-formatting.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
@@ -51,6 +52,7 @@ path = "benches/batch_verify.rs"
 default = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
 	"commonware-math/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
@@ -66,6 +68,7 @@ fuzz = [
 std = [
 	"bytes/std",
 	"commonware-codec/std",
+	"commonware-cryptography/std",
 	"commonware-formatting/std",
 	"commonware-macros/std",
 	"commonware-math/std",

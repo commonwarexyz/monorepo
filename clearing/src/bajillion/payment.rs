@@ -1,6 +1,5 @@
 //! Payer-authorized debits and individually signed operator receipts.
 
-use super::wire::{PublicKeyReader, ReadWithPublicKeys};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
@@ -78,20 +77,10 @@ impl<P: PublicKey, D: Digest> Read for PaymentContext<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for PaymentContext<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
             anchor: D::read(buf)?,
             epoch: u64::read(buf)?,
-            operator: public_keys.read(buf)?,
+            operator: P::read(buf)?,
         })
     }
 }
@@ -277,21 +266,11 @@ impl<P: PublicKey, D: Digest> Read for SendBody<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for SendBody<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
             anchor: D::read(buf)?,
             epoch: u64::read(buf)?,
-            payer: public_keys.read(buf)?,
-            recipient: public_keys.read(buf)?,
+            payer: P::read(buf)?,
+            recipient: P::read(buf)?,
             amount: u64::read(buf)?,
             cumulative_debit: u64::read(buf)?,
         })
@@ -410,18 +389,8 @@ impl<P: PublicKey, D: Digest> Read for SignedSend<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for SignedSend<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
-            body: SendBody::read_with_public_keys(buf, public_keys)?,
+            body: SendBody::read(buf)?,
             payer_signature: P::Signature::read(buf)?,
         })
     }
@@ -540,20 +509,10 @@ impl<P: PublicKey, D: Digest> Read for ReceiptBody<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for ReceiptBody<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
             anchor: D::read(buf)?,
             epoch: u64::read(buf)?,
-            recipient: public_keys.read(buf)?,
+            recipient: P::read(buf)?,
             shard: u64::read(buf)?,
             amount: u64::read(buf)?,
             tx_id: TxId::read(buf)?,
@@ -678,18 +637,8 @@ impl<P: PublicKey, D: Digest> Read for SignedReceipt<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for SignedReceipt<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
-            body: ReceiptBody::read_with_public_keys(buf, public_keys)?,
+            body: ReceiptBody::read(buf)?,
             operator_signature: P::Signature::read(buf)?,
         })
     }
@@ -864,19 +813,9 @@ impl<P: PublicKey, D: Digest> Read for Payment<P, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let mut public_keys = PublicKeyReader::new();
-        Self::read_with_public_keys(buf, &mut public_keys)
-    }
-}
-
-impl<P: PublicKey, D: Digest> ReadWithPublicKeys<P> for Payment<P, D> {
-    fn read_with_public_keys(
-        buf: &mut impl Buf,
-        public_keys: &mut PublicKeyReader<P>,
-    ) -> Result<Self, CodecError> {
         Ok(Self {
-            send: SignedSend::read_with_public_keys(buf, public_keys)?,
-            receipt: SignedReceipt::read_with_public_keys(buf, public_keys)?,
+            send: SignedSend::read(buf)?,
+            receipt: SignedReceipt::read(buf)?,
         })
     }
 }
@@ -1147,10 +1086,9 @@ mod arbitrary_impls {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::{
-        Sha256,
-        curve25519::{SigningKey, VerifyingKey},
-        sha256::Digest as ShaDigest,
+    use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
+    use commonware_cryptography_curve25519::signing::{
+        SigningKey, StrictVerifyingKey as VerifyingKey,
     };
     use commonware_parallel::{Rayon, Sequential};
     use std::num::NonZeroUsize;

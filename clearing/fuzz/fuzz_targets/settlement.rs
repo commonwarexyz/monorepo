@@ -3,11 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{
-        Committee, assigned_slice_indices,
-        curve25519::{Certificate, Scheme as AdmissionScheme},
-        seal,
-    },
+    admission::{Committee, assigned_slice_indices, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalBatch, WithdrawalId},
     challenge::{
         AccountLookup, Challenge, ChallengeKind, RangeLower, RowOpening, StateOpening, Verdict,
@@ -28,8 +24,15 @@ use commonware_clearing::bajillion::{
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Hasher, Sha256, Signer,
-    curve25519::{BatchVerifier as PaymentBatchVerifier, SigningKey, VerifyingKey},
+    bls12381::primitives::{
+        group::{Private, Scalar},
+        ops::compute_public,
+        variant::MinSig,
+    },
     sha256::Digest,
+};
+use commonware_cryptography_curve25519::signing::{
+    BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
 use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
@@ -55,6 +58,7 @@ type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
 type TestDeposits = DepositBatch<VerifyingKey>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
+type Certificate = bls12381::Certificate;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -139,8 +143,8 @@ struct Slot {
     context: TestContext,
     deposits: TestDeposits,
     withdrawal_releases: Vec<WithdrawalRelease<VerifyingKey, Digest>>,
-    header: commonware_clearing::bajillion::transition::Header<VerifyingKey, Digest>,
-    certificate: Certificate,
+    header: commonware_clearing::bajillion::transition::Header<Digest>,
+    certificate: bls12381::Certificate,
     closing: TestCache,
     status: BatchStatus<Digest>,
 }
@@ -159,7 +163,7 @@ struct Snapshot {
     deposits: TestDeposits,
     withdrawals: TestWithdrawals,
     safety_roots: Vec<VectorRoot<Digest>>,
-    batches: Vec<PendingBatch<VerifyingKey, Digest>>,
+    batches: Vec<PendingBatch<Digest>>,
     deadlines: Vec<Option<u64>>,
     hard_fault: Option<HardFaultReason<VerifyingKey, Digest>>,
     fence: Option<u64>,
@@ -214,8 +218,7 @@ struct Harness {
     chain: TestChain,
     deployment: Digest,
     operator: SigningKey,
-    validator: AdmissionScheme<VerifyingKey>,
-    committee: Committee<VerifyingKey>,
+    validator: bls12381::Scheme,
     committee_digest: Digest,
     accounts: Vec<SigningKey>,
     now: u64,
@@ -263,11 +266,11 @@ impl Harness {
         let seed = input.seed.to_be_bytes();
         let deployment = Sha256::hash(&[b"settlement-stateful-fuzz", &seed]);
         let operator = SigningKey::from_seed(input.seed ^ 0xa5a5_a5a5_a5a5_a5a5);
-        let validator_key = SigningKey::from_seed(input.seed ^ 0x5a5a_5a5a_5a5a_5a5a);
-        let committee = Committee::new(vec![validator_key.public_key()])
+        let validator_bls = Private::new(Scalar::from((input.seed ^ 0x1357_9bdf_2468_ace0).max(1)));
+        let committee = Committee::new(vec![compute_public::<MinSig>(&validator_bls)])
             .expect("one validator is an exact 3f+1 committee");
         let committee_digest = committee.commitment::<Sha256>();
-        let validator = AdmissionScheme::signer(committee.clone(), validator_key)
+        let validator = bls12381::Scheme::signer(committee.clone(), validator_bls)
             .expect("deterministic validator belongs to its committee");
         let config = SettlementConfig::new(
             NonZeroUsize::new(MAX_PENDING_EPOCHS).unwrap(),
@@ -293,7 +296,6 @@ impl Harness {
             deployment,
             operator,
             validator,
-            committee,
             committee_digest,
             accounts,
             now: 0,
@@ -480,7 +482,9 @@ impl Harness {
             .iter()
             .map(|slot| PendingBatch {
                 header: slot.header.clone(),
+                roots: slot.close.roots,
                 certificate: slot.certificate.clone(),
+                closing_liability: slot.closing.liability(),
                 status: slot.status.clone(),
             })
             .collect::<Vec<_>>();
@@ -496,19 +500,20 @@ impl Harness {
         let mut opening_root = self.finalized.root();
         let mut opening_liability = self.finalized.liability();
         for (offset, slot) in self.slots.iter().enumerate() {
-            assert_eq!(slot.opening.root(), slot.header.opening_root);
+            assert_eq!(slot.opening.root(), slot.close.roots.opening);
             assert_eq!(slot.close.header, slot.header);
             assert_eq!(
                 slot.context.payment().epoch(),
                 self.expected_epoch + offset as u64
             );
-            assert_eq!(slot.header.context, *slot.context.payment());
-            assert_eq!(slot.header.opening_root, opening_root);
-            assert_eq!(slot.header.opening_liability, opening_liability);
-            assert_eq!(slot.header.closing_root, slot.closing.root());
-            assert_eq!(slot.header.closing_liability, slot.closing.liability());
+            assert_eq!(slot.close.roots.opening, opening_root);
+            assert_eq!(slot.context.opening_liability(), opening_liability);
+            assert_eq!(slot.close.roots.closing, slot.closing.root());
             assert_eq!(
-                slot.header.totals.withdrawal,
+                slot.close
+                    .rows
+                    .last()
+                    .map_or(0, |row| row.prefix.withdrawal),
                 release_total(&slot.withdrawal_releases)
             );
             opening_root = slot.closing.root();
@@ -736,7 +741,7 @@ impl Harness {
         );
         let (close, closing) = boundary_close(cache, &context, &deposits, &withdrawals);
         assert_eq!(
-            close.header.totals.withdrawal,
+            close.rows.last().map_or(0, |row| row.prefix.withdrawal),
             release_total(&withdrawal_releases)
         );
         Prepared {
@@ -768,7 +773,7 @@ impl Harness {
         )
         .expect("sanitized close slices must build");
         let assigned = assigned_slice_indices::<Sha256, _>(
-            &self.committee,
+            self.validator.committee(),
             prepared.context.assignment(),
             self.validator.me().expect("validator can sign"),
         )
@@ -778,11 +783,11 @@ impl Harness {
         .collect::<Vec<_>>();
         let (vote, retained) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &self.validator,
-            &self.committee,
             &prepared.context,
             &prepared.deposits,
             &prepared.withdrawals,
             &prepared.close.header,
+            &prepared.close.roots,
             assigned,
             &mut test_rng(),
             &Sequential,
@@ -795,7 +800,7 @@ impl Harness {
                 .all(|slice| retained.serve(slice.index).is_some())
         );
         self.validator
-            .assemble_exact([vote], &Sequential)
+            .assemble_exact([vote])
             .expect("one-validator exact quorum must assemble")
     }
 
@@ -1182,29 +1187,27 @@ impl Harness {
         let certificate = self.certificate(&prepared);
         let retained_certificate = certificate.clone();
         let mut header = prepared.close.header.clone();
-        let terminal = terminal_opening(&prepared.close);
+        let mut roots = prepared.close.roots;
         if mutated {
-            header.closing_liability ^= 1;
+            roots.closing.digest = self.digest(b"admit-root-mutation", now);
+            header = commonware_clearing::bajillion::transition::Header::new::<Sha256, _>(
+                prepared.context.payment(),
+                &roots,
+            );
         }
         let observation = self.predict_observation(now);
         let expected = if self.operates_after(&observation)
             && self.slots.len() < MAX_PENDING_EPOCHS
             && self.registered.as_ref().is_some_and(|registered| {
-                now <= registered.context.admission_deadline() && header == registered.close.header
+                now <= registered.context.admission_deadline()
+                    && header == registered.close.header
+                    && roots == registered.close.roots
             }) {
             OutcomeClass::Success
         } else {
             OutcomeClass::Error
         };
-        let mut rng = test_rng();
-        let result = self.chain.admit(
-            now,
-            header,
-            certificate,
-            terminal.as_ref(),
-            &mut rng,
-            &Sequential,
-        );
+        let result = self.chain.admit(now, header, roots, certificate);
         assert_eq!(OutcomeClass::of(&result), expected);
         if expected == OutcomeClass::Success {
             let batch_id = result
@@ -1943,30 +1946,8 @@ fn boundary_close(
         leaf.state = row.closing;
     }
     let closing = StateCache::new::<Sha256>(leaves).expect("closing state remains canonical");
-    assert_eq!(closing.root(), close.header.closing_root);
+    assert_eq!(closing.root(), close.roots.closing);
     (close, closing)
-}
-
-fn terminal_opening(close: &TestClose) -> Option<RowOpening<VerifyingKey, Digest>> {
-    let count = u32::try_from(close.rows.len()).expect("close row count is bounded");
-    if count == 0 {
-        return None;
-    }
-    let mut builder = commitment::Builder::<Sha256>::new(VectorKind::Change, count)
-        .expect("bounded change vector");
-    for row in &close.rows {
-        builder
-            .add_encoded(row.encode().as_ref())
-            .expect("row encoding is length-framable");
-    }
-    let tree = builder.build().expect("complete change vector builds");
-    let position = count - 1;
-    Some(RowOpening {
-        row: close.rows[position as usize].clone(),
-        proof: tree
-            .opening(position)
-            .expect("terminal position is in range"),
-    })
 }
 
 fn account_lookup(
@@ -1982,8 +1963,10 @@ fn account_lookup(
             .add_encoded(row.encode().as_ref())
             .expect("row encoding is length-framable");
     }
-    let tree = builder.build().expect("complete change vector builds");
-    assert_eq!(tree.root(), close.header.change_root);
+    let tree = builder
+        .build(&Sequential)
+        .expect("complete change vector builds");
+    assert_eq!(tree.root(), close.roots.change);
     match close.rows.binary_search_by(|row| row.account.cmp(account)) {
         Ok(position) => AccountLookup::Present(Box::new(RowOpening {
             row: close.rows[position].clone(),

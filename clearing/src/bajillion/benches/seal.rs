@@ -3,7 +3,8 @@ use super::{
     fixtures::{WORKERS, selected_active_profiles, strategy},
 };
 use commonware_clearing::bajillion::admission::seal;
-use commonware_cryptography::{Sha256, curve25519::BatchVerifier as PaymentBatchVerifier};
+use commonware_cryptography::Sha256;
+use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
 use commonware_utils::TestRng;
 use criterion::{Criterion, criterion_group};
 use std::{
@@ -45,11 +46,11 @@ fn bench_seal(c: &mut Criterion) {
                         let (vote, retained) =
                             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                                 black_box(&scheme),
-                                black_box(fixture.validators.committee()),
                                 black_box(&fixture.close.context),
                                 black_box(&fixture.close.deposits),
                                 black_box(&fixture.close.withdrawals),
                                 black_box(&fixture.close.prepared.close().header),
+                                black_box(&fixture.close.prepared.close().roots),
                                 input,
                                 &mut rng,
                                 strategy(),

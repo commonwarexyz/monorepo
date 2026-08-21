@@ -1,23 +1,25 @@
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{Committee, HeaderSubject, curve25519},
+    admission::{Committee, bls12381},
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalBatch},
-    challenge::{RowOpening, StateOpening},
-    commitment::{self, VectorKind},
+    challenge::StateOpening,
     credit::ShardSet,
     settlement::{SettlementChain, SettlementConfig},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
-    transition::{Assignment, Close, CloseContext, CloseLimits, Header, StateCache, build_close},
+    transition::{
+        Assignment, Close, CloseContext, CloseLimits, Header, RootBundle, StateCache, build_close,
+    },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
-    certificate::Scheme as _,
-    curve25519::{SigningKey, VerifyingKey},
+    bls12381::primitives::{
+        group::{Private, Scalar},
+        ops::compute_public,
+        variant::MinSig,
+    },
     sha256::Digest,
 };
-use commonware_parallel::Sequential;
-use commonware_utils::{TestRng, test_rng};
+use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::{
     hint::black_box,
@@ -56,7 +58,7 @@ type TestCache = StateCache<VerifyingKey, Digest>;
 type TestChain = SettlementChain<Sha256, VerifyingKey>;
 type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
-type TestHeader = Header<VerifyingKey, Digest>;
+type TestHeader = Header<Digest>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
 
 struct Account {
@@ -65,8 +67,8 @@ struct Account {
 }
 
 struct Validators {
-    committee: Committee<VerifyingKey>,
-    signers: Vec<curve25519::Scheme<VerifyingKey>>,
+    committee: Committee,
+    signers: Vec<bls12381::Scheme>,
 }
 
 impl Validators {
@@ -74,40 +76,32 @@ impl Validators {
         let mut keys = (0..count)
             .map(|index| {
                 let index = u64::try_from(index).expect("validator index fits in u64");
-                let private = SigningKey::from_seed(VALIDATOR_SEED_START + index);
-                (private.public_key(), private)
+                let signing = Private::new(Scalar::from(VALIDATOR_SEED_START + index + 1));
+                (compute_public::<MinSig>(&signing), signing)
             })
             .collect::<Vec<_>>();
-        keys.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        let committee = Committee::new(
-            keys.iter()
-                .map(|(public, _)| public.clone())
-                .collect::<Vec<_>>(),
-        )
-        .expect("benchmark committee is canonical");
+        keys.sort_unstable_by_key(|validator| validator.0);
+        let committee = Committee::new(keys.iter().map(|(public, _)| *public).collect::<Vec<_>>())
+            .expect("benchmark committee is canonical");
         let signers = keys
             .into_iter()
             .take(committee.quorum())
-            .map(|(_, private)| {
-                curve25519::Scheme::signer(committee.clone(), private)
+            .map(|(_, signing)| {
+                bls12381::Scheme::signer(committee.clone(), signing)
                     .expect("benchmark validator belongs to the committee")
             })
             .collect();
         Self { committee, signers }
     }
 
-    fn certificate(&self, header: &TestHeader) -> curve25519::Certificate {
+    fn certificate(&self, header: &TestHeader) -> bls12381::Certificate {
         let attestations = self
             .signers
             .iter()
-            .map(|signer| {
-                signer
-                    .sign(HeaderSubject::from_header(header))
-                    .expect("benchmark validator can sign")
-            })
+            .map(|signer| signer.sign(header).expect("benchmark validator can sign"))
             .collect::<Vec<_>>();
         self.signers[0]
-            .assemble_exact(attestations, &Sequential)
+            .assemble_exact(attestations)
             .expect("benchmark certificate has an exact quorum")
     }
 }
@@ -117,8 +111,8 @@ struct PreparedClose {
     deposits: DepositBatch<VerifyingKey>,
     withdrawals: TestWithdrawals,
     header: TestHeader,
-    certificate: curve25519::Certificate,
-    terminal: Option<RowOpening<VerifyingKey, Digest>>,
+    roots: RootBundle<Digest>,
+    certificate: bls12381::Certificate,
 }
 
 struct QueueInput {
@@ -130,9 +124,8 @@ struct QueueInput {
 struct AdmitInput {
     chain: TestChain,
     header: TestHeader,
-    certificate: curve25519::Certificate,
-    terminal: Option<RowOpening<VerifyingKey, Digest>>,
-    rng: TestRng,
+    roots: RootBundle<Digest>,
+    certificate: bls12381::Certificate,
 }
 
 const fn nonzero_usize(value: usize) -> NonZeroUsize {
@@ -268,28 +261,6 @@ fn withdrawal_close(
         .expect("benchmark close is valid")
 }
 
-fn terminal_opening(close: &TestClose) -> Option<RowOpening<VerifyingKey, Digest>> {
-    let count = u32::try_from(close.rows.len()).expect("benchmark row count fits in u32");
-    if count == 0 {
-        return None;
-    }
-    let mut builder = commitment::Builder::<Sha256>::new(VectorKind::Change, count)
-        .expect("benchmark change tree is valid");
-    for row in &close.rows {
-        builder
-            .add_encoded(row.encode().as_ref())
-            .expect("benchmark row count matches the tree");
-    }
-    let tree = builder.build().expect("benchmark change tree is complete");
-    let position = count - 1;
-    Some(RowOpening {
-        row: close.rows[position as usize].clone(),
-        proof: tree
-            .opening(position)
-            .expect("benchmark terminal row can be opened"),
-    })
-}
-
 fn prepared_close(
     cache: &TestCache,
     validators: &Validators,
@@ -300,14 +271,13 @@ fn prepared_close(
     let context = context(cache, validators, epoch, &deposits, &withdrawals);
     let close = withdrawal_close(cache, &context, &deposits, &withdrawals);
     let certificate = validators.certificate(&close.header);
-    let terminal = terminal_opening(&close);
     PreparedClose {
         context,
         deposits,
         withdrawals,
         header: close.header,
+        roots: close.roots,
         certificate,
-        terminal,
     }
 }
 
@@ -317,21 +287,14 @@ fn admit_prepared(chain: &mut TestChain, prepared: PreparedClose) {
         deposits,
         withdrawals,
         header,
+        roots,
         certificate,
-        terminal,
     } = prepared;
     chain
         .register(0, context, deposits, withdrawals)
         .expect("benchmark close can be registered");
     chain
-        .admit(
-            0,
-            header,
-            certificate,
-            terminal.as_ref(),
-            &mut test_rng(),
-            &Sequential,
-        )
+        .admit(0, header, roots, certificate)
         .expect("benchmark close can be admitted");
 }
 
@@ -395,9 +358,8 @@ fn admit_input() -> AdmitInput {
     AdmitInput {
         chain,
         header: prepared.header,
+        roots: prepared.roots,
         certificate: prepared.certificate,
-        terminal: prepared.terminal,
-        rng: test_rng(),
     }
 }
 
@@ -492,10 +454,8 @@ fn bench_admit(c: &mut Criterion) {
                             .admit(
                                 black_box(0),
                                 input.header,
+                                input.roots,
                                 input.certificate,
-                                black_box(input.terminal.as_ref()),
-                                &mut input.rng,
-                                &Sequential,
                             )
                             .expect("benchmark close can be admitted"),
                     )

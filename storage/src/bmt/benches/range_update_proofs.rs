@@ -9,7 +9,7 @@ fn bench_range_update_proofs(c: &mut Criterion) {
         let fixture = Fixture::new(profile);
         let update = fixture
             .tree
-            .update_with_strategy::<Sha256>(&fixture.changes, &strategy)
+            .update::<Sha256>(&fixture.changes, &strategy)
             .expect("benchmark update is valid");
         c.bench_function(
             &format!(
@@ -24,7 +24,7 @@ fn bench_range_update_proofs(c: &mut Criterion) {
                 b.iter(|| {
                     let proofs = fixture
                         .tree
-                        .range_update_proofs_with_strategy(
+                        .range_update_proofs(
                             black_box(&update),
                             black_box(&fixture.boundaries),
                             black_box(&strategy),
