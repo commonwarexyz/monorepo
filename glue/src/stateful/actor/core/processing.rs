@@ -152,9 +152,13 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
+    // A requested successor is a no-op when no applied suffix remains uncovered.
     if !durability.needs_sync() {
         return true;
     }
+
+    // Capture the dirty prefix before waiting for the database writer. Drive verification readers
+    // until the barrier starts, then bind its completion to exactly the prefix it captured.
     let height = durability.latest_applied();
     let barrier = select! {
         _ = context.stopped() => return false,
@@ -448,11 +452,19 @@ where
                                 "applied finalized database batch"
                             );
 
+                            // Retain marshal acknowledgements until a barrier makes their database
+                            // prefix durable. This keeps marshal's processed floor within
+                            // recoverable database state while later work proceeds. The
+                            // acknowledgement window bounds the queue; a barrier that returns false
+                            // leaves the suffix unacknowledged for restart replay.
                             let height = block.height();
                             durability.applied(height, acknowledgement);
                             if let Some(barrier) = barrier {
                                 durability.started(height, barrier);
                             }
+
+                            // Defer pruning to the loop so it can settle durability and quiesce
+                            // verification readers at one database mutation boundary.
                             if let Some(prune) = prune {
                                 pending_prune = Some((prune, retry_mailbox.clone()));
                             }

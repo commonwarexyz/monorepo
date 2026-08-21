@@ -247,7 +247,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         *self.tip_witness.write() = witness;
     }
 
-    /// Apply the current compact state to the witness journal without making it durable.
+    /// Apply the current compact state to the witness journal without guaranteeing durability.
     pub(crate) async fn apply<H, S>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
