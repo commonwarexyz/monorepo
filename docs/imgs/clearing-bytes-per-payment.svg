@@ -11,8 +11,10 @@
     .frame { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
     .blue { stroke: #2424d4; fill: none; }
     .green { stroke: #2f7d3d; fill: none; }
+    .neutral { stroke: #555; fill: none; }
     .blue-text { fill: #2424d4; }
     .green-text { fill: #2f7d3d; }
+    .neutral-text { fill: #555; }
     .series { stroke-width: 3; }
     .dashed { stroke-dasharray: 8 6; }
   </style>
@@ -107,11 +109,11 @@
   <text class="axis-strong" x="1240" y="402" text-anchor="middle">1B</text>
   <text class="axis" x="1000" y="428" text-anchor="middle">payments accepted (T)</text>
 
-  <path class="blue series" d="M790 223.17 L940 259.84 L1090 296.51 L1240 333.17"/>
-  <circle cx="790" cy="223.17" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="940" cy="259.84" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="1090" cy="296.51" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="1240" cy="333.17" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <text class="value blue-text" x="802" y="211">101 B</text>
-  <text class="value blue-text" x="1228" y="348" text-anchor="end">0.000000101</text>
+  <path class="neutral series" d="M790 223.17 L940 259.84 L1090 296.51 L1240 333.17"/>
+  <circle cx="790" cy="223.17" r="5" fill="#fff" stroke="#555" stroke-width="3"/>
+  <circle cx="940" cy="259.84" r="5" fill="#fff" stroke="#555" stroke-width="3"/>
+  <circle cx="1090" cy="296.51" r="5" fill="#fff" stroke="#555" stroke-width="3"/>
+  <circle cx="1240" cy="333.17" r="5" fill="#fff" stroke="#555" stroke-width="3"/>
+  <text class="value neutral-text" x="802" y="211">all profiles · 0.000101</text>
+  <text class="value neutral-text" x="1228" y="348" text-anchor="end">0.000000101</text>
 </svg>
