@@ -588,6 +588,7 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
+    use futures::FutureExt;
     use futures::{StreamExt as _, poll};
     use std::{
         collections::VecDeque,
@@ -993,6 +994,40 @@ mod tests {
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
         (Mailbox::new(sender), control, marshal.guards, actor)
+    }
+
+    #[test]
+    fn propose_does_not_treat_closed_actor_as_application_none() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::new())),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "closed-propose", app).await;
+
+            actor.abort();
+            context.sleep(Duration::from_millis(10)).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let proposal_context = TestBlock::child(&genesis, 1).context();
+
+            let proposal = mailbox.propose(
+                (context.child("propose"), proposal_context),
+                ancestry::from_iter([Arc::new(genesis)]),
+                (),
+            );
+
+            let result = std::panic::AssertUnwindSafe(proposal).catch_unwind().await;
+
+            assert!(
+                result.is_err(),
+                "closed stateful actor must not be reported as an application no-proposal result"
+            );
+        });
     }
 
     #[test]
