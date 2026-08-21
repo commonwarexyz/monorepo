@@ -450,9 +450,9 @@ where
     /// Applies a finalized batch to the in-memory database state and appends its operations to the
     /// journal, returning the range of written locations.
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the journal,
-    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
-    /// returned by [`Db::start_sync`], to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal.
+    /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
+    /// make the applied state durable.
     #[boxed]
     pub async fn apply_batch(
         mut self,
