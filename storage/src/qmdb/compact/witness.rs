@@ -186,6 +186,16 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// below it. Anything else is refused with the same errors a pruned operation log
     /// reports.
     #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.sync.serve",
+        level = "info",
+        skip_all,
+        fields(
+            size = *request.size(),
+            start = *request.start(),
+            max_ops = request.max_ops().get(),
+        ),
+    )]
     pub(crate) fn compact_state<Op: Read>(
         &self,
         cfg: &Op::Cfg,
