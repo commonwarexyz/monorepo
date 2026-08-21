@@ -81,18 +81,17 @@
 //!
 //! ### MultiArchive Overhead
 //!
-//! [Archive] stores index positions in a dual-map layout:
-//! - `indices: BTreeMap<u64, u64>` tracks the first position for each index.
-//! - `extra_indices: BTreeMap<u64, Vec<u64>>` tracks additional positions for indices written via
-//!   [crate::archive::MultiArchive::put_multi].
+//! [Archive] stores index positions in a dual-map layout: one map tracks the first position for
+//! each index, and a second tracks additional positions for indices written via
+//! [crate::archive::MultiArchive::put_multi].
 //!
 //! This means the baseline overhead above remains unchanged for the first item at an index. For
 //! indices with duplicates, the additional in-memory payload is:
 //! - one `Vec<u64>` header (`24` bytes), and
 //! - `n * 8` bytes for `n` additional positions.
 //!
-//! Equivalently, this is `24 + (n * 8)` bytes per duplicated index, excluding `BTreeMap` node
-//! overhead for `extra_indices`.
+//! Equivalently, this is `24 + (n * 8)` bytes per duplicated index, excluding the second map's
+//! `BTreeMap` node overhead.
 //!
 //! # Pruning
 //!
