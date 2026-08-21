@@ -8,7 +8,7 @@ use crate::stateful::{
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, AttachableResolverSet},
+    db::{Anchor, AttachableResolverSet, DatabaseSet as _},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -327,6 +327,7 @@ where
         );
 
         let mut pending_prune = None;
+        let mut pending_acknowledgements = Vec::new();
 
         for handoff in handoffs {
             match handoff {
@@ -338,30 +339,35 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let Applied { barrier, prune } = processor
-                        .finalize(self.context.as_present(), block.as_ref())
+                    let Applied { prune, .. } = processor
+                        .finalize(self.context.as_present(), block.as_ref(), false)
                         .await
                         .expect("sync handoff block cannot be a duplicate");
-
-                    // The processing loop's flush pool does not exist yet, so observe the
-                    // deferred flush inline. Keep state-sync metadata in progress until every
-                    // handoff block is durable.
-                    if !barrier.durable().await {
-                        return;
-                    }
-                    acknowledgement.acknowledge();
+                    pending_acknowledgements.push(acknowledgement);
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
-                    debug!(
-                        height = block.height().get(),
-                        "persisted finalized database batch during sync handoff"
-                    );
                 }
             }
         }
 
-        // Every applied handoff is durable, so completion can advance through the last one before
-        // pruning or exposing the databases to other actors.
+        // Applied handoffs extend beyond the state-sync artifact. Release their acknowledgements
+        // only after one barrier makes the entire suffix durable.
+        if !pending_acknowledgements.is_empty() {
+            let barrier = processor.databases().finalize().await;
+            if !barrier.durable().await {
+                return;
+            }
+            for acknowledgement in pending_acknowledgements {
+                acknowledgement.acknowledge();
+            }
+            debug!(
+                height = completed_height.get(),
+                "persisted finalized database batches during sync handoff"
+            );
+        }
+
+        // Completion is an irreversible startup floor. Persist it only after every handoff through
+        // `completed_height` is durable and before pruning or exposing the databases.
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
             prune.run(processor.databases(), &self.marshal).await;
@@ -706,9 +712,9 @@ mod tests {
     }
 
     #[test]
-    fn transition_marks_complete_after_handoff_is_durable() {
+    fn transition_coalesces_handoff_durability_before_completion() {
         deterministic::Runner::default().start(|context| async move {
-            // Gate the sync-complete metadata write and the handoff batch's flush independently.
+            // Gate the sync-complete metadata write and the handoff flush independently.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
                 inner: context.child("delayed"),
@@ -767,16 +773,16 @@ mod tests {
             let first_flush = control.flushes.lock().remove(0);
             first_flush
                 .send(Ok(()))
-                .expect("first handoff must be waiting on its database flush");
-            while control.flushes.lock().is_empty() {
+                .expect("handoff must be waiting on its database flush");
+            while control.flushes.lock().is_empty() && poll!(&mut second_waiter).is_pending() {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert!(poll!(&mut first_waiter).is_ready());
-            assert!(poll!(&mut second_waiter).is_pending());
-            let second_flush = control.flushes.lock().remove(0);
-            second_flush
-                .send(Ok(()))
-                .expect("second handoff must be waiting on its database flush");
+            assert!(poll!(&mut second_waiter).is_ready());
+            assert!(
+                control.flushes.lock().is_empty(),
+                "one database flush must cover the complete handoff prefix",
+            );
 
             gate.blocked
                 .await
@@ -805,7 +811,7 @@ mod tests {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             let databases = Shared::new(
                 "test",
-                TestDb::with_finalize(Handle::ready(Err(RuntimeError::Aborted))),
+                TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))),
             );
             harness
                 .syncing

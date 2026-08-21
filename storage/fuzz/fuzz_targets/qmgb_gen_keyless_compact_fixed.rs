@@ -271,8 +271,10 @@ fn fuzz_family<F: Family, S: Strategy>(
                             let expected_root = merkleized.root();
                             let start = db.size();
                             let range;
-                            (db, range) =
-                                db.apply_batch(merkleized).expect("Commit should not fail");
+                            (db, range) = db
+                                .apply_batch(merkleized)
+                                .await
+                                .expect("Commit should not fail");
                             assert_eq!(range.start, start);
                             assert_eq!(range.end, db.size());
                             assert_eq!(db.root(), expected_root);
@@ -316,6 +318,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let range;
                     (db, range) = db
                         .apply_batch(child)
+                        .await
                         .expect("Chained commit should not fail");
                     assert_eq!(range.start, start);
                     assert_eq!(range.end, db.size());
@@ -340,7 +343,10 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .await;
                     let start = db.size();
                     let range;
-                    (db, range) = db.apply_batch(batch_a).expect("Commit should not fail");
+                    (db, range) = db
+                        .apply_batch(batch_a)
+                        .await
+                        .expect("Commit should not fail");
                     assert_eq!(range.start, start);
                     assert_eq!(range.end, db.size());
                     assert!(

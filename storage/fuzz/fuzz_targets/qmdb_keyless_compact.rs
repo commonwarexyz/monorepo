@@ -282,7 +282,10 @@ fn fuzz_family<F: Family, S: Strategy>(
                             );
                             assert_eq!(merkleized.bounds().inactivity_floor, floor);
                             let expected_root = merkleized.root();
-                            (db, _) = db.apply_batch(merkleized).expect("Commit should not fail");
+                            (db, _) = db
+                                .apply_batch(merkleized)
+                                .await
+                                .expect("Commit should not fail");
                             assert_eq!(db.root(), expected_root);
                             assert_eq!(db.get_metadata(), metadata_bytes.clone());
                             assert_eq!(db.inactivity_floor_loc(), floor);
@@ -320,6 +323,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let expected_root = child.root();
                     (db, _) = db
                         .apply_batch(child)
+                        .await
                         .expect("Chained commit should not fail");
                     assert_eq!(db.root(), expected_root);
                     assert_eq!(db.get_metadata(), None);
@@ -338,7 +342,10 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .append(vec![3u8; 1])
                         .merkleize(&db, None, floor)
                         .await;
-                    (db, _) = db.apply_batch(batch_a).expect("Commit should not fail");
+                    (db, _) = db
+                        .apply_batch(batch_a)
+                        .await
+                        .expect("Commit should not fail");
                     expected_metadata = None;
                     assert!(
                         matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch)),
