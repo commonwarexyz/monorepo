@@ -454,8 +454,8 @@ where
     /// Apply a merkleized batch to the database.
     ///
     /// Returns the range of locations written. The state is updated in memory and appended to the
-    /// witness journal, but is not made durable. Call [`Self::commit`] or [`Self::sync`], or await
-    /// the handle returned by [`Self::start_sync`], to guarantee durability.
+    /// witness journal. Call [`Self::commit`] or [`Self::sync`], or await the handle returned by
+    /// [`Self::start_sync`], to make the applied state durable.
     ///
     /// # Errors
     ///
