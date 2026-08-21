@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-08-19T00:00:00Z"
+modified-time: "2026-08-20T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,11 +11,13 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
+*Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for validator certificates. Concurrent root and proof construction is substantially faster.*
+
 \$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years.
 
 If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching a new recipient means opening a new channel or asking existing ones to route for you (locking their liquidity and risking forced closure along the way). Rollups either prove a batch's state transition or publish enough transaction data for anyone to replay and challenge it. Even then, binding sequencer preconfirmations need a separate challenge for signed payments omitted from the batch (more on this later).
 
-**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity becomes a few-kilobyte commitment that most chains can process. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
+**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity becomes a compact commitment that most chains can process. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
 
 For a given set of accounts, one payment or a bajillion costs the same to settle.
 
@@ -157,19 +159,24 @@ $$
 Figure 2: One witness recomputes both roots from the same material. Each changed account supplies its paired leaves, $X^0$ on the opening side and $X^1$ on the closing side, while each untouched subtree contributes one shared digest ($\Phi_2$ covers two accounts at once). Identical frontiers on both sides prove every omitted account unchanged.
 :::
 
-Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row. The settlement chain retains only a header:
+Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row. The close is named by a hash of its three ordered roots:
 
 $$
-\mathsf{Header}_e=\bigl(\mathsf{StateRoot}_e,\;\mathsf{ChangeRoot}_e,\;\mathsf{StateRoot}_{e+1},\;D_e,\;C_e,\;F_e,\;W_e,\;\ldots\bigr).
+\mathsf{Commitment}_e
+=H\!\left(
+\mathsf{StateRoot}_e
+\parallel \mathsf{ChangeRoot}_e
+\parallel \mathsf{StateRoot}_{e+1}
+\right).
 $$
 
-The totals are the terminal row's prefix: gross debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and shard counts alongside. To verify them, the chain is handed the terminal row and its Merkle opening once, checks the row against $\mathsf{ChangeRoot}_e$, and retains neither. The shard vectors, remaining changed rows, and paired witness stay off the chain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$.
+The totals are the terminal row's prefix: gross debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and shard counts alongside. They remain in settlement state, so admission no longer needs the terminal row or its Merkle opening. The three roots, shard vectors, changed rows, and paired witness stay offchain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$.
 
 ## Validate Everything Up Front
 
-Before the chain queues a close for finalization, someone must check all of it. A validator committee verifies the complete public close, every row, every prefix, and the exact state transition, and signs the header only when all of it holds. Exhaustive validation keeps malformed or inexact closes out of the finalization queue and reduces any remaining private-receipt dispute to one tagged, non-interactive submission.
+Before the chain queues a close for finalization, someone must check all of it. A validator committee verifies the complete public close, every row, every prefix, and the exact state transition, and signs the commitment only when all of it holds. Exhaustive validation keeps malformed or inexact closes out of the finalization queue and reduces any remaining private-receipt dispute to one tagged, non-interactive submission.
 
-Prefix continuity ties the header's totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
+Prefix continuity ties the epoch totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
 
 $$
 \boxed{D_e=C_e.}
@@ -181,7 +188,7 @@ $$
 \boxed{L_{e+1}=L_e+F_e-W_e.}
 $$
 
-The public corpus is partitioned into deterministic, exhaustive account intervals. Every certificate signer signs the same header. Each evidence piece is assigned to a quorum of validators who check and retain it. Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. With $n$ validators, $f$ tolerated faults, and quorum $q$, every piece $j$'s holders share more than $f$ validators with the certificate's signers:
+The public corpus is partitioned into deterministic, exhaustive account intervals. Every certificate signer signs the same commitment. Each evidence piece is assigned to a quorum of validators who check and retain it. Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. With $n$ validators, $f$ tolerated faults, and quorum $q$, every piece $j$'s holders share more than $f$ validators with the certificate's signers:
 
 $$
 \begin{aligned}
@@ -273,7 +280,7 @@ Rollover changes only live serving state, without changing the evidence required
 
 ## The Close Never Grows (with Payments)
 
-Every profile below runs one fixture: a registry of $N=1{,}000{,}000$ accounts, a 100-validator committee, a corpus split into 256 pieces for validator assignment, and an eight-thread worker pool. Every changed account sends, and the same 512 credited accounts receive, spaced evenly among the senders.
+Every profile below runs one fixture: a registry of $N=1{,}000{,}000$ accounts, a 100-validator committee, 256 evidence pieces distributed among validators, and an eight-thread worker pool. Every changed account sends, and the same 512 credited accounts receive, spaced evenly among the senders.
 
 The matrix independently varies $A$, the number of changed accounts, and $h$, the number of receive shards on each credited account. No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$.
 
@@ -282,7 +289,7 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
 <table>
   <thead>
     <tr>
-      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Close stage</th>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
       <th colspan="2" style="text-align:center;"><em>A</em> = 1,024</th>
       <th colspan="2" style="text-align:center;"><em>A</em> = 1,000,000</th>
     </tr>
@@ -294,99 +301,111 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
     </tr>
   </thead>
   <tbody>
-    <tr><th colspan="5" style="text-align:left;">Operator</th></tr>
+    <tr><th colspan="5" style="text-align:left;">Construction</th></tr>
     <tr>
-      <td style="padding-left:20px;">public corpus</td>
-      <td style="text-align:right;">2.07 MB</td>
-      <td style="text-align:right;">117 MB</td>
-      <td style="text-align:right;">649 MB</td>
-      <td style="text-align:right;">764 MB</td>
+      <td style="padding-left:20px;">evidence</td>
+      <td style="text-align:right;">2.27 MB</td>
+      <td style="text-align:right;">105 MB</td>
+      <td style="text-align:right;">629 MB</td>
+      <td style="text-align:right;">732 MB</td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">build roots</td>
-      <td style="text-align:right;">1.28 ms</td>
-      <td style="text-align:right;">54.1 ms</td>
-      <td style="text-align:right;">330 ms</td>
-      <td style="text-align:right;">403 ms</td>
+      <td style="padding-left:20px;">prepare</td>
+      <td style="text-align:right;">0.862 ms</td>
+      <td style="text-align:right;">1.12 ms</td>
+      <td style="text-align:right;">251 ms</td>
+      <td style="text-align:right;">291 ms</td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">build piece proofs</td>
-      <td style="text-align:right;">1.25 ms</td>
-      <td style="text-align:right;">41.2 ms</td>
-      <td style="text-align:right;">351 ms</td>
-      <td style="text-align:right;">406 ms</td>
+      <td style="padding-left:20px;">deal</td>
+      <td style="text-align:right;">0.381 ms</td>
+      <td style="text-align:right;">3.26 ms</td>
+      <td style="text-align:right;">47.0 ms</td>
+      <td style="text-align:right;">59.0 ms</td>
     </tr>
-    <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
+    <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
-      <td style="padding-left:20px;">assignment</td>
-      <td style="text-align:right;">1.39 MB <span style="color:#666;">(-33%)</span></td>
-      <td style="text-align:right;">79.4 MB <span style="color:#666;">(-32%)</span></td>
-      <td style="text-align:right;">436 MB <span style="color:#666;">(-33%)</span></td>
-      <td style="text-align:right;">514 MB <span style="color:#666;">(-33%)</span></td>
+      <td style="padding-left:20px;">dealing</td>
+      <td style="text-align:right;">1.53 MB <span style="color:#666;">(-33%)</span></td>
+      <td style="text-align:right;">71.0 MB <span style="color:#666;">(-32%)</span></td>
+      <td style="text-align:right;">423 MB <span style="color:#666;">(-33%)</span></td>
+      <td style="text-align:right;">492 MB <span style="color:#666;">(-33%)</span></td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">check and sign</td>
-      <td style="text-align:right;">2.53 ms</td>
-      <td style="text-align:right;">204 ms</td>
-      <td style="text-align:right;">0.99 s</td>
-      <td style="text-align:right;">1.27 s</td>
+      <td style="padding-left:20px;">seal</td>
+      <td style="text-align:right;">2.89 ms</td>
+      <td style="text-align:right;">264 ms</td>
+      <td style="text-align:right;">1.37 s</td>
+      <td style="text-align:right;">1.45 s</td>
     </tr>
-    <tr><th colspan="5" style="text-align:left;">Chain</th></tr>
+    <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
     <tr>
       <td style="padding-left:20px;">commitment</td>
-      <td style="text-align:right;"><strong>5.62 KB</strong></td>
-      <td style="text-align:right;"><strong>5.62 KB</strong></td>
-      <td style="text-align:right;"><strong>5.94 KB</strong></td>
-      <td style="text-align:right;"><strong>5.94 KB</strong></td>
+      <td style="text-align:right;"><strong>32 B</strong></td>
+      <td style="text-align:right;"><strong>32 B</strong></td>
+      <td style="text-align:right;"><strong>32 B</strong></td>
+      <td style="text-align:right;"><strong>32 B</strong></td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">check commitment</td>
-      <td style="text-align:right;"><strong>0.275 ms</strong></td>
-      <td style="text-align:right;"><strong>0.258 ms</strong></td>
-      <td style="text-align:right;"><strong>0.262 ms</strong></td>
-      <td style="text-align:right;"><strong>0.260 ms</strong></td>
+      <td style="padding-left:20px;">certified commitment</td>
+      <td style="text-align:right;"><strong>101 B</strong></td>
+      <td style="text-align:right;"><strong>101 B</strong></td>
+      <td style="text-align:right;"><strong>101 B</strong></td>
+      <td style="text-align:right;"><strong>101 B</strong></td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">challenge payload</td>
-      <td style="text-align:right;"><strong>1.84 KB</strong></td>
+      <td style="padding-left:20px;">check certified commitment</td>
+      <td style="text-align:right;"><strong>0.490 ms</strong></td>
+      <td style="text-align:right;"><strong>0.524 ms</strong></td>
+      <td style="text-align:right;"><strong>0.491 ms</strong></td>
+      <td style="text-align:right;"><strong>0.482 ms</strong></td>
+    </tr>
+    <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
+    <tr>
+      <td style="padding-left:20px;">challenge</td>
+      <td style="text-align:right;"><strong>1.73 KB</strong></td>
+      <td style="text-align:right;"><strong>2.02 KB</strong></td>
+      <td style="text-align:right;"><strong>2.05 KB</strong></td>
       <td style="text-align:right;"><strong>2.34 KB</strong></td>
-      <td style="text-align:right;"><strong>2.16 KB</strong></td>
-      <td style="text-align:right;"><strong>2.66 KB</strong></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">check challenge</td>
-      <td style="text-align:right;"><strong>0.127 ms</strong></td>
-      <td style="text-align:right;"><strong>0.126 ms</strong></td>
-      <td style="text-align:right;"><strong>0.125 ms</strong></td>
-      <td style="text-align:right;"><strong>0.126 ms</strong></td>
+      <td style="text-align:right;"><strong>0.177 ms</strong></td>
+      <td style="text-align:right;"><strong>0.269 ms</strong></td>
+      <td style="text-align:right;"><strong>0.178 ms</strong></td>
+      <td style="text-align:right;"><strong>0.176 ms</strong></td>
     </tr>
   </tbody>
 </table>
 </div>
 ```
 
+::: {.image-caption}
+The operator prepares the roots, then deals the evidence into validator-specific pieces. Each validator seals its dealing by checking and retaining those pieces before signing the commitment. A receipt holder with evidence of fraud can dispute the certified commitment with a challenge that the chain checks.
+:::
+
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show benchmark latency for preparing the roots, dealing the evidence into pieces, and sealing the largest of the 100 validator dealings. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
 ```
 
 ::: {.image-caption}
-Figure 4: These are four measured profiles, not an interpolation. Points are arithmetic means, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the receive shards on each credited account from $h=1$ to $h=512$.
+Figure 4: These are four measured profiles, not an interpolation. Points are central estimates, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the receive shards on each credited account from $h=1$ to $h=512$.
 :::
 
 Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated shard leaves and signatures behind each credited row.
 
-Even the busiest validator assignment is 32–33% smaller than the public corpus because it contains only that validator's assigned pieces. At $A=1{,}024$ and $h=1$, it is 1.39 MB despite a registry of one million accounts. Distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments.
+Even the largest validator dealing is 32–33% smaller than the full evidence because it contains only that validator's pieces. At $A=1{,}024$ and $h=1$, it is 1.53 MB despite a registry of one million accounts. Distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments.
 
-The offchain public corpus is constant for a profile, so accepted payments only divide it. Ten million payments spread the sparse profile's 2.07 MB to about 0.2 offchain bytes per payment; a billion spread it to 0.002 offchain bytes per payment. The onchain commitment remains 5.62–5.94 KB per epoch across the four profiles: 0.0056–0.0059 bytes per payment at one million, and 0.0000056–0.0000059 at one billion. It carries only the header, quorum certificate, and terminal prefix opening rather than the rows or shard leaves.
+The offchain evidence is constant for a profile, so accepted payments only divide it. Ten million payments spread the sparse profile's 2.27 MB to about 0.23 offchain bytes per payment; a billion spread it to 0.0023 offchain bytes per payment. The certified commitment adds the signer bitmap and aggregate signature to the 32-byte commitment, for 101 bytes total; it likewise shrinks as $1/T$.
 
 This fixture queues no withdrawals and no full closes, whose re-check and row openings would otherwise add to it. The challenge measurements use one proven higher-tip challenge: its payload grows only with the two lookup depths, and its check verifies two signatures and two openings.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows offchain public-corpus bytes per payment for the four A-by-h profiles; the right shows onchain commitment bytes per payment for the two A profiles. Blue is 1,024 changed accounts and green is one million; solid is h=1 and dashed is h=512. Every line falls as 1/T.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows offchain evidence bytes per payment for the four A-by-h profiles; the right shows the 101-byte certified commitment. Every line falls as 1/T.">
 ```
 
 ::: {.image-caption}
-Figure 5: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The offchain public corpus (left) depends on $A$ and $h$: shards move the million-account corpus by only $1.2\times$ but the sparse corpus by $57\times$. The onchain commitment (right) stays 5.62–5.94 KB across profiles.
+Figure 5: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The offchain evidence (left) depends on $A$ and $h$: shards move the million-account evidence by only $1.2\times$ but the sparse evidence by $46\times$. The certified commitment (right) stays 101 bytes across profiles.
 :::
 
 ## A Bajillion Payments, One Settlement

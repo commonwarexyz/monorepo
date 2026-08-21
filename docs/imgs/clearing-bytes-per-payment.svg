@@ -30,9 +30,9 @@
   <line class="green series dashed" x1="1000" y1="50" x2="1040" y2="50"/>
   <text class="axis-strong green-text" x="1050" y="55">A = 1,000,000 • h = 512</text>
 
-  <!-- Offchain public corpus. -->
+  <!-- Offchain evidence. -->
   <rect class="frame" x="30" y="90" width="610" height="360" rx="3"/>
-  <text class="panel-title" x="335" y="122">Public Corpus (Offchain)</text>
+  <text class="panel-title" x="335" y="122">Evidence (Offchain)</text>
   <text class="axis" x="95" y="138" text-anchor="end">bytes</text>
   <line class="grid" x1="105" y1="150" x2="620" y2="150"/>
   <line class="grid" x1="105" y1="186.67" x2="620" y2="186.67"/>
@@ -58,63 +58,60 @@
   <text class="axis-strong" x="600" y="402" text-anchor="middle">1B</text>
   <text class="axis" x="360" y="428" text-anchor="middle">payments accepted (T)</text>
 
-  <path class="green series" d="M150 156.88 L300 193.55 L450 230.22 L600 266.88"/>
-  <path class="green series dashed" d="M150 154.29 L300 190.95 L450 227.62 L600 264.29"/>
-  <path class="blue series" d="M150 248.41 L300 285.08 L450 321.75 L600 358.41"/>
-  <path class="blue series dashed" d="M150 184.17 L300 220.83 L450 257.50 L600 294.17"/>
-  <circle cx="150" cy="248.41" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="300" cy="285.08" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="450" cy="321.75" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="600" cy="358.41" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <rect x="145" y="151.88" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="295" y="188.55" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="445" y="225.22" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="595" y="261.88" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value green-text" x="162" y="143">764</text>
-  <text class="value green-text" x="162" y="175">649</text>
-  <text class="value blue-text" x="162" y="205">117</text>
-  <text class="value blue-text" x="162" y="236">2.07</text>
-  <text class="value green-text" x="588" y="255" text-anchor="end">0.76</text>
-  <text class="value green-text" x="588" y="283" text-anchor="end">0.65</text>
-  <text class="value blue-text" x="588" y="312" text-anchor="end">0.12</text>
-  <text class="value blue-text" x="588" y="347" text-anchor="end">0.002</text>
+  <path class="green series" d="M150 157.37 L300 194.04 L450 230.70 L600 267.37"/>
+  <path class="green series dashed" d="M150 154.97 L300 191.64 L450 228.30 L600 264.97"/>
+  <path class="blue series" d="M150 246.95 L300 283.62 L450 320.28 L600 356.95"/>
+  <path class="blue series dashed" d="M150 185.92 L300 222.59 L450 259.25 L600 295.92"/>
+  <circle cx="150" cy="246.95" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="300" cy="283.62" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="450" cy="320.28" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="600" cy="356.95" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="145" y="152.37" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="295" y="189.04" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="445" y="225.70" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="595" y="262.37" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value green-text" x="162" y="143">732</text>
+  <text class="value green-text" x="162" y="175">629</text>
+  <text class="value blue-text" x="162" y="205">105</text>
+  <text class="value blue-text" x="162" y="235">2.27</text>
+  <text class="value green-text" x="588" y="254" text-anchor="end">0.732</text>
+  <text class="value green-text" x="588" y="283" text-anchor="end">0.629</text>
+  <text class="value blue-text" x="588" y="312" text-anchor="end">0.105</text>
+  <text class="value blue-text" x="588" y="346" text-anchor="end">0.00227</text>
 
-  <!-- Onchain commitment. -->
+  <!-- Onchain certified commitment. -->
   <rect class="frame" x="670" y="90" width="620" height="360" rx="3"/>
-  <text class="panel-title" x="980" y="122">Commitment (Onchain)</text>
+  <text class="panel-title" x="980" y="122">Certified Commitment (Onchain)</text>
   <text class="axis" x="760" y="138" text-anchor="end">bytes</text>
   <line class="grid" x1="770" y1="150" x2="1255" y2="150"/>
-  <line class="grid" x1="770" y1="205" x2="1255" y2="205"/>
+  <line class="grid" x1="770" y1="186.67" x2="1255" y2="186.67"/>
+  <line class="grid" x1="770" y1="223.33" x2="1255" y2="223.33"/>
   <line class="grid" x1="770" y1="260" x2="1255" y2="260"/>
-  <line class="grid" x1="770" y1="315" x2="1255" y2="315"/>
+  <line class="grid" x1="770" y1="296.67" x2="1255" y2="296.67"/>
+  <line class="grid" x1="770" y1="333.33" x2="1255" y2="333.33"/>
   <line class="grid" x1="770" y1="370" x2="1255" y2="370"/>
   <line class="grid" x1="790" y1="150" x2="790" y2="370"/>
   <line class="grid" x1="940" y1="150" x2="940" y2="370"/>
   <line class="grid" x1="1090" y1="150" x2="1090" y2="370"/>
   <line class="grid" x1="1240" y1="150" x2="1240" y2="370"/>
   <text class="axis" x="760" y="155" text-anchor="end">0.01</text>
-  <text class="axis" x="760" y="210" text-anchor="end">0.001</text>
-  <text class="axis" x="760" y="265" text-anchor="end">0.0001</text>
-  <text class="axis" x="760" y="320" text-anchor="end">0.00001</text>
-  <text class="axis" x="760" y="375" text-anchor="end">0.000001</text>
+  <text class="axis" x="760" y="192" text-anchor="end">0.001</text>
+  <text class="axis" x="760" y="228" text-anchor="end">0.0001</text>
+  <text class="axis" x="760" y="265" text-anchor="end">0.00001</text>
+  <text class="axis" x="760" y="302" text-anchor="end">0.000001</text>
+  <text class="axis" x="760" y="338" text-anchor="end">0.0000001</text>
+  <text class="axis" x="760" y="375" text-anchor="end">0.00000001</text>
   <text class="axis-strong" x="790" y="402" text-anchor="middle">1M</text>
   <text class="axis-strong" x="940" y="402" text-anchor="middle">10M</text>
   <text class="axis-strong" x="1090" y="402" text-anchor="middle">100M</text>
   <text class="axis-strong" x="1240" y="402" text-anchor="middle">1B</text>
   <text class="axis" x="1000" y="428" text-anchor="middle">payments accepted (T)</text>
 
-  <path class="green series" d="M790 162.44 L940 217.44 L1090 272.44 L1240 327.44"/>
-  <path class="blue series" d="M790 163.76 L940 218.76 L1090 273.76 L1240 328.76"/>
-  <rect x="785" y="157.44" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="935" y="212.44" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="1085" y="267.44" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="1235" y="322.44" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="790" cy="163.76" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="940" cy="218.76" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="1090" cy="273.76" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="1240" cy="328.76" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <text class="value green-text" x="802" y="151">0.00594</text>
-  <text class="value blue-text" x="802" y="184">0.00562</text>
-  <text class="value green-text" x="1228" y="316" text-anchor="end">0.00000594</text>
-  <text class="value blue-text" x="1228" y="348" text-anchor="end">0.00000562</text>
+  <path class="blue series" d="M790 223.17 L940 259.84 L1090 296.51 L1240 333.17"/>
+  <circle cx="790" cy="223.17" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="940" cy="259.84" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="1090" cy="296.51" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="1240" cy="333.17" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <text class="value blue-text" x="802" y="211">101 B</text>
+  <text class="value blue-text" x="1228" y="348" text-anchor="end">0.000000101</text>
 </svg>
