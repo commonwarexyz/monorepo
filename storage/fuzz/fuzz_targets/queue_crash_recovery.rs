@@ -11,6 +11,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
+use commonware_storage_fuzz::write_config;
 use commonware_utils::Probability;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -89,6 +90,7 @@ struct FuzzInput {
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
     /// Failure and byte-retention configuration for write operations.
+    #[arbitrary(with = write_config)]
     write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,

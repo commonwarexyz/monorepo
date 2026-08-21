@@ -52,6 +52,7 @@ use commonware_storage::journal::{
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
 };
+use commonware_storage_fuzz::write_config;
 use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
@@ -165,6 +166,7 @@ struct FuzzInput {
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
     /// Failure and byte-retention configuration for write operations.
+    #[arbitrary(with = write_config)]
     write_config: deterministic::WriteConfig,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]

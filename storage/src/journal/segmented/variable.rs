@@ -119,6 +119,7 @@ pub struct Config<C> {
 struct SectionReplay<B: Blob> {
     section: u64,
     reader: BlobReplay<B>,
+    validated: bool,
     skip_bytes: u64,
     offset: u64,
     valid_offset: u64,
@@ -410,50 +411,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         read_options: ReadOptions,
     ) -> Result<Replay<E, V>, Error> {
         let mut sections = VecDeque::new();
-        let section_ids: Vec<_> = self
-            .0
-            .manager
-            .sections()
-            .filter(|&section| section >= start_section)
-            .collect();
-        for section in section_ids {
-            // Constructing the reader flushes accepted writes so the page-prefix scan observes
-            // both reopened data and live buffered appends. The backward sizing performed by
-            // `Writer::new` cannot detect a torn page followed by a valid one, while frame replay
-            // may prefetch both pages and expose neither. Repair the page prefix first, then let
-            // frame replay align a cut through an item to the preceding complete frame.
-            let (reader, size, recoverable) = {
-                let blob = self
-                    .0
-                    .manager
-                    .get_mut(section)
-                    .expect("listed section is present");
-                let reader = blob.replay(buffer, read_options).await?;
-                let size = blob.size();
-                let recoverable = blob.recoverable_prefix_len().await?;
-                (reader, size, recoverable)
-            };
-            let reader = if recoverable < size {
-                warn!(
-                    section,
-                    invalid_size = size,
-                    new_size = recoverable,
-                    "torn page detected: truncating"
-                );
-                drop(reader);
-                repair_blob(&mut self, section, recoverable).await?;
-                self.0
-                    .manager
-                    .get_mut(section)
-                    .expect("repaired section is present")
-                    .replay(buffer, read_options)
-                    .await?
-            } else {
-                reader
-            };
-            if section == start_section && start_offset > reader.blob_size() {
-                return Err(Error::ItemOutOfRange(start_offset));
-            }
+        for (&section, blob) in self.0.manager.sections_from(start_section) {
+            let reader = blob.replay(buffer, read_options).await?;
             let skip_bytes = if section == start_section {
                 start_offset
             } else {
@@ -462,6 +421,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             sections.push_back(SectionReplay {
                 section,
                 reader,
+                validated: false,
                 skip_bytes,
                 offset: 0,
                 valid_offset: skip_bytes,
@@ -469,13 +429,26 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             });
         }
         let finished = sections.is_empty();
-        Ok(Replay {
+        let mut replay = Replay {
             journal: self,
             sections,
+            buffer,
+            read_options,
             finished,
             errored: false,
             repairing: false,
-        })
+        };
+
+        // Validate the first section before returning so an invalid start offset remains a setup
+        // error. Later sections are validated only when ordered replay reaches them.
+        replay.validate_front().await?;
+        if let Some(current) = replay.sections.front()
+            && current.section == start_section
+            && start_offset > current.reader.blob_size()
+        {
+            return Err(Error::ItemOutOfRange(start_offset));
+        }
+        Ok(replay)
     }
 
     /// Appends an item to `Journal` in a given `section`, returning the offset
@@ -629,12 +602,95 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 pub struct Replay<E: Storage + Metrics, V: Codec> {
     journal: Journal<E, V>,
     sections: VecDeque<SectionReplay<E::Blob>>,
+    buffer: NonZeroUsize,
+    read_options: ReadOptions,
     finished: bool,
     errored: bool,
     repairing: bool,
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
+    /// Validate the front section before frame replay can accept any of its bytes.
+    async fn validate_front(&mut self) -> Result<(), Error> {
+        let Some(current) = self.sections.front() else {
+            return Ok(());
+        };
+        if current.validated {
+            return Ok(());
+        }
+
+        let section = current.section;
+        let size = current.reader.blob_size();
+        let recoverable = match self
+            .journal
+            .0
+            .manager
+            .get_mut(section)
+            .expect("replayed section is present")
+            .recoverable_prefix_len(self.read_options)
+            .await
+        {
+            Ok(recoverable) => recoverable,
+            Err(err) => {
+                self.sections.pop_front();
+                return Err(err.into());
+            }
+        };
+        if recoverable >= size {
+            self.sections
+                .front_mut()
+                .expect("validated section is present")
+                .validated = true;
+            return Ok(());
+        }
+
+        warn!(
+            section,
+            invalid_size = size,
+            new_size = recoverable,
+            "torn page detected: truncating"
+        );
+
+        // Once mutation begins, a dropped future makes the writer and blob state ambiguous. Keep
+        // the interruption guard set until the repaired reader has replaced the stale one.
+        self.repairing = true;
+        let current = self
+            .sections
+            .pop_front()
+            .expect("repaired section is present");
+        drop(current.reader);
+        if let Err(err) = repair_blob(&mut self.journal, section, recoverable).await {
+            self.repairing = false;
+            return Err(err);
+        }
+        let reader = match self
+            .journal
+            .0
+            .manager
+            .get_mut(section)
+            .expect("repaired section is present")
+            .replay(self.buffer, self.read_options)
+            .await
+        {
+            Ok(reader) => reader,
+            Err(err) => {
+                self.repairing = false;
+                return Err(err.into());
+            }
+        };
+        self.sections.push_front(SectionReplay {
+            section,
+            reader,
+            validated: true,
+            skip_bytes: current.skip_bytes,
+            offset: current.offset,
+            valid_offset: current.valid_offset,
+            pending: current.pending,
+        });
+        self.repairing = false;
+        Ok(())
+    }
+
     /// Returns the next `(section, offset, size, item)`, or `None` once every section is
     /// exhausted.
     ///
@@ -650,7 +706,14 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             self.sections.clear();
             return self.fail(Error::ReplayInterrupted);
         }
-        while let Some(current) = self.sections.front_mut() {
+        while !self.sections.is_empty() {
+            if let Err(err) = self.validate_front().await {
+                return self.fail(err);
+            }
+            let current = self
+                .sections
+                .front_mut()
+                .expect("validated section is present");
             let blob_size = current.reader.blob_size();
 
             // Resume a recorded frame header or decode the next one
@@ -837,7 +900,7 @@ async fn repair_blob<E: Storage + Metrics, V: Codec>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::test_utils::corrupt_page;
+    use crate::journal::utils::corrupt_page;
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -1856,14 +1919,16 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_variable_replay_repairs_torn_interior_page() {
+    fn test_segmented_variable_replay_repairs_torn_interior_page_when_reached() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const LOGICAL_PAGE_SIZE: u64 = 64;
-            const SECTION: u64 = 0;
+            const FIRST_SECTION: u64 = 0;
+            const PARTITION: &str = "segmented-variable-torn-interior";
+            const TORN_SECTION: u64 = 1;
 
             let cfg = Config {
-                partition: "segmented-variable-torn-interior".into(),
+                partition: PARTITION.into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
@@ -1876,9 +1941,10 @@ mod tests {
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
+            (journal, _, _) = journal.append(FIRST_SECTION, &u64::MAX).await.unwrap();
             for value in 0..15u64 {
                 let offset;
-                (journal, offset, _) = journal.append(SECTION, &value).await.unwrap();
+                (journal, offset, _) = journal.append(TORN_SECTION, &value).await.unwrap();
                 assert_eq!(offset, value * 9);
             }
             journal = journal.sync_all().await.unwrap();
@@ -1889,27 +1955,57 @@ mod tests {
             // first truncate to 64 bytes; frame replay can then retain the seven complete frames
             // ending at byte 63 and safely discard the one-byte frame prefix at the page boundary.
             // The replay buffer spans all three pages, proving recovery does not lose page 0 when
-            // a prefetched later page fails validation.
-            corrupt_page(&context, &cfg.partition, SECTION, 1, LOGICAL_PAGE_SIZE).await;
+            // a prefetched later page fails validation. FIRST_SECTION establishes the ordered
+            // lifecycle boundary: replay setup and consumption of an earlier section must not
+            // read or repair this later section.
+            corrupt_page(&context, &cfg.partition, TORN_SECTION, 1, LOGICAL_PAGE_SIZE).await;
 
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
                 .await
                 .unwrap();
+            let original_size = context
+                .open(PARTITION, &TORN_SECTION.to_be_bytes())
+                .await
+                .unwrap()
+                .1;
             let mut replay = journal
-                .replay(SECTION, 0, NZUsize!(1024), ReadOptions::default())
+                .replay(FIRST_SECTION, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .unwrap();
+
+            assert_eq!(
+                context
+                    .open(PARTITION, &TORN_SECTION.to_be_bytes())
+                    .await
+                    .unwrap()
+                    .1,
+                original_size,
+                "replay setup must not repair a later section"
+            );
+
+            let (section, offset, _, value) = replay.next().await.unwrap().unwrap();
+            assert_eq!((section, offset, value), (FIRST_SECTION, 0, u64::MAX));
+            assert_eq!(
+                context
+                    .open(PARTITION, &TORN_SECTION.to_be_bytes())
+                    .await
+                    .unwrap()
+                    .1,
+                original_size,
+                "consuming an earlier section must not repair a later section"
+            );
+
             let mut values = Vec::new();
             while let Some(result) = replay.next().await {
                 let (section, offset, _, value) = result.unwrap();
-                assert_eq!(section, SECTION);
+                assert_eq!(section, TORN_SECTION);
                 assert_eq!(offset, value * 9);
                 values.push(value);
             }
             assert_eq!(values, (0..7).collect::<Vec<_>>());
 
             let journal = replay.finish().unwrap();
-            assert_eq!(journal.size(SECTION).unwrap(), 63);
+            assert_eq!(journal.size(TORN_SECTION).unwrap(), 63);
             journal.destroy().await.unwrap();
         });
     }

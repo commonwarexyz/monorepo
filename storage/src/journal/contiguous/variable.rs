@@ -1105,7 +1105,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let valid = writer.recoverable_prefix_len().await?;
+            let valid = writer
+                .recoverable_prefix_len(ReadOptions::default())
+                .await?;
             if valid == writer.size() {
                 continue;
             }
@@ -2586,7 +2588,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{contiguous::tests::run_contiguous_tests, test_utils::corrupt_page};
+    use crate::journal::{contiguous::tests::run_contiguous_tests, utils::corrupt_page};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,

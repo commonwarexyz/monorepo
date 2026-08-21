@@ -15,6 +15,7 @@ use commonware_storage::journal::{
     Error as JournalError,
     segmented::oversized::{Config, Oversized, Record},
 };
+use commonware_storage_fuzz::IndexMutations;
 use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -259,7 +260,7 @@ fn fuzz(input: FuzzInput) {
         // A successful checksum authenticates bytes for this oracle. Limit each journal section
         // to one byte-producing mutation so the mutator cannot assemble a replacement payload and
         // matching checksum across an extension and later overwrite. Truncations remain composable.
-        let mut modified_index_sections = BTreeSet::new();
+        let mut index_mutations = IndexMutations::default();
         let mut modified_value_sections = BTreeSet::new();
         for corruption in &input.corruptions {
             match corruption {
@@ -292,7 +293,7 @@ fn fuzz(input: FuzzInput) {
                     offset_factor,
                     data,
                 } => {
-                    if modified_index_sections.contains(section) {
+                    if !index_mutations.can_modify(*section) {
                         continue;
                     }
                     if let Ok((blob, size)) =
@@ -307,7 +308,7 @@ fn fuzz(input: FuzzInput) {
                             .write_at(offset, data.to_vec(), WriteOptions::SYNC)
                             .await;
                         if result.is_ok() && overlaps_existing_blob(offset, data.len(), size) {
-                            modified_index_sections.insert(*section);
+                            index_mutations.record_overwrite(*section);
                         }
                     }
                 }
@@ -338,7 +339,7 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .is_ok()
                     {
-                        modified_index_sections.remove(section);
+                        index_mutations.remove(*section);
                     }
                 }
                 CorruptionType::DeleteGlob { section } => {
@@ -351,7 +352,7 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
                 CorruptionType::ExtendIndex { section } => {
-                    if modified_index_sections.contains(section) {
+                    if !index_mutations.can_modify(*section) {
                         continue;
                     }
                     if let Ok((blob, size)) =
@@ -361,7 +362,7 @@ fn fuzz(input: FuzzInput) {
                             .await
                             .is_ok()
                     {
-                        modified_index_sections.insert(*section);
+                        index_mutations.record_extension(*section);
                     }
                 }
                 CorruptionType::ExtendGlob { section } => {
@@ -388,7 +389,7 @@ fn fuzz(input: FuzzInput) {
                 // Existing-byte overwrites in the paged index can invalidate fixed-journal
                 // integrity checks before oversized recovery has a chance to inspect entries.
                 Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
-                    if !modified_index_sections.is_empty() =>
+                    if index_mutations.may_accept_invalid_checksum() =>
                 {
                     return;
                 }

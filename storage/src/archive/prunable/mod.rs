@@ -52,6 +52,7 @@
 //! ```rust
 //! struct Record {
 //!     index: u64,
+//!     position: u64,
 //!
 //!     next: Option<Box<Record>>,
 //! }
@@ -227,8 +228,8 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob as _, BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Storage as _,
-        Supervisor as _, WriteOptions, deterministic,
+        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
+        deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,
             release_pending_syncs,
@@ -833,58 +834,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_archive_get_reports_lazy_checksum_failure() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
-            let old_key = test_key("old");
-            let new_key = test_key("new");
-            let mut archive = Archive::init(context.child("first"), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-            archive = archive.put(1, old_key.clone(), 10).await.unwrap();
-            archive = archive.put(2, new_key.clone(), 20).await.unwrap();
-            archive = archive.sync().await.unwrap();
-            drop(archive);
-
-            // Both entries share section 0 and each uncompressed i32 value occupies eight bytes:
-            //
-            // index:  [1 -> value 0] [2 -> value 8]
-            // values: [bad data | CRC] [good data | CRC]
-            //
-            // Recovery verifies the valid tail value and replays both index records without
-            // reading the older value. Its checksum failure must therefore be reported lazily by
-            // `get`, without hiding the later valid record.
-            let (blob, size) = context
-                .open(&cfg.value_partition, &0u64.to_be_bytes())
-                .await
-                .unwrap();
-            assert_eq!(size, 16);
-            blob.write_at(0, vec![0xFF], WriteOptions::SYNC)
-                .await
-                .unwrap();
-            drop(blob);
-
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg)
-                .await
-                .expect("index-only recovery must not read the older value");
-            assert!(matches!(
-                archive.get(Identifier::Index(1)).await,
-                Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
-            ));
-            assert!(matches!(
-                archive.get(Identifier::Key(&old_key)).await,
-                Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
-            ));
-            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
-            assert_eq!(
-                archive.get(Identifier::Key(&new_key)).await.unwrap(),
-                Some(20)
-            );
-        });
-    }
-
-    #[test_traced]
     fn test_archive_subset_crash_reports_lazy_value_failure() {
         const SEED: u64 = 148;
 
@@ -934,6 +883,7 @@ mod tests {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let cfg = subset_crash_config(&context);
                 let old_key = FixedBytes::new(*b"old!");
+                let tail_key = FixedBytes::new(*b"tail");
                 let mut archive =
                     Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
                         .await
@@ -949,6 +899,7 @@ mod tests {
                 // path cannot repair and presence-based fetch logic cannot discover.
                 assert!(archive.has(Identifier::Index(1)).await.unwrap());
                 assert!(archive.has(Identifier::Index(2)).await.unwrap());
+                assert!(archive.has(Identifier::Key(&old_key)).await.unwrap());
                 assert!(matches!(
                     archive.get(Identifier::Index(1)).await,
                     Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
@@ -958,6 +909,10 @@ mod tests {
                     Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
                 ));
                 assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
+                assert_eq!(
+                    archive.get(Identifier::Key(&tail_key)).await.unwrap(),
+                    Some(20)
+                );
 
                 archive = archive.put(1, old_key.clone(), 99).await.unwrap();
                 assert!(matches!(

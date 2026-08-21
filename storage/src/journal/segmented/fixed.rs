@@ -83,7 +83,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             let recoverable = manager
                 .get(section)?
                 .expect("listed section is present")
-                .recoverable_prefix_len()
+                .recoverable_prefix_len(ReadOptions::default())
                 .await?;
             let valid_size = recoverable - (recoverable % Self::CHUNK_SIZE_U64);
             if valid_size == size {
@@ -603,7 +603,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::test_utils::corrupt_page;
+    use crate::journal::utils::corrupt_page;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{

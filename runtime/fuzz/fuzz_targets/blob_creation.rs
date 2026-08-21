@@ -5,7 +5,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{
     Blob, ReadOptions, Storage, WriteOptions,
-    mocks::{MemoryStorage, memory_storage, v0_header},
+    mocks::{MemoryStorage, memory_storage},
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
@@ -14,6 +14,12 @@ const PARTITION: &str = "blob_creation";
 const PAYLOAD: &[u8] = b"payload!";
 const V0_NAME: &[u8] = b"v0";
 const V1_NAME: &[u8] = b"v1";
+
+/// Frozen V0 prelude: `CWIC`, runtime version 0, then the caller-owned blob version.
+const fn v0_header(blob_version: u16) -> [u8; 8] {
+    let version = blob_version.to_be_bytes();
+    [b'C', b'W', b'I', b'C', 0, 0, version[0], version[1]]
+}
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {

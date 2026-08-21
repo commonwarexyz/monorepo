@@ -460,7 +460,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let recoverable = writer.recoverable_prefix_len().await?;
+            let recoverable = writer
+                .recoverable_prefix_len(ReadOptions::default())
+                .await?;
             let valid = Self::items_to_bytes(recoverable / Self::CHUNK_SIZE_U64)?;
             if valid == writer.size() {
                 continue;
@@ -1747,7 +1749,7 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{contiguous::Contiguous as _, test_utils::corrupt_page};
+    use crate::journal::{contiguous::Contiguous as _, utils::corrupt_page};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;

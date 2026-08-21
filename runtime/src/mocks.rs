@@ -34,14 +34,6 @@ pub fn memory_storage() -> MemoryStorage {
     MemoryStorage::new(pool.clone())
 }
 
-/// Encode a V0 blob header for compatibility tests.
-#[cfg(any(test, feature = "test-utils"))]
-pub fn v0_header(blob_version: u16) -> Vec<u8> {
-    use commonware_codec::Encode;
-
-    crate::storage::v0_header(blob_version).encode().to_vec()
-}
-
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
 const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
@@ -1260,31 +1252,6 @@ mod tests {
     use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
-
-    #[test]
-    fn test_memory_storage_v0_fixture() {
-        const PARTITION: &str = "raw-storage";
-        const NAME: &[u8] = b"blob";
-        const BLOB_VERSION: u16 = 7;
-
-        let storage = memory_storage();
-        let header = v0_header(BLOB_VERSION);
-        storage.set_raw_blob(PARTITION, NAME, header.clone());
-        assert_eq!(
-            storage.raw_blob(PARTITION, NAME).as_deref(),
-            Some(header.as_slice())
-        );
-        assert!(memory_storage().raw_blob(PARTITION, NAME).is_none());
-
-        let (_, size, version) = futures::executor::block_on(storage.open_versioned(
-            PARTITION,
-            NAME,
-            BLOB_VERSION..=BLOB_VERSION,
-        ))
-        .unwrap();
-        assert_eq!(size, 0);
-        assert_eq!(version, BLOB_VERSION);
-    }
 
     #[test]
     fn recording_context_preserves_data_and_records_options() {
