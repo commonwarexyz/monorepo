@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_archive_subset_crash_lazily_quarantines_and_repairs_value() {
+    fn test_archive_subset_crash_eagerly_quarantines_and_repairs_value() {
         let checkpoint = subset_crash_checkpoint();
 
         let (_, checkpoint) =
@@ -1089,25 +1089,23 @@ mod tests {
                 let mut archive =
                     Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
                         .await
-                        .expect("index-only recovery must not validate the older value");
+                        .expect("startup validation must preserve the readable tail");
 
-                // Startup remains index-only, so the synchronous presence and range helpers are
-                // optimistic until an authoritative value read validates the indexed occurrence:
+                // A supported subset write can leave a bad interior value followed by a readable
+                // tail. Startup must validate both occurrences before publishing its synchronous
+                // range view:
                 //
-                // indexed: [1, 2]            readable: [?, 2]
-                // has/get(1) -> bad CRC -> absent  readable: [missing, 2]
-                // put(1, replacement)             readable: [replacement, 2]
+                // indexed:  [1, 2]
+                // readable: [_, 2]
+                // ranges:   [(2, 2)]
                 //
-                // Quarantining only on an authoritative asynchronous query avoids replaying all
-                // values at startup. The synchronous range helpers then expose the discovered
-                // hole so backfill can request it, and an ordinary put at the occupied index
-                // appends a repair occurrence.
-                assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(1, 2)]);
-                assert_eq!(archive.ranges_from(1).collect::<Vec<_>>(), vec![(1, 2)]);
-                assert_eq!(archive.first_index(), Some(1));
+                // An ordinary put can then append a readable replacement at the occupied index.
+                assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(2, 2)]);
+                assert_eq!(archive.ranges_from(1).collect::<Vec<_>>(), vec![(2, 2)]);
+                assert_eq!(archive.first_index(), Some(2));
                 assert_eq!(archive.last_index(), Some(2));
-                assert_eq!(archive.next_gap(1), (Some(2), None));
-                assert!(archive.missing_items(1, 1).is_empty());
+                assert_eq!(archive.next_gap(1), (None, Some(2)));
+                assert_eq!(archive.missing_items(1, 1), vec![1]);
 
                 assert!(!archive.has(Identifier::Index(1)).await.unwrap());
                 assert!(archive.has(Identifier::Index(2)).await.unwrap());
@@ -1116,12 +1114,6 @@ mod tests {
                 assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
                 assert_eq!(archive.get(Identifier::Key(&old_key)).await.unwrap(), None);
                 assert_eq!(archive.get_all(1).await.unwrap(), None);
-                assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(2, 2)]);
-                assert_eq!(archive.ranges_from(1).collect::<Vec<_>>(), vec![(2, 2)]);
-                assert_eq!(archive.first_index(), Some(2));
-                assert_eq!(archive.last_index(), Some(2));
-                assert_eq!(archive.next_gap(1), (None, Some(2)));
-                assert_eq!(archive.missing_items(1, 1), vec![1]);
                 assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
                 assert_eq!(
                     archive.get(Identifier::Key(&tail_key)).await.unwrap(),
