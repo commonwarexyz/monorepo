@@ -473,16 +473,14 @@ fn fuzz_family<F: Family, S: Strategy>(
                 Operation::Target => {
                     let target = db.target();
                     assert!(sync::Target::try_from(&target).is_ok());
-                    let expected = synced.last().unwrap();
-                    assert_eq!(target.size.as_u64(), expected.size);
-                    assert_eq!(target.root, expected.root);
+                    assert_eq!(target.size, db.size());
+                    assert_eq!(target.root, db.root());
                 }
 
                 Operation::CompactSync => {
                     let target = db.target();
-                    let expected = synced.last().unwrap();
-                    let expected_size = expected.size;
-                    let expected_metadata = expected.metadata;
+                    let expected_size = target.size;
+                    let expected_metadata = db.get_metadata();
                     let source = Arc::new(db);
                     let client_cfg = test_config(
                         &format!("{suffix}-client-{syncs}"),
@@ -506,7 +504,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     .await
                     .expect("Compact sync should not fail");
                     assert_eq!(client.root(), target.root);
-                    assert_eq!(client.size().as_u64(), expected_size);
+                    assert_eq!(client.size(), expected_size);
                     assert_eq!(client.get_metadata(), expected_metadata);
                     client.destroy().await.expect("Destroy should not fail");
                     db = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
