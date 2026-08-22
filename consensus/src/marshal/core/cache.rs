@@ -341,7 +341,7 @@ where
                 // needs its own copy to survive per-view retention pruning.
                 let exists = match cache.verified_blocks.has_at(view, &digest).await {
                     Ok(exists) => exists,
-                    Err(e) => panic!("failed to check verified blocks: {e}"),
+                    Err(err) => panic!("failed to check verified blocks: {err}"),
                 };
                 let handle;
                 if exists {
@@ -374,11 +374,11 @@ where
     ) -> Self {
         (self, _) = self
             .with_epoch(epoch, |mut cache| async move {
-                // A digest determines its height, so scoping the dedup to this height
-                // is exact and avoids fetching values.
+                // A digest determines its height, so deduplicate against readable values at that
+                // height before deciding whether a replacement is needed.
                 let exists = match cache.certified_blocks.has_at(height.get(), &digest).await {
                     Ok(exists) => exists,
-                    Err(e) => panic!("failed to check certified block: {e}"),
+                    Err(err) => panic!("failed to check certified block: {err}"),
                 };
                 if !exists {
                     cache.certified_blocks = cache

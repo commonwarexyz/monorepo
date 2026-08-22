@@ -102,43 +102,32 @@ async fn assert_index_matches(
     );
 }
 
-async fn assert_key_matches_replay_precedence(
+async fn assert_key_matches(
     archive: &TestArchive,
     items: &[(u64, RawKey, RawValue)],
     key_data: RawKey,
-    items_per_section: u64,
 ) {
     let key = Key::new(key_data);
     let actual = archive
         .get(Identifier::Key(&key))
         .await
         .unwrap_or_else(|err| panic!("get by key {key_data:?} failed: {err:?}"));
-    let winning_section = items
+    let expected: Vec<_> = items
         .iter()
-        .filter_map(|(index, key, _)| {
-            (*key == key_data).then_some((index / items_per_section) * items_per_section)
-        })
-        .max();
-    let expected = winning_section.and_then(|winning_section| {
-        items.iter().rev().find_map(|(index, key, value)| {
-            let section = (index / items_per_section) * items_per_section;
-            (*key == key_data && section == winning_section).then_some(value)
-        })
-    });
+        .filter_map(|(_, key, value)| (*key == key_data).then_some(value))
+        .collect();
 
-    match (actual, expected) {
-        (Some(actual), Some(expected)) => assert_eq!(
+    match actual {
+        Some(actual) => assert!(
+            expected.iter().any(|value| actual.as_ref() == *value),
+            "key {key_data:?} returned unmodeled value {:?}; expected one of {expected:?}",
             actual.as_ref(),
-            expected,
-            "key {key_data:?} did not resolve with journal replay precedence",
         ),
-        (None, None) => {}
-        (Some(actual), None) => panic!(
-            "key {key_data:?} returned unmodeled value {:?}",
-            actual.as_ref()
-        ),
-        (None, Some(expected)) => {
-            panic!("key {key_data:?} is missing expected value {expected:?}")
+        None => {
+            assert!(
+                expected.is_empty(),
+                "key {key_data:?} is unexpectedly missing"
+            )
         }
     }
 }
@@ -199,15 +188,7 @@ fn fuzz(data: FuzzInput) {
                         written_indices.insert(*index);
                     }
 
-                    // Check precedence at the mutation boundary so a later operation cannot mask
-                    // a live ordering error.
-                    assert_key_matches_replay_precedence(
-                        &archive,
-                        &items,
-                        key_data,
-                        items_per_section,
-                    )
-                    .await;
+                    assert_key_matches(&archive, &items, key_data).await;
                     assert_index_matches(&archive, &items, *index).await;
                 }
 
@@ -233,15 +214,7 @@ fn fuzz(data: FuzzInput) {
                         written_indices.insert(index);
                     }
 
-                    // The key winner is position-sensitive even when multiple entries share the
-                    // same exact index. Index lookup and get_all have separate ordering contracts.
-                    assert_key_matches_replay_precedence(
-                        &archive,
-                        &items,
-                        key_data,
-                        items_per_section,
-                    )
-                    .await;
+                    assert_key_matches(&archive, &items, key_data).await;
                     assert_index_matches(&archive, &items, index).await;
                 }
 
@@ -255,13 +228,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::GetByKey(key_data) => {
-                    assert_key_matches_replay_precedence(
-                        &archive,
-                        &items,
-                        canonical_key(*key_data),
-                        items_per_section,
-                    )
-                    .await;
+                    assert_key_matches(&archive, &items, canonical_key(*key_data)).await;
                 }
 
                 ArchiveOperation::HasByKey(key_data) => {
@@ -332,7 +299,7 @@ fn fuzz(data: FuzzInput) {
             .expect("restart init failed");
         for key_id in 0..16 {
             let key = canonical_key([key_id; 16]);
-            assert_key_matches_replay_precedence(&archive, &items, key, items_per_section).await;
+            assert_key_matches(&archive, &items, key).await;
         }
         let retained_indices: std::collections::BTreeSet<_> =
             items.iter().map(|(index, _, _)| *index).collect();

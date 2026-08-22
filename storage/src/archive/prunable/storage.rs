@@ -2,7 +2,8 @@ use super::{Config, Translator};
 use crate::{
     Context,
     archive::{Error, Identifier},
-    index::{Cursor as _, Unordered, unordered::Index},
+    index::{Unordered, unordered::Index},
+    journal::Error as JournalError,
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
@@ -13,8 +14,14 @@ use commonware_runtime::{
     Buf, BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::Array;
-use std::collections::{BTreeMap, BTreeSet, btree_map};
+use commonware_utils::{
+    Array,
+    sync::RwLock,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet, btree_map},
+    sync::Arc,
+};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -85,11 +92,51 @@ impl<K: Array> OversizedRecord for Record<K> {
     }
 }
 
-/// Identifies one index-journal occurrence represented in the translated-key index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct KeyCandidate {
-    index: u64,
-    position: u64,
+/// Lazy value-validation state for one logical index.
+#[derive(Debug, Default)]
+struct IndexValidation {
+    /// Whether any occurrence has passed checksum validation.
+    readable: bool,
+    /// Positions whose checksums failed.
+    invalid_positions: BTreeSet<u64>,
+}
+
+/// Results learned while values are validated lazily.
+#[derive(Debug, Default)]
+struct Validation {
+    /// Per-index results. Unvalidated indices have no entry.
+    indices: BTreeMap<u64, IndexValidation>,
+    /// Indexed ranges with every proven-unreadable index removed.
+    intervals: Arc<RMap>,
+}
+
+/// Snapshot iterator over the archive's currently visible ranges.
+struct RangeIter {
+    intervals: Arc<RMap>,
+    next: Option<u64>,
+}
+
+impl RangeIter {
+    const fn new(intervals: Arc<RMap>, from: u64) -> Self {
+        Self {
+            intervals,
+            next: Some(from),
+        }
+    }
+}
+
+impl Iterator for RangeIter {
+    type Item = (u64, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let from = self.next?;
+        let Some((&start, &end)) = self.intervals.iter_from(from).next() else {
+            self.next = None;
+            return None;
+        };
+        self.next = end.checked_add(1);
+        Some((start, end))
+    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -133,18 +180,20 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
-    /// Maps translated key representation to its corresponding journal occurrences.
-    keys: Index<T, KeyCandidate>,
+    /// Maps translated key representation to its corresponding index.
+    keys: Index<T, u64>,
 
     /// Maps index to its first position in the index journal.
     indices: BTreeMap<u64, u64>,
 
-    /// Additional positions for indices that have more than one entry.
-    /// Only populated when used via [crate::archive::MultiArchive::put_multi].
+    /// Additional positions for indices with multiple entries, from either multi-value puts or
+    /// ordinary puts that repair unreadable occurrences.
     extra_indices: BTreeMap<u64, Vec<u64>>,
 
-    /// Interval tracking for gap detection.
-    intervals: RMap,
+    /// Lazy value-validation results and the range view derived from them. Index replay
+    /// deliberately does not read values, so ranges are optimistic until an authoritative read
+    /// discovers an invalid occurrence.
+    validation: RwLock<Validation>,
 
     // Metrics
     items_tracked: Gauge,
@@ -169,36 +218,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
     }
 
-    /// Insert a key candidate in the same order produced by journal replay.
-    ///
-    /// Sections replay from low to high, and records within a section replay in append order. The
-    /// in-memory index yields the most recently inserted candidate first, so candidates are kept
-    /// in descending section order and a new candidate leads the candidates from its own section.
-    fn insert_key_candidate(
-        keys: &mut Index<T, KeyCandidate>,
-        items_per_section: u64,
-        key: &K,
-        candidate: KeyCandidate,
-    ) {
-        let index = candidate.index;
-        let section = (index / items_per_section) * items_per_section;
-        let rank = (section, candidate.position);
-        let Some(mut cursor) = keys.get_mut_or_insert(key, candidate) else {
-            return;
-        };
-
-        while let Some(current) = cursor.next() {
-            let current_section = (current.index / items_per_section) * items_per_section;
-            if (current_section, current.position) <= rank {
-                let displaced = *current;
-                cursor.update(candidate);
-                cursor.insert(displaced);
-                return;
-            }
-        }
-        cursor.insert(candidate);
-    }
-
     /// Iterate over all positions for a given index (first + extras).
     fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
         self.indices.get(&index).into_iter().copied().chain(
@@ -207,6 +226,114 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                 .into_iter()
                 .flat_map(|v| v.iter().copied()),
         )
+    }
+
+    /// Adds one translated-key candidate per index while discarding candidates below the floor.
+    fn insert_key_index(keys: &mut Index<T, u64>, key: &K, index: u64, oldest_allowed: u64) {
+        if oldest_allowed > 0 {
+            keys.retain(key, |candidate| *candidate >= oldest_allowed);
+        }
+        if !keys.get(key).any(|candidate| *candidate == index) {
+            keys.insert(key, index);
+        }
+    }
+
+    /// Returns whether a value occurrence has already failed checksum validation.
+    fn invalid_occurrence(&self, index: u64, position: u64) -> bool {
+        self.validation
+            .read()
+            .indices
+            .get(&index)
+            .is_some_and(|state| state.invalid_positions.contains(&position))
+    }
+
+    /// Returns whether any occurrence at `index` has passed checksum validation.
+    fn known_readable(&self, index: u64) -> bool {
+        self.validation
+            .read()
+            .indices
+            .get(&index)
+            .is_some_and(|state| state.readable)
+    }
+
+    /// Records that at least one occurrence at `index` is readable.
+    fn mark_readable(&self, index: u64) {
+        self.validation
+            .write()
+            .indices
+            .entry(index)
+            .or_default()
+            .readable = true;
+    }
+
+    /// Records an invalid occurrence and hides its index once no possible occurrence remains.
+    fn invalidate(&self, index: u64, position: u64) {
+        let occurrence_count = 1 + self.extra_indices.get(&index).map_or(0, Vec::len);
+        let mut validation = self.validation.write();
+        let all_invalid = {
+            let state = validation.indices.entry(index).or_default();
+            state.invalid_positions.insert(position);
+            let all_invalid = state.invalid_positions.len() == occurrence_count;
+            if all_invalid {
+                state.readable = false;
+            }
+            all_invalid
+        };
+        if all_invalid {
+            Arc::make_mut(&mut validation.intervals).remove(index, index);
+        }
+    }
+
+    /// Makes `index` visible after appending a replacement occurrence.
+    fn make_available(&self, index: u64) {
+        let mut validation = self.validation.write();
+        validation.indices.entry(index).or_default().readable = true;
+        Arc::make_mut(&mut validation.intervals).insert(index);
+    }
+
+    /// Reads one value occurrence, treating a failed value checksum as an incomplete write.
+    async fn read_value(
+        &self,
+        index: u64,
+        position: u64,
+        entry: &Record<K>,
+    ) -> Result<Option<V>, Error> {
+        let section = self.section(index);
+        if self.invalid_occurrence(index, position) {
+            return Ok(None);
+        }
+
+        let (value_offset, value_size) = entry.value_location();
+        match self
+            .oversized
+            .get_value(section, value_offset, value_size)
+            .await
+        {
+            Ok(value) => {
+                self.mark_readable(index);
+                Ok(Some(value))
+            }
+            Err(JournalError::ChecksumMismatch(_, _)) => {
+                self.invalidate(index, position);
+                Ok(None)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// Returns the first readable value at `index` in insertion order.
+    async fn first_value(&self, index: u64) -> Result<Option<V>, Error> {
+        let section = self.section(index);
+        for position in self.iter_positions(index) {
+            if self.invalid_occurrence(index, position) {
+                continue;
+            }
+            let entry = self.oversized.get(section, position).await?;
+            if let Some(value) = self.read_value(index, position, &entry).await? {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
     }
 
     /// See [Archive::init].
@@ -252,16 +379,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                     }
                 }
 
-                // Keep the key index in the same order during replay and live operation.
-                Self::insert_key_candidate(
-                    &mut keys,
-                    cfg.items_per_section.get(),
-                    &entry.key,
-                    KeyCandidate {
-                        index: entry.index,
-                        position,
-                    },
-                );
+                // Store one translated-key candidate for this index.
+                Self::insert_key_index(&mut keys, &entry.key, entry.index, 0);
 
                 // Store index in intervals
                 intervals.insert(entry.index);
@@ -291,7 +410,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             oldest_allowed: None,
             indices,
             extra_indices,
-            intervals,
+            validation: RwLock::new(Validation {
+                intervals: Arc::new(intervals),
+                ..Validation::default()
+            }),
             keys,
             items_tracked,
             indices_pruned,
@@ -305,24 +427,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
-
-        // Get first position at this index
-        let position = match self.indices.get(&index) {
-            Some(&position) => position,
-            None => return Ok(None),
-        };
-
-        // Fetch index entry to get value location
-        let section = self.section(index);
-        let entry = self.oversized.get(section, position).await?;
-        let (value_offset, value_size) = entry.value_location();
-
-        // Fetch value directly from blob storage (bypasses page cache)
-        let value = self
-            .oversized
-            .get_value(section, value_offset, value_size)
-            .await?;
-        Ok(Some(value))
+        self.first_value(index).await
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
@@ -330,66 +435,71 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.gets.inc();
 
         // Fetch index
-        for candidate in self.keys.get(key) {
+        for index in self.keys.get(key) {
             // Continue if index is no longer allowed due to pruning.
-            if self.pruned(candidate.index) {
+            if self.pruned(*index) {
                 continue;
             }
 
-            if !self.indices.contains_key(&candidate.index) {
+            if !self.indices.contains_key(index) {
                 return Err(Error::RecordCorrupted);
             }
-            let section = self.section(candidate.index);
+            let section = self.section(*index);
 
-            // Fetch this exact candidate from the index journal. Candidates retain their positions
-            // so a translated-key collision cannot promote an unrelated occurrence at one index.
-            let entry = self.oversized.get(section, candidate.position).await?;
+            for position in self.iter_positions(*index) {
+                if self.invalid_occurrence(*index, position) {
+                    continue;
+                }
 
-            // Verify the full key before following a candidate from the translated-key index.
-            if entry.key.as_ref() == key.as_ref() {
-                // Fetch value directly from blob storage (bypasses page cache)
-                let (value_offset, value_size) = entry.value_location();
-                let value = self
-                    .oversized
-                    .get_value(section, value_offset, value_size)
-                    .await?;
-                return Ok(Some(value));
+                let entry = self.oversized.get(section, position).await?;
+                if entry.key.as_ref() == key.as_ref() {
+                    if let Some(value) = self.read_value(*index, position, &entry).await? {
+                        return Ok(Some(value));
+                    }
+                    continue;
+                }
+                self.unnecessary_reads.inc();
             }
-            self.unnecessary_reads.inc();
         }
 
         Ok(None)
     }
 
-    /// Check whether any retained index stores `key`.
-    ///
-    /// Confirms translated-key candidates against index journal entries,
-    /// never reading values.
+    /// Check whether any retained index stores a readable value for `key`.
     async fn has_key(&self, key: &K) -> Result<bool, Error> {
-        for candidate in self.keys.get(key) {
+        for index in self.keys.get(key) {
             // Continue if index is no longer allowed due to pruning.
-            if self.pruned(candidate.index) {
+            if self.pruned(*index) {
                 continue;
             }
 
-            if !self.indices.contains_key(&candidate.index) {
+            if !self.indices.contains_key(index) {
                 return Err(Error::RecordCorrupted);
             }
-            let section = self.section(candidate.index);
+            let section = self.section(*index);
 
-            let entry = self.oversized.get(section, candidate.position).await?;
-            if entry.key.as_ref() == key.as_ref() {
-                return Ok(true);
+            for position in self.iter_positions(*index) {
+                if self.invalid_occurrence(*index, position) {
+                    continue;
+                }
+
+                let entry = self.oversized.get(section, position).await?;
+                if entry.key.as_ref() == key.as_ref() {
+                    if self.read_value(*index, position, &entry).await?.is_some() {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                self.unnecessary_reads.inc();
             }
-            self.unnecessary_reads.inc();
         }
 
         Ok(false)
     }
 
     fn has_index(&self, index: u64) -> bool {
-        // Check if index exists
         self.indices.contains_key(&index)
+            && self.validation.read().intervals.get(&index).is_some()
     }
 
     async fn put_internal(
@@ -398,17 +508,21 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         key: K,
         data: V,
         skip_if_index_exists: bool,
-    ) -> Result<(Box<Self>, bool), Error> {
+    ) -> Result<Box<Self>, Error> {
         // A put below the prune floor is satisfied without storing
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
             debug!(index, oldest_allowed, "ignoring put below prune floor");
-            return Ok((self, false));
+            return Ok(self);
         }
 
-        // Check for existing index when enforcing single-item semantics.
-        if skip_if_index_exists && self.indices.contains_key(&index) {
-            return Ok((self, true));
+        // An occupied index is only an overwrite when at least one occurrence is readable. This
+        // validation makes one retransmission sufficient to replace incomplete crash debris.
+        if skip_if_index_exists
+            && self.indices.contains_key(&index)
+            && (self.known_readable(index) || self.first_value(index).await?.is_some())
+        {
+            return Ok(self);
         }
 
         // Write value and index entry atomically (glob first, then index)
@@ -428,24 +542,17 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
 
         // Store interval
-        self.intervals.insert(index);
+        self.make_available(index);
 
-        // Remove pruned candidates before inserting with the precedence reconstructed by replay.
-        self.keys
-            .retain(&key, |candidate| candidate.index >= oldest_allowed);
-        Self::insert_key_candidate(
-            &mut self.keys,
-            self.items_per_section,
-            &key,
-            KeyCandidate { index, position },
-        );
+        // Insert one candidate for this translated key and prune useless candidates in its bucket.
+        Self::insert_key_index(&mut self.keys, &key, index, oldest_allowed);
 
         // Add section to pending
         self.pending.insert(section);
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok((self, true))
+        Ok(self)
     }
 
     /// See [Archive::prune].
@@ -483,7 +590,13 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Remove all keys from interval tree less than min
         if min > 0 {
-            self.intervals.remove(0, min - 1);
+            Arc::make_mut(&mut self.validation.write().intervals).remove(0, min - 1);
+        }
+
+        // Discard validation state for pruned indices.
+        {
+            let mut validation = self.validation.write();
+            validation.indices = validation.indices.split_off(&min);
         }
 
         // Update last pruned (to prevent reads from pruned sections)
@@ -504,7 +617,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
         self.has.inc();
         match identifier {
-            Identifier::Index(index) => Ok(self.has_index(index)),
+            Identifier::Index(index) => Ok(self.first_value(index).await?.is_some()),
             Identifier::Key(key) => self.has_key(key).await,
         }
     }
@@ -539,32 +652,32 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [crate::archive::Archive::next_gap].
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
+        self.validation.read().intervals.next_gap(index)
     }
 
     /// See [crate::archive::Archive::missing_items].
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        self.intervals.missing_items(index, max)
+        self.validation.read().intervals.missing_items(index, max)
     }
 
     /// See [crate::archive::Archive::ranges].
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter().map(|(&s, &e)| (s, e))
+        RangeIter::new(Arc::clone(&self.validation.read().intervals), 0)
     }
 
     /// See [crate::archive::Archive::ranges_from].
     fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+        RangeIter::new(Arc::clone(&self.validation.read().intervals), from)
     }
 
     /// See [crate::archive::Archive::first_index].
     fn first_index(&self) -> Option<u64> {
-        self.intervals.first_index()
+        self.validation.read().intervals.first_index()
     }
 
     /// See [crate::archive::Archive::last_index].
     fn last_index(&self) -> Option<u64> {
-        self.intervals.last_index()
+        self.validation.read().intervals.last_index()
     }
 
     /// See [crate::archive::Archive::destroy].
@@ -577,8 +690,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Update metrics
         self.gets.inc();
 
-        // Check if the index exists.
-        if !self.indices.contains_key(&index) {
+        // Check if the index exists and has not already been fully invalidated.
+        if !self.has_index(index) {
             return Ok(None);
         }
 
@@ -588,18 +701,18 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         let mut values = Vec::with_capacity(1 + extra_count);
         for position in self.iter_positions(index) {
+            if self.invalid_occurrence(index, position) {
+                continue;
+            }
+
             // Fetch index entry from index journal to verify key
             let entry = self.oversized.get(section, position).await?;
 
-            // Fetch value directly from blob storage (bypasses page cache)
-            let (value_offset, value_size) = entry.value_location();
-            let value = self
-                .oversized
-                .get_value(section, value_offset, value_size)
-                .await?;
-            values.push(value);
+            if let Some(value) = self.read_value(index, position, &entry).await? {
+                values.push(value);
+            }
         }
-        Ok(Some(values))
+        Ok((!values.is_empty()).then_some(values))
     }
 
     /// See [crate::archive::MultiArchive::has_at].
@@ -611,17 +724,22 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             return Ok(false);
         }
 
-        // A translated-key hit may be a collision, so confirm each occurrence at this index
-        // against its persisted full key (reads index journal entries, never values).
+        // A key absent from the in-memory index is not stored at this index. A translated-key hit
+        // may be a collision, so scan persisted full keys and validate each exact match.
+        if !self.keys.get(key).any(|candidate| *candidate == index) {
+            return Ok(false);
+        }
         let section = self.section(index);
-        for candidate in self
-            .keys
-            .get(key)
-            .filter(|candidate| candidate.index == index)
-        {
-            let entry = self.oversized.get(section, candidate.position).await?;
+        for position in self.iter_positions(index) {
+            if self.invalid_occurrence(index, position) {
+                continue;
+            }
+            let entry = self.oversized.get(section, position).await?;
             if entry.key.as_ref() == key.as_ref() {
-                return Ok(true);
+                if self.read_value(index, position, &entry).await?.is_some() {
+                    return Ok(true);
+                }
+                continue;
             }
             self.unnecessary_reads.inc();
         }
@@ -658,7 +776,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// section mask).
     ///
     /// If this is called with a min lower than the last pruned, nothing
-    /// will happen.
+    /// will happen. The live handle remembers the floor; callers must reapply any durable
+    /// application floor after reinitializing the archive before accepting old puts.
     pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
         self.0 = self.0.prune(min).await?;
         Ok(self)
@@ -672,17 +791,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archiv
     type Value = V;
 
     async fn put(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        (self.0, _) = self.0.put_internal(index, key, data, true).await?;
+        self.0 = self.0.put_internal(index, key, data, true).await?;
         Ok(self)
     }
 
     async fn put_sync(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, true).await?;
-        if !stored {
-            return Ok(self);
-        }
+        self.0 = self.0.put_internal(index, key, data, true).await?;
         self.sync().await
     }
 
@@ -692,12 +806,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archiv
         key: K,
         data: V,
     ) -> Result<(Self, Handle<()>), Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, true).await?;
-        if !stored {
-            return Ok((self, Handle::ready(Ok(()))));
-        }
+        self.0 = self.0.put_internal(index, key, data, true).await?;
         self.start_sync().await
     }
 
@@ -757,17 +866,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::MultiA
     }
 
     async fn put_multi(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        (self.0, _) = self.0.put_internal(index, key, data, false).await?;
+        self.0 = self.0.put_internal(index, key, data, false).await?;
         Ok(self)
     }
 
     async fn put_multi_sync(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, false).await?;
-        if !stored {
-            return Ok(self);
-        }
+        self.0 = self.0.put_internal(index, key, data, false).await?;
         crate::archive::Archive::sync(self).await
     }
 
@@ -777,12 +881,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::MultiA
         key: K,
         data: V,
     ) -> Result<(Self, Handle<()>), Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, false).await?;
-        if !stored {
-            return Ok((self, Handle::ready(Ok(()))));
-        }
+        self.0 = self.0.put_internal(index, key, data, false).await?;
         crate::archive::Archive::start_sync(self).await
     }
 

@@ -30,8 +30,9 @@ pub trait Certificates: Send + Sync + Sized + 'static {
     ///
     /// The write is not durable until [sync](Self::sync) is called.
     ///
-    /// Implementations must ignore overwrites for an existing finalization at the same
-    /// height or commitment.
+    /// Implementations must ignore the write when a readable finalization already exists at the
+    /// same height. If indexed metadata exists but its value is unreadable, a successful write
+    /// must make the supplied finalization readable.
     ///
     /// # Arguments
     ///
@@ -87,7 +88,9 @@ pub trait Certificates: Send + Sync + Sized + 'static {
         Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
     > + Send;
 
-    /// Check whether a finalization is stored at `height` without fetching it.
+    /// Check whether a readable finalization is stored at `height`.
+    ///
+    /// Implementations that validate values lazily may read the value before answering.
     fn has(&self, height: Height) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
@@ -101,13 +104,19 @@ pub trait Certificates: Send + Sync + Sized + 'static {
     /// The store when pruning is applied or unnecessary, or `Err` if pruning fails.
     fn prune(self, min: Height) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Retrieves the highest stored finalization's application height.
+    /// Retrieves the highest finalization height in the store's current indexed view.
+    ///
+    /// Lazily validated stores may return an unread value here. Call [Self::get] to prove that the
+    /// candidate is readable.
     ///
     /// # Returns
     /// `Some(height)` if there are any stored finalizations, or `None` if the store is empty.
     fn last_index(&self) -> Option<Height>;
 
-    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    /// Retrieve indexed ranges that overlap or follow `from`.
+    ///
+    /// Lazily validated stores may include unread values and omit values already proven
+    /// unreadable. Call [Self::get] before relying on a candidate value.
     fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)>;
 }
 
@@ -126,8 +135,9 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     ///
     /// The write is not durable until [sync](Self::sync) is called.
     ///
-    /// Implementations must ignore overwrites for an existing block at the same
-    /// height or commitment.
+    /// Implementations must ignore the write when a readable block already exists at the same
+    /// height. If indexed metadata exists but its value is unreadable, a successful write must
+    /// make the supplied block readable.
     ///
     /// # Arguments
     ///
@@ -184,6 +194,8 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     ///
     /// This method iterates through gaps between existing ranges, collecting missing indices
     /// until either `max` items are found or there are no more gaps to fill.
+    /// Lazily validated stores treat unread indexed values as present until a value read proves
+    /// otherwise.
     ///
     /// # Arguments
     ///
@@ -199,6 +211,8 @@ pub trait Blocks: Send + Sync + Sized + 'static {
 
     /// Finds the end of the range containing `value` and the start of the
     /// range succeeding `value`. This method is useful for identifying gaps around a given point.
+    /// Lazily validated stores may include unread values in these ranges; callers must retrieve a
+    /// range endpoint before relying on its value.
     ///
     /// # Arguments
     ///
@@ -220,7 +234,10 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the store is empty.
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
 
-    /// Retrieve the last (highest) index in the store.
+    /// Retrieve the last (highest) index in the store's current indexed view.
+    ///
+    /// Lazily validated stores may return an unread value here. Call [Self::get] to prove that the
+    /// candidate is readable.
     ///
     /// # Returns
     /// `Some(height)` if there are any stored blocks, or `None` if the store is empty.

@@ -1214,8 +1214,9 @@ impl<E: Context, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
 impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Initialize a new `Journal` instance.
     ///
-    /// All backing blobs are opened but not read during initialization. The `replay` method can be
-    /// used to iterate over all items in the `Journal`.
+    /// All backing blobs are opened during initialization. Recovery scans the two newest blobs to
+    /// establish their contiguous valid-page prefixes without decoding journal items. The
+    /// `replay` method can be used to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }

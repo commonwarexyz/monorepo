@@ -30,15 +30,14 @@
 //!
 //! # Uniqueness
 //!
-//! Indices are unique for [Archive] and writing to an occupied index is a no-op. Duplicate
-//! indices can be stored via [`crate::archive::MultiArchive::put_multi`].
+//! Indices are unique for [Archive], and writing to an index with a readable value is a no-op. If
+//! every indexed occurrence fails lazy integrity validation, a put can append a replacement.
+//! Duplicate readable values can be stored via [`crate::archive::MultiArchive::put_multi`].
 //!
 //! Keys may be stored at multiple indices with either put variant. A lookup by
-//! [`crate::archive::Identifier::Key`] prioritizes the last retained occurrence in index-journal
-//! replay order: higher sections take precedence, and later appends take precedence within a
-//! section. Live puts maintain the same ordering, so restarting does not change the selected
-//! occurrence. Entries whose index has been pruned are never returned or reported as present, so
-//! a key matching both a pruned and a non-pruned entry resolves to the non-pruned entry.
+//! [`crate::archive::Identifier::Key`] may return any value associated with that key. Entries whose
+//! index has been pruned are never returned or reported as present, so a key matching both a pruned
+//! and a non-pruned entry resolves to a non-pruned entry.
 //!
 //! ## Conflicts
 //!
@@ -46,20 +45,15 @@
 //! expected) that two keys will eventually be represented by the same translated key. To handle
 //! this case, [Archive] must check the persisted form of all conflicting keys to ensure data from
 //! the correct key is returned. To support efficient checks, [Archive] (via
-//! [crate::index::unordered::Index]) keeps a linked list of all keys with the same translated
-//! prefix:
+//! [crate::index::unordered::Index]) keeps a candidate index for every distinct index represented
+//! in a translated-key bucket:
 //!
 //! ```rust
-//! struct Record {
-//!     index: u64,
-//!     position: u64,
-//!
-//!     next: Option<Box<Record>>,
-//! }
+//! type Candidate = u64;
 //! ```
 //!
-//! _To avoid random memory reads in the common case, the in-memory index directly stores the first
-//! item in the linked list instead of a pointer to the first item._
+//! One candidate is sufficient for every key occurrence at an index because lookup verifies all
+//! full keys stored at that index. This avoids duplicate candidate scans for [crate::archive::MultiArchive].
 //!
 //! `index` is the key to the map used to serve lookups by `index` that stores the position in the
 //! index journal (selected by `section = index / items_per_section * items_per_section` to minimize
@@ -78,16 +72,16 @@
 //!
 //! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
 //! index item is `8 + 8` (where `8` is the index and `8` is the position in the index journal).
-//! The memory used to track each key item is `~translated(key).len() + 24` bytes (where `24` covers
-//! its index-journal location and collision-chain link). This means that an [Archive] employing a
-//! [Translator] that uses the first `8` bytes of a key will use `~48` bytes to index each key.
+//! Each translated-key bucket tracks one `u64` candidate per distinct index, plus map and collision
+//! chain overhead. Lazy validation adds state only for indices that have been read, appended during
+//! the current process, or found to contain an invalid value occurrence.
 //!
 //! ### MultiArchive Overhead
 //!
 //! [Archive] stores index positions in a dual-map layout:
 //! - `indices: BTreeMap<u64, u64>` tracks the first position for each index.
-//! - `extra_indices: BTreeMap<u64, Vec<u64>>` tracks additional positions for indices written via
-//!   [crate::archive::MultiArchive::put_multi].
+//! - `extra_indices: BTreeMap<u64, Vec<u64>>` tracks every position after the first, whether added
+//!   by [crate::archive::MultiArchive::put_multi] or by an ordinary put repairing unreadable data.
 //!
 //! This means the baseline overhead above remains unchanged for the first item at an index. For
 //! indices with duplicates, the additional in-memory payload is:
@@ -101,7 +95,9 @@
 //!
 //! [Archive] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
 //! called on a `section`, entries below the pruned `section` are gone: `get` returns `None`,
-//! and a `put` below the floor is satisfied without storing.
+//! and a `put` below the floor is satisfied without storing. The floor itself is in-memory; after
+//! reinitialization, a caller that may issue old puts must reapply its durable application floor
+//! before accepting them. Deleted sections remain absent without replaying their values.
 //!
 //! ## Lazy Index Cleanup
 //!
@@ -116,9 +112,16 @@
 //! All reads (by index or key) first read the index entry from the index journal to get the
 //! value location (offset and size), then read the value from the value blob. The index journal
 //! uses a page cache for caching, so hot entries are served from memory. Values are read directly
-//! from disk without caching to avoid polluting the page cache with large values. Value checksums
-//! are validated lazily and validation failures are reported by `get`. `has` checks only the
-//! retained index entry and does not read the value.
+//! from disk without caching to avoid polluting the page cache with large values.
+//!
+//! Startup replays only index entries. Until a value is read, synchronous range, gap, and endpoint
+//! queries optimistically describe retained index entries whose values may prove unreadable. The
+//! asynchronous `get`, `get_all`, `has`, and `has_at` queries validate value checksums and treat an
+//! invalid occurrence as absent. Once all occurrences at an index have failed validation,
+//! subsequent metadata queries expose that index as missing. A normal `put` validates an occupied
+//! index before treating it as a duplicate, then remembers successful validation for the lifetime
+//! of the handle. One retransmission can therefore append a readable replacement without changing
+//! the on-disk format or scanning every value during startup.
 //!
 //! # Compression
 //!
@@ -231,8 +234,8 @@ mod tests {
         BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,
-            release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
+            release_next_pending_syncs, release_pending_syncs,
         },
         telemetry::metrics::has_metric_value,
     };
@@ -292,6 +295,59 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             items_per_section: NZU64!(1024),
         }
+    }
+
+    /// Create a supported subset-write crash whose index journal retains two entries while the
+    /// first value frame is missing one byte and the second remains readable.
+    fn subset_crash_checkpoint() -> deterministic::Checkpoint {
+        const SEED: u64 = 148;
+
+        let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(SEED));
+        let (_, checkpoint) = runner.start_and_recover(|context| async move {
+            let fault_config = context.storage_fault_config();
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = subset_crash_config(&context);
+            let mut archive =
+                Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
+                    .await
+                    .unwrap();
+
+            archive = archive
+                .put(1, FixedBytes::new(*b"old!"), 10)
+                .await
+                .unwrap();
+            archive = archive
+                .put(2, FixedBytes::new(*b"tail"), 20)
+                .await
+                .unwrap();
+
+            // Flush both journals, but hold their durability barriers open. With this seed,
+            // subset retention keeps both fixed-index pages and the second value frame while
+            // omitting a byte from the first value frame:
+            //
+            // index:  [1 -> value 0, valid] [2 -> value 8, valid]
+            // values: [value 1, bad CRC]    [value 2, valid CRC]
+            //
+            // The high retention rate makes the cut surgical; recovery assertions own the exact
+            // retained shape and fail if the deterministic runtime sequence moves.
+            *fault_config.write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: Probability!(0.0),
+                    retention_rate: Probability!(0.999),
+                    mode: deterministic::PartialWriteMode::Subset,
+                }),
+                ..Default::default()
+            };
+            let (archive, handle) = archive.start_sync().await.unwrap();
+            assert_eq!(pending.lock().len(), 2);
+            drop(handle);
+            drop(archive);
+        });
+        checkpoint
     }
 
     #[test_traced]
@@ -413,6 +469,158 @@ mod tests {
             waiter.await.expect("duplicate waiter failed");
 
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_put_preserves_readable_value() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let archive = archive
+                .put_sync(1, test_key("original"), 10)
+                .await
+                .expect("Failed to store original value");
+
+            recordings.clear();
+            let archive = archive
+                .put(1, test_key("duplicate"), 99)
+                .await
+                .expect("Duplicate put should be a no-op");
+            assert!(
+                recordings.snapshot().reads.is_empty(),
+                "a live append already proves that the occupied index is readable"
+            );
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_put_reuses_recovered_positive_validation() {
+        let runner = deterministic::Runner::default();
+        let (_, checkpoint) = runner.start_and_recover(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            archive
+                .put_sync(1, test_key("original"), 10)
+                .await
+                .expect("Failed to store original value");
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to reopen archive");
+
+            recordings.clear();
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert!(
+                !recordings.snapshot().reads.is_empty(),
+                "the first recovered lookup must validate the value"
+            );
+
+            recordings.clear();
+            let archive = archive
+                .put(1, test_key("duplicate"), 99)
+                .await
+                .expect("Duplicate put should be a no-op");
+            assert!(
+                recordings.snapshot().reads.is_empty(),
+                "a successful recovered read must be reused by later duplicate puts"
+            );
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
+    fn test_below_floor_put_start_sync_covers_prior_pending_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let archive = archive.prune(1).await.expect("Failed to set prune floor");
+            let archive = archive
+                .put(2, test_key("pending"), 20)
+                .await
+                .expect("Failed to buffer retained write");
+
+            assert!(pending.lock().is_empty());
+            let (archive, handle) = archive
+                .put_start_sync(0, test_key("pruned"), 0)
+                .await
+                .expect("Failed to request sync through below-floor put");
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "the sync combinator must cover writes accepted before its below-floor put"
+            );
+
+            release_pending_syncs(&pending);
+            handle.await.expect("covering sync should complete");
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_below_floor_put_multi_sync_covers_prior_pending_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let archive = archive.prune(1).await.expect("Failed to set prune floor");
+            let archive = archive
+                .put_multi(2, test_key("pending"), 20)
+                .await
+                .expect("Failed to buffer retained write");
+
+            pending.arm();
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let task = context.inner.child("put_sync").spawn(|_| async move {
+                let result = archive.put_multi_sync(0, test_key("pruned"), 0).await;
+                completed_clone.store(1, Ordering::Relaxed);
+                result
+            });
+            while pending.calls() == 0 && completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "put_multi_sync must wait for writes accepted before its below-floor put"
+            );
+            assert!(pending.calls() > 0);
+            release_pending_syncs(&pending);
+            let archive = task
+                .await
+                .expect("put_multi_sync task failed")
+                .expect("put_multi_sync failed");
+            assert_eq!(archive.get_all(2).await.unwrap(), Some(vec![20]));
+            assert_eq!(archive.get_all(0).await.unwrap(), None);
         });
     }
 
@@ -834,49 +1042,43 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_archive_subset_crash_reports_lazy_value_failure() {
-        const SEED: u64 = 148;
+    fn test_put_repairs_unvalidated_crash_debris() {
+        let checkpoint = subset_crash_checkpoint();
+        let (_, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let cfg = subset_crash_config(&context);
+                let key = FixedBytes::new(*b"old!");
+                let archive = Archive::<_, _, FixedBytes<4>, i32>::init(
+                    context.child("archive"),
+                    cfg,
+                )
+                .await
+                .expect("index-only recovery must leave the value unvalidated");
 
-        let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(SEED));
-        let (_, checkpoint) = runner.start_and_recover(|context| async move {
-            let fault_config = context.storage_fault_config();
-            let pending = PendingSyncs::default();
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
+                // A retransmission can be the first operation after restart. It must validate the
+                // optimistic occupied index and append a replacement in one call:
+                //
+                // recovered: [index 1 -> bad value CRC]
+                // put(1):    [bad occurrence, readable replacement]
+                let archive = archive.put(1, key, 99).await.unwrap();
+                assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(99));
+                archive.sync().await.unwrap();
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = subset_crash_config(&context);
-            let old_key = FixedBytes::new(*b"old!");
-            let mut archive =
-                Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
-                    .await
-                    .unwrap();
-
-            archive = archive.put(1, old_key, 10).await.unwrap();
-            archive = archive.put(2, FixedBytes::new(*b"tail"), 20).await.unwrap();
-
-            // Flush both journals, but hold their durability barriers open. With this seed,
-            // subset retention keeps both fixed-index pages and the second value frame while
-            // omitting a byte from the first value frame:
-            //
-            // index:  [1 -> value 0, valid] [2 -> value 8, valid]
-            // values: [value 1, bad CRC]    [value 2, valid CRC]
-            //
-            // The high retention rate makes the cut surgical; these post-recovery assertions
-            // own the exact retained shape and fail if the deterministic runtime sequence moves.
-            *fault_config.write() = deterministic::FaultConfig {
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: Probability!(0.0),
-                    retention_rate: Probability!(0.999),
-                    mode: deterministic::PartialWriteMode::Subset,
-                }),
-                ..Default::default()
-            };
-            let (archive, handle) = archive.start_sync().await.unwrap();
-            assert_eq!(pending.lock().len(), 2);
-            drop(handle);
-            drop(archive);
+            let archive = Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(99));
         });
+    }
+
+    #[test_traced]
+    fn test_archive_subset_crash_lazily_quarantines_and_repairs_value() {
+        let checkpoint = subset_crash_checkpoint();
 
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
@@ -889,25 +1091,37 @@ mod tests {
                         .await
                         .expect("index-only recovery must not validate the older value");
 
-                // Startup deliberately remains index-only, so `has` still reports the retained
-                // index. `get` must distinguish its unreadable value from true absence:
+                // Startup remains index-only, so the synchronous presence and range helpers are
+                // optimistic until an authoritative value read validates the indexed occurrence:
                 //
-                // has(1): true       put(1, replacement): ignored (write-once index)
-                // get(1): CRC error  caller observes:     retained value is unreadable
+                // indexed: [1, 2]            readable: [?, 2]
+                // has/get(1) -> bad CRC -> absent  readable: [missing, 2]
+                // put(1, replacement)             readable: [replacement, 2]
                 //
-                // Returning `None` would create an absent-but-present index that the normal put
-                // path cannot repair and presence-based fetch logic cannot discover.
-                assert!(archive.has(Identifier::Index(1)).await.unwrap());
+                // Quarantining only on an authoritative asynchronous query avoids replaying all
+                // values at startup. The synchronous range helpers then expose the discovered
+                // hole so backfill can request it, and an ordinary put at the occupied index
+                // appends a repair occurrence.
+                assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(1, 2)]);
+                assert_eq!(archive.ranges_from(1).collect::<Vec<_>>(), vec![(1, 2)]);
+                assert_eq!(archive.first_index(), Some(1));
+                assert_eq!(archive.last_index(), Some(2));
+                assert_eq!(archive.next_gap(1), (Some(2), None));
+                assert!(archive.missing_items(1, 1).is_empty());
+
+                assert!(!archive.has(Identifier::Index(1)).await.unwrap());
                 assert!(archive.has(Identifier::Index(2)).await.unwrap());
-                assert!(archive.has(Identifier::Key(&old_key)).await.unwrap());
-                assert!(matches!(
-                    archive.get(Identifier::Index(1)).await,
-                    Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
-                ));
-                assert!(matches!(
-                    archive.get(Identifier::Key(&old_key)).await,
-                    Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
-                ));
+                assert!(!archive.has(Identifier::Key(&old_key)).await.unwrap());
+                assert!(!archive.has_at(1, &old_key).await.unwrap());
+                assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+                assert_eq!(archive.get(Identifier::Key(&old_key)).await.unwrap(), None);
+                assert_eq!(archive.get_all(1).await.unwrap(), None);
+                assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(2, 2)]);
+                assert_eq!(archive.ranges_from(1).collect::<Vec<_>>(), vec![(2, 2)]);
+                assert_eq!(archive.first_index(), Some(2));
+                assert_eq!(archive.last_index(), Some(2));
+                assert_eq!(archive.next_gap(1), (None, Some(2)));
+                assert_eq!(archive.missing_items(1, 1), vec![1]);
                 assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
                 assert_eq!(
                     archive.get(Identifier::Key(&tail_key)).await.unwrap(),
@@ -915,16 +1129,12 @@ mod tests {
                 );
 
                 archive = archive.put(1, old_key.clone(), 99).await.unwrap();
-                assert!(matches!(
-                    archive.get(Identifier::Index(1)).await,
-                    Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
-                ));
-
-                archive = archive.put(3, old_key.clone(), 30).await.unwrap();
-                assert_eq!(
-                    archive.get(Identifier::Key(&old_key)).await.unwrap(),
-                    Some(30)
-                );
+                assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(99));
+                assert_eq!(archive.get(Identifier::Key(&old_key)).await.unwrap(), Some(99));
+                assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![99]));
+                assert!(archive.has(Identifier::Index(1)).await.unwrap());
+                assert!(archive.has_at(1, &old_key).await.unwrap());
+                assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(1, 2)]);
                 archive.sync().await.unwrap();
             });
 
@@ -936,22 +1146,17 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(archive.has(Identifier::Index(1)).await.unwrap());
-            assert!(matches!(
-                archive.get(Identifier::Index(1)).await,
-                Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
-            ));
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(99));
+            assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![99]));
             assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
-            assert_eq!(archive.get(Identifier::Index(3)).await.unwrap(), Some(30));
-            assert_eq!(
-                archive.get(Identifier::Key(&old_key)).await.unwrap(),
-                Some(30)
-            );
+            assert_eq!(archive.get(Identifier::Key(&old_key)).await.unwrap(), Some(99));
+            assert!(archive.has_at(1, &old_key).await.unwrap());
+            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(1, 2)]);
         });
     }
 
     #[test_traced]
-    fn test_archive_duplicate_key_uses_replay_precedence_before_and_after_restart() {
+    fn test_archive_duplicate_key_returns_an_associated_value_across_restart() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config(&context, NZU64!(1));
@@ -960,33 +1165,22 @@ mod tests {
                 .await
                 .expect("Failed to initialize archive");
 
-            // Each index lives in its own section. Permute call order relative to physical replay:
-            //
-            // calls:  section 2 -> section 5 -> section 1
-            // replay: section 1 -> section 2 -> section 5
-            //
-            // Cross-section call order is not persisted. Key precedence therefore follows the
-            // replay order that both live state and restart can reconstruct, while direct index
-            // lookups continue to expose all values.
+            // Each index lives in its own section and replay orders sections independently of call
+            // order. Key lookup promises any associated value, so it needs only the index and not
+            // an index-journal position or a persisted precedence rule.
             archive = archive.put(2, key.clone(), 20).await.unwrap();
             archive = archive.put(5, key.clone(), 50).await.unwrap();
             archive = archive.put(1, key.clone(), 10).await.unwrap();
-            assert_eq!(
-                archive.get(Identifier::Key(&key)).await.unwrap(),
-                Some(50),
-                "live lookup must use replay precedence"
-            );
+            let live = archive.get(Identifier::Key(&key)).await.unwrap().unwrap();
+            assert!([10, 20, 50].contains(&live));
 
             archive = archive.sync().await.unwrap();
             drop(archive);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            assert_eq!(
-                archive.get(Identifier::Key(&key)).await.unwrap(),
-                Some(50),
-                "restart must preserve live key precedence"
-            );
+            let replayed = archive.get(Identifier::Key(&key)).await.unwrap().unwrap();
+            assert!([10, 20, 50].contains(&replayed));
             assert_eq!(archive.get(Identifier::Index(5)).await.unwrap(), Some(50));
             assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
@@ -994,7 +1188,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_archive_duplicate_key_at_one_index_uses_latest_position() {
+    fn test_archive_duplicate_key_at_one_index_returns_an_associated_value() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
@@ -1003,16 +1197,12 @@ mod tests {
                 .await
                 .expect("Failed to initialize archive");
 
-            // MultiArchive can append the same key more than once at one index. Both key-index
-            // candidates are numerically identical, so their index-journal positions own the tie:
-            //
-            // position: 0 (old) -> 1 (new)
-            // key get:            1 -> 0
-            //
-            // Direct index lookup remains first-inserted and get_all remains insertion-ordered.
+            // Direct index lookup remains first-inserted and get_all remains insertion-ordered;
+            // key lookup may return either associated value.
             archive = archive.put_multi(7, key.clone(), 10).await.unwrap();
             archive = archive.put_multi(7, key.clone(), 20).await.unwrap();
-            assert_eq!(archive.get(Identifier::Key(&key)).await.unwrap(), Some(20));
+            let by_key = archive.get(Identifier::Key(&key)).await.unwrap().unwrap();
+            assert!([10, 20].contains(&by_key));
             assert_eq!(archive.get(Identifier::Index(7)).await.unwrap(), Some(10));
             assert_eq!(archive.get_all(7).await.unwrap(), Some(vec![10, 20]));
 
@@ -1021,14 +1211,15 @@ mod tests {
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            assert_eq!(archive.get(Identifier::Key(&key)).await.unwrap(), Some(20));
+            let by_key = archive.get(Identifier::Key(&key)).await.unwrap().unwrap();
+            assert!([10, 20].contains(&by_key));
             assert_eq!(archive.get(Identifier::Index(7)).await.unwrap(), Some(10));
             assert_eq!(archive.get_all(7).await.unwrap(), Some(vec![10, 20]));
         });
     }
 
     #[test_traced]
-    fn test_archive_collision_does_not_promote_an_older_exact_key() {
+    fn test_archive_collision_returns_only_values_for_the_exact_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
@@ -1038,21 +1229,17 @@ mod tests {
                 .await
                 .expect("Failed to initialize archive");
 
-            // FourCap maps both keys to "same". The final B append shares index 7 with A's first
-            // occurrence, but it must not promote that older A ahead of A's later occurrence:
-            //
-            // position: 0 (7, A=10) -> 1 (8, A=20) -> 2 (7, B=30)
-            // key A:                         1 wins -> 0
-            // key B:                                   2 wins
-            //
-            // Index lookup remains first-inserted and get_all remains insertion-ordered.
+            // FourCap maps both keys to "same". Key lookup may choose either A occurrence but
+            // must verify the full key before returning a value from the shared translated key.
             archive = archive.put_multi(7, key_a.clone(), 10).await.unwrap();
             archive = archive.put_multi(8, key_a.clone(), 20).await.unwrap();
             archive = archive.put_multi(7, key_b.clone(), 30).await.unwrap();
-            assert_eq!(
-                archive.get(Identifier::Key(&key_a)).await.unwrap(),
-                Some(20)
-            );
+            let by_key_a = archive
+                .get(Identifier::Key(&key_a))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!([10, 20].contains(&by_key_a));
             assert_eq!(
                 archive.get(Identifier::Key(&key_b)).await.unwrap(),
                 Some(30)
@@ -1065,10 +1252,12 @@ mod tests {
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            assert_eq!(
-                archive.get(Identifier::Key(&key_a)).await.unwrap(),
-                Some(20)
-            );
+            let by_key_a = archive
+                .get(Identifier::Key(&key_a))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!([10, 20].contains(&by_key_a));
             assert_eq!(
                 archive.get(Identifier::Key(&key_b)).await.unwrap(),
                 Some(30)
@@ -1364,8 +1553,8 @@ mod tests {
                 None
             );
 
-            // The sync combinators skip the sync for a satisfied below-floor put
-            // and return a ready handle
+            // With no earlier pending writes, the below-floor sync combinators complete without
+            // storing the pruned item.
             let (archive, handle) = archive
                 .put_start_sync(1, test_key("key1-blah"), 1)
                 .await
@@ -1580,8 +1769,8 @@ mod tests {
             archive = archive.put(2, key.clone(), 20).await.unwrap();
             archive = archive.put(5, key.clone(), 50).await.unwrap();
 
-            // The occurrence in the higher section is the lookup head.
-            assert_eq!(archive.get(Identifier::Key(&key)).await.unwrap(), Some(50));
+            let before_prune = archive.get(Identifier::Key(&key)).await.unwrap().unwrap();
+            assert!([20, 50].contains(&before_prune));
             assert!(archive.has(Identifier::Key(&key)).await.unwrap());
 
             // Prune the earlier index (section 2). The later index must be
@@ -1810,8 +1999,8 @@ mod tests {
                 None
             );
 
-            // put_multi_start_sync below the prune floor skips the sync and
-            // returns a ready handle
+            // With no earlier pending writes, put_multi_start_sync below the prune floor returns
+            // a ready handle without storing the pruned item.
             let (archive, handle) = archive
                 .put_multi_start_sync(2, test_key("ddd"), 41)
                 .await
@@ -1819,7 +2008,7 @@ mod tests {
             handle.await.expect("handle must resolve");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
 
-            // put_multi_sync below the prune floor skips the sync
+            // put_multi_sync below the prune floor stores nothing.
             let archive = archive
                 .put_multi_sync(2, test_key("ddd"), 42)
                 .await
