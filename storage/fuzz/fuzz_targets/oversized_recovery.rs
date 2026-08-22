@@ -15,9 +15,13 @@ use commonware_storage::journal::{
     Error as JournalError,
     segmented::oversized::{Config, Oversized, Record},
 };
+use commonware_storage_fuzz::IndexMutations;
 use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::{
+    collections::BTreeSet,
+    num::{NonZeroU16, NonZeroUsize},
+};
 
 /// Test index entry that stores a u64 id and references a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -104,9 +108,9 @@ enum CorruptionType {
     /// Delete glob section
     DeleteGlob { section: u64 },
     /// Extend index with garbage
-    ExtendIndex { section: u64, garbage: [u8; 32] },
+    ExtendIndex { section: u64 },
     /// Extend glob with garbage
-    ExtendGlob { section: u64, garbage: [u8; 64] },
+    ExtendGlob { section: u64 },
 }
 
 impl<'a> Arbitrary<'a> for CorruptionType {
@@ -139,11 +143,9 @@ impl<'a> Arbitrary<'a> for CorruptionType {
             }),
             6 => Ok(CorruptionType::ExtendIndex {
                 section: u.int_in_range(1..=3)?,
-                garbage: u.arbitrary()?,
             }),
             _ => Ok(CorruptionType::ExtendGlob {
                 section: u.int_in_range(1..=3)?,
-                garbage: u.arbitrary()?,
             }),
         }
     }
@@ -164,6 +166,11 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
 
+// Fixed invalid extensions cannot replay an authenticated page or value frame into a truncated
+// section, so every CRC-valid record remains suitable for the entry-identity oracle.
+const INDEX_EXTENSION: [u8; 32] = [0xFF; 32];
+const VALUE_EXTENSION: [u8; 64] = [0xFF; 64];
+
 fn overlaps_existing_blob(offset: u64, write_len: usize, blob_size: u64) -> bool {
     let end = offset.saturating_add(write_len as u64);
     offset < blob_size && end > offset
@@ -178,6 +185,39 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
         value_write_buffer: NZUsize!(512),
         compression: None,
         codec_config: (),
+    }
+}
+
+async fn assert_adopted_entries_consistent(
+    oversized: &Oversized<deterministic::Context, TestEntry, TestValue>,
+) {
+    for section in 1u64..=3 {
+        let mut position = 0;
+        loop {
+            let entry = match oversized.get(section, position).await {
+                Ok(entry) => entry,
+                Err(
+                    JournalError::AlreadyPrunedToSection(_)
+                    | JournalError::ItemOutOfRange(_)
+                    | JournalError::SectionOutOfRange(_),
+                ) => break,
+                Err(err) => {
+                    panic!("entry {section}:{position} produced an unexpected index error: {err:?}")
+                }
+            };
+            let (offset, size) = entry.value_location();
+            match oversized.get_value(section, offset, size).await {
+                Ok(value) => assert_eq!(
+                    value, [entry.id as u8; 16],
+                    "entry {section}:{position} adopted another record's value bytes",
+                ),
+                Err(JournalError::ChecksumMismatch(_, _)) => {}
+                Err(err) => {
+                    panic!("entry {section}:{position} produced an unexpected value error: {err:?}")
+                }
+            }
+            position += 1;
+        }
     }
 }
 
@@ -217,7 +257,11 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Phase 2: Apply corruptions
-        let mut index_page_integrity_may_be_invalidated = false;
+        // A successful checksum authenticates bytes for this oracle. Limit each journal section
+        // to one byte-producing mutation so the mutator cannot assemble a replacement payload and
+        // matching checksum across an extension and later overwrite. Truncations remain composable.
+        let mut index_mutations = IndexMutations::default();
+        let mut modified_value_sections = BTreeSet::new();
         for corruption in &input.corruptions {
             match corruption {
                 CorruptionType::TruncateIndex {
@@ -249,6 +293,9 @@ fn fuzz(input: FuzzInput) {
                     offset_factor,
                     data,
                 } => {
+                    if !index_mutations.can_modify(*section) {
+                        continue;
+                    }
                     if let Ok((blob, size)) =
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                         && size > 0
@@ -257,12 +304,12 @@ fn fuzz(input: FuzzInput) {
                         // Overwriting existing index bytes can invalidate the fixed-journal
                         // page-integrity checks. Pure extensions/truncations are handled by
                         // lower-level tail trimming and should not require this allowance.
-                        if overlaps_existing_blob(offset, data.len(), size) {
-                            index_page_integrity_may_be_invalidated = true;
-                        }
-                        let _ = blob
+                        let result = blob
                             .write_at(offset, data.to_vec(), WriteOptions::SYNC)
                             .await;
+                        if result.is_ok() && overlaps_existing_blob(offset, data.len(), size) {
+                            index_mutations.record_overwrite(*section);
+                        }
                     }
                 }
                 CorruptionType::CorruptGlobBytes {
@@ -270,42 +317,66 @@ fn fuzz(input: FuzzInput) {
                     offset_factor,
                     data,
                 } => {
+                    if modified_value_sections.contains(section) {
+                        continue;
+                    }
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                         && size > 0
                     {
                         let offset = (size * (*offset_factor as u64)) / 256;
-                        let _ = blob
+                        let result = blob
                             .write_at(offset, data.to_vec(), WriteOptions::SYNC)
                             .await;
+                        if result.is_ok() && overlaps_existing_blob(offset, data.len(), size) {
+                            modified_value_sections.insert(*section);
+                        }
                     }
                 }
                 CorruptionType::DeleteIndex { section } => {
-                    let _ = context
+                    if context
                         .remove(INDEX_PARTITION, Some(&section.to_be_bytes()))
-                        .await;
-                }
-                CorruptionType::DeleteGlob { section } => {
-                    let _ = context
-                        .remove(VALUE_PARTITION, Some(&section.to_be_bytes()))
-                        .await;
-                }
-                CorruptionType::ExtendIndex { section, garbage } => {
-                    if let Ok((blob, size)) =
-                        context.open(INDEX_PARTITION, &section.to_be_bytes()).await
+                        .await
+                        .is_ok()
                     {
-                        let _ = blob
-                            .write_at(size, garbage.to_vec(), WriteOptions::SYNC)
-                            .await;
+                        index_mutations.remove(*section);
                     }
                 }
-                CorruptionType::ExtendGlob { section, garbage } => {
+                CorruptionType::DeleteGlob { section } => {
+                    if context
+                        .remove(VALUE_PARTITION, Some(&section.to_be_bytes()))
+                        .await
+                        .is_ok()
+                    {
+                        modified_value_sections.remove(section);
+                    }
+                }
+                CorruptionType::ExtendIndex { section } => {
+                    if !index_mutations.can_modify(*section) {
+                        continue;
+                    }
+                    if let Ok((blob, size)) =
+                        context.open(INDEX_PARTITION, &section.to_be_bytes()).await
+                        && blob
+                            .write_at(size, INDEX_EXTENSION.to_vec(), WriteOptions::SYNC)
+                            .await
+                            .is_ok()
+                    {
+                        index_mutations.record_extension(*section);
+                    }
+                }
+                CorruptionType::ExtendGlob { section } => {
+                    if modified_value_sections.contains(section) {
+                        continue;
+                    }
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
+                        && blob
+                            .write_at(size, VALUE_EXTENSION.to_vec(), WriteOptions::SYNC)
+                            .await
+                            .is_ok()
                     {
-                        let _ = blob
-                            .write_at(size, garbage.to_vec(), WriteOptions::SYNC)
-                            .await;
+                        modified_value_sections.insert(*section);
                     }
                 }
             }
@@ -318,41 +389,57 @@ fn fuzz(input: FuzzInput) {
                 // Existing-byte overwrites in the paged index can invalidate fixed-journal
                 // integrity checks before oversized recovery has a chance to inspect entries.
                 Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
-                    if index_page_integrity_may_be_invalidated =>
+                    if index_mutations.may_accept_invalid_checksum() =>
                 {
                     return;
                 }
                 Err(err) => panic!("Unexpected recovery failure: {err:?}"),
             };
 
-        // Phase 4: Verify get operations don't panic
-        // Note: Value checksums are verified lazily on read, not during recovery.
-        // So an entry may exist but get_value() may return ChecksumMismatch - this is expected.
-        for section in 1u64..=3 {
-            let mut pos = 0u64;
-            while let Ok(entry) = recovered.get(section, pos).await {
-                // Entry exists, verify get_value doesn't panic (may return error)
-                let (offset, size) = entry.value_location();
-                let _ = recovered.get_value(section, offset, size).await;
-                pos += 1;
-            }
-        }
+        // Phase 4: Every readable value must still belong to the entry that references it. Older
+        // value checksums are lazy and may fail, but a valid retained frame cannot be adopted by a
+        // different entry after truncation and offset reuse.
+        assert_adopted_entries_consistent(&recovered).await;
 
-        // Phase 5: Verify we can append after recovery
+        // Phase 5: Append after recovery, make the new locations durable, and reopen. This turns
+        // stale-index/offset-reuse bugs into a value-identity failure rather than merely proving
+        // that the first append call returned successfully.
+        let mut sentinels = Vec::new();
         for section in 1u64..=3 {
             let value: TestValue = [0xFF; 16];
             let entry = TestEntry::new(u64::MAX);
-            let append_result = recovered.append(section, entry, &value).await;
+            let position;
+            (recovered, position, _, _) = recovered
+                .append(section, entry, &value)
+                .await
+                .unwrap_or_else(|err| panic!("append to section {section} failed: {err:?}"));
+            sentinels.push((section, position));
+        }
+        recovered = recovered.sync_all().await.expect("sentinel sync failed");
+        drop(recovered);
 
-            // Append should succeed (recovery should have left journal in appendable state)
-            assert!(
-                append_result.is_ok(),
-                "Should be able to append to section {section} after recovery"
+        let reopened: Oversized<_, TestEntry, TestValue> =
+            Oversized::init(context.child("reopened"), cfg, None)
+                .await
+                .expect("reopen after sentinel sync failed");
+        assert_adopted_entries_consistent(&reopened).await;
+        for (section, position) in sentinels {
+            let entry = reopened
+                .get(section, position)
+                .await
+                .expect("sentinel index missing");
+            assert_eq!(entry.id, u64::MAX);
+            let (offset, size) = entry.value_location();
+            assert_eq!(
+                reopened
+                    .get_value(section, offset, size)
+                    .await
+                    .expect("sentinel value missing"),
+                [0xFF; 16],
             );
-            (recovered, _, _, _) = append_result.unwrap();
         }
 
-        let _ = recovered.destroy().await;
+        let _ = reopened.destroy().await;
     });
 }
 

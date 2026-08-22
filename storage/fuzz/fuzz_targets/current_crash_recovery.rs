@@ -20,6 +20,7 @@ use commonware_storage::{
     qmdb::current::{VariableConfig, unordered::variable::Db as Current},
     translator::TwoCap,
 };
+use commonware_storage_fuzz::write_config;
 use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -83,8 +84,8 @@ struct FuzzInput {
     write_buffer: usize,
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
-    #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: Probability,
+    #[arbitrary(with = write_config)]
+    write_config: deterministic::WriteConfig,
     operations: Vec<CurrentOperation>,
 }
 
@@ -198,7 +199,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     let log_items_per_blob = input.log_items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let sync_failure_rate = input.sync_failure_rate;
-    let write_failure_rate = input.write_failure_rate;
+    let write_config = input.write_config;
     let operations = input.operations.clone();
     let suffix = format!("{suffix_base}_{}", input.seed);
 
@@ -229,11 +230,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let fault_cfg = ctx.storage_fault_config();
             *fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: write_failure_rate,
-                    retention_rate: Probability!(0.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                }),
+                write_rate: Some(write_config),
                 ..Default::default()
             };
 

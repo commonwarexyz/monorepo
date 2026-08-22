@@ -471,6 +471,16 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.values.get(section, offset, size).await
     }
 
+    /// Iterate over retained index sections.
+    pub(crate) fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.index.sections()
+    }
+
+    /// Return the number of index entries in `section`.
+    pub(crate) fn section_len(&self, section: u64) -> Result<u64, Error> {
+        self.index.section_len(section)
+    }
+
     /// Consumes the journal and returns an owned [Replay] reader over index entries
     /// starting from `start_position` in `start_section`.
     ///
@@ -675,6 +685,16 @@ pub struct Replay<E: Context, I: Record, V: Codec> {
 }
 
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
+    /// Check a referenced value frame without decoding it.
+    pub(crate) async fn verify_value(
+        &self,
+        section: u64,
+        offset: u64,
+        size: u32,
+    ) -> Result<bool, Error> {
+        self.values.verify(section, offset, size).await
+    }
+
     /// Returns the next `(section, position, entry)`, or `None` once every section is
     /// exhausted.
     ///

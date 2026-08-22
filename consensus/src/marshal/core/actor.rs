@@ -393,7 +393,7 @@ where
         // orphan traces.
         (self, application, buffer, resolver) = async move {
             // Get tip and send to application
-            let tip = self.get_latest().await;
+            let tip = self.get_latest(&mut resolver).await;
             if let Some((height, digest, round)) = tip {
                 application.report(Update::Tip(round, height, digest));
                 self.tip = height;
@@ -428,7 +428,9 @@ where
             }
 
             // Attempt to dispatch the next finalized block to the application, if it is ready.
-            self = self.try_dispatch_blocks(&mut application).await;
+            self = self
+                .try_dispatch_blocks(&mut application, &mut resolver)
+                .await;
 
             (self, application, buffer, resolver)
         }
@@ -451,7 +453,9 @@ where
             sync = syncs.next_completed() => {
                 if let PooledSync::Finalized(seq) = sync {
                     self.dispatch_gate.release(seq);
-                    self = self.try_dispatch_blocks(&mut application).await;
+                    self = self
+                        .try_dispatch_blocks(&mut application, &mut resolver)
+                        .await;
                 }
             },
             // Handle waiter completions first
@@ -591,7 +595,7 @@ where
         });
 
         // Refill the application dispatch pipeline.
-        Ok(self.try_dispatch_blocks(application).await)
+        Ok(self.try_dispatch_blocks(application, resolver).await)
     }
 
     /// Handles a single mailbox message from local consensus/application callers.
@@ -634,7 +638,7 @@ where
                         .flatten()
                         .map(|b| (b.height(), digest)),
                     BlockID::Height(height) => self.get_info_by_height(height).await,
-                    BlockID::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
+                    BlockID::Latest => self.get_latest(resolver).await.map(|(h, d, _)| (h, d)),
                 };
                 response.send_lossy(info);
             }
@@ -841,7 +845,7 @@ where
                     response.send_lossy(result);
                 }
                 BlockID::Latest => {
-                    let block = match self.get_latest().await {
+                    let block = match self.get_latest(resolver).await {
                         Some((_, digest, _)) => self.find_block_by_digest(buffer, digest).await,
                         None => None,
                     }
@@ -1330,7 +1334,7 @@ where
             if repaired {
                 self = self.sync_finalized().await;
             }
-            return self.try_dispatch_blocks(application).await;
+            return self.try_dispatch_blocks(application, resolver).await;
         }
 
         let digest = block.digest();
@@ -1394,7 +1398,7 @@ where
         if repaired {
             self = self.sync_finalized().await;
         }
-        self.try_dispatch_blocks(application).await
+        self.try_dispatch_blocks(application, resolver).await
     }
 
     /// Takes cleared acknowledgement commitments covered by the active processed-height floor.
@@ -1850,6 +1854,7 @@ where
     async fn try_dispatch_blocks(
         mut self: Box<Self>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         // Dispatch resumes after the floor anchor is durably stored.
         if self.floor.blocks_progress() {
@@ -1867,7 +1872,13 @@ where
             if barrier.is_some_and(|lowest| next_height >= lowest) {
                 return self;
             }
+            let indexed = self.finalized_blocks.next_gap(next_height).0.is_some();
             let Some(block) = self.get_finalized_block(next_height).await else {
+                if indexed {
+                    self.floor
+                        .fetch_if_permitted(resolver, Request::finalized(next_height))
+                        .ignore();
+                }
                 return self;
             };
             assert_eq!(
@@ -2003,12 +2014,11 @@ where
         }
     }
 
-    /// Check whether a finalization exists in the archive at `height` without
-    /// fetching it.
+    /// Check whether a finalization is readable in the archive at `height`.
     async fn has_finalization_by_height(&self, height: Height) -> bool {
         match self.finalizations_by_height.has(height).await {
             Ok(has) => has,
-            Err(e) => panic!("failed to check finalization: {e}"),
+            Err(err) => panic!("failed to check finalization: {err}"),
         }
     }
 
@@ -2102,6 +2112,42 @@ where
         (self, true)
     }
 
+    /// Get the latest readable finalization and hand every unreadable candidate to the resolver.
+    async fn latest_finalization(
+        &self,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) -> Option<(Height, Finalization<P::Scheme, V::Commitment>)> {
+        let mut missing = Vec::new();
+        let mut latest = None;
+        let mut candidate = self.finalizations_by_height.last_index();
+        for _ in 0..self.max_repair.get() {
+            let Some(height) = candidate else {
+                break;
+            };
+            if let Some(finalization) = self.get_finalization_by_height(height).await {
+                latest = Some((height, finalization));
+                break;
+            }
+            missing.push(Request::finalized(height));
+
+            // Range metadata may remain optimistic after a failed value read. Move below the
+            // attempted height explicitly so this bounded pass never depends on invalidation as
+            // a side effect of `get`.
+            candidate = height.previous().and_then(|before| {
+                self.finalizations_by_height
+                    .ranges_from(Height::zero())
+                    .filter_map(|(start, end)| (start <= before).then_some(end.min(before)))
+                    .max()
+            });
+        }
+        if !missing.is_empty() {
+            self.floor
+                .fetch_all_if_permitted(resolver, missing)
+                .ignore();
+        }
+        latest
+    }
+
     /// Get the latest finalized block information (height and digest tuple).
     ///
     /// Blocks are only finalized directly with a finalization or indirectly via a descendant
@@ -2114,12 +2160,11 @@ where
     /// yet be found in the `finalizations_by_height` archive. While not checked explicitly, we
     /// should have the associated block (in the `finalized_blocks` archive) for the information
     /// returned.
-    async fn get_latest(&self) -> Option<(Height, <V::Block as Digestible>::Digest, Round)> {
-        let height = self.finalizations_by_height.last_index()?;
-        let finalization = self
-            .get_finalization_by_height(height)
-            .await
-            .expect("finalization missing");
+    async fn get_latest(
+        &self,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) -> Option<(Height, <V::Block as Digestible>::Digest, Round)> {
+        let (height, finalization) = self.latest_finalization(resolver).await?;
         Some((
             height,
             V::commitment_to_inner(finalization.proposal.payload),
@@ -2229,17 +2274,9 @@ where
 
         // If finalizations extend beyond the last stored block, anchor the
         // trailing block so the gap repair loop below can walk backward from it.
-        if let Some(last_finalized) = self.finalizations_by_height.last_index() {
-            let have_block = self
-                .finalized_blocks
-                .last_index()
-                .is_some_and(|last| last >= last_finalized);
+        if let Some((last_finalized, finalization)) = self.latest_finalization(resolver).await {
+            let have_block = self.get_finalized_block(last_finalized).await.is_some();
             if last_finalized > self.floor.processed_height() && !have_block {
-                // Get the finalization for the last finalized block.
-                let finalization = self
-                    .get_finalization_by_height(last_finalized)
-                    .await
-                    .expect("finalization missing");
                 let commitment = finalization.proposal.payload;
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     // If found, persist the block.
@@ -2278,7 +2315,10 @@ where
             // blocks from our local storage. The walkback only needs each
             // block's height and parent linkage.
             let Some(cursor) = self.get_finalized_block(gap_end).await else {
-                panic!("gapped block missing that should exist: {gap_end}");
+                self.floor
+                    .fetch_if_permitted(resolver, Request::finalized(gap_end))
+                    .ignore();
+                break 'cache_repair;
             };
             let (mut height, mut parent_digest, mut parent_commitment) = (
                 cursor.height(),
@@ -2382,12 +2422,15 @@ where
                 .max()
         });
         let processed_round = match processed_round {
+            // Section-granular pruning can retain an unreadable indexed value below a durable
+            // floor anchor. Such a candidate contributes no authenticated round; the matching
+            // successor block and finalization below remain authoritative when present.
             Some(finalization_height) => match finalizations_by_height
                 .get(ArchiveID::Index(finalization_height.get()))
                 .await
             {
                 Ok(Some(finalization)) => finalization.round(),
-                Ok(None) => panic!("processed finalization missing from stored range"),
+                Ok(None) => Round::zero(),
                 Err(err) => panic!("failed to get processed finalization: {err}"),
             },
             None => Round::zero(),

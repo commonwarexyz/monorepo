@@ -1,5 +1,8 @@
 //! Mock implementations of runtime primitives for testing.
 
+/// In-memory storage exposed for direct test construction and inspection.
+#[cfg(any(test, feature = "test-utils"))]
+pub use crate::storage::memory::Storage as MemoryStorage;
 use crate::{
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
     ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
@@ -19,6 +22,17 @@ use std::{
     sync::Arc,
     task::Poll,
 };
+
+/// Construct in-memory storage with a shared default storage buffer pool.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn memory_storage() -> MemoryStorage {
+    static POOL: std::sync::OnceLock<BufferPool> = std::sync::OnceLock::new();
+    let pool = POOL.get_or_init(|| {
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry)
+    });
+    MemoryStorage::new(pool.clone())
+}
 
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.

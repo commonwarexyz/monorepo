@@ -14,7 +14,6 @@
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
-    durability::Barrier,
     fixed,
     metrics::Metrics,
     position_to_blob,
@@ -25,6 +24,7 @@ use crate::{
     Context, SyncCompletion,
     journal::{
         Error,
+        durability::Barrier,
         frame::{
             FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame,
             read_frame_at,
@@ -1105,7 +1105,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let valid = writer.recoverable_prefix_len().await?;
+            let valid = writer
+                .recoverable_prefix_len(ReadOptions::default())
+                .await?;
             if valid == writer.size() {
                 continue;
             }
@@ -1604,7 +1606,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data = self.blobs.start_sync().await;
         let (offsets_journal, offsets) = self.offsets.start_data_sync().await;
 
-        let size = self.barrier.size();
+        let size = self.barrier.boundary();
         let (offsets_journal, watermark_handle) =
             offsets_journal.start_watermark_sync(size).await?;
         self.offsets = offsets_journal;
@@ -2586,7 +2588,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::tests::{corrupt_page, run_contiguous_tests};
+    use crate::journal::{contiguous::tests::run_contiguous_tests, utils::corrupt_page};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,

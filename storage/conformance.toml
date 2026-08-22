@@ -4,11 +4,15 @@ hash = "836f71ea345dc8707105fee756c04b1f2edb8a5e54c38b23282b53998244dd12"
 
 ["commonware_storage::archive::conformance::StorageConformance<ArchivePrunableWorkload>"]
 n_cases = 128
-hash = "c42202186ded174cd23871b6728b23a2284f7146c7acdaf1dbff61fa9bd666ea"
+hash = "3ed7dc88c37720eab2c33a44a378512246bdb6b20ff636172a92609204776f71"
 
 ["commonware_storage::archive::immutable::storage::conformance::CodecConformance<Record>"]
 n_cases = 65536
 hash = "892ba87ed9fa60ee60f694f927de60c3ee7fcdddd5a04d330c7511533cc2ca8d"
+
+["commonware_storage::archive::prunable::checkpoint::conformance::CodecConformance<Record>"]
+n_cases = 65536
+hash = "180dafd1dcdcd3efcb2925eabe28e3f667ce1d844f7553b640ce0ee56fde64dd"
 
 ["commonware_storage::archive::prunable::storage::conformance::CodecConformance<Record<U64>>"]
 n_cases = 65536

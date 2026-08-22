@@ -32,6 +32,7 @@ impl StorageWorkload for ArchivePrunableWorkload {
         let config = prunable::Config {
             translator: TwoCap,
             key_partition: format!("archive-prunable-key-{seed}"),
+            metadata_partition: format!("archive-prunable-metadata-{seed}"),
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: format!("archive-prunable-value-{seed}"),
             compression: None,

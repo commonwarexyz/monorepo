@@ -30,8 +30,8 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. `write_retention_rate`
-//! controls the prefix of a failed or unsynchronized write that survives, while
+//! The operation phase runs under write/sync/resize fault injection. `write_config` controls write
+//! failures and whether retained bytes form a prefix or arbitrary subset, while
 //! `partial_resize_rate` can stop a failed truncation at an intermediate length.
 //!
 //! # Positions
@@ -52,6 +52,7 @@ use commonware_storage::journal::{
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
 };
+use commonware_storage_fuzz::write_config;
 use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
@@ -164,12 +165,9 @@ struct FuzzInput {
     /// Write buffer size.
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
-    /// Failure rate for write operations.
-    #[arbitrary(with = bounded_rate)]
-    write_failure_rate: Probability,
-    /// Probability used to retain bytes from a failed or unsynchronized write.
-    #[arbitrary(with = bounded_rate)]
-    write_retention_rate: Probability,
+    /// Failure and byte-retention configuration for write operations.
+    #[arbitrary(with = write_config)]
+    write_config: deterministic::WriteConfig,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
     sync_failure_rate: Probability,
@@ -191,8 +189,7 @@ struct Params {
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
-    write_rate: Probability,
-    write_retention_rate: Probability,
+    write_config: deterministic::WriteConfig,
     sync_rate: Probability,
     resize_rate: Probability,
     partial_resize_rate: Probability,
@@ -202,11 +199,7 @@ impl Params {
     /// The fault config applied during the operation phase of each cycle.
     fn fault_config(&self) -> deterministic::FaultConfig {
         deterministic::FaultConfig {
-            write_rate: Some(deterministic::WriteConfig {
-                failure_rate: self.write_rate,
-                retention_rate: self.write_retention_rate,
-                mode: deterministic::PartialWriteMode::Prefix,
-            }),
+            write_rate: Some(self.write_config),
             sync_rate: Some(self.sync_rate),
             resize_rate: Some(deterministic::ResizeConfig {
                 failure_rate: self.resize_rate,
@@ -828,8 +821,7 @@ where
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
         items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
-        write_rate: input.write_failure_rate,
-        write_retention_rate: input.write_retention_rate,
+        write_config: input.write_config,
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,
