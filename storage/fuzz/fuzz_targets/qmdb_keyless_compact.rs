@@ -489,9 +489,9 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                 Operation::Target => {
                     let target = db.target();
-                    let expected = synced.last().unwrap();
-                    assert_eq!(target.size.as_u64(), expected.size);
-                    assert_eq!(target.root, expected.root);
+                    assert!(sync::Target::try_from(&target).is_ok());
+                    assert_eq!(target.size, db.size());
+                    assert_eq!(target.root, db.root());
                 }
 
                 Operation::ToBatch => {
