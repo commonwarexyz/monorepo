@@ -133,7 +133,6 @@
 use super::{
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
-    durability::Barrier,
 };
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
@@ -142,6 +141,7 @@ use crate::{
     journal::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
+        durability::Barrier,
     },
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
@@ -852,7 +852,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         mut self: Box<Self>,
         size: u64,
     ) -> Result<(Box<Self>, Handle<()>), Error> {
-        let size = size.min(self.barrier.size());
+        let size = size.min(self.barrier.boundary());
         let (checkpoint, handle) = self.checkpoint.start_watermark_sync(size).await?;
         self.checkpoint = checkpoint;
         Ok((self, handle))
@@ -862,7 +862,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn start_sync(self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
         let (mut journal, data) = self.start_data_sync().await;
-        let size = journal.barrier.size();
+        let size = journal.barrier.boundary();
         let (journal, watermark) = journal.start_watermark_sync(size).await?;
         let handle = Handle::from_future(async move {
             data.await?;

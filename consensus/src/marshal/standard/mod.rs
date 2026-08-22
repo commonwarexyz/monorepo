@@ -93,7 +93,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _,
+        buffer::paged::CacheRef,
         deterministic::{self, PartialWriteMode, WriteConfig},
         mocks::{DelayedSyncContext, PendingSyncs},
     };
@@ -549,6 +550,7 @@ mod tests {
                 prunable::Config {
                     translator: TwoCap,
                     key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
+                    metadata_partition: format!("{cache_prefix}-cache-{epoch}-notarized-metadata"),
                     key_page_cache: page_cache,
                     value_partition: format!("{cache_prefix}-cache-{epoch}-notarized-value"),
                     items_per_section: NonZeroU64::new(10).unwrap(),
@@ -6847,6 +6849,7 @@ mod tests {
                 prunable::Config {
                     translator: EightCap,
                     key_partition: format!("{partition_prefix}-fbh-key"),
+                    metadata_partition: format!("{partition_prefix}-fbh-metadata"),
                     key_page_cache: page_cache.clone(),
                     value_partition: format!("{partition_prefix}-fbh-value"),
                     compression: None,
@@ -6864,6 +6867,7 @@ mod tests {
                 prunable::Config {
                     translator: EightCap,
                     key_partition: format!("{partition_prefix}-fb-key"),
+                    metadata_partition: format!("{partition_prefix}-fb-metadata"),
                     key_page_cache: page_cache,
                     value_partition: format!("{partition_prefix}-fb-value"),
                     compression: None,
@@ -7300,10 +7304,7 @@ mod tests {
 
         async fn get(
             &self,
-            id: commonware_storage::archive::Identifier<
-                '_,
-                <Self::Block as Digestible>::Digest,
-            >,
+            id: commonware_storage::archive::Identifier<'_, <Self::Block as Digestible>::Digest>,
         ) -> Result<Option<Self::Block>, Self::Error> {
             match id {
                 commonware_storage::archive::Identifier::Index(index)
@@ -7311,9 +7312,7 @@ mod tests {
                 {
                     Ok(None)
                 }
-                commonware_storage::archive::Identifier::Key(digest)
-                    if digest == &self.digest =>
-                {
+                commonware_storage::archive::Identifier::Key(digest) if digest == &self.digest => {
                     Ok(None)
                 }
                 id => self.inner.get(id).await,
@@ -7381,6 +7380,7 @@ mod tests {
             prunable::Config {
                 translator: EightCap,
                 key_partition: format!("{partition_prefix}-fbh-key"),
+                metadata_partition: format!("{partition_prefix}-fbh-metadata"),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{partition_prefix}-fbh-value"),
                 compression: None,
@@ -7398,6 +7398,7 @@ mod tests {
             prunable::Config {
                 translator: EightCap,
                 key_partition: format!("{partition_prefix}-fb-key"),
+                metadata_partition: format!("{partition_prefix}-fb-metadata"),
                 key_page_cache: page_cache,
                 value_partition: format!("{partition_prefix}-fb-value"),
                 compression: None,
@@ -7533,7 +7534,9 @@ mod tests {
             blocks = store::Blocks::put(blocks, block_2.clone()).await.unwrap();
 
             let (finalizations, finalizations_sync) =
-                store::Certificates::start_sync(finalizations).await.unwrap();
+                store::Certificates::start_sync(finalizations)
+                    .await
+                    .unwrap();
             let (blocks, blocks_sync) = store::Blocks::start_sync(blocks).await.unwrap();
             assert_eq!(
                 pending.lock().len(),
@@ -7545,24 +7548,31 @@ mod tests {
             drop(finalizations);
             drop(blocks);
 
-            (
-                schemes,
-                block_1,
-                block_2,
-                finalization_1,
-                finalization_2,
-            )
+            (schemes, block_1, block_2, finalization_1, finalization_2)
         });
 
-        let (fixture, checkpoint) = deterministic::Runner::from(checkpoint)
-            .start_and_recover(|context| async move {
+        let (fixture, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let (finalizations, blocks) =
                     prunable_finalized_stores(&context, PREFIX, NZUsize!(1024)).await;
                 let (schemes, block_1, block_2, finalization_1, finalization_2) = fixture;
 
-                assert_eq!(finalizations.ranges().collect::<Vec<_>>(), vec![(1, 2)]);
-                assert_eq!(blocks.ranges().collect::<Vec<_>>(), vec![(1, 2)]);
+                // The public Archive view is exact: height 1 is absent because both value frames
+                // failed startup validation. Marshal's indexed view retains that physical
+                // occurrence so recovery can assign it to the resolver before a replacement is
+                // stored.
+                assert_eq!(finalizations.ranges().collect::<Vec<_>>(), vec![(2, 2)]);
+                assert_eq!(blocks.ranges().collect::<Vec<_>>(), vec![(2, 2)]);
+                assert_eq!(
+                    store::Certificates::ranges_from(&finalizations, Height::zero())
+                        .collect::<Vec<_>>(),
+                    vec![(Height::new(1), Height::new(2))]
+                );
+                assert_eq!(
+                    store::Blocks::next_gap(&blocks, Height::new(1)),
+                    (Some(Height::new(2)), None)
+                );
                 assert_eq!(
                     store::Certificates::get(
                         &finalizations,
@@ -7575,14 +7585,11 @@ mod tests {
                     finalization_2.proposal,
                 );
                 assert_eq!(
-                    store::Blocks::get(
-                        &blocks,
-                        commonware_storage::archive::Identifier::Index(2),
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .digest(),
+                    store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(2),)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .digest(),
                     block_2.digest(),
                 );
                 assert_eq!(
@@ -7596,12 +7603,9 @@ mod tests {
                     "the certificate value must be unreadable before the delivery repairs it"
                 );
                 assert_eq!(
-                    store::Blocks::get(
-                        &blocks,
-                        commonware_storage::archive::Identifier::Index(1),
-                    )
-                    .await
-                    .unwrap(),
+                    store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(1),)
+                        .await
+                        .unwrap(),
                     None,
                     "the block value must be unreadable before the delivery repairs it"
                 );
@@ -7637,10 +7641,8 @@ mod tests {
                         })
                         .accepted()
                 );
-                let actor_handle = actor.start_unbuffered(
-                    application.clone(),
-                    (resolver_rx, resolver.clone()),
-                );
+                let actor_handle =
+                    actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
 
                 assert!(
                     response_rx.await.expect("delivery response missing"),
@@ -7659,12 +7661,7 @@ mod tests {
 
                 actor_handle.abort();
                 drop(mailbox);
-                (
-                    block_1,
-                    block_2,
-                    finalization_1,
-                    finalization_2,
-                )
+                (block_1, block_2, finalization_1, finalization_2)
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
@@ -7692,13 +7689,11 @@ mod tests {
                 .is_some()
             );
 
-            let recovered_block = store::Blocks::get(
-                &blocks,
-                commonware_storage::archive::Identifier::Index(1),
-            )
-            .await
-            .unwrap()
-            .expect("height-1 block repair was not durable");
+            let recovered_block =
+                store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(1))
+                    .await
+                    .unwrap()
+                    .expect("height-1 block repair was not durable");
             assert_eq!(recovered_block.digest(), block_1_digest);
             assert_eq!(
                 store::Blocks::get(
@@ -7724,16 +7719,166 @@ mod tests {
                 finalization_2.proposal,
             );
             assert_eq!(
-                store::Blocks::get(
-                    &blocks,
-                    commonware_storage::archive::Identifier::Index(2),
-                )
-                .await
-                .unwrap()
-                .unwrap()
-                .digest(),
+                store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(2),)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .digest(),
                 block_2.digest(),
             );
+        });
+    }
+
+    /// Eager Archive validation removes a torn value from the readable range view, but Marshal
+    /// must retain the corresponding index-journal occurrence long enough to give it a resolver
+    /// owner. This is load-bearing for an unreadable tail: there is no readable descendant whose
+    /// gap can rediscover the missing height.
+    ///
+    /// ```text
+    /// readable: [height 1] [        ]
+    /// indexed:  [height 1] [height 2]
+    ///                              \----> resolver fetch(2)
+    /// ```
+    #[test_traced("WARN")]
+    fn test_standard_recovery_requests_terminal_unreadable_indexed_pair() {
+        const PREFIX: &str = "terminal-unreadable-indexed-pair";
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block_1 = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_2 = make_raw_block(block_1.digest(), Height::new(2), 200);
+            let finalization_1 = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    block_1.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let finalization_2 = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(2)),
+                    View::new(1),
+                    block_2.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            seed_processed_height(context.child("metadata"), PREFIX, Height::new(1)).await;
+
+            let fault_config = context.storage_fault_config();
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let (mut finalizations, mut blocks) =
+                prunable_finalized_stores(&context, PREFIX, NZUsize!(1)).await;
+
+            // Values are issued under the fault policy active at append time. Tear height 2, then
+            // append a fully retained height 1 so the bad frame is interior rather than recoverable
+            // tail debris. Finally retain the buffered index pages for both logical heights.
+            *fault_config.write() = deterministic::FaultConfig {
+                write_rate: Some(WriteConfig {
+                    failure_rate: Probability!(0.0),
+                    retention_rate: Probability!(0.9),
+                    mode: PartialWriteMode::Subset,
+                }),
+                ..Default::default()
+            };
+            finalizations = store::Certificates::put(
+                finalizations,
+                Height::new(2),
+                block_2.digest(),
+                finalization_2,
+            )
+            .await
+            .unwrap();
+            blocks = store::Blocks::put(blocks, block_2).await.unwrap();
+
+            *fault_config.write() = deterministic::FaultConfig {
+                write_rate: Some(WriteConfig {
+                    failure_rate: Probability!(0.0),
+                    retention_rate: Probability!(1.0),
+                    mode: PartialWriteMode::Subset,
+                }),
+                ..Default::default()
+            };
+            finalizations = store::Certificates::put(
+                finalizations,
+                Height::new(1),
+                block_1.digest(),
+                finalization_1,
+            )
+            .await
+            .unwrap();
+            blocks = store::Blocks::put(blocks, block_1).await.unwrap();
+
+            let (finalizations, finalizations_sync) =
+                store::Certificates::start_sync(finalizations)
+                    .await
+                    .unwrap();
+            let (blocks, blocks_sync) = store::Blocks::start_sync(blocks).await.unwrap();
+            assert_eq!(pending.lock().len(), 4);
+            drop(finalizations_sync);
+            drop(blocks_sync);
+            drop(finalizations);
+            drop(blocks);
+
+            schemes
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let (finalizations, blocks) =
+                prunable_finalized_stores(&context, PREFIX, NZUsize!(1024)).await;
+            let schemes = fixture;
+
+            assert_eq!(finalizations.ranges().collect::<Vec<_>>(), vec![(1, 1)]);
+            assert_eq!(blocks.ranges().collect::<Vec<_>>(), vec![(1, 1)]);
+            assert_eq!(
+                store::Certificates::ranges_from(&finalizations, Height::zero())
+                    .collect::<Vec<_>>(),
+                vec![(Height::new(1), Height::new(2))]
+            );
+            assert_eq!(
+                store::Blocks::next_gap(&blocks, Height::new(2)),
+                (Some(Height::new(2)), None)
+            );
+
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let config = prunable_actor_config(&context, PREFIX, provider);
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                finalizations,
+                blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let actor_handle = actor
+                .start_unbuffered(Application::<B>::default(), (resolver_rx, resolver.clone()));
+
+            let _ = mailbox.get_processed_height().await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "terminal unreadable pair fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            &fetch.key,
+                            handler::Key::Finalized { height } if *height == Height::new(2)
+                        )
+                    })
+                },
+            )
+            .await;
+            actor_handle.abort();
         });
     }
 
@@ -7812,10 +7957,8 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let actor_handle = actor.start_unbuffered(
-                Application::<B>::default(),
-                (resolver_rx, resolver),
-            );
+            let actor_handle =
+                actor.start_unbuffered(Application::<B>::default(), (resolver_rx, resolver));
 
             let latest: B = mailbox
                 .get_block(Identifier::Latest)
@@ -7979,10 +8122,8 @@ mod tests {
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let resolver_observer = resolver.clone();
-            let actor_handle = actor.start_unbuffered(
-                Application::<B>::default(),
-                (resolver_rx, resolver),
-            );
+            let actor_handle =
+                actor.start_unbuffered(Application::<B>::default(), (resolver_rx, resolver));
 
             let _ = mailbox.get_processed_height().await;
             assert_eq!(
@@ -8059,10 +8200,8 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let actor_handle = actor.start_unbuffered(
-                Application::<B>::default(),
-                (resolver_rx, resolver.clone()),
-            );
+            let actor_handle = actor
+                .start_unbuffered(Application::<B>::default(), (resolver_rx, resolver.clone()));
 
             wait_until(
                 &context,
@@ -8084,7 +8223,10 @@ mod tests {
             )
             .await;
             assert!(
-                mailbox.get_block(Identifier::Height(Height::zero())).await.is_some(),
+                mailbox
+                    .get_block(Identifier::Height(Height::zero()))
+                    .await
+                    .is_some(),
                 "marshal must remain live after discovering the unreadable endpoint"
             );
             actor_handle.abort();

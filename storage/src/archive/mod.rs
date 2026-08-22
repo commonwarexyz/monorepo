@@ -58,9 +58,8 @@ pub trait Archive: Send + Sized {
     /// Store an item in [Archive].
     ///
     /// Indices are unique: if the index already stores a readable value, put does nothing and
-    /// returns. Duplicate indices can be stored via [MultiArchive::put_multi]. An implementation
-    /// that validates values lazily must validate an occupied index before ignoring the put and
-    /// make the new value readable when every existing occurrence fails integrity validation.
+    /// returns. If every existing occurrence is unreadable, the put stores a replacement.
+    /// Duplicate readable values can be stored via [MultiArchive::put_multi].
     /// Keys need not be unique: the same key may be stored at multiple indices, and a subsequent
     /// [Archive::get] or [Archive::has] call with an [Identifier::Key] identifier may return any
     /// associated readable value.
@@ -117,34 +116,30 @@ pub trait Archive: Send + Sized {
     /// Retrieve the end of the current range including `index` (inclusive) and
     /// the start of the next range after `index` (if it exists).
     ///
-    /// This is useful for driving backfill operations over the archive. Lazily validated
-    /// implementations include indexed values that have not yet been read and omit values already
-    /// proven unreadable.
+    /// This is useful for driving backfill operations over the archive. Only indices with at
+    /// least one readable value are included.
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>);
 
     /// Returns up to `max` missing items starting from `start`.
     ///
-    /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `max` items are found or there are no more gaps to fill. It uses the same
-    /// lazily validated range view as [Archive::next_gap].
+    /// This method iterates through gaps between existing readable ranges, collecting missing
+    /// indices until either `max` items are found or there are no more gaps to fill.
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64>;
 
     /// Retrieve an iterator over all indexed ranges (inclusive) within the [Archive].
     ///
-    /// Lazily validated implementations include values that have not yet been read and omit values
-    /// already proven unreadable.
+    /// Only indices with at least one readable value are included.
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)>;
 
     /// Retrieve indexed ranges that overlap or follow `from`.
     ///
-    /// Lazily validated implementations include values that have not yet been read and omit values
-    /// already proven unreadable.
+    /// Only indices with at least one readable value are included.
     fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)>;
 
-    /// Retrieve the first index in the same lazily validated view as [Archive::ranges].
+    /// Retrieve the first index in the same readable view as [Archive::ranges].
     fn first_index(&self) -> Option<u64>;
 
-    /// Retrieve the last index in the same lazily validated view as [Archive::ranges].
+    /// Retrieve the last index in the same readable view as [Archive::ranges].
     fn last_index(&self) -> Option<u64>;
 
     /// Sync all pending writes.
@@ -264,6 +259,7 @@ mod tests {
         let cfg = prunable::Config {
             translator: TwoCap,
             key_partition: "test-key".into(),
+            metadata_partition: "test-prunable-metadata".into(),
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             compression,

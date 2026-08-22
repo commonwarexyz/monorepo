@@ -31,7 +31,7 @@
 //! # Uniqueness
 //!
 //! Indices are unique for [Archive], and writing to an index with a readable value is a no-op. If
-//! every indexed occurrence fails lazy integrity validation, a put can append a replacement.
+//! every indexed occurrence fails startup integrity validation, a put can append a replacement.
 //! Duplicate readable values can be stored via [`crate::archive::MultiArchive::put_multi`].
 //!
 //! Keys may be stored at multiple indices with either put variant. A lookup by
@@ -73,8 +73,7 @@
 //! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
 //! index item is `8 + 8` (where `8` is the index and `8` is the position in the index journal).
 //! Each translated-key bucket tracks one `u64` candidate per distinct index, plus map and collision
-//! chain overhead. Lazy validation adds state only for indices that have been read, appended during
-//! the current process, or found to contain an invalid value occurrence.
+//! chain overhead. Invalid value occurrences are tracked by their per-section journal position.
 //!
 //! ### MultiArchive Overhead
 //!
@@ -114,14 +113,18 @@
 //! uses a page cache for caching, so hot entries are served from memory. Values are read directly
 //! from disk without caching to avoid polluting the page cache with large values.
 //!
-//! Startup replays only index entries. Until a value is read, synchronous range, gap, and endpoint
-//! queries optimistically describe retained index entries whose values may prove unreadable. The
-//! asynchronous `get`, `get_all`, `has`, and `has_at` queries validate value checksums and treat an
-//! invalid occurrence as absent. Once all occurrences at an index have failed validation,
-//! subsequent metadata queries expose that index as missing. A normal `put` validates an occupied
-//! index before treating it as a duplicate, then remembers successful validation for the lifetime
-//! of the handle. One retransmission can therefore append a readable replacement without changing
-//! the on-disk format or scanning every value during startup.
+//! Startup replays index entries and CRC-validates any value suffix not covered by a durable
+//! per-section checkpoint. The checkpoint also records interior invalid positions, so every public
+//! query observes the same exact readable set immediately after initialization. The first start of
+//! an existing archive validates all retained values; later starts skip validated prefixes and scan
+//! only values appended since the last published durability boundary. A normal `put` can append a
+//! replacement when every existing occurrence at its index is invalid. The index and value journal
+//! formats are unchanged.
+//!
+//! Recovery code that must repair indexed but unreadable values can use [Archive]'s `indexed_*`
+//! methods. Those methods describe retained index-journal occurrences and may therefore include a
+//! candidate whose value failed startup validation; callers must read each candidate before relying
+//! on it.
 //!
 //! # Compression
 //!
@@ -155,6 +158,7 @@
 //!     let cfg = Config {
 //!         translator: FourCap,
 //!         key_partition: "demo-index".into(),
+//!         metadata_partition: "demo-metadata".into(),
 //!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
 //!         compression: Some(3),
@@ -178,6 +182,7 @@ use crate::translator::Translator;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+mod checkpoint;
 mod storage;
 pub use storage::Archive;
 
@@ -192,6 +197,18 @@ pub struct Config<T: Translator, C> {
 
     /// The partition to use for the key journal (stores index+key metadata).
     pub key_partition: String,
+
+    /// The partition to use for durable value-validation checkpoints.
+    ///
+    /// This partition must be dedicated to one archive and distinct from `key_partition` and
+    /// `value_partition`. Existing archives can use a new empty partition. The first initialization
+    /// validates the retained values and populates it without changing either journal's format.
+    ///
+    /// Once populated, an older writer that does not maintain this partition must not mutate the
+    /// archive. Before reopening with such an older writer, remove this partition while the archive
+    /// is closed; a later checkpoint-aware initialization will safely validate all retained values
+    /// again.
+    pub metadata_partition: String,
 
     /// The page cache to use for the key journal.
     pub key_page_cache: CacheRef,
@@ -231,8 +248,8 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
-        deterministic,
+        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Storage as _,
+        Supervisor as _, deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
             release_next_pending_syncs, release_pending_syncs,
@@ -243,6 +260,7 @@ mod tests {
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
+        hash::BuildHasher,
         num::{NonZeroU16, NonZeroU64},
         sync::{
             Arc,
@@ -258,6 +276,28 @@ mod tests {
         FixedBytes::decode(buf.as_ref()).unwrap()
     }
 
+    #[derive(Clone)]
+    struct CountingFourCap {
+        transforms: Arc<AtomicUsize>,
+    }
+
+    impl BuildHasher for CountingFourCap {
+        type Hasher = <FourCap as BuildHasher>::Hasher;
+
+        fn build_hasher(&self) -> Self::Hasher {
+            FourCap.build_hasher()
+        }
+    }
+
+    impl Translator for CountingFourCap {
+        type Key = <FourCap as Translator>::Key;
+
+        fn transform(&self, key: &[u8]) -> Self::Key {
+            self.transforms.fetch_add(1, Ordering::Relaxed);
+            FourCap.transform(key)
+        }
+    }
+
     const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
@@ -271,6 +311,7 @@ mod tests {
         Config {
             translator: FourCap,
             key_partition: "test-index".into(),
+            metadata_partition: "test-metadata".into(),
             key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             codec_config: (),
@@ -286,6 +327,7 @@ mod tests {
         Config {
             translator: FourCap,
             key_partition: "subset-index".into(),
+            metadata_partition: "subset-metadata".into(),
             key_page_cache: CacheRef::from_pooler(context, NZU16!(24), NZUsize!(4)),
             value_partition: "subset-value".into(),
             codec_config: (),
@@ -300,6 +342,15 @@ mod tests {
     /// Create a supported subset-write crash whose index journal retains two entries while the
     /// first value frame is missing one byte and the second remains readable.
     fn subset_crash_checkpoint() -> deterministic::Checkpoint {
+        subset_crash_checkpoint_inner(false)
+    }
+
+    /// Create the same physical crash shape with both entries at one logical index.
+    fn subset_multi_crash_checkpoint() -> deterministic::Checkpoint {
+        subset_crash_checkpoint_inner(true)
+    }
+
+    fn subset_crash_checkpoint_inner(same_index: bool) -> deterministic::Checkpoint {
         const SEED: u64 = 148;
 
         let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(SEED));
@@ -316,21 +367,22 @@ mod tests {
                     .await
                     .unwrap();
 
-            archive = archive
-                .put(1, FixedBytes::new(*b"old!"), 10)
-                .await
-                .unwrap();
-            archive = archive
-                .put(2, FixedBytes::new(*b"tail"), 20)
-                .await
-                .unwrap();
+            archive = archive.put(1, FixedBytes::new(*b"old!"), 10).await.unwrap();
+            archive = if same_index {
+                archive
+                    .put_multi(1, FixedBytes::new(*b"tail"), 20)
+                    .await
+                    .unwrap()
+            } else {
+                archive.put(2, FixedBytes::new(*b"tail"), 20).await.unwrap()
+            };
 
             // Flush both journals, but hold their durability barriers open. With this seed,
             // subset retention keeps both fixed-index pages and the second value frame while
             // omitting a byte from the first value frame:
             //
-            // index:  [1 -> value 0, valid] [2 -> value 8, valid]
-            // values: [value 1, bad CRC]    [value 2, valid CRC]
+            // index:  [entry 0 -> value 0] [entry 1 -> value 8]
+            // values: [value 0, bad CRC]   [value 1, valid CRC]
             //
             // The high retention rate makes the cut surgical; recovery assertions own the exact
             // retained shape and fail if the deterministic runtime sequence moves.
@@ -500,7 +552,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_duplicate_put_reuses_recovered_positive_validation() {
+    fn test_duplicate_put_uses_startup_validation_without_read() {
         let runner = deterministic::Runner::default();
         let (_, checkpoint) = runner.start_and_recover(|context| async move {
             let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
@@ -521,20 +573,13 @@ mod tests {
                 .expect("Failed to reopen archive");
 
             recordings.clear();
-            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
-            assert!(
-                !recordings.snapshot().reads.is_empty(),
-                "the first recovered lookup must validate the value"
-            );
-
-            recordings.clear();
             let archive = archive
                 .put(1, test_key("duplicate"), 99)
                 .await
                 .expect("Duplicate put should be a no-op");
             assert!(
                 recordings.snapshot().reads.is_empty(),
-                "a successful recovered read must be reused by later duplicate puts"
+                "startup validation must make duplicate suppression independent of a first read"
             );
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
         });
@@ -1042,22 +1087,20 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_put_repairs_unvalidated_crash_debris() {
+    fn test_put_repairs_startup_quarantined_crash_debris() {
         let checkpoint = subset_crash_checkpoint();
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let cfg = subset_crash_config(&context);
                 let key = FixedBytes::new(*b"old!");
-                let archive = Archive::<_, _, FixedBytes<4>, i32>::init(
-                    context.child("archive"),
-                    cfg,
-                )
-                .await
-                .expect("index-only recovery must leave the value unvalidated");
+                let archive =
+                    Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
+                        .await
+                        .expect("startup must quarantine the invalid value");
 
-                // A retransmission can be the first operation after restart. It must validate the
-                // optimistic occupied index and append a replacement in one call:
+                // A retransmission can be the first operation after restart. Startup has already
+                // classified the occupied index, so the put appends a replacement in one call:
                 //
                 // recovered: [index 1 -> bad value CRC]
                 // put(1):    [bad occurrence, readable replacement]
@@ -1122,7 +1165,10 @@ mod tests {
 
                 archive = archive.put(1, old_key.clone(), 99).await.unwrap();
                 assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(99));
-                assert_eq!(archive.get(Identifier::Key(&old_key)).await.unwrap(), Some(99));
+                assert_eq!(
+                    archive.get(Identifier::Key(&old_key)).await.unwrap(),
+                    Some(99)
+                );
                 assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![99]));
                 assert!(archive.has(Identifier::Index(1)).await.unwrap());
                 assert!(archive.has_at(1, &old_key).await.unwrap());
@@ -1141,9 +1187,303 @@ mod tests {
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(99));
             assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![99]));
             assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
-            assert_eq!(archive.get(Identifier::Key(&old_key)).await.unwrap(), Some(99));
+            assert_eq!(
+                archive.get(Identifier::Key(&old_key)).await.unwrap(),
+                Some(99)
+            );
             assert!(archive.has_at(1, &old_key).await.unwrap());
             assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(1, 2)]);
+        });
+    }
+
+    #[test_traced]
+    fn test_multi_archive_keeps_readable_occurrence_after_interior_value_tear() {
+        let checkpoint = subset_multi_crash_checkpoint();
+        let (_, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let cfg = subset_crash_config(&context);
+                let old_key = FixedBytes::new(*b"old!");
+                let tail_key = FixedBytes::new(*b"tail");
+                let mut archive =
+                    Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
+                        .await
+                        .unwrap();
+
+                // Both physical occurrences belong to logical index 1. The first value is torn,
+                // but the second remains authoritative:
+                //
+                // positions: [0 -> bad CRC] [1 -> value 20]
+                // get_all:   [              ] [20]
+                // ranges:    [(1, 1)]
+                assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(1, 1)]);
+                assert_eq!(archive.first_index(), Some(1));
+                assert_eq!(archive.last_index(), Some(1));
+                assert_eq!(archive.next_gap(1), (Some(1), None));
+                assert_eq!(archive.missing_items(1, 1), Vec::<u64>::new());
+                assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
+                assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![20]));
+                assert!(archive.has(Identifier::Index(1)).await.unwrap());
+                assert!(!archive.has(Identifier::Key(&old_key)).await.unwrap());
+                assert!(!archive.has_at(1, &old_key).await.unwrap());
+                assert_eq!(
+                    archive.get(Identifier::Key(&tail_key)).await.unwrap(),
+                    Some(20)
+                );
+                assert!(archive.has_at(1, &tail_key).await.unwrap());
+
+                // A normal put remains a no-op because the logical index has one readable value.
+                archive = archive.put(1, old_key.clone(), 99).await.unwrap();
+                assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![20]));
+                assert!(!archive.has_at(1, &old_key).await.unwrap());
+
+                archive = archive.put_multi(1, old_key.clone(), 99).await.unwrap();
+                assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![20, 99]));
+                assert!(archive.has_at(1, &old_key).await.unwrap());
+                archive.sync().await.unwrap();
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let cfg = subset_crash_config(&context);
+            let archive = Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
+            assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![20, 99]));
+            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(1, 1)]);
+        });
+    }
+
+    #[test_traced]
+    fn test_validation_checkpoint_skips_previously_validated_values() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(4));
+            cfg.key_partition = "checkpoint-skip-index".into();
+            cfg.metadata_partition = "checkpoint-skip-metadata".into();
+            cfg.value_partition = "checkpoint-skip-values".into();
+
+            let mut archive = Archive::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            archive = archive.put(0, test_key("zero"), 10).await.unwrap();
+            archive = archive.put(1, test_key("one"), 20).await.unwrap();
+            archive = archive.sync().await.unwrap();
+            drop(archive);
+
+            // Simulate an archive created before validation checkpoints existed. The first open
+            // scans every retained value and writes the additive sidecar:
+            //
+            // first open:  [value 0] [value 1] -> validate 2
+            // second open: [checkpoint covers both] -> validate 0
+            context.remove(&cfg.metadata_partition, None).await.unwrap();
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("first_open"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 2);
+            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 1)]);
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_open"), cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
+        });
+    }
+
+    #[test_traced]
+    fn test_validation_checkpoint_is_bound_to_its_archive() {
+        let checkpoint = subset_crash_checkpoint();
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+            // Populate the shared checkpoint with the source archive's classification:
+            //
+            // source index:  [1 -> bad CRC] [2 -> readable]
+            // source marker: [position 0 invalid, validated through position 2]
+            let source_cfg = subset_crash_config(&context);
+            let source = Archive::<_, _, FixedBytes<4>, i32>::init(
+                context.child("source"),
+                source_cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(source.ranges().collect::<Vec<_>>(), vec![(2, 2)]);
+            drop(source);
+
+            // Seed another archive with the same section shape but two readable values. Its own
+            // temporary checkpoint keeps the foreign data independent until both journals are
+            // durable.
+            let mut foreign_cfg = source_cfg;
+            foreign_cfg.key_partition = "foreign-index".into();
+            foreign_cfg.metadata_partition = "foreign-temporary-metadata".into();
+            foreign_cfg.value_partition = "foreign-values".into();
+            let mut foreign = Archive::<_, _, FixedBytes<4>, i32>::init(
+                context.child("foreign_seed"),
+                foreign_cfg.clone(),
+            )
+            .await
+            .unwrap();
+            foreign = foreign.put(1, FixedBytes::new(*b"one!"), 10).await.unwrap();
+            foreign = foreign.put(2, FixedBytes::new(*b"two!"), 20).await.unwrap();
+            foreign.sync().await.unwrap();
+
+            // Reusing the source metadata partition must not import its position-0 failure. A
+            // binding mismatch discards the derived checkpoint and validates both foreign values.
+            foreign_cfg.metadata_partition = "subset-metadata".into();
+            let foreign = Archive::<_, _, FixedBytes<4>, i32>::init(
+                context.child("foreign_reopen"),
+                foreign_cfg,
+            )
+            .await
+            .unwrap();
+            assert_eq!(foreign.values_validated_on_init(), 2);
+            assert_eq!(foreign.ranges().collect::<Vec<_>>(), vec![(1, 2)]);
+            assert_eq!(foreign.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(foreign.get(Identifier::Index(2)).await.unwrap(), Some(20));
+        });
+    }
+
+    #[test_traced]
+    fn test_validation_checkpoint_partition_must_be_dedicated() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut key_collision = test_config(&context, NZU64!(4));
+            key_collision.metadata_partition = key_collision.key_partition.clone();
+            let err = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("key_collision"),
+                key_collision,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                err,
+                Error::Journal(JournalError::InvalidConfiguration(_))
+            ));
+
+            let mut value_collision = test_config(&context, NZU64!(4));
+            value_collision.metadata_partition = value_collision.value_partition.clone();
+            let err = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("value_collision"),
+                value_collision,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                err,
+                Error::Journal(JournalError::InvalidConfiguration(_))
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_lazily_publishes_previous_durable_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(4));
+            cfg.key_partition = "checkpoint-lag-index".into();
+            cfg.metadata_partition = "checkpoint-lag-metadata".into();
+            cfg.value_partition = "checkpoint-lag-values".into();
+
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let archive = Archive::init(delayed.child("archive"), cfg.clone())
+                .await
+                .unwrap();
+
+            // The first call has no prior durability proof, so it starts only the index and value
+            // syncs. The second call starts those syncs for the larger prefix and concurrently
+            // publishes the boundary completed by the first call:
+            //
+            // call 1: data [0, 1) durable, marker absent
+            // call 2: data [0, 2) pending, marker [0, 1) pending
+            let (archive, first) = archive
+                .put_start_sync(0, test_key("zero"), 10)
+                .await
+                .unwrap();
+            assert_eq!(pending.lock().len(), 2);
+            release_pending_syncs(&pending);
+            first.await.unwrap();
+
+            let archive = archive.put(1, test_key("one"), 20).await.unwrap();
+            let (archive, second) = archive.start_sync().await.unwrap();
+            assert_eq!(pending.lock().len(), 3);
+            release_pending_syncs(&pending);
+            second.await.unwrap();
+            drop(archive);
+
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("first_reopen"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 1);
+            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 1)]);
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_clears_checkpoint_before_section_reuse() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(2));
+            cfg.key_partition = "checkpoint-reuse-index".into();
+            cfg.metadata_partition = "checkpoint-reuse-metadata".into();
+            cfg.value_partition = "checkpoint-reuse-values".into();
+
+            let archive = Archive::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            let archive = archive.put_sync(0, test_key("old"), 10).await.unwrap();
+            let archive = archive.prune(2).await.unwrap();
+            drop(archive);
+
+            // Reinitialization resets the in-memory prune floor, so section 0 can be created again
+            // if the application does not reapply its durable floor. Make the replacement bytes
+            // durable without a second sync call that could publish their new checkpoint:
+            //
+            // old section 0: [position 0 -> 10] --prune--> absent
+            // new section 0: [position 0 -> 20] --sync data only--> validate on reopen
+            //
+            // A stale marker from the old incarnation would incorrectly skip that validation.
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let archive = Archive::init(delayed.child("reuse"), cfg.clone())
+                .await
+                .unwrap();
+            let archive = archive.put(0, test_key("new"), 20).await.unwrap();
+            let (archive, handle) = archive.start_sync().await.unwrap();
+            assert_eq!(pending.lock().len(), 2);
+            release_pending_syncs(&pending);
+            handle.await.unwrap();
+            drop(archive);
+
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 1);
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(20));
         });
     }
 
@@ -1226,11 +1566,7 @@ mod tests {
             archive = archive.put_multi(7, key_a.clone(), 10).await.unwrap();
             archive = archive.put_multi(8, key_a.clone(), 20).await.unwrap();
             archive = archive.put_multi(7, key_b.clone(), 30).await.unwrap();
-            let by_key_a = archive
-                .get(Identifier::Key(&key_a))
-                .await
-                .unwrap()
-                .unwrap();
+            let by_key_a = archive.get(Identifier::Key(&key_a)).await.unwrap().unwrap();
             assert!([10, 20].contains(&by_key_a));
             assert_eq!(
                 archive.get(Identifier::Key(&key_b)).await.unwrap(),
@@ -1244,11 +1580,7 @@ mod tests {
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            let by_key_a = archive
-                .get(Identifier::Key(&key_a))
-                .await
-                .unwrap()
-                .unwrap();
+            let by_key_a = archive.get(Identifier::Key(&key_a)).await.unwrap().unwrap();
             assert!([10, 20].contains(&by_key_a));
             assert_eq!(
                 archive.get(Identifier::Key(&key_b)).await.unwrap(),
@@ -1268,6 +1600,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1299,6 +1632,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1335,6 +1669,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1400,6 +1735,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1459,6 +1795,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1570,6 +1907,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1633,6 +1971,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1741,6 +2080,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1783,6 +2123,63 @@ mod tests {
         });
     }
 
+    /// Replay must install the first readable occurrence of each logical index without probing its
+    /// translated-key bucket. A bucket containing `N` distinct indices would otherwise examine
+    /// `0 + 1 + ... + (N - 1)` candidates during every restart. Direct insertion translates each
+    /// replayed key once; a lookup followed by insertion translates it twice and performs the
+    /// collision scan this regression excludes.
+    #[test_traced]
+    fn test_archive_restart_inserts_distinct_indices_without_bucket_scans() {
+        const ITEMS: u64 = 128;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let transforms = Arc::new(AtomicUsize::new(0));
+            let cfg = Config {
+                translator: CountingFourCap {
+                    transforms: transforms.clone(),
+                },
+                key_partition: "replay-index".into(),
+                metadata_partition: "replay-metadata".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "replay-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(ITEMS),
+            };
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            for index in 0..ITEMS {
+                // Half the records repeat one full key; the rest use distinct full keys that all
+                // collide under FourCap. Both cases require one candidate per distinct index.
+                let key = if index < ITEMS / 2 {
+                    test_key("aaaa-repeated")
+                } else {
+                    test_key(&format!("aaaa-collision-{index}"))
+                };
+                archive = archive.put(index, key, index).await.unwrap();
+            }
+            archive = archive.sync().await.unwrap();
+            drop(archive);
+
+            transforms.store(0, Ordering::Relaxed);
+            let archive = Archive::<_, _, FixedBytes<64>, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(transforms.load(Ordering::Relaxed), ITEMS as usize);
+            assert_eq!(
+                archive.get(Identifier::Index(ITEMS - 1)).await.unwrap(),
+                Some(ITEMS - 1)
+            );
+        });
+    }
+
     #[test_traced]
     fn test_get_all_after_prune() {
         let executor = deterministic::Runner::default();
@@ -1790,6 +2187,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1925,6 +2323,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),

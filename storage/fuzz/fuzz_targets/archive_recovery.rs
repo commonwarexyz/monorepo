@@ -2,11 +2,10 @@
 
 //! Prunable archive recovery under supported partial-write crash cuts.
 //!
-//! Recovery replays index entries without reading every value. This target probes every intended
-//! index after restart, checks that CRC-valid values still belong to their indexed key/value pair,
-//! first exercises an ordinary retransmission before any read, verifies that synchronous range
-//! helpers converge after authoritative reads, repairs every discovered hole through the public
-//! put APIs, and reopens the synced result.
+//! Recovery CRC-validates only value suffixes not covered by a durable per-section checkpoint.
+//! This target snapshots every synchronous range helper before any asynchronous probe, checks that
+//! the snapshot exactly matches the independently decoded readable values, repairs every discovered
+//! hole through the public put APIs, and reopens the synced result.
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
@@ -53,6 +52,7 @@ fn config(
     prunable::Config {
         translator: EightCap,
         key_partition: "archive-recovery-index".into(),
+        metadata_partition: "archive-recovery-metadata".into(),
         key_page_cache: CacheRef::from_pooler(context, NZU16!(128), NZUsize!(8)),
         value_partition: "archive-recovery-values".into(),
         compression: None,
@@ -114,15 +114,81 @@ fn assert_subsequence(actual: &[Value], expected: &[Value], index: u64) {
     }
 }
 
-fn assert_range_helpers(archive: &TestArchive, expected: &BTreeSet<u64>) {
+#[derive(Debug)]
+struct RangeSnapshot {
+    ranges: Vec<(u64, u64)>,
+    first: Option<u64>,
+    last: Option<u64>,
+    probes: Vec<RangeProbe>,
+}
+
+#[derive(Debug)]
+struct RangeProbe {
+    start: u64,
+    ranges: Vec<(u64, u64)>,
+    next_gap: (Option<u64>, Option<u64>),
+    missing: Vec<u64>,
+}
+
+fn snapshot_range_helpers(archive: &TestArchive, candidates: &BTreeSet<u64>) -> RangeSnapshot {
+    let mut starts = BTreeSet::from([0]);
+    for &index in candidates {
+        starts.insert(index);
+        if let Some(next) = index.checked_add(1) {
+            starts.insert(next);
+        }
+    }
+    let probes = starts
+        .into_iter()
+        .map(|start| RangeProbe {
+            start,
+            ranges: archive.ranges_from(start).collect(),
+            next_gap: archive.next_gap(start),
+            missing: archive.missing_items(start, 8),
+        })
+        .collect();
+    RangeSnapshot {
+        ranges: archive.ranges().collect(),
+        first: archive.first_index(),
+        last: archive.last_index(),
+        probes,
+    }
+}
+
+fn snapshot_indexed_helpers(archive: &TestArchive, candidates: &BTreeSet<u64>) -> RangeSnapshot {
+    let mut starts = BTreeSet::from([0]);
+    for &index in candidates {
+        starts.insert(index);
+        if let Some(next) = index.checked_add(1) {
+            starts.insert(next);
+        }
+    }
+    let ranges: Vec<_> = archive.indexed_ranges_from(0).collect();
+    let probes = starts
+        .into_iter()
+        .map(|start| RangeProbe {
+            start,
+            ranges: archive.indexed_ranges_from(start).collect(),
+            next_gap: archive.indexed_next_gap(start),
+            missing: archive.indexed_missing_items(start, 8),
+        })
+        .collect();
+    RangeSnapshot {
+        first: ranges.first().map(|(start, _)| *start),
+        last: archive.indexed_last_index(),
+        ranges,
+        probes,
+    }
+}
+
+fn assert_range_snapshot(snapshot: &RangeSnapshot, expected: &BTreeSet<u64>) {
     let mut model = RMap::new();
     for &index in expected {
         model.insert(index);
     }
     let expected_ranges: Vec<_> = model.iter().map(|(&start, &end)| (start, end)).collect();
-    let actual_ranges: Vec<_> = archive.ranges().collect();
     let mut actual = BTreeSet::new();
-    for &(start, end) in &actual_ranges {
+    for &(start, end) in &snapshot.ranges {
         assert!(start <= end);
         assert!(
             end < 64,
@@ -130,36 +196,64 @@ fn assert_range_helpers(archive: &TestArchive, expected: &BTreeSet<u64>) {
         );
         actual.extend(start..=end);
     }
-    assert_eq!(actual_ranges, expected_ranges);
+    assert_eq!(snapshot.ranges, expected_ranges);
     assert_eq!(
         &actual, expected,
         "range metadata disagrees with readable values"
     );
 
-    assert_eq!(archive.first_index(), model.first_index());
-    assert_eq!(archive.last_index(), model.last_index());
-    let mut starts = BTreeSet::from([0]);
-    for &index in expected {
-        starts.insert(index);
-        if let Some(next) = index.checked_add(1) {
-            starts.insert(next);
-        }
-    }
-    for start in starts {
+    assert_eq!(snapshot.first, model.first_index());
+    assert_eq!(snapshot.last, model.last_index());
+    for probe in &snapshot.probes {
         let expected_from: Vec<_> = model
-            .iter_from(start)
+            .iter_from(probe.start)
             .map(|(&range_start, &range_end)| (range_start, range_end))
             .collect();
-        assert_eq!(
-            archive.ranges_from(start).collect::<Vec<_>>(),
-            expected_from
-        );
-        assert_eq!(archive.next_gap(start), model.next_gap(start));
-        assert_eq!(
-            archive.missing_items(start, 8),
-            model.missing_items(start, 8)
-        );
+        assert_eq!(probe.ranges, expected_from);
+        assert_eq!(probe.next_gap, model.next_gap(probe.start));
+        assert_eq!(probe.missing, model.missing_items(probe.start, 8));
     }
+}
+
+fn assert_range_helpers(archive: &TestArchive, expected: &BTreeSet<u64>) {
+    assert_range_snapshot(&snapshot_range_helpers(archive, expected), expected);
+}
+
+fn indexed_indices(snapshot: &RangeSnapshot) -> BTreeSet<u64> {
+    let mut indices = BTreeSet::new();
+    for &(start, end) in &snapshot.ranges {
+        assert!(start <= end);
+        assert!(
+            end < 64,
+            "archive exposed an unmodeled indexed range {start}..={end}"
+        );
+        indices.extend(start..=end);
+    }
+    indices
+}
+
+fn assert_indexed_snapshot(
+    snapshot: &RangeSnapshot,
+    intended: &BTreeSet<u64>,
+    readable: &BTreeSet<u64>,
+) -> BTreeSet<u64> {
+    let indexed = indexed_indices(snapshot);
+    assert_range_snapshot(snapshot, &indexed);
+    assert!(
+        readable.is_subset(&indexed),
+        "a readable value is missing from the physical index view"
+    );
+    assert!(
+        indexed.is_subset(intended),
+        "the physical index view exposed an unintended index"
+    );
+    indexed
+}
+
+fn assert_indexed_helpers(archive: &TestArchive, expected: &BTreeSet<u64>) {
+    let snapshot = snapshot_indexed_helpers(archive, expected);
+    let indexed = assert_indexed_snapshot(&snapshot, expected, expected);
+    assert_eq!(&indexed, expected);
 }
 
 async fn collect_readable(
@@ -274,7 +368,9 @@ async fn assert_exact(archive: &TestArchive, expected: &[Entry]) {
             assert!(archive.has_at(index, &entry.key).await.unwrap());
         }
     }
-    assert_range_helpers(archive, &indices(expected));
+    let expected_indices = indices(expected);
+    assert_range_helpers(archive, &expected_indices);
+    assert_indexed_helpers(archive, &expected_indices);
     for entry in expected {
         let actual = archive
             .get(Identifier::Key(&entry.key))
@@ -369,9 +465,34 @@ fn fuzz(input: FuzzInput) {
             .expect("archive recovery failed");
         let mut intended = intended;
 
-        // A retransmission may be the first operation after restart. For single-item archives it
-        // must either preserve the existing readable value or install the replacement in one call;
-        // an optimistic index entry must never swallow the retransmission while hiding a bad value.
+        // Capture synchronous metadata before any async method can participate in the oracle. The
+        // subsequent decoded values determine the expected set independently of this snapshot.
+        let intended_indices = indices(&intended);
+        let startup_ranges = snapshot_range_helpers(&archive, &intended_indices);
+        let startup_indexed = snapshot_indexed_helpers(&archive, &intended_indices);
+        let mut expected = collect_readable(&archive, &intended, input.first_probe).await;
+        let readable_indices = indices(&expected);
+        assert_range_snapshot(&startup_ranges, &readable_indices);
+        let indexed =
+            assert_indexed_snapshot(&startup_indexed, &intended_indices, &readable_indices);
+        assert!(
+            indices(&baseline).is_subset(&indexed),
+            "a synchronized index occurrence was lost",
+        );
+        for entry in &baseline {
+            assert!(
+                expected
+                    .iter()
+                    .any(|candidate| candidate.value == entry.value),
+                "a value from the synchronized baseline was lost",
+            );
+        }
+        if input.retention % 101 == 100 {
+            assert_exact(&archive, &intended).await;
+        }
+
+        // For single-item archives, one retransmission must either preserve the existing readable
+        // value or install a replacement for an invalid occurrence.
         if !input.multi {
             let first_unsynced = baseline_count.min(intended.len() - 1);
             let target =
@@ -387,6 +508,8 @@ fn fuzz(input: FuzzInput) {
                 .expect("first-operation retransmission read failed")
                 .expect("one retransmission must leave a readable value");
             if value == repair.value {
+                expected.retain(|entry| entry.index != repair.index);
+                expected.push(repair.clone());
                 intended[target] = repair;
             } else {
                 assert_eq!(
@@ -394,19 +517,7 @@ fn fuzz(input: FuzzInput) {
                     "retransmission exposed an unauthentic value"
                 );
             }
-        }
-
-        let mut expected = collect_readable(&archive, &intended, input.first_probe).await;
-        for entry in &baseline {
-            assert!(
-                expected
-                    .iter()
-                    .any(|candidate| candidate.value == entry.value),
-                "a value from the synchronized baseline was lost",
-            );
-        }
-        if input.retention % 101 == 100 {
-            assert_exact(&archive, &intended).await;
+            assert_range_helpers(&archive, &indices(&expected));
         }
 
         for entry in &intended {

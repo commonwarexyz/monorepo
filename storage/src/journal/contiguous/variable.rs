@@ -14,7 +14,6 @@
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
-    durability::Barrier,
     fixed,
     metrics::Metrics,
     position_to_blob,
@@ -25,6 +24,7 @@ use crate::{
     Context, SyncCompletion,
     journal::{
         Error,
+        durability::Barrier,
         frame::{
             FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame,
             read_frame_at,
@@ -1606,7 +1606,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data = self.blobs.start_sync().await;
         let (offsets_journal, offsets) = self.offsets.start_data_sync().await;
 
-        let size = self.barrier.size();
+        let size = self.barrier.boundary();
         let (offsets_journal, watermark_handle) =
             offsets_journal.start_watermark_sync(size).await?;
         self.offsets = offsets_journal;

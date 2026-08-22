@@ -1,11 +1,14 @@
-use super::{Config, Translator};
+use super::{
+    Config, Translator,
+    checkpoint::{Checkpoint, Section as SectionCheckpoint},
+};
 use crate::{
-    Context,
+    Context, SyncCompletion,
     archive::{Error, Identifier},
     index::{Unordered, unordered::Index},
-    journal::Error as JournalError,
-    journal::segmented::oversized::{
-        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+    journal::{
+        durability::Barrier,
+        segmented::oversized::{Config as OversizedConfig, Oversized, Record as OversizedRecord},
     },
     rmap::RMap,
 };
@@ -14,14 +17,9 @@ use commonware_runtime::{
     Buf, BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{
-    Array,
-    sync::RwLock,
-};
-use std::{
-    collections::{BTreeMap, BTreeSet, btree_map},
-    sync::Arc,
-};
+use commonware_utils::Array;
+use futures::{FutureExt as _, future::try_join};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -92,53 +90,6 @@ impl<K: Array> OversizedRecord for Record<K> {
     }
 }
 
-/// Lazy value-validation state for one logical index.
-#[derive(Debug, Default)]
-struct IndexValidation {
-    /// Whether any occurrence has passed checksum validation.
-    readable: bool,
-    /// Positions whose checksums failed.
-    invalid_positions: BTreeSet<u64>,
-}
-
-/// Results learned while values are validated lazily.
-#[derive(Debug, Default)]
-struct Validation {
-    /// Per-index results. Unvalidated indices have no entry.
-    indices: BTreeMap<u64, IndexValidation>,
-    /// Indexed ranges with every proven-unreadable index removed.
-    intervals: Arc<RMap>,
-}
-
-/// Snapshot iterator over the archive's currently visible ranges.
-struct RangeIter {
-    intervals: Arc<RMap>,
-    next: Option<u64>,
-}
-
-impl RangeIter {
-    const fn new(intervals: Arc<RMap>, from: u64) -> Self {
-        Self {
-            intervals,
-            next: Some(from),
-        }
-    }
-}
-
-impl Iterator for RangeIter {
-    type Item = (u64, u64);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let from = self.next?;
-        let Some((&start, &end)) = self.intervals.iter_from(from).next() else {
-            self.next = None;
-            return None;
-        };
-        self.next = end.checked_add(1);
-        Some((start, end))
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<K: Array> arbitrary::Arbitrary<'_> for Record<K>
 where
@@ -160,6 +111,12 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
 
     /// Combined index + value storage with crash recovery.
     oversized: Oversized<E, Record<K>, V>,
+
+    /// Durable per-section value-validation checkpoints.
+    checkpoint: Checkpoint<E>,
+
+    /// Per-section boundaries that may be published once their data sync completes.
+    barriers: BTreeMap<u64, Barrier>,
 
     /// Sections with writes not yet included in any sync request. Moved into `requested` when a
     /// sync is requested; the `syncs` metric counts only this set, so each section of writes is
@@ -190,10 +147,14 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// ordinary puts that repair unreadable occurrences.
     extra_indices: BTreeMap<u64, Vec<u64>>,
 
-    /// Lazy value-validation results and the range view derived from them. Index replay
-    /// deliberately does not read values, so ranges are optimistic until an authoritative read
-    /// discovers an invalid occurrence.
-    validation: RwLock<Validation>,
+    /// Positions whose value frames failed startup CRC validation, keyed by section.
+    invalid_positions: BTreeMap<u64, BTreeSet<u64>>,
+
+    /// Logical indices with at least one CRC-valid value occurrence.
+    intervals: RMap,
+
+    /// Logical indices with at least one retained index-journal occurrence.
+    indexed_intervals: RMap,
 
     // Metrics
     items_tracked: Gauge,
@@ -202,6 +163,9 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     gets: Counter,
     has: Counter,
     syncs: Counter,
+
+    #[cfg(test)]
+    values_validated_on_init: u64,
 }
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
@@ -228,8 +192,26 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         )
     }
 
-    /// Adds one translated-key candidate per index while discarding candidates below the floor.
-    fn insert_key_index(keys: &mut Index<T, u64>, key: &K, index: u64, oldest_allowed: u64) {
+    /// Adds one translated-key candidate per readable index while discarding candidates below the
+    /// floor.
+    fn insert_key_index(
+        keys: &mut Index<T, u64>,
+        key: &K,
+        index: u64,
+        index_already_readable: bool,
+        oldest_allowed: u64,
+    ) {
+        // A first readable occurrence cannot already have a candidate for this index. Insert it
+        // directly so unrelated candidates in the translated-key bucket are not scanned.
+        if !index_already_readable {
+            if oldest_allowed == 0 {
+                keys.insert(key, index);
+            } else {
+                keys.insert_and_retain(key, index, |candidate| *candidate >= oldest_allowed);
+            }
+            return;
+        }
+
         if oldest_allowed > 0 {
             keys.retain(key, |candidate| *candidate >= oldest_allowed);
         }
@@ -238,138 +220,133 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
     }
 
-    /// Returns whether a value occurrence has already failed checksum validation.
-    fn invalid_occurrence(&self, index: u64, position: u64) -> bool {
-        self.validation
-            .read()
-            .indices
-            .get(&index)
-            .is_some_and(|state| state.invalid_positions.contains(&position))
+    /// Returns whether a value occurrence failed startup validation.
+    fn invalid_occurrence(&self, section: u64, position: u64) -> bool {
+        self.invalid_positions
+            .get(&section)
+            .is_some_and(|positions| positions.contains(&position))
     }
 
-    /// Returns whether any occurrence at `index` has passed checksum validation.
-    fn known_readable(&self, index: u64) -> bool {
-        self.validation
-            .read()
-            .indices
-            .get(&index)
-            .is_some_and(|state| state.readable)
-    }
-
-    /// Records that at least one occurrence at `index` is readable.
-    fn mark_readable(&self, index: u64) {
-        self.validation
-            .write()
-            .indices
-            .entry(index)
-            .or_default()
-            .readable = true;
-    }
-
-    /// Records an invalid occurrence and hides its index once no possible occurrence remains.
-    fn invalidate(&self, index: u64, position: u64) {
-        let occurrence_count = 1 + self.extra_indices.get(&index).map_or(0, Vec::len);
-        let mut validation = self.validation.write();
-        let all_invalid = {
-            let state = validation.indices.entry(index).or_default();
-            state.invalid_positions.insert(position);
-            let all_invalid = state.invalid_positions.len() == occurrence_count;
-            if all_invalid {
-                state.readable = false;
-            }
-            all_invalid
-        };
-        if all_invalid {
-            Arc::make_mut(&mut validation.intervals).remove(index, index);
-        }
-    }
-
-    /// Makes `index` visible after appending a replacement occurrence.
-    fn make_available(&self, index: u64) {
-        let mut validation = self.validation.write();
-        validation.indices.entry(index).or_default().readable = true;
-        Arc::make_mut(&mut validation.intervals).insert(index);
-    }
-
-    /// Reads one value occurrence, treating a failed value checksum as an incomplete write.
-    async fn read_value(
-        &self,
-        index: u64,
-        position: u64,
-        entry: &Record<K>,
-    ) -> Result<Option<V>, Error> {
-        let section = self.section(index);
-        if self.invalid_occurrence(index, position) {
-            return Ok(None);
-        }
-
-        let (value_offset, value_size) = entry.value_location();
-        match self
-            .oversized
-            .get_value(section, value_offset, value_size)
-            .await
-        {
-            Ok(value) => {
-                self.mark_readable(index);
-                Ok(Some(value))
-            }
-            Err(JournalError::ChecksumMismatch(_, _)) => {
-                self.invalidate(index, position);
-                Ok(None)
-            }
-            Err(err) => Err(err.into()),
+    /// Stage a checkpoint at `validated`, including every known invalid position below it.
+    fn stage_checkpoint(&mut self, section: u64, validated: u64) -> bool {
+        if let Some(invalid) = self.invalid_positions.get(&section) {
+            self.checkpoint.stage(section, validated, invalid)
+        } else {
+            self.checkpoint.stage(section, validated, &BTreeSet::new())
         }
     }
 
     /// Returns the first readable value at `index` in insertion order.
     async fn first_value(&self, index: u64) -> Result<Option<V>, Error> {
+        if !self.has_index(index) {
+            return Ok(None);
+        }
+
         let section = self.section(index);
         for position in self.iter_positions(index) {
-            if self.invalid_occurrence(index, position) {
+            if self.invalid_occurrence(section, position) {
                 continue;
             }
             let entry = self.oversized.get(section, position).await?;
-            if let Some(value) = self.read_value(index, position, &entry).await? {
-                return Ok(Some(value));
-            }
+            let (value_offset, value_size) = entry.value_location();
+            return self
+                .oversized
+                .get_value(section, value_offset, value_size)
+                .await
+                .map(Some)
+                .map_err(Into::into);
         }
-        Ok(None)
+        Err(Error::RecordCorrupted)
     }
 
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
-        // Initialize oversized journal
+        let Config {
+            translator,
+            key_partition,
+            metadata_partition,
+            key_page_cache,
+            value_partition,
+            compression,
+            codec_config,
+            items_per_section,
+            key_write_buffer,
+            value_write_buffer,
+            replay_buffer,
+        } = cfg;
+
+        if metadata_partition == key_partition || metadata_partition == value_partition {
+            return Err(crate::journal::Error::InvalidConfiguration(
+                "archive metadata partition must be distinct from key and value partitions".into(),
+            )
+            .into());
+        }
+        let items_per_section = items_per_section.get();
+        let (mut checkpoint, mut checkpoint_dirty) = Checkpoint::open(
+            context.child("checkpoint"),
+            metadata_partition,
+            &key_partition,
+            &value_partition,
+            items_per_section,
+        )
+        .await?;
+
         let oversized_cfg = OversizedConfig {
-            index_partition: cfg.key_partition,
-            value_partition: cfg.value_partition,
-            index_page_cache: cfg.key_page_cache,
-            index_write_buffer: cfg.key_write_buffer,
-            value_write_buffer: cfg.value_write_buffer,
-            compression: cfg.compression,
-            codec_config: cfg.codec_config,
+            index_partition: key_partition,
+            value_partition,
+            index_page_cache: key_page_cache,
+            index_write_buffer: key_write_buffer,
+            value_write_buffer,
+            compression,
+            codec_config,
         };
         let oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg, None).await?;
+        let section_lengths = oversized
+            .sections()
+            .map(|section| Ok((section, oversized.section_len(section)?)))
+            .collect::<Result<BTreeMap<_, _>, crate::journal::Error>>()?;
+        let sections = section_lengths.keys().copied().collect::<BTreeSet<_>>();
 
-        // Initialize keys and replay index journal (no values read!)
+        checkpoint_dirty |= checkpoint.retain(&sections);
+        let trusted = section_lengths
+            .iter()
+            .filter_map(|(&section, &length)| {
+                let state = checkpoint.get(section)?;
+                (state.validated <= length).then(|| (section, state.clone()))
+            })
+            .collect::<BTreeMap<u64, SectionCheckpoint>>();
+
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-        let mut keys = Index::new(context.child("index"), cfg.translator.clone());
+        let mut invalid_positions = trusted
+            .iter()
+            .filter(|(_, state)| !state.invalid.is_empty())
+            .map(|(&section, state)| (section, state.invalid.iter().copied().collect()))
+            .collect::<BTreeMap<u64, BTreeSet<u64>>>();
+        let mut keys = Index::new(context.child("index"), translator);
         let mut intervals = RMap::new();
+        let mut indexed_intervals = RMap::new();
+        let mut scanned_sections = BTreeSet::new();
+        #[cfg(test)]
+        let mut values_validated_on_init = 0;
+        let values_validated = context.counter(
+            "values_validated",
+            "Number of value frames CRC-validated during startup",
+        );
         let oversized = {
             debug!("initializing archive from index journal");
             let mut replay = oversized
                 .replay(
                     0,
                     0,
-                    cfg.replay_buffer,
+                    replay_buffer,
                     commonware_runtime::ReadOptions::default(),
                 )
                 .await?;
             while let Some(result) = replay.next().await {
-                let (_section, position, entry) = result?;
+                let (section, position, entry) = result?;
 
-                // Store index location (position in index journal)
                 match indices.entry(entry.index) {
                     btree_map::Entry::Vacant(e) => {
                         e.insert(position);
@@ -378,16 +355,62 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                         extra_indices.entry(entry.index).or_default().push(position);
                     }
                 }
+                indexed_intervals.insert(entry.index);
 
-                // Store one translated-key candidate for this index.
-                Self::insert_key_index(&mut keys, &entry.key, entry.index, 0);
-
-                // Store index in intervals
-                intervals.insert(entry.index);
+                let valid = match trusted.get(&section) {
+                    Some(state) if position < state.validated => !state.invalid(position),
+                    _ => {
+                        scanned_sections.insert(section);
+                        let (offset, size) = entry.value_location();
+                        values_validated.inc();
+                        #[cfg(test)]
+                        {
+                            values_validated_on_init += 1;
+                        }
+                        replay.verify_value(section, offset, size).await?
+                    }
+                };
+                if valid {
+                    let index_already_readable = intervals.get(&entry.index).is_some();
+                    Self::insert_key_index(
+                        &mut keys,
+                        &entry.key,
+                        entry.index,
+                        index_already_readable,
+                        0,
+                    );
+                    intervals.insert(entry.index);
+                } else {
+                    invalid_positions
+                        .entry(section)
+                        .or_default()
+                        .insert(position);
+                }
             }
             debug!("archive initialized");
             replay.finish()?
         };
+
+        // A checkpoint must never describe data that is not durable. This sync is needed only
+        // for sections whose uncheckpointed suffix was validated, including the one-time upgrade
+        // from an archive without validation metadata.
+        let oversized = if scanned_sections.is_empty() {
+            oversized
+        } else {
+            oversized.sync(&scanned_sections).await?
+        };
+        for (&section, &length) in &section_lengths {
+            let empty = BTreeSet::new();
+            let invalid = invalid_positions.get(&section).unwrap_or(&empty);
+            checkpoint_dirty |= checkpoint.stage(section, length, invalid);
+        }
+        if checkpoint_dirty {
+            checkpoint = checkpoint.sync().await?;
+        }
+        let barriers = section_lengths
+            .into_iter()
+            .map(|(section, length)| (section, Barrier::new(length)))
+            .collect();
 
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");
@@ -403,17 +426,18 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Return populated archive
         Ok(Self {
-            items_per_section: cfg.items_per_section.get(),
+            items_per_section,
             oversized,
+            checkpoint,
+            barriers,
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
             indices,
             extra_indices,
-            validation: RwLock::new(Validation {
-                intervals: Arc::new(intervals),
-                ..Validation::default()
-            }),
+            invalid_positions,
+            intervals,
+            indexed_intervals,
             keys,
             items_tracked,
             indices_pruned,
@@ -421,6 +445,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             gets,
             has,
             syncs,
+            #[cfg(test)]
+            values_validated_on_init,
         })
     }
 
@@ -447,16 +473,19 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             let section = self.section(*index);
 
             for position in self.iter_positions(*index) {
-                if self.invalid_occurrence(*index, position) {
+                if self.invalid_occurrence(section, position) {
                     continue;
                 }
 
                 let entry = self.oversized.get(section, position).await?;
                 if entry.key.as_ref() == key.as_ref() {
-                    if let Some(value) = self.read_value(*index, position, &entry).await? {
-                        return Ok(Some(value));
-                    }
-                    continue;
+                    let (offset, size) = entry.value_location();
+                    return self
+                        .oversized
+                        .get_value(section, offset, size)
+                        .await
+                        .map(Some)
+                        .map_err(Into::into);
                 }
                 self.unnecessary_reads.inc();
             }
@@ -479,16 +508,13 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             let section = self.section(*index);
 
             for position in self.iter_positions(*index) {
-                if self.invalid_occurrence(*index, position) {
+                if self.invalid_occurrence(section, position) {
                     continue;
                 }
 
                 let entry = self.oversized.get(section, position).await?;
                 if entry.key.as_ref() == key.as_ref() {
-                    if self.read_value(*index, position, &entry).await?.is_some() {
-                        return Ok(true);
-                    }
-                    continue;
+                    return Ok(true);
                 }
                 self.unnecessary_reads.inc();
             }
@@ -498,8 +524,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     }
 
     fn has_index(&self, index: u64) -> bool {
-        self.indices.contains_key(&index)
-            && self.validation.read().intervals.get(&index).is_some()
+        self.indices.contains_key(&index) && self.intervals.get(&index).is_some()
     }
 
     async fn put_internal(
@@ -516,12 +541,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             return Ok(self);
         }
 
-        // An occupied index is only an overwrite when at least one occurrence is readable. This
-        // validation makes one retransmission sufficient to replace incomplete crash debris.
-        if skip_if_index_exists
-            && self.indices.contains_key(&index)
-            && (self.known_readable(index) || self.first_value(index).await?.is_some())
-        {
+        // Startup validation makes this decision independent of the first read operation. An
+        // index represented only by torn value frames remains replaceable by one retransmission.
+        let index_already_readable = self.has_index(index);
+        if skip_if_index_exists && index_already_readable {
             return Ok(self);
         }
 
@@ -541,14 +564,23 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             }
         }
 
-        // Store interval
-        self.make_available(index);
+        self.intervals.insert(index);
+        self.indexed_intervals.insert(index);
 
         // Insert one candidate for this translated key and prune useless candidates in its bucket.
-        Self::insert_key_index(&mut self.keys, &key, index, oldest_allowed);
+        Self::insert_key_index(
+            &mut self.keys,
+            &key,
+            index,
+            index_already_readable,
+            oldest_allowed,
+        );
 
         // Add section to pending
         self.pending.insert(section);
+        self.barriers
+            .entry(section)
+            .or_insert_with(|| Barrier::new(0));
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
@@ -570,12 +602,19 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
         debug!(min, "pruning archive");
 
-        // Prune oversized journal (handles both index and values)
+        // Invalidate checkpoints before deleting or reusing their section names. A crash after
+        // this sync but before the journal prune merely causes the retained sections to be
+        // revalidated at the next initialization.
+        if self.checkpoint.remove_before(min) {
+            self.checkpoint = self.checkpoint.sync().await?;
+        }
+
         (self.oversized, _) = self.oversized.prune(min).await?;
 
-        // Remove pending and requested sync work (no need to call `sync` as we are pruning)
         self.pending = self.pending.split_off(&min);
         self.requested = self.requested.split_off(&min);
+        self.barriers = self.barriers.split_off(&min);
+        self.invalid_positions = self.invalid_positions.split_off(&min);
 
         // Remove all indices that are less than min
         loop {
@@ -588,15 +627,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             self.indices_pruned.inc();
         }
 
-        // Remove all keys from interval tree less than min
         if min > 0 {
-            Arc::make_mut(&mut self.validation.write().intervals).remove(0, min - 1);
-        }
-
-        // Discard validation state for pruned indices.
-        {
-            let mut validation = self.validation.write();
-            validation.indices = validation.indices.split_off(&min);
+            self.intervals.remove(0, min - 1);
+            self.indexed_intervals.remove(0, min - 1);
         }
 
         // Update last pruned (to prevent reads from pruned sections)
@@ -617,7 +650,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
         self.has.inc();
         match identifier {
-            Identifier::Index(index) => Ok(self.first_value(index).await?.is_some()),
+            Identifier::Index(index) => Ok(self.has_index(index)),
             Identifier::Key(key) => self.has_key(key).await,
         }
     }
@@ -628,10 +661,23 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.syncs.inc_by(self.pending.len() as u64);
         self.requested.append(&mut self.pending);
 
-        // Sync oversized journal (handles both index and values). Re-syncing `requested` sections
-        // also waits for any of their syncs still in flight.
+        let lengths = self
+            .requested
+            .iter()
+            .map(|&section| Ok((section, self.oversized.section_len(section)?)))
+            .collect::<Result<Vec<_>, crate::journal::Error>>()?;
         self.oversized = self.oversized.sync(&self.requested).await?;
 
+        for (section, length) in lengths {
+            self.barriers
+                .entry(section)
+                .or_insert_with(|| Barrier::new(0))
+                .mark_durable(length);
+            self.stage_checkpoint(section, length);
+        }
+        if !self.requested.is_empty() {
+            self.checkpoint = self.checkpoint.sync().await?;
+        }
         self.requested.clear();
         Ok(self)
     }
@@ -641,48 +687,102 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Update metrics
         self.syncs.inc_by(self.pending.len() as u64);
 
-        // Move sections into `requested` rather than dropping them: section buffers reuse
-        // in-flight syncs, so re-requesting a section makes this handle observe outstanding work
-        // without issuing a new sync.
         self.requested.append(&mut self.pending);
-        let handle;
-        (self.oversized, handle) = self.oversized.start_sync(&self.requested).await?;
+        let lengths = self
+            .requested
+            .iter()
+            .map(|&section| Ok((section, self.oversized.section_len(section)?)))
+            .collect::<Result<Vec<_>, crate::journal::Error>>()?;
+        let data;
+        (self.oversized, data) = self.oversized.start_sync(&self.requested).await?;
+        if lengths.is_empty() {
+            return Ok((self, data));
+        }
+
+        let completion: SyncCompletion = data.boxed().shared();
+        let mut publish = Vec::with_capacity(lengths.len());
+        for (section, length) in lengths {
+            let barrier = self
+                .barriers
+                .entry(section)
+                .or_insert_with(|| Barrier::new(0));
+            barrier.record(length, completion.clone());
+            publish.push((section, barrier.boundary()));
+        }
+        let mut checkpoint_dirty = false;
+        for (section, validated) in publish {
+            checkpoint_dirty |= self.stage_checkpoint(section, validated);
+        }
+
+        if !checkpoint_dirty && !self.checkpoint.pending() {
+            return Ok((self, Handle::from_future(completion)));
+        }
+        let metadata;
+        (self.checkpoint, metadata) = self.checkpoint.start_sync().await?;
+        let handle =
+            Handle::from_future(async move { try_join(completion, metadata).await.map(|_| ()) });
         Ok((self, handle))
     }
 
     /// See [crate::archive::Archive::next_gap].
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.validation.read().intervals.next_gap(index)
+        self.intervals.next_gap(index)
     }
 
     /// See [crate::archive::Archive::missing_items].
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        self.validation.read().intervals.missing_items(index, max)
+        self.intervals.missing_items(index, max)
     }
 
     /// See [crate::archive::Archive::ranges].
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        RangeIter::new(Arc::clone(&self.validation.read().intervals), 0)
+        self.intervals.iter().map(|(&start, &end)| (start, end))
     }
 
     /// See [crate::archive::Archive::ranges_from].
     fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        RangeIter::new(Arc::clone(&self.validation.read().intervals), from)
+        self.intervals
+            .iter_from(from)
+            .map(|(&start, &end)| (start, end))
     }
 
     /// See [crate::archive::Archive::first_index].
     fn first_index(&self) -> Option<u64> {
-        self.validation.read().intervals.first_index()
+        self.intervals.first_index()
     }
 
     /// See [crate::archive::Archive::last_index].
     fn last_index(&self) -> Option<u64> {
-        self.validation.read().intervals.last_index()
+        self.intervals.last_index()
+    }
+
+    /// Return missing items in the retained index-journal view.
+    fn indexed_missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.indexed_intervals.missing_items(index, max)
+    }
+
+    /// Return gap boundaries in the retained index-journal view.
+    fn indexed_next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.indexed_intervals.next_gap(index)
+    }
+
+    /// Return retained index-journal ranges overlapping or following `from`.
+    fn indexed_ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.indexed_intervals
+            .iter_from(from)
+            .map(|(&start, &end)| (start, end))
+    }
+
+    /// Return the highest retained index-journal occurrence.
+    fn indexed_last_index(&self) -> Option<u64> {
+        self.indexed_intervals.last_index()
     }
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
-        Ok(self.oversized.destroy().await?)
+        self.checkpoint.destroy().await?;
+        self.oversized.destroy().await?;
+        Ok(())
     }
 
     /// See [crate::archive::MultiArchive::get_all].
@@ -701,16 +801,13 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         let mut values = Vec::with_capacity(1 + extra_count);
         for position in self.iter_positions(index) {
-            if self.invalid_occurrence(index, position) {
+            if self.invalid_occurrence(section, position) {
                 continue;
             }
 
-            // Fetch index entry from index journal to verify key
             let entry = self.oversized.get(section, position).await?;
-
-            if let Some(value) = self.read_value(index, position, &entry).await? {
-                values.push(value);
-            }
+            let (offset, size) = entry.value_location();
+            values.push(self.oversized.get_value(section, offset, size).await?);
         }
         Ok((!values.is_empty()).then_some(values))
     }
@@ -731,15 +828,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
         let section = self.section(index);
         for position in self.iter_positions(index) {
-            if self.invalid_occurrence(index, position) {
+            if self.invalid_occurrence(section, position) {
                 continue;
             }
             let entry = self.oversized.get(section, position).await?;
             if entry.key.as_ref() == key.as_ref() {
-                if self.read_value(index, position, &entry).await?.is_some() {
-                    return Ok(true);
-                }
-                continue;
+                return Ok(true);
             }
             self.unnecessary_reads.inc();
         }
@@ -764,10 +858,16 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Ar
 }
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
+    /// Number of value frames validated while opening this handle.
+    #[cfg(test)]
+    pub(super) fn values_validated_on_init(&self) -> u64 {
+        self.0.values_validated_on_init
+    }
+
     /// Initialize a new `Archive` instance.
     ///
-    /// The in-memory index for `Archive` is populated during this call
-    /// by replaying only the index journal (no values are read).
+    /// The in-memory index is populated by replaying the index journal. Value frames not covered by
+    /// a durable validation checkpoint are CRC-validated before this returns.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
@@ -781,6 +881,39 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
         self.0 = self.0.prune(min).await?;
         Ok(self)
+    }
+
+    /// Return missing items from the physical index-journal view.
+    ///
+    /// Unlike [crate::archive::Archive::missing_items], an index whose every value occurrence
+    /// failed CRC validation is treated as present. Recovery code can use this view to distinguish
+    /// missing index metadata from an indexed value that must be fetched and replaced.
+    pub fn indexed_missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.0.indexed_missing_items(index, max)
+    }
+
+    /// Return gap boundaries from the physical index-journal view.
+    ///
+    /// A returned range may contain values that failed startup validation. Call
+    /// [crate::archive::Archive::get] before relying on a candidate's value.
+    pub fn indexed_next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.0.indexed_next_gap(index)
+    }
+
+    /// Return physical index-journal ranges overlapping or following `from`.
+    ///
+    /// A returned range may contain values that failed startup validation. Call
+    /// [crate::archive::Archive::get] before relying on a candidate's value.
+    pub fn indexed_ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.0.indexed_ranges_from(from)
+    }
+
+    /// Return the highest index with a retained index-journal occurrence.
+    ///
+    /// The value at this index may have failed startup validation. Call
+    /// [crate::archive::Archive::get] before relying on it.
+    pub fn indexed_last_index(&self) -> Option<u64> {
+        self.0.indexed_last_index()
     }
 }
 
