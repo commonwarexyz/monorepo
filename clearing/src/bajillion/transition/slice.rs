@@ -917,7 +917,7 @@ where
     }
     let closing = state_tree_with_strategy::<H, P, D>(&closing_leaves, strategy)?;
     if closing.root() != close.roots.closing {
-        return Err(TransitionError::Commitment(commitment::Error::HiddenChange));
+        return Err(TransitionError::ClosingRoot);
     }
     let layout_boundaries = derive_layout(
         &close.rows,

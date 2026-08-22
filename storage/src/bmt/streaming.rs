@@ -10,7 +10,7 @@ use core::{marker::PhantomData, ops::Range};
 ///
 /// The builder buffers at most one configured subtree and retains one digest per
 /// tree height. It returns the same root as [`super::Builder`] without retaining
-/// the levels required to construct proofs or updates.
+/// the levels required to construct proofs.
 ///
 /// `subtree_size` must be a non-zero power of two that fits in a `u32`. The
 /// builder retains at most `subtree_size + subtree_size.div_ceil(2) + MAX_LEVELS + 1`

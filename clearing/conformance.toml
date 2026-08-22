@@ -98,10 +98,6 @@ n_cases = 1024
 hash = "3a4731633fdcded169f01b320d3d8791db38fbd5fddfc96ddc9620d20ffee04b"
 n_cases = 1024
 
-["conformance::CodecConformance<RangeUpdate<Sha256Digest>>"]
-hash = "f468f7a3ea2c9c614c954142585c7081bf6656481970c38375575e633b67a9aa"
-n_cases = 1024
-
 ["conformance::CodecConformance<ReceiptBody<VerifyingKey,Sha256Digest>>"]
 hash = "b1e3e679736db3163417f45419115200129309db16f469f1765dc81193fdbac7"
 n_cases = 1024
@@ -149,10 +145,6 @@ n_cases = 1024
 ["conformance::CodecConformance<SliceBoundary>"]
 hash = "635dd9e20ee5ecfa6ad9ae9abab79aa97aad76e36a6129cc1a53324bfe601082"
 n_cases = 65536
-
-["conformance::CodecConformance<SparseUpdate<Sha256Digest>>"]
-hash = "c95f2404ec0cf89de917747d4275716b3e82ebbc52bc5b5f66455aeeac469c74"
-n_cases = 1024
 
 ["conformance::CodecConformance<StateLeaf<VerifyingKey>>"]
 hash = "8f729df62afe6e28bbb32c573020976be2fc2d63b34670a696f59cc05f298503"

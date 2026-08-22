@@ -76,24 +76,8 @@ pub enum Error {
     UnalignedProof,
     #[error("duplicate position: {0}")]
     DuplicatePosition(u32),
-    #[error("positions are not strictly increasing: {0} then {1}")]
-    UnorderedPosition(u32, u32),
-    #[error("unchanged position: {0}")]
-    UnchangedPosition(u32),
     #[error("invalid range: {0}..{1}")]
     InvalidRange(u32, u32),
-    #[error("invalid boundary: {0}")]
-    InvalidBoundary(u32),
-    #[error(
-        "mismatched leaves: {positions} positions, {opening} opening leaves, {closing} closing leaves"
-    )]
-    MismatchedLeaves {
-        positions: usize,
-        opening: usize,
-        closing: usize,
-    },
-    #[error("update does not belong to this tree")]
-    InvalidUpdate,
     /// A streaming builder received a zero, non-power-of-two, or unrepresentable subtree size.
     #[error("invalid streaming subtree size: {0}")]
     InvalidSubtreeSize(usize),
@@ -228,14 +212,6 @@ pub struct Tree<D: Digest> {
 }
 
 impl<D: Digest> Tree<D> {
-    fn leaf_count(&self) -> u32 {
-        if self.empty {
-            0
-        } else {
-            self.levels.first().len().get() as u32
-        }
-    }
-
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
     fn new<H: Hasher<Digest = D>>(mut leaves: Vec<D>, strategy: &impl Strategy) -> Self {
         // If no leaves, add an empty node.
@@ -375,533 +351,6 @@ impl<D: Digest> Tree<D> {
         })
     }
 
-    /// Builds a sparse overlay containing the nodes affected by `changes`.
-    ///
-    /// Each change is `(position, closing_leaf)`, where `closing_leaf` has not been
-    /// position-hashed. Changes must be strictly increasing, in bounds, and different
-    /// from the corresponding opening leaves. Construction touches only the changed
-    /// paths and does not clone or scan dormant leaves. Independent hashes use
-    /// `strategy`.
-    pub fn update<H: Hasher<Digest = D>>(
-        &self,
-        changes: &[(u32, D)],
-        strategy: &impl Strategy,
-    ) -> Result<Update<D>, Error> {
-        let leaf_count = self.leaf_count();
-        let mut previous = None;
-        for &(position, _) in changes {
-            if position >= leaf_count {
-                return Err(Error::InvalidPosition(position));
-            }
-            if let Some(previous) = previous {
-                if position == previous {
-                    return Err(Error::DuplicatePosition(position));
-                }
-                if position < previous {
-                    return Err(Error::UnorderedPosition(previous, position));
-                }
-            }
-            previous = Some(position);
-        }
-
-        let level_count = self.levels.len().get();
-        if changes.is_empty() {
-            return Ok(Update {
-                opening_root: self.root,
-                leaf_count,
-                levels: (0..level_count).map(|_| Vec::new()).collect(),
-                root: self.root,
-            });
-        }
-
-        let mut leaves = changes.to_vec();
-        let _: Vec<()> = strategy.map_collect_vec(leaves.chunks_mut(2), |chunk| match chunk {
-            [first, second] => {
-                let (position_a, leaf_a) = *first;
-                let (position_b, leaf_b) = *second;
-                let (digest_a, digest_b) = H::hash_pair(
-                    &[&position_a.to_be_bytes(), leaf_a.as_ref()],
-                    &[&position_b.to_be_bytes(), leaf_b.as_ref()],
-                );
-                first.1 = digest_a;
-                second.1 = digest_b;
-            }
-            [only] => {
-                let (position, leaf) = *only;
-                only.1 = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
-            }
-            _ => unreachable!("chunks(2) yields one or two elements"),
-        });
-        for &(position, digest) in &leaves {
-            if digest == self.levels.first()[position as usize] {
-                return Err(Error::UnchangedPosition(position));
-            }
-        }
-
-        let mut levels = Vec::with_capacity(level_count);
-        levels.push(leaves);
-        for level in 0..level_count - 1 {
-            let current = &levels[level];
-            let level_size = self.levels[level].len().get() as u32;
-            let mut parents = Vec::with_capacity(current.len());
-            let mut index = 0;
-            while index < current.len() {
-                let (position, digest) = current[index];
-                let parent = position / 2;
-                let (left, right) = if position.is_multiple_of(2) {
-                    let right = if index + 1 < current.len() && current[index + 1].0 == position + 1
-                    {
-                        index += 1;
-                        current[index].1
-                    } else if position + 1 < level_size {
-                        self.levels[level][position as usize + 1]
-                    } else {
-                        digest
-                    };
-                    (digest, right)
-                } else {
-                    (self.levels[level][position as usize - 1], digest)
-                };
-                parents.push((parent, left, right));
-                index += 1;
-            }
-
-            let _: Vec<()> = strategy.map_collect_vec(parents.chunks_mut(2), |chunk| match chunk {
-                [first, second] => {
-                    let (_, left_a, right_a) = *first;
-                    let (_, left_b, right_b) = *second;
-                    let (digest_a, digest_b) = H::hash_pair(
-                        &[left_a.as_ref(), right_a.as_ref()],
-                        &[left_b.as_ref(), right_b.as_ref()],
-                    );
-                    first.1 = digest_a;
-                    second.1 = digest_b;
-                }
-                [only] => {
-                    let (_, left, right) = *only;
-                    only.1 = H::hash(&[left.as_ref(), right.as_ref()]);
-                }
-                _ => unreachable!("chunks(2) yields one or two elements"),
-            });
-            let next = parents
-                .into_iter()
-                .map(|(position, digest, _)| (position, digest))
-                .collect();
-            levels.push(next);
-        }
-
-        let tree_root = levels.last().expect("update has every tree level")[0].1;
-        let root = H::hash(&[&leaf_count.to_be_bytes(), tree_root.as_ref()]);
-        Ok(Update {
-            opening_root: self.root,
-            leaf_count,
-            levels,
-            root,
-        })
-    }
-
-    /// Builds one paired update proof for every adjacent pair of `boundaries`.
-    ///
-    /// Boundaries must begin at zero, end at the tree's leaf count, and be
-    /// nondecreasing. Equal adjacent boundaries produce a proof for an empty interval.
-    /// The complete update and boundary domain is validated before independent
-    /// intervals are dispatched by `strategy`. Output follows boundary order,
-    /// including repeated boundaries for empty intervals.
-    pub fn range_update_proofs(
-        &self,
-        update: &Update<D>,
-        boundaries: &[u32],
-        strategy: &impl Strategy,
-    ) -> Result<Vec<RangeUpdateProof<D>>, Error> {
-        let leaf_count = self.leaf_count();
-        if update.opening_root != self.root
-            || update.leaf_count != leaf_count
-            || update.levels.len() != self.levels.len().get()
-        {
-            return Err(Error::InvalidUpdate);
-        }
-        if boundaries.len() < 2 {
-            return Err(Error::InvalidBoundary(
-                boundaries.first().copied().unwrap_or(0),
-            ));
-        }
-        if boundaries[0] != 0 {
-            return Err(Error::InvalidBoundary(boundaries[0]));
-        }
-        if *boundaries
-            .last()
-            .expect("boundaries has at least two items")
-            != leaf_count
-        {
-            return Err(Error::InvalidBoundary(
-                *boundaries
-                    .last()
-                    .expect("boundaries has at least two items"),
-            ));
-        }
-        for pair in boundaries.windows(2) {
-            if pair[0] > pair[1] || pair[1] > leaf_count {
-                return Err(Error::InvalidBoundary(pair[1]));
-            }
-        }
-
-        let proofs = strategy.map_collect_vec(boundaries.windows(2), |pair| {
-            let mut proof = RangeUpdateProof {
-                leaf_count,
-                shared: Vec::new(),
-                outside: Vec::new(),
-            };
-            if leaf_count != 0 {
-                let changes = &update.levels[0];
-                RangeUpdateFrontierBuilder {
-                    tree: self,
-                    update,
-                    start: pair[0],
-                    end: pair[1],
-                    proof: &mut proof,
-                }
-                .build(
-                    levels_in_tree(leaf_count) - 1,
-                    0,
-                    0,
-                    u64::from(leaf_count),
-                    changes,
-                );
-            }
-            proof
-        });
-        Ok(proofs)
-    }
-}
-
-/// A sparse closing-state overlay for an immutable Binary Merkle Tree.
-///
-/// The overlay stores only affected nodes and can be reused to construct paired
-/// proofs for multiple intervals without materializing a second tree.
-#[derive(Clone, Debug)]
-pub struct Update<D: Digest> {
-    opening_root: D,
-    leaf_count: u32,
-    levels: Vec<Vec<(u32, D)>>,
-    root: D,
-}
-
-impl<D: Digest> Update<D> {
-    /// Returns the finalized closing root.
-    #[must_use]
-    pub const fn root(&self) -> D {
-        self.root
-    }
-}
-
-/// A paired proof for all changes in one half-open leaf interval.
-///
-/// `shared` authenticates unchanged subtrees wholly inside the interval. Each
-/// `outside` entry independently authenticates the `(opening, closing)` digests
-/// of one canonical exterior subtree, allowing other intervals to change while
-/// proving every undisclosed interior leaf unchanged.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RangeUpdateProof<D: Digest> {
-    /// The number of leaves in both trees.
-    pub leaf_count: u32,
-    /// Canonical unchanged frontier nodes inside the interval.
-    pub shared: Vec<D>,
-    /// Canonical `(opening, closing)` frontier nodes outside the interval.
-    pub outside: Vec<(D, D)>,
-}
-
-impl<D: Digest> Write for RangeUpdateProof<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.leaf_count.write(writer);
-        self.shared.write(writer);
-        self.outside.write(writer);
-    }
-}
-
-impl<D: Digest> Read for RangeUpdateProof<D> {
-    /// `(maximum shared hashes, maximum exterior pairs)`.
-    type Cfg = (usize, usize);
-
-    fn read_cfg(
-        reader: &mut impl Buf,
-        (max_shared, max_outside): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let leaf_count = u32::read(reader)?;
-        let shared = Vec::<D>::read_range(reader, ..=*max_shared)?;
-        let outside = Vec::<(D, D)>::read_range(reader, ..=*max_outside)?;
-        Ok(Self {
-            leaf_count,
-            shared,
-            outside,
-        })
-    }
-}
-
-impl<D: Digest> EncodeSize for RangeUpdateProof<D> {
-    fn encode_size(&self) -> usize {
-        self.leaf_count.encode_size() + self.shared.encode_size() + self.outside.encode_size()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for RangeUpdateProof<D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            leaf_count: u.arbitrary()?,
-            shared: u.arbitrary()?,
-            outside: u.arbitrary()?,
-        })
-    }
-}
-
-/// Emits the canonical left-to-right frontier for one update interval.
-///
-/// Exterior subtrees carry opening and closing digests, while unchanged interior
-/// subtrees carry one shared digest. Verification consumes both streams in this
-/// same maximal-subtree order, preventing alternate encodings of one update.
-struct RangeUpdateFrontierBuilder<'a, D: Digest> {
-    tree: &'a Tree<D>,
-    update: &'a Update<D>,
-    start: u32,
-    end: u32,
-    proof: &'a mut RangeUpdateProof<D>,
-}
-
-impl<D: Digest> RangeUpdateFrontierBuilder<'_, D> {
-    fn build(
-        &mut self,
-        level: usize,
-        index: u32,
-        node_start: u64,
-        node_end: u64,
-        changes: &[(u32, D)],
-    ) {
-        let start = u64::from(self.start);
-        let end = u64::from(self.end);
-        if start == end || node_end <= start || node_start >= end {
-            let opening = self.tree.levels[level][index as usize];
-            let closing = self.update.levels[level]
-                .binary_search_by_key(&index, |(position, _)| *position)
-                .map_or(opening, |found| self.update.levels[level][found].1);
-            self.proof.outside.push((opening, closing));
-            return;
-        }
-        if node_start >= start && node_end <= end && changes.is_empty() {
-            self.proof
-                .shared
-                .push(self.tree.levels[level][index as usize]);
-            return;
-        }
-        if level == 0 {
-            debug_assert_eq!(changes.len(), 1);
-            debug_assert_eq!(changes[0].0, node_start as u32);
-            return;
-        }
-
-        let child_level = level - 1;
-        let middle = (node_start + (1u64 << child_level)).min(node_end);
-        let split = changes.partition_point(|(position, _)| u64::from(*position) < middle);
-        self.build(
-            child_level,
-            index * 2,
-            node_start,
-            middle,
-            &changes[..split],
-        );
-        if middle < node_end {
-            self.build(
-                child_level,
-                index * 2 + 1,
-                middle,
-                node_end,
-                &changes[split..],
-            );
-        }
-    }
-}
-
-/// Reconstructs paired roots by consuming the canonical frontier exactly once.
-///
-/// The shared and exterior streams must follow the builder's left-to-right
-/// maximal-subtree partition and be exhausted when reconstruction completes.
-struct RangeUpdateVerifier<'a, D: Digest> {
-    start: u64,
-    end: u64,
-    positions: &'a [u32],
-    opening_leaves: &'a [D],
-    closing_leaves: &'a [D],
-    shared: core::slice::Iter<'a, D>,
-    outside: core::slice::Iter<'a, (D, D)>,
-}
-
-impl<D: Digest> RangeUpdateVerifier<'_, D> {
-    fn reconstruct<H: Hasher<Digest = D>>(
-        &mut self,
-        level: usize,
-        node_start: u64,
-        node_end: u64,
-        change_start: usize,
-        change_end: usize,
-    ) -> Result<(D, D), Error> {
-        if self.start == self.end || node_end <= self.start || node_start >= self.end {
-            return self.outside.next().copied().ok_or(Error::UnalignedProof);
-        }
-        if node_start >= self.start && node_end <= self.end && change_start == change_end {
-            let shared = *self.shared.next().ok_or(Error::UnalignedProof)?;
-            return Ok((shared, shared));
-        }
-        if level == 0 {
-            if change_end != change_start + 1
-                || u64::from(self.positions[change_start]) != node_start
-            {
-                return Err(Error::UnalignedProof);
-            }
-            let position = self.positions[change_start];
-            return Ok(H::hash_pair(
-                &[
-                    &position.to_be_bytes(),
-                    self.opening_leaves[change_start].as_ref(),
-                ],
-                &[
-                    &position.to_be_bytes(),
-                    self.closing_leaves[change_start].as_ref(),
-                ],
-            ));
-        }
-
-        let child_level = level - 1;
-        let middle = (node_start + (1u64 << child_level)).min(node_end);
-        let split = change_start
-            + self.positions[change_start..change_end]
-                .partition_point(|position| u64::from(*position) < middle);
-        let (opening_left, closing_left) =
-            self.reconstruct::<H>(child_level, node_start, middle, change_start, split)?;
-        let (opening_right, closing_right) = if middle < node_end {
-            self.reconstruct::<H>(child_level, middle, node_end, split, change_end)?
-        } else {
-            (opening_left, closing_left)
-        };
-        Ok(H::hash_pair(
-            &[opening_left.as_ref(), opening_right.as_ref()],
-            &[closing_left.as_ref(), closing_right.as_ref()],
-        ))
-    }
-}
-
-impl<D: Digest> RangeUpdateProof<D> {
-    /// Reconstructs the finalized opening and closing roots for one interval.
-    ///
-    /// `positions`, `opening_leaves`, and `closing_leaves` are aligned. Positions
-    /// must be strictly increasing and contained in the interval, and each leaf
-    /// pair must differ. Successful reconstruction proves every undisclosed leaf
-    /// in the interval unchanged. Leaves outside the interval may differ.
-    pub fn roots<H: Hasher<Digest = D>>(
-        &self,
-        range: core::ops::Range<u32>,
-        positions: &[u32],
-        opening_leaves: &[D],
-        closing_leaves: &[D],
-    ) -> Result<(D, D), Error> {
-        // Validate the complete adversarial domain before recursive reconstruction
-        // indexes aligned leaf slices or consumes either proof stream.
-        let (start, end) = (range.start, range.end);
-        if start > end || end > self.leaf_count {
-            return Err(Error::InvalidRange(start, end));
-        }
-        if positions.len() != opening_leaves.len() || positions.len() != closing_leaves.len() {
-            return Err(Error::MismatchedLeaves {
-                positions: positions.len(),
-                opening: opening_leaves.len(),
-                closing: closing_leaves.len(),
-            });
-        }
-        let mut previous = None;
-        for (index, &position) in positions.iter().enumerate() {
-            if position < start || position >= end {
-                return Err(Error::InvalidPosition(position));
-            }
-            if let Some(previous) = previous {
-                if position == previous {
-                    return Err(Error::DuplicatePosition(position));
-                }
-                if position < previous {
-                    return Err(Error::UnorderedPosition(previous, position));
-                }
-            }
-            if opening_leaves[index] == closing_leaves[index] {
-                return Err(Error::UnchangedPosition(position));
-            }
-            previous = Some(position);
-        }
-
-        if self.leaf_count == 0 {
-            if !self.shared.is_empty() || !self.outside.is_empty() {
-                return Err(Error::UnalignedProof);
-            }
-            let empty = H::hash(&[]);
-            let finalized = H::hash(&[&0u32.to_be_bytes(), empty.as_ref()]);
-            return Ok((finalized, finalized));
-        }
-
-        // The recursive walk owns canonical proof consumption. Requiring both
-        // streams to finish rejects missing, extra, and reordered frontier nodes.
-        let mut verifier = RangeUpdateVerifier {
-            start: u64::from(start),
-            end: u64::from(end),
-            positions,
-            opening_leaves,
-            closing_leaves,
-            shared: self.shared.iter(),
-            outside: self.outside.iter(),
-        };
-        let (opening, closing) = verifier.reconstruct::<H>(
-            levels_in_tree(self.leaf_count) - 1,
-            0,
-            u64::from(self.leaf_count),
-            0,
-            positions.len(),
-        )?;
-        if verifier.shared.next().is_some() || verifier.outside.next().is_some() {
-            return Err(Error::UnalignedProof);
-        }
-
-        let leaf_count = self.leaf_count.to_be_bytes();
-        let (opening, closing) = H::hash_pair(
-            &[&leaf_count, opening.as_ref()],
-            &[&leaf_count, closing.as_ref()],
-        );
-        Ok((opening, closing))
-    }
-
-    /// Verifies every disclosed change in `range` against trusted roots.
-    pub fn verify<H: Hasher<Digest = D>>(
-        &self,
-        range: core::ops::Range<u32>,
-        positions: &[u32],
-        opening_leaves: &[D],
-        closing_leaves: &[D],
-        opening_root: &D,
-        closing_root: &D,
-    ) -> Result<(), Error> {
-        let (opening, closing) =
-            self.roots::<H>(range, positions, opening_leaves, closing_leaves)?;
-        if opening != *opening_root {
-            return Err(Error::InvalidProof(
-                opening.to_string(),
-                opening_root.to_string(),
-            ));
-        }
-        if closing != *closing_root {
-            return Err(Error::InvalidProof(
-                closing.to_string(),
-                closing_root.to_string(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// A Merkle proof for multiple non-contiguous leaves in a Binary Merkle Tree.
@@ -3480,11 +2929,11 @@ mod tests {
         assert!(result.is_err(), "Should reject malicious large leaf_count");
     }
 
-    fn update_test_digest(side: &[u8], position: u32) -> Digest {
+    fn test_digest(side: &[u8], position: u32) -> Digest {
         Sha256::hash(&[side, &position.to_be_bytes()])
     }
 
-    fn update_test_tree(leaves: &[Digest]) -> Tree<Digest> {
+    fn test_tree(leaves: &[Digest]) -> Tree<Digest> {
         let mut builder = Builder::<Sha256>::new(leaves.len());
         for leaf in leaves {
             builder.add(leaf);
@@ -3492,7 +2941,7 @@ mod tests {
         builder.build(&Sequential)
     }
 
-    fn update_test_tree_with_strategy(leaves: &[Digest], strategy: &impl Strategy) -> Tree<Digest> {
+    fn test_tree_with_strategy(leaves: &[Digest], strategy: &impl Strategy) -> Tree<Digest> {
         let mut builder = Builder::<Sha256>::new(leaves.len());
         for leaf in leaves {
             builder.add(leaf);
@@ -3502,13 +2951,6 @@ mod tests {
 
     fn assert_same_tree(left: &Tree<Digest>, right: &Tree<Digest>) {
         assert_eq!(left.empty, right.empty);
-        assert_eq!(left.levels, right.levels);
-        assert_eq!(left.root, right.root);
-    }
-
-    fn assert_same_update(left: &Update<Digest>, right: &Update<Digest>) {
-        assert_eq!(left.opening_root, right.opening_root);
-        assert_eq!(left.leaf_count, right.leaf_count);
         assert_eq!(left.levels, right.levels);
         assert_eq!(left.root, right.root);
     }
@@ -3544,9 +2986,9 @@ mod tests {
     fn streaming_build_matches_dense_exhaustively() {
         for leaf_count in 0..=64u32 {
             let leaves: Vec<_> = (0..leaf_count)
-                .map(|position| update_test_digest(b"stream", position))
+                .map(|position| test_digest(b"stream", position))
                 .collect();
-            let expected = update_test_tree(&leaves).root();
+            let expected = test_tree(&leaves).root();
 
             for subtree_size in [1, 2, 4, 8, 16, 32, 64, 128] {
                 for split in 0..=leaves.len() {
@@ -3575,9 +3017,9 @@ mod tests {
             255, 256, 257,
         ] {
             let leaves: Vec<_> = (0..leaf_count)
-                .map(|position| update_test_digest(b"stream-boundary", position))
+                .map(|position| test_digest(b"stream-boundary", position))
                 .collect();
-            let expected = update_test_tree(&leaves).root();
+            let expected = test_tree(&leaves).root();
 
             for subtree_size in [1, 2, 4, 8, 64, 256, 512] {
                 assert_eq!(
@@ -3614,7 +3056,7 @@ mod tests {
         }
 
         let leaves: Vec<_> = (0..3)
-            .map(|position| update_test_digest(b"stream-count", position))
+            .map(|position| test_digest(b"stream-count", position))
             .collect();
         let mut over = StreamingBuilder::<Sha256>::new(2, 2).unwrap();
         assert_eq!(over.add(&leaves[0], &Sequential).unwrap(), 0);
@@ -3628,7 +3070,7 @@ mod tests {
         assert_eq!(over.add(&leaves[1], &Sequential).unwrap(), 1);
         assert_eq!(
             over.finish(&Sequential).unwrap(),
-            update_test_tree(&leaves[..2]).root()
+            test_tree(&leaves[..2]).root()
         );
 
         let mut under = StreamingBuilder::<Sha256>::new(2, 4).unwrap();
@@ -3652,7 +3094,7 @@ mod tests {
         ));
         assert_eq!(
             empty.finish(&Sequential).unwrap(),
-            update_test_tree(&[]).root()
+            test_tree(&[]).root()
         );
     }
 
@@ -3661,60 +3103,11 @@ mod tests {
         let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
         for leaf_count in [0usize, 1, 3, 257] {
             let leaves: Vec<_> = (0..leaf_count as u32)
-                .map(|position| update_test_digest(b"build", position))
+                .map(|position| test_digest(b"build", position))
                 .collect();
-            let sequential = update_test_tree_with_strategy(&leaves, &Sequential);
-            let rayon = update_test_tree_with_strategy(&leaves, &parallel);
+            let sequential = test_tree_with_strategy(&leaves, &Sequential);
+            let rayon = test_tree_with_strategy(&leaves, &parallel);
             assert_same_tree(&sequential, &rayon);
-        }
-    }
-
-    #[test]
-    fn strategy_updates_and_range_proofs_match_sequential_exactly() {
-        let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
-
-        let empty = update_test_tree(&[]);
-        let empty_update = empty.update::<Sha256>(&[], &Sequential).unwrap();
-        let empty_parallel = empty.update::<Sha256>(&[], &parallel).unwrap();
-        assert_same_update(&empty_update, &empty_parallel);
-        assert_eq!(
-            empty
-                .range_update_proofs(&empty_update, &[0, 0, 0], &Sequential)
-                .unwrap(),
-            empty
-                .range_update_proofs(&empty_parallel, &[0, 0, 0], &parallel)
-                .unwrap()
-        );
-
-        let opening: Vec<_> = (0..9)
-            .map(|position| update_test_digest(b"opening", position))
-            .collect();
-        let tree = update_test_tree(&opening);
-        let change_sets = [
-            Vec::new(),
-            vec![(4, update_test_digest(b"one", 4))],
-            [0, 4, 8]
-                .into_iter()
-                .map(|position| (position, update_test_digest(b"sparse", position)))
-                .collect(),
-            (0..9)
-                .map(|position| (position, update_test_digest(b"dense", position)))
-                .collect(),
-        ];
-        let boundaries = [0, 0, 1, 1, 4, 8, 9, 9];
-
-        for changes in change_sets {
-            let sequential = tree.update::<Sha256>(&changes, &Sequential).unwrap();
-            let rayon = tree.update::<Sha256>(&changes, &parallel).unwrap();
-            assert_same_update(&sequential, &rayon);
-
-            let sequential_proofs = tree
-                .range_update_proofs(&sequential, &boundaries, &Sequential)
-                .unwrap();
-            let rayon_proofs = tree
-                .range_update_proofs(&rayon, &boundaries, &parallel)
-                .unwrap();
-            assert_eq!(sequential_proofs, rayon_proofs);
         }
     }
 
@@ -3732,9 +3125,9 @@ mod tests {
         );
 
         let leaves: Vec<_> = (0..257)
-            .map(|position| update_test_digest(b"proof", position))
+            .map(|position| test_digest(b"proof", position))
             .collect();
-        let tree = update_test_tree(&leaves);
+        let tree = test_tree(&leaves);
         let position_sets = [vec![128], vec![0, 63, 128, 191, 256], (0..257).collect()];
         for positions in position_sets {
             let proof = tree.multi_proof(&positions).unwrap();
@@ -3755,39 +3148,12 @@ mod tests {
     }
 
     #[test]
-    fn strategy_apis_reject_malformed_inputs_identically() {
+    fn strategy_multi_inclusion_rejects_malformed_inputs_identically() {
         let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
         let opening: Vec<_> = (0..9)
-            .map(|position| update_test_digest(b"opening", position))
+            .map(|position| test_digest(b"opening", position))
             .collect();
-        let tree = update_test_tree(&opening);
-        let changed = update_test_digest(b"changed", 4);
-        for changes in [
-            vec![(9, changed)],
-            vec![(4, changed), (4, changed)],
-            vec![(5, changed), (4, changed)],
-            vec![(4, opening[4])],
-        ] {
-            assert_eq!(
-                rejected(tree.update::<Sha256>(&changes, &Sequential)),
-                rejected(tree.update::<Sha256>(&changes, &parallel))
-            );
-        }
-
-        let update = tree.update::<Sha256>(&[(4, changed)], &Sequential).unwrap();
-        for boundaries in [
-            &[][..],
-            &[0][..],
-            &[1, 9][..],
-            &[0, 8][..],
-            &[0, 5, 4, 9][..],
-        ] {
-            assert_eq!(
-                rejected(tree.range_update_proofs(&update, boundaries, &Sequential)),
-                rejected(tree.range_update_proofs(&update, boundaries, &parallel,))
-            );
-        }
-
+        let tree = test_tree(&opening);
         let proof = tree.multi_proof([4]).unwrap();
         for elements in [
             vec![(opening[4], 4), (opening[4], 4)],
@@ -3795,458 +3161,16 @@ mod tests {
         ] {
             assert_eq!(
                 rejected(proof.root_from_multi_inclusion::<Sha256>(&elements, &Sequential)),
-                rejected(proof.root_from_multi_inclusion::<Sha256>(&elements, &parallel,))
+                rejected(proof.root_from_multi_inclusion::<Sha256>(&elements, &parallel))
             );
         }
 
         let mut unaligned = proof;
-        unaligned.siblings.push(update_test_digest(b"extra", 0));
+        unaligned.siblings.push(test_digest(b"extra", 0));
         let elements = [(opening[4], 4)];
         assert_eq!(
             rejected(unaligned.root_from_multi_inclusion::<Sha256>(&elements, &Sequential)),
             rejected(unaligned.root_from_multi_inclusion::<Sha256>(&elements, &parallel))
-        );
-    }
-
-    #[test]
-    fn range_update_matches_dense_tree_exhaustively() {
-        for leaf_count in 0..=8u32 {
-            let opening: Vec<_> = (0..leaf_count)
-                .map(|position| update_test_digest(b"opening", position))
-                .collect();
-            let tree = update_test_tree(&opening);
-
-            for mask in 0..(1u32 << leaf_count) {
-                let mut closing = opening.clone();
-                let mut changes = Vec::new();
-                for position in 0..leaf_count {
-                    if mask & (1 << position) != 0 {
-                        closing[position as usize] = update_test_digest(b"closing", position);
-                        changes.push((position, closing[position as usize]));
-                    }
-                }
-
-                let dense = update_test_tree(&closing);
-                let update = tree.update::<Sha256>(&changes, &Sequential).unwrap();
-                assert_eq!(update.root(), dense.root());
-                assert!(
-                    update.levels.iter().map(Vec::len).sum::<usize>()
-                        <= changes.len().saturating_mul(levels_in_tree(leaf_count))
-                );
-
-                for start in 0..=leaf_count {
-                    for end in start..=leaf_count {
-                        let proofs = tree
-                            .range_update_proofs(&update, &[0, start, end, leaf_count], &Sequential)
-                            .unwrap();
-                        let proof = &proofs[1];
-                        if leaf_count == 0 {
-                            assert!(proof.shared.is_empty());
-                            assert!(proof.outside.is_empty());
-                        } else if start == end {
-                            assert!(proof.shared.is_empty());
-                            assert_eq!(proof.outside.len(), 1);
-                        }
-                        let interval: Vec<_> = changes
-                            .iter()
-                            .filter(|(position, _)| *position >= start && *position < end)
-                            .copied()
-                            .collect();
-                        let positions: Vec<_> =
-                            interval.iter().map(|(position, _)| *position).collect();
-                        let opening_leaves: Vec<_> = positions
-                            .iter()
-                            .map(|position| opening[*position as usize])
-                            .collect();
-                        let closing_leaves: Vec<_> = positions
-                            .iter()
-                            .map(|position| closing[*position as usize])
-                            .collect();
-
-                        proof
-                            .verify::<Sha256>(
-                                start..end,
-                                &positions,
-                                &opening_leaves,
-                                &closing_leaves,
-                                &tree.root(),
-                                &dense.root(),
-                            )
-                            .unwrap();
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn range_update_rejects_invalid_construction() {
-        let opening: Vec<_> = (0..5)
-            .map(|position| update_test_digest(b"opening", position))
-            .collect();
-        let tree = update_test_tree(&opening);
-        let changed = update_test_digest(b"closing", 2);
-
-        assert!(matches!(
-            tree.update::<Sha256>(&[(5, changed)], &Sequential),
-            Err(Error::InvalidPosition(5))
-        ));
-        assert!(matches!(
-            tree.update::<Sha256>(&[(2, changed), (2, changed)], &Sequential),
-            Err(Error::DuplicatePosition(2))
-        ));
-        assert!(matches!(
-            tree.update::<Sha256>(&[(3, changed), (2, changed)], &Sequential),
-            Err(Error::UnorderedPosition(3, 2))
-        ));
-        assert!(matches!(
-            tree.update::<Sha256>(&[(2, opening[2])], &Sequential),
-            Err(Error::UnchangedPosition(2))
-        ));
-
-        let update = tree.update::<Sha256>(&[(2, changed)], &Sequential).unwrap();
-        for boundaries in [
-            &[][..],
-            &[0][..],
-            &[1, 5][..],
-            &[0, 4][..],
-            &[0, 4, 3, 5][..],
-        ] {
-            assert!(
-                tree.range_update_proofs(&update, boundaries, &Sequential)
-                    .is_err()
-            );
-        }
-
-        let other_opening: Vec<_> = (0..5)
-            .map(|position| update_test_digest(b"other", position))
-            .collect();
-        let other = update_test_tree(&other_opening);
-        assert!(matches!(
-            other.range_update_proofs(&update, &[0, 5], &Sequential),
-            Err(Error::InvalidUpdate)
-        ));
-    }
-
-    #[test]
-    fn range_update_rejects_hidden_changes_and_malformed_inputs() {
-        let opening: Vec<_> = (0..9)
-            .map(|position| update_test_digest(b"opening", position))
-            .collect();
-        let mut closing = opening.clone();
-        let positions = [1, 4, 5, 8];
-        for position in positions {
-            closing[position as usize] = update_test_digest(b"closing", position);
-        }
-        let tree = update_test_tree(&opening);
-        let dense = update_test_tree(&closing);
-        let changes: Vec<_> = positions
-            .iter()
-            .map(|&position| (position, closing[position as usize]))
-            .collect();
-        let update = tree.update::<Sha256>(&changes, &Sequential).unwrap();
-        let mut proof = tree
-            .range_update_proofs(&update, &[0, 3, 7, 9], &Sequential)
-            .unwrap()
-            .remove(1);
-        assert!(!proof.shared.is_empty());
-        assert!(!proof.outside.is_empty());
-        assert!(
-            proof
-                .outside
-                .iter()
-                .any(|(opening, closing)| opening != closing)
-        );
-        let interval_positions = [4, 5];
-        let interval_opening = [opening[4], opening[5]];
-        let interval_closing = [closing[4], closing[5]];
-
-        assert_eq!(
-            proof
-                .roots::<Sha256>(
-                    3..7,
-                    &interval_positions,
-                    &interval_opening,
-                    &interval_closing,
-                )
-                .unwrap(),
-            (tree.root(), dense.root())
-        );
-        proof
-            .verify::<Sha256>(
-                3..7,
-                &interval_positions,
-                &interval_opening,
-                &interval_closing,
-                &tree.root(),
-                &dense.root(),
-            )
-            .unwrap();
-
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &[4],
-                    &interval_opening[..1],
-                    &interval_closing[..1],
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &interval_positions,
-                    &interval_opening,
-                    &[interval_closing[0], interval_opening[1]],
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &[5, 4],
-                    &interval_opening,
-                    &interval_closing,
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        for (start, end) in [(7, 3), (3, 10)] {
-            assert!(
-                proof
-                    .verify::<Sha256>(
-                        start..end,
-                        &interval_positions,
-                        &interval_opening,
-                        &interval_closing,
-                        &tree.root(),
-                        &dense.root(),
-                    )
-                    .is_err()
-            );
-        }
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &[4, 4],
-                    &interval_opening,
-                    &interval_closing,
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &[2],
-                    &interval_opening[..1],
-                    &interval_closing[..1],
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &interval_positions,
-                    &interval_opening,
-                    &interval_opening,
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &interval_positions,
-                    &interval_opening[..1],
-                    &interval_closing,
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    2..7,
-                    &interval_positions,
-                    &interval_opening,
-                    &interval_closing,
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &interval_positions,
-                    &interval_opening,
-                    &interval_closing,
-                    &Sha256::hash(&[b"wrong opening root"]),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &interval_positions,
-                    &interval_opening,
-                    &interval_closing,
-                    &tree.root(),
-                    &Sha256::hash(&[b"wrong closing root"]),
-                )
-                .is_err()
-        );
-
-        let extra = Sha256::hash(&[b"extra frontier node"]);
-        for field in 0..2 {
-            let mut malformed = proof.clone();
-            match field {
-                0 => malformed.shared.push(extra),
-                _ => malformed.outside.push((extra, extra)),
-            }
-            assert!(
-                malformed
-                    .verify::<Sha256>(
-                        3..7,
-                        &interval_positions,
-                        &interval_opening,
-                        &interval_closing,
-                        &tree.root(),
-                        &dense.root(),
-                    )
-                    .is_err()
-            );
-        }
-        for field in 0..2 {
-            let mut malformed = proof.clone();
-            match field {
-                0 => {
-                    malformed.shared.pop();
-                }
-                _ => {
-                    malformed.outside.pop();
-                }
-            }
-            assert!(
-                malformed
-                    .verify::<Sha256>(
-                        3..7,
-                        &interval_positions,
-                        &interval_opening,
-                        &interval_closing,
-                        &tree.root(),
-                        &dense.root(),
-                    )
-                    .is_err()
-            );
-        }
-
-        for side in 0..2 {
-            let mut malformed = proof.clone();
-            if side == 0 {
-                malformed.outside[0].0 = extra;
-            } else {
-                malformed.outside[0].1 = extra;
-            }
-            assert!(
-                malformed
-                    .verify::<Sha256>(
-                        3..7,
-                        &interval_positions,
-                        &interval_opening,
-                        &interval_closing,
-                        &tree.root(),
-                        &dense.root(),
-                    )
-                    .is_err()
-            );
-        }
-
-        proof.leaf_count = u32::MAX;
-        assert!(
-            proof
-                .verify::<Sha256>(
-                    3..7,
-                    &interval_positions,
-                    &interval_opening,
-                    &interval_closing,
-                    &tree.root(),
-                    &dense.root(),
-                )
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn range_update_codec_is_bounded_and_canonical() {
-        let opening: Vec<_> = (0..9)
-            .map(|position| update_test_digest(b"opening", position))
-            .collect();
-        let tree = update_test_tree(&opening);
-        let closing = update_test_digest(b"closing", 4);
-        let update = tree.update::<Sha256>(&[(4, closing)], &Sequential).unwrap();
-        let proof = tree
-            .range_update_proofs(&update, &[0, 3, 7, 9], &Sequential)
-            .unwrap()
-            .remove(1);
-        let encoded = proof.encode();
-        assert_eq!(encoded.len(), proof.encode_size());
-        assert_eq!(
-            RangeUpdateProof::<Digest>::decode_cfg(
-                encoded.clone(),
-                &(proof.shared.len(), proof.outside.len()),
-            )
-            .unwrap(),
-            proof
-        );
-        if !proof.shared.is_empty() {
-            assert!(
-                RangeUpdateProof::<Digest>::decode_cfg(
-                    encoded.clone(),
-                    &(proof.shared.len() - 1, proof.outside.len()),
-                )
-                .is_err()
-            );
-        }
-        if !proof.outside.is_empty() {
-            assert!(
-                RangeUpdateProof::<Digest>::decode_cfg(
-                    encoded.clone(),
-                    &(proof.shared.len(), proof.outside.len() - 1),
-                )
-                .is_err()
-            );
-        }
-
-        let mut truncated = encoded;
-        truncated.truncate(truncated.len() - 1);
-        assert!(
-            RangeUpdateProof::<Digest>::decode_cfg(
-                truncated,
-                &(proof.shared.len(), proof.outside.len()),
-            )
-            .is_err()
         );
     }
 
@@ -4292,10 +3216,10 @@ mod tests {
 
                 // Modify a sibling hash and ensure the proof fails
                 if !proof.siblings.is_empty() {
-                    let mut update_tamper = proof.clone();
-                    update_tamper.siblings[0] = Sha256::hash(&[b"tampered"]);
+                    let mut tampered_proof = proof.clone();
+                    tampered_proof.siblings[0] = Sha256::hash(&[b"tampered"]);
                     assert!(
-                        update_tamper
+                        tampered_proof
                             .verify_element_inclusion::<Sha256>(leaf, i as u32, &root)
                             .is_err(),
                         "modify fail for size={n} leaf={i}"
@@ -4343,7 +3267,6 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Proof<Sha256Digest>>,
-            CodecConformance<RangeUpdateProof<Sha256Digest>>,
             RootConformance => 200
         }
     }

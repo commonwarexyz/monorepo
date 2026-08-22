@@ -941,7 +941,6 @@ pub struct StateCache<P: PublicKey, D: Digest> {
     leaves: Vec<StateLeaf<P>>,
     tree: Tree<D>,
     liability: u64,
-    byte_boundaries: [u32; 257],
 }
 
 impl<P: PublicKey, D: Digest> StateCache<P, D> {
@@ -969,31 +968,19 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
             return Err(TransitionError::InactiveBalance);
         }
 
-        let mut byte_boundaries = [0_u32; 257];
-        let mut cursor = 0_usize;
-        for byte in 0_u16..=u16::from(u8::MAX) {
-            byte_boundaries[usize::from(byte)] =
-                u32::try_from(cursor).map_err(|_| TransitionError::TooManyStates)?;
-            while let Some(leaf) = leaves.get(cursor) {
-                let first = leaf
-                    .account
-                    .as_ref()
-                    .first()
-                    .copied()
-                    .ok_or(TransitionError::EmptyAccountKey)?;
-                if u16::from(first) < byte {
-                    return Err(TransitionError::NonCanonicalSliceOrder);
-                }
-                if u16::from(first) != byte {
-                    break;
-                }
-                cursor += 1;
+        let mut previous_prefix = None;
+        for leaf in &leaves {
+            let prefix = leaf
+                .account
+                .as_ref()
+                .first()
+                .copied()
+                .ok_or(TransitionError::EmptyAccountKey)?;
+            if previous_prefix.is_some_and(|previous| previous > prefix) {
+                return Err(TransitionError::NonCanonicalSliceOrder);
             }
+            previous_prefix = Some(prefix);
         }
-        if cursor != leaves.len() {
-            return Err(TransitionError::NonCanonicalSliceOrder);
-        }
-        byte_boundaries[256] = len;
 
         let mut liability = 0_u64;
         for leaf in &leaves {
@@ -1006,7 +993,6 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
             leaves,
             tree,
             liability,
-            byte_boundaries,
         })
     }
 
@@ -1033,20 +1019,6 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
     /// Returns the checked sum of opening balances.
     pub const fn liability(&self) -> u64 {
         self.liability
-    }
-
-    /// Returns cached state-position boundaries for every deterministic slice.
-    ///
-    /// This touches at most 257 cached entries and never scans or rehashes state leaves.
-    pub fn slice_boundaries(&self, slice_bits: u8) -> Result<Vec<u32>, TransitionError> {
-        if slice_bits > MAX_SLICE_BITS {
-            return Err(TransitionError::SliceBits);
-        }
-        let count = 1_usize << slice_bits;
-        let buckets_per_slice = 256 / count;
-        Ok((0..=count)
-            .map(|slice| self.byte_boundaries[slice * buckets_per_slice])
-            .collect())
     }
 
     /// Opens one authenticated account from the cached state tree.
@@ -2102,7 +2074,7 @@ where
     let (opening, closing) =
         derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
     if prepared.closing_leaves != closing || prepared.closing.root() != close.roots.closing {
-        return Err(TransitionError::Commitment(commitment::Error::HiddenChange));
+        return Err(TransitionError::ClosingRoot);
     }
     let layout = slice::derive_layout(&close.rows, &opening, &closing, prepared.slice_bits)?;
     if prepared.layout_boundaries != layout || prepared.layout.root() != close.roots.layout {
@@ -2151,7 +2123,7 @@ where
         return Err(TransitionError::OpeningRoot);
     }
     if closing_tree.root() != close.roots.closing {
-        return Err(TransitionError::Commitment(commitment::Error::HiddenChange));
+        return Err(TransitionError::ClosingRoot);
     }
     let layout = slice::derive_layout(
         &close.rows,
@@ -2260,6 +2232,9 @@ pub enum TransitionError {
     /// The committed change root does not match the exact rows.
     #[error("change root does not commit the supplied rows")]
     ChangeRoot,
+    /// The committed closing root does not match the exact derived live state.
+    #[error("closing root does not commit the derived live state")]
+    ClosingRoot,
     /// A close or sealed boundary exceeds its anchor-bound resource limits.
     #[error("close exceeds an anchor-bound resource limit")]
     CloseLimit,
@@ -2704,31 +2679,6 @@ mod tests {
         )
         .unwrap();
         (context, deposits, withdrawals, close)
-    }
-
-    #[test]
-    fn proof_slice_boundaries_are_exhaustive_cached_intervals() {
-        let mut leaves = (0..512)
-            .map(|seed| StateLeaf {
-                account: SigningKey::from_seed(seed).public_key(),
-                state: state(1),
-            })
-            .collect::<Vec<_>>();
-        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-        let cache = StateCache::new::<CountingHasher>(leaves).unwrap();
-
-        HASH_CALLS.store(0, Ordering::Relaxed);
-        let boundaries = cache.slice_boundaries(8).unwrap();
-        assert_eq!(HASH_CALLS.load(Ordering::Relaxed), 0);
-        assert_eq!(boundaries.len(), 257);
-        assert_eq!(boundaries.first(), Some(&0));
-        assert_eq!(boundaries.last(), Some(&(cache.len() as u32)));
-        assert!(boundaries.windows(2).all(|pair| pair[0] <= pair[1]));
-        for (slice, interval) in boundaries.windows(2).enumerate() {
-            for leaf in &cache.leaves()[interval[0] as usize..interval[1] as usize] {
-                assert_eq!(account_slice(&leaf.account, 8).unwrap(), slice as u16);
-            }
-        }
     }
 
     #[test]
@@ -3904,7 +3854,7 @@ mod tests {
         close.header = Header::new::<Sha256, _>(context.payment(), &close.roots);
         assert!(matches!(
             validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close),
-            Err(TransitionError::Commitment(commitment::Error::HiddenChange))
+            Err(TransitionError::ClosingRoot)
         ));
     }
 
@@ -4426,13 +4376,13 @@ mod tests {
     }
 
     #[test]
-    fn hidden_change_is_rejected() {
+    fn mismatched_closing_root_is_rejected() {
         let (context, deposits, withdrawals, mut close) = empty_fixture();
         close.roots.closing.digest = Sha256::hash(&[b"hidden"]);
         close.header = Header::new::<Sha256, _>(context.payment(), &close.roots);
         assert!(matches!(
             validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close),
-            Err(TransitionError::Commitment(commitment::Error::HiddenChange))
+            Err(TransitionError::ClosingRoot)
         ));
     }
 

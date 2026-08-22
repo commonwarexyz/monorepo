@@ -18,10 +18,6 @@ hash = "3cb6882637c1c1a929a50b3ab425311f3ef342184dc46a80b1eae616ca7b64a4"
 n_cases = 65536
 hash = "6d6382956289a2f706581a4b1afa08c5cd8e8a4f55b11d454425333b6537cc17"
 
-["commonware_storage::bmt::tests::conformance::CodecConformance<RangeUpdateProof<Sha256Digest>>"]
-n_cases = 65536
-hash = "690306b864aaaedf9e17657e36cb4836b9e491ed55d2e70f49867cfbddc4abed"
-
 ["commonware_storage::bmt::tests::conformance::RootConformance"]
 n_cases = 200
 hash = "18b1108f18520078e2eb5bb29c6a4cdf3bded6b52d8efda19d45c0f10be27207"

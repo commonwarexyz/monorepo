@@ -26,8 +26,8 @@ must be supplied or cached by external settlement operations.
 dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator.
 `seal` checks the local row equations and the exact state-update, prefix, and conservation relations
 represented by the dealing and shared Header. It verifies every distinct signed send and receipt
-envelope in one aggregate batch. Proofs of possession are checked when validators register. With
-`n` validators, the BLS MinSig certificate contributes a 48-byte signature and a
+envelope in one randomized aggregate batch. Proofs of possession are checked when validators
+register. With `n` validators, the BLS MinSig certificate contributes a 48-byte signature and a
 `ceil(n / 8)`-byte signer bitmap on the external chain. For every slice, its `q = 2f + 1`
 holders and an exact certificate quorum of `q` signers intersect in more than `f` validators, so at
 least one honest certificate signer has authenticated and retains that slice. Across all slices,
@@ -40,9 +40,9 @@ embedding application must provide an authenticated monotonic clock and atomical
 state mutation with its custody effects. A chain operated by the same validators may persist the
 32-byte Header as its admitted commitment because consensus admission occurs only after those
 validators have seen the RootBundle and authenticated their dealings. This does not remove the
-chain's context, status, custody, or deadline state, and it does not replace RootBundle or data-
-availability retention. The crate does not provide an operator, network service, persistence layer,
-or asset-adapter implementation.
+chain's context, status, custody, or deadline state, and it does not replace RootBundle or
+data-availability retention. The crate does not provide an operator, network service, persistence
+layer, or asset-adapter implementation.
 
 ## Benchmarks
 

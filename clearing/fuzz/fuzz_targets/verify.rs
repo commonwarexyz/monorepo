@@ -9,9 +9,7 @@ use commonware_clearing::bajillion::{
         AccountLookup, Challenge, ChallengeKind, RangeLower, StateLookup, Verdict, adjudicate,
         decode_bounded,
     },
-    commitment::{
-        Builder, MultiOpening, Opening, SparseUpdate, VectorKind, VectorRoot, empty_root,
-    },
+    commitment::{Builder, MultiOpening, Opening, VectorKind, VectorRoot, empty_root},
     credit::{CreditRoot, ShardHead, ShardLookup, ShardOpening, ShardSet, verify_opening},
     payment::{
         Payment, PaymentContext, ReceiptBody, SignedReceipt, SignedSend, receipt_range_is_feasible,
@@ -90,11 +88,8 @@ struct ChallengeCase {
 struct CommitmentCase {
     opening: Opening<Digest>,
     multi: MultiOpening<Digest>,
-    update: SparseUpdate<Digest>,
     opening_root: VectorRoot<Digest>,
-    closing_root: VectorRoot<Digest>,
     opening_values: Vec<Vec<u8>>,
-    closing_values: Vec<Vec<u8>>,
     positions: Vec<u8>,
     kind: VectorKind,
 }
@@ -634,10 +629,7 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     case.opening.proof.siblings.truncate(MAX_PROOF_DIGESTS);
     case.multi.positions.truncate(MAX_POSITIONS);
     case.multi.proof.siblings.truncate(MAX_PROOF_DIGESTS);
-    case.update.positions.truncate(MAX_POSITIONS);
-    case.update.proof.siblings.truncate(MAX_PROOF_DIGESTS);
     let opening_values = bounded_values(case.opening_values);
-    let closing_values = bounded_values(case.closing_values);
     let first = opening_values.first().map_or(&[][..], Vec::as_slice);
 
     let _ = case
@@ -647,17 +639,6 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     let _ = case
         .multi
         .verify::<Sha256, _>(case.kind, &case.opening_root, &opening_values);
-    let _ = case
-        .update
-        .reconstruct_closing::<Sha256, _>(case.kind, &closing_values);
-    let _ = case.update.verify::<Sha256, _, _>(
-        case.kind,
-        &case.opening_root,
-        &case.closing_root,
-        &opening_values,
-        &closing_values,
-    );
-
     let mut builder = Builder::<Sha256>::new(case.kind, opening_values.len() as u32)
         .expect("small vector must fit the protocol bound");
     for value in &opening_values {
@@ -676,14 +657,6 @@ fn fuzz_commitment(mut case: CommitmentCase) {
         assert!(
             multi
                 .verify::<Sha256, Vec<u8>>(case.kind, &root, &[])
-                .is_ok()
-        );
-        let update = tree
-            .sparse_update(&[])
-            .expect("empty vector has a canonical empty update");
-        assert!(
-            update
-                .verify::<Sha256, Vec<u8>, Vec<u8>>(case.kind, &root, &root, &[], &[])
                 .is_ok()
         );
         return;
@@ -721,22 +694,6 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     assert!(
         multi
             .verify::<Sha256, _>(case.kind, &root, &disclosed)
-            .is_ok()
-    );
-
-    let update = tree
-        .sparse_update(&positions)
-        .expect("normalized positions are canonical");
-    let mut changed = disclosed.clone();
-    for value in &mut changed {
-        value.push(0xff);
-    }
-    let closing_root = update
-        .reconstruct_closing::<Sha256, _>(case.kind, &changed)
-        .expect("constructed update must reconstruct");
-    assert!(
-        update
-            .verify::<Sha256, _, _>(case.kind, &root, &closing_root, &disclosed, &changed)
             .is_ok()
     );
 }
