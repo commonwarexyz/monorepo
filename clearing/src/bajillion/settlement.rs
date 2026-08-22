@@ -9,10 +9,13 @@
 //! when the requested operation returns an error. Callers must therefore provide one authenticated,
 //! monotonic clock and persist mutation-on-error results.
 //!
-//! Terminal settlement deliberately authenticates and scans the complete surviving registry. Its
-//! work and payout count are bounded by [`SettlementConfig::max_registry_accounts`]. Replay state
-//! for external deposit events is retained for the deployment lifetime and bounded by
-//! [`SettlementConfig::max_deposit_ids`]; reaching that limit safely rejects new deposits.
+//! Terminal settlement deliberately authenticates and scans the complete surviving state. The
+//! survivor is bounded by [`SettlementConfig::max_state_accounts`], while unfinalized deposit
+//! records and distinct deposit-only recipients are bounded by
+//! [`SettlementConfig::max_deposit_ids`]. Including the bounded pipeline traversal, terminal work
+//! is linear in those configured limits, and the payout list contains at most two entries per
+//! survivor plus one per retained deposit identifier. Deposit replay state is retained for the
+//! deployment lifetime; reaching its limit safely rejects new deposits.
 //! Withdrawal replay identifiers are retained only through the configured maximum deadline.
 
 use crate::bajillion::{
@@ -22,8 +25,10 @@ use crate::bajillion::{
     },
     challenge::{self, Challenge, ChallengeError, ChallengeKind, StateOpening, Verdict},
     commitment::{self, VectorRoot},
-    state::{AccountState, StateLeaf},
-    transition::{self, BatchId, CloseContext, Header, RootBundle, StateCache, TransitionError},
+    transition::{
+        self, BatchId, CloseContext, ExternalPayout, Header, PayoutProof, RootBundle, StateCache,
+        TransitionError, verify_payout_proof_after_header,
+    },
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -55,7 +60,7 @@ pub enum BatchStatus<D: Digest> {
 pub struct PendingBatch<D: Digest> {
     /// Admitted header.
     pub header: Header<D>,
-    /// Authenticated opening, change, and closing roots used while the batch is pending.
+    /// Authenticated opening, change, closing, and slice-layout roots used while pending.
     pub roots: RootBundle<D>,
     /// Exact BLS12-381 MinSig quorum certificate over `header`.
     pub certificate: bls12381::Certificate,
@@ -88,7 +93,9 @@ pub struct FinalizedBatch<P: PublicKey, D: Digest> {
     pub closing_state_root: VectorRoot<D>,
     /// Signed withdrawals and their exact released amounts.
     pub released_withdrawals: Vec<WithdrawalRelease<P, D>>,
-    /// Custody remaining after the withdrawals are released.
+    /// Certified sends to recipients absent from the opening state.
+    pub released_payouts: Vec<ExternalPayout<P>>,
+    /// Custody remaining after withdrawals and external payouts are released.
     pub custody_balance: u64,
 }
 
@@ -151,11 +158,13 @@ pub struct SettlementConfig {
     pub minimum_withdrawal_notice: NonZeroU64,
     /// Maximum delay from queueing to a withdrawal's absolute deadline.
     pub maximum_withdrawal_notice: NonZeroU64,
-    /// Maximum accounts that one terminal unwind may scan.
-    pub max_registry_accounts: NonZeroUsize,
+    /// Maximum live accounts in every finalized, admitted, or terminal-survivor state.
+    pub max_state_accounts: NonZeroUsize,
     /// Maximum retained bytes in an opaque withdrawal destination.
     pub max_destination_bytes: usize,
     /// Maximum external deposit identifiers retained for lifetime replay protection.
+    ///
+    /// This also bounds unfinalized deposit records and deposit-only terminal payouts.
     pub max_deposit_ids: NonZeroUsize,
 }
 
@@ -166,7 +175,7 @@ impl SettlementConfig {
         max_pending_epochs: NonZeroUsize,
         minimum_withdrawal_notice: NonZeroU64,
         maximum_withdrawal_notice: NonZeroU64,
-        max_registry_accounts: NonZeroUsize,
+        max_state_accounts: NonZeroUsize,
         max_destination_bytes: usize,
         max_deposit_ids: NonZeroUsize,
     ) -> Self {
@@ -174,7 +183,7 @@ impl SettlementConfig {
             max_pending_epochs,
             minimum_withdrawal_notice,
             maximum_withdrawal_notice,
-            max_registry_accounts,
+            max_state_accounts,
             max_destination_bytes,
             max_deposit_ids,
         }
@@ -186,6 +195,7 @@ struct RegisteredClose<P: PublicKey, D: Digest> {
     context: CloseContext<P, D>,
     deposits: DepositBatch<P>,
     withdrawal_releases: Vec<WithdrawalRelease<P, D>>,
+    external_payouts: Vec<ExternalPayout<P>>,
 }
 
 #[derive(Clone, Debug)]
@@ -212,7 +222,6 @@ where
     deployment: H::Digest,
     operator: P,
     certificate_scheme: bls12381::Scheme,
-    accounts: Vec<P>,
     current_state_root: VectorRoot<H::Digest>,
     current_liability: u64,
     custody_balance: u64,
@@ -255,20 +264,14 @@ where
         if config.maximum_withdrawal_notice < config.minimum_withdrawal_notice {
             return Err(SettlementError::WithdrawalNoticeOrder);
         }
-        if current_state.leaves().len() > config.max_registry_accounts.get() {
-            return Err(SettlementError::RegistryCapacity);
+        if current_state.leaves().len() > config.max_state_accounts.get() {
+            return Err(SettlementError::StateCapacity);
         }
-        let accounts = current_state
-            .leaves()
-            .iter()
-            .map(|leaf| leaf.account.clone())
-            .collect();
         let current_liability = current_state.liability();
         Ok(Self {
             deployment,
             operator,
             certificate_scheme: bls12381::Scheme::verifier(committee),
-            accounts,
             current_state_root: current_state.root(),
             current_liability,
             custody_balance: current_liability,
@@ -389,10 +392,6 @@ where
         Ok(())
     }
 
-    fn contains_account(&self, account: &P) -> bool {
-        self.accounts.binary_search(account).is_ok()
-    }
-
     fn ensure_deposit_capacity(&self) -> Result<(), SettlementError> {
         if self.consumed_deposit_ids.len() >= self.config.max_deposit_ids.get() {
             return Err(SettlementError::DepositCapacity);
@@ -415,9 +414,6 @@ where
         }
         if amount == 0 {
             return Err(SettlementError::ZeroDeposit);
-        }
-        if !self.contains_account(&account) {
-            return Err(SettlementError::DepositAccount);
         }
         if self.consumed_deposit_ids.contains(&deposit_id) {
             return Err(SettlementError::DuplicateDeposit);
@@ -703,6 +699,7 @@ where
             context,
             deposits,
             withdrawal_releases: self.pending_withdrawals.values().cloned().collect(),
+            external_payouts: Vec::new(),
         });
         Ok(())
     }
@@ -713,6 +710,7 @@ where
         now: u64,
         header: Header<H::Digest>,
         roots: RootBundle<H::Digest>,
+        payout_proof: PayoutProof<P, H::Digest>,
         certificate: bls12381::Certificate,
     ) -> Result<BatchId<H::Digest>, SettlementError> {
         self.ensure_operating_at(now)?;
@@ -727,22 +725,40 @@ where
             return Err(SettlementError::AdmissionAfterDeadline);
         }
         transition::validate_header::<H, P, H::Digest>(&registered.context, &header, &roots)?;
+        if !self.certificate_scheme.verify_exact(&header, &certificate) {
+            return Err(SettlementError::InvalidCertificate);
+        }
+        let (external_payouts, totals) = verify_payout_proof_after_header::<H, P, H::Digest>(
+            &registered.context,
+            &registered.deposits,
+            &self.pending_withdrawals(),
+            &roots,
+            &payout_proof,
+        )?;
+        if usize::try_from(payout_proof.terminal().closing).map_or(true, |closing| {
+            closing > self.config.max_state_accounts.get()
+        }) {
+            return Err(SettlementError::StateCapacity);
+        }
         let withdrawal_total = release_total(&registered.withdrawal_releases)?;
+        if totals.withdrawal != withdrawal_total {
+            return Err(SettlementError::WithdrawalWitness);
+        }
+        let payout_total = payout_total(&external_payouts)?;
         let closing_liability = registered
             .context
             .opening_liability()
             .checked_add(registered.deposits.total())
             .and_then(|liability| liability.checked_sub(withdrawal_total))
+            .and_then(|liability| liability.checked_sub(payout_total))
             .ok_or(SettlementError::CustodyArithmetic)?;
-        if !self.certificate_scheme.verify_exact(&header, &certificate) {
-            return Err(SettlementError::InvalidCertificate);
-        }
 
         let batch_id = header.batch_id::<H>();
-        let registered = self
+        let mut registered = self
             .registered
             .take()
             .expect("the registered close was checked above");
+        registered.external_payouts = external_payouts;
         for record in registered.deposits.records() {
             self.pending_deposits
                 .remove(record.account())
@@ -850,7 +866,8 @@ where
 
     /// Finalizes the pending pipeline front after its inclusive challenge window.
     ///
-    /// The caller must atomically commit the returned withdrawal releases with this state mutation.
+    /// The caller must atomically commit every returned withdrawal and external-payout release with
+    /// this state mutation.
     pub fn finalize(&mut self, now: u64) -> Result<FinalizedBatch<P, H::Digest>, SettlementError> {
         self.observe_time(now);
         if self.fault_settled {
@@ -866,6 +883,7 @@ where
             closing_state_root,
             closing_liability,
             released_withdrawals,
+            released_payouts,
             custody_balance,
             unfinalized_deposit_total,
         ) = {
@@ -888,9 +906,11 @@ where
             }
 
             let withdrawal_total = release_total(&entry.registered.withdrawal_releases)?;
+            let payout_total = payout_total(&entry.registered.external_payouts)?;
             let custody_balance = self
                 .custody_balance
                 .checked_sub(withdrawal_total)
+                .and_then(|custody| custody.checked_sub(payout_total))
                 .ok_or(SettlementError::CustodyArithmetic)?;
             let unfinalized_deposit_total = self
                 .unfinalized_deposit_total
@@ -914,6 +934,7 @@ where
                 entry.batch.roots.closing,
                 closing_liability,
                 entry.registered.withdrawal_releases.clone(),
+                entry.registered.external_payouts.clone(),
                 custody_balance,
                 unfinalized_deposit_total,
             )
@@ -924,6 +945,7 @@ where
             epoch,
             closing_state_root,
             released_withdrawals,
+            released_payouts,
             custody_balance,
         };
         self.current_state_root = finalized.closing_state_root;
@@ -1022,11 +1044,10 @@ where
             return Err(SettlementError::CustodyMismatch);
         }
 
-        let mut leaves = survivor.leaves().to_vec();
         let mut withdrawals = self.outstanding_withdrawals.clone();
         let mut payouts = Vec::new();
         let mut released_custody = 0_u64;
-        for leaf in &mut leaves {
+        for leaf in survivor.leaves() {
             let source = leaf.account.clone();
             let deposit = terminal_deposits.remove(&source).unwrap_or(0);
             let withdrawal = withdrawals.remove(&source);
@@ -1038,7 +1059,7 @@ where
                 }
             });
             if let Some(release) = withdrawal {
-                if !leaf.state.active || release.request.body().amount() > leaf.state.balance {
+                if release.request.body().amount() > leaf.state.balance {
                     return Err(SettlementError::WithdrawalBalance);
                 }
                 payouts.push(FaultPayout::QueuedWithdrawal(WithdrawalRelease {
@@ -1063,11 +1084,12 @@ where
                 .checked_add(withdrawal_amount)
                 .and_then(|total| total.checked_add(residual))
                 .ok_or(SettlementError::CustodyArithmetic)?;
-            leaf.state.balance = 0;
-            leaf.state.active = false;
         }
-        if !terminal_deposits.is_empty() {
-            return Err(SettlementError::DepositAccount);
+        for (account, amount) in terminal_deposits {
+            payouts.push(FaultPayout::ResidualSettlement { account, amount });
+            released_custody = released_custody
+                .checked_add(amount)
+                .ok_or(SettlementError::CustodyArithmetic)?;
         }
         if !withdrawals.is_empty() {
             return Err(SettlementError::WithdrawalOpening);
@@ -1076,7 +1098,7 @@ where
             return Err(SettlementError::CustodyMismatch);
         }
 
-        let terminal_state = StateCache::new::<H>(leaves)?;
+        let terminal_state = StateCache::new::<H>(Vec::new())?;
         if terminal_state.liability() != 0 {
             return Err(SettlementError::CustodyMismatch);
         }
@@ -1118,88 +1140,16 @@ where
         if survivor.liability() != self.current_liability {
             return Err(SettlementError::CustodyMismatch);
         }
-        if survivor
-            .leaves()
-            .iter()
-            .map(|leaf| &leaf.account)
-            .ne(self.accounts.iter())
-        {
-            return Err(SettlementError::RegistryAncestry);
+        if survivor.leaves().len() > self.config.max_state_accounts.get() {
+            return Err(SettlementError::StateCapacity);
         }
         Ok(())
-    }
-
-    /// Reindexes the registry only while no close, boundary item, or withdrawal is active.
-    pub fn reconfigure(
-        &mut self,
-        now: u64,
-        current_state: &StateCache<P, H::Digest>,
-        mut next_accounts: Vec<P>,
-    ) -> Result<StateCache<P, H::Digest>, SettlementError> {
-        self.ensure_operating_at(now)?;
-        if self.registered.is_some()
-            || !self.pipeline.is_empty()
-            || !self.pending_deposits.is_empty()
-            || !self.pending_withdrawals.is_empty()
-            || !self.outstanding_withdrawals.is_empty()
-            || !self.withdrawal_deadlines.is_empty()
-            || self.unfinalized_deposit_total != 0
-        {
-            return Err(SettlementError::ReconfigurationActive);
-        }
-        self.validate_survivor(current_state)?;
-        if self.current_liability != self.custody_balance {
-            return Err(SettlementError::CustodyMismatch);
-        }
-
-        if next_accounts.len() > self.config.max_registry_accounts.get() {
-            return Err(SettlementError::RegistryCapacity);
-        }
-        next_accounts.sort_unstable();
-        if next_accounts.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(SettlementError::DuplicateAccount);
-        }
-        let current = current_state
-            .leaves()
-            .iter()
-            .map(|leaf| (leaf.account.clone(), leaf.state))
-            .collect::<BTreeMap<_, _>>();
-        for (account, state) in &current {
-            if state.active && next_accounts.binary_search(account).is_err() {
-                return Err(SettlementError::ActiveAccountRemoval);
-            }
-        }
-        let leaves = next_accounts
-            .iter()
-            .map(|account| StateLeaf {
-                account: account.clone(),
-                state: current
-                    .get(account)
-                    .copied()
-                    .unwrap_or_else(AccountState::default),
-            })
-            .collect();
-        let next_state = StateCache::new::<H>(leaves)?;
-        if next_state.liability() != self.custody_balance {
-            return Err(SettlementError::CustodyMismatch);
-        }
-
-        self.accounts = next_accounts;
-        self.current_state_root = next_state.root();
-        self.current_liability = next_state.liability();
-        Ok(next_state)
     }
 
     /// Returns the finalized state root.
     #[must_use]
     pub const fn current_state_root(&self) -> VectorRoot<H::Digest> {
         self.current_state_root
-    }
-
-    /// Returns the canonical current registry.
-    #[must_use]
-    pub fn current_registry(&self) -> &[P] {
-        &self.accounts
     }
 
     /// Returns custody currently controlled by this deployment.
@@ -1266,6 +1216,14 @@ fn release_total<P: PublicKey, D: Digest>(
     })
 }
 
+fn payout_total<P: PublicKey>(payouts: &[ExternalPayout<P>]) -> Result<u64, SettlementError> {
+    payouts.iter().try_fold(0_u64, |total, payout| {
+        total
+            .checked_add(payout.amount)
+            .ok_or(SettlementError::CustodyArithmetic)
+    })
+}
+
 /// Settlement lifecycle failure.
 #[derive(Debug, Error)]
 pub enum SettlementError {
@@ -1290,9 +1248,6 @@ pub enum SettlementError {
     /// A context opening liability does not extend the tail liability.
     #[error("opening liability does not extend the authenticated ancestry")]
     LiabilityAncestry,
-    /// A complete state preimage does not contain the exact current registry.
-    #[error("state preimage does not match the current account registry")]
-    RegistryAncestry,
     /// The certificate committee differs from the anchor-bound assignment.
     #[error("certificate committee does not match the authenticated assignment")]
     CommitteeMismatch,
@@ -1305,9 +1260,6 @@ pub enum SettlementError {
     /// Supplied withdrawals do not equal the exact staged withdrawal batch.
     #[error("registered withdrawals do not equal the staged withdrawal batch")]
     WithdrawalWitness,
-    /// A deposit account is absent from the registry.
-    #[error("deposit account is absent from the current registry")]
-    DepositAccount,
     /// Deposits must carry value.
     #[error("deposit amount must be positive")]
     ZeroDeposit,
@@ -1395,18 +1347,9 @@ pub enum SettlementError {
     /// Advancing the epoch counter would overflow.
     #[error("epoch counter overflow")]
     EpochOverflow,
-    /// Registry reconfiguration requires a completely clean deployment.
-    #[error("registry reconfiguration requires no active protocol state")]
-    ReconfigurationActive,
-    /// Reconfiguration supplied the same account more than once.
-    #[error("registry contains a duplicate account")]
-    DuplicateAccount,
-    /// A state registry exceeds the deployment's bounded terminal-unwind domain.
-    #[error("registry exceeds the configured account bound")]
-    RegistryCapacity,
-    /// Reconfiguration attempted to remove an active account.
-    #[error("an active account cannot be removed from the registry")]
-    ActiveAccountRemoval,
+    /// An initial, admitted, or terminal-survivor state exceeds the live-account bound.
+    #[error("state exceeds the configured live-account bound")]
+    StateCapacity,
     /// Boundary construction or signature verification failed.
     #[error("invalid boundary: {0}")]
     Boundary(#[from] BoundaryError),
@@ -1427,10 +1370,12 @@ mod tests {
     use crate::bajillion::{
         admission::{Committee, bls12381},
         boundary::SignedWithdrawal,
-        credit::ShardSet,
+        credit::{ShardHead, ShardSet},
         payment::{Payment, PaymentError, SignedReceipt, SignedSend},
-        state::{AccountRow, Prefix},
-        transition::{Assignment, Close, CloseLimits, build_close, validate_close},
+        state::{AccountRow, AccountState, Prefix, StateLeaf},
+        transition::{
+            Assignment, Close, CloseLimits, assemble_payout_proof, build_close, validate_close,
+        },
     };
     use alloc::collections::BTreeSet;
     use commonware_cryptography::{
@@ -1624,8 +1569,7 @@ mod tests {
                 .leaves()
                 .iter()
                 .find(|leaf| leaf.account == account)
-                .unwrap()
-                .state;
+                .map_or_else(AccountState::default, |leaf| leaf.state);
             let deposit = deposits.amount_for(&account);
             let withdrawal = withdrawals.request_for(&account);
             let full_close = withdrawal.is_some_and(|request| request.body().full_close());
@@ -1642,7 +1586,7 @@ mod tests {
                 .checked_add(deposit)
                 .and_then(|balance| balance.checked_sub(applied))
                 .unwrap();
-            closing.active = (opening.active || deposit != 0) && !full_close;
+            closing.active = closing.balance > 0;
             let shards = ShardSet::empty(context.payment().epoch(), account.clone());
             prefix = prefix
                 .checked_extend(Prefix {
@@ -1665,14 +1609,28 @@ mod tests {
         let close =
             build_close::<Sha256, _, _>(cache, context, deposits, withdrawals, rows, shard_sets)
                 .unwrap();
-        let mut closing_leaves = cache.leaves().to_vec();
-        for row in &close.rows {
-            let leaf = closing_leaves
-                .iter_mut()
-                .find(|leaf| leaf.account == row.account)
-                .unwrap();
-            leaf.state = row.closing;
-        }
+        let changed = close
+            .rows
+            .iter()
+            .map(|row| row.account.clone())
+            .collect::<BTreeSet<_>>();
+        let mut closing_leaves = cache
+            .leaves()
+            .iter()
+            .filter(|leaf| !changed.contains(&leaf.account))
+            .cloned()
+            .collect::<Vec<_>>();
+        closing_leaves.extend(
+            close
+                .rows
+                .iter()
+                .filter(|row| row.closing.active)
+                .map(|row| StateLeaf {
+                    account: row.account.clone(),
+                    state: row.closing,
+                }),
+        );
+        closing_leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
         let closing = StateCache::new::<Sha256>(closing_leaves).unwrap();
         assert_eq!(closing.root(), close.roots.closing);
         (close, closing)
@@ -1700,9 +1658,17 @@ mod tests {
         close: &TestClose,
     ) -> BatchId<ShaDigest> {
         let certificate = certificate(signer, &context, &deposits, &withdrawals, close);
+        let payout_proof = assemble_payout_proof::<Sha256, _, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            close,
+            &Sequential,
+        )
+        .unwrap();
         chain.register(now, context, deposits, withdrawals).unwrap();
         chain
-            .admit(now, close.header, close.roots, certificate)
+            .admit(now, close.header, close.roots, payout_proof, certificate)
             .unwrap()
     }
 
@@ -1774,6 +1740,112 @@ mod tests {
             SignedReceipt::issue_next::<Sha256, _>(context.payment(), &send, 0, 0, 0, operator)
                 .unwrap();
         Payment::new::<Sha256>(context.payment(), send, receipt).unwrap()
+    }
+
+    fn external_payout_close(
+        cache: &TestCache,
+        context: &TestContext,
+        operator: &SigningKey,
+        payer: &SigningKey,
+        recipient: &SigningKey,
+        amount: u64,
+    ) -> (TestClose, TestCache) {
+        let payment = fork_payment(context, operator, payer, recipient, amount);
+        let opening = cache
+            .leaves()
+            .iter()
+            .find(|leaf| leaf.account == payer.public_key())
+            .expect("test payer is live")
+            .state;
+        let payer_shards = ShardSet::empty(context.payment().epoch(), payer.public_key());
+        let recipient_shards = ShardSet::new(
+            context.payment().epoch(),
+            recipient.public_key(),
+            vec![ShardHead::new(0, payment.clone())],
+        )
+        .unwrap();
+        let mut pairs = vec![
+            (
+                AccountRow {
+                    account: payer.public_key(),
+                    opening,
+                    closing: AccountState {
+                        balance: opening.balance.checked_sub(amount).unwrap(),
+                        cumulative_debit: opening.cumulative_debit.checked_add(amount).unwrap(),
+                        ..opening
+                    },
+                    outgoing: Some(payment),
+                    credit_root: payer_shards.root::<Sha256>().unwrap(),
+                    prefix: Prefix::default(),
+                },
+                payer_shards,
+            ),
+            (
+                AccountRow {
+                    account: recipient.public_key(),
+                    opening: AccountState::default(),
+                    closing: AccountState {
+                        cumulative_credit: amount,
+                        receipt_count: 1,
+                        ..AccountState::default()
+                    },
+                    outgoing: None,
+                    credit_root: recipient_shards.root::<Sha256>().unwrap(),
+                    prefix: Prefix::default(),
+                },
+                recipient_shards,
+            ),
+        ];
+        pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
+        let mut prefix = Prefix::default();
+        for (row, shards) in &mut pairs {
+            let (debit, credit, _) = row.checked_deltas().unwrap();
+            prefix = prefix
+                .checked_extend(Prefix {
+                    debit,
+                    credit,
+                    payout: if row.opening.active { 0 } else { credit },
+                    shards: shards.heads().len() as u64,
+                    ..Prefix::default()
+                })
+                .unwrap();
+            row.prefix = prefix;
+        }
+        let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        let close = build_close::<Sha256, _, _>(
+            cache,
+            context,
+            &DepositBatch::empty(),
+            &WithdrawalBatch::empty(),
+            rows,
+            shard_sets,
+        )
+        .unwrap();
+        let changed = close
+            .rows
+            .iter()
+            .map(|row| row.account.clone())
+            .collect::<BTreeSet<_>>();
+        let mut closing = cache
+            .leaves()
+            .iter()
+            .filter(|leaf| !changed.contains(&leaf.account))
+            .cloned()
+            .collect::<Vec<_>>();
+        closing.extend(
+            close
+                .rows
+                .iter()
+                .filter(|row| row.closing.active)
+                .map(|row| StateLeaf {
+                    account: row.account.clone(),
+                    state: row.closing,
+                }),
+        );
+        closing.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let closing = StateCache::new::<Sha256>(closing).unwrap();
+        assert_eq!(closing.root(), close.roots.closing);
+        (close, closing)
     }
 
     #[derive(Clone, Copy)]
@@ -2491,7 +2563,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_deposits_leave_intake_atomic() {
+    fn absent_account_deposits_are_staged_atomically() {
         let mut deposits = harness(&[10, 10]);
         let zero_id = Sha256::hash(&[b"zero-then-valid"]);
         let first_account = deposits.accounts[0].public_key();
@@ -2507,21 +2579,272 @@ mod tests {
             .unwrap();
 
         let unknown_id = Sha256::hash(&[b"unknown-then-valid"]);
-        assert!(matches!(
-            deposits.chain.record_deposit(
-                0,
-                unknown_id,
-                SigningKey::from_seed(999).public_key(),
-                1,
-            ),
-            Err(SettlementError::DepositAccount)
-        ));
+        let unknown_account = SigningKey::from_seed(999).public_key();
         deposits
             .chain
-            .record_deposit(0, unknown_id, deposits.accounts[1].public_key(), 1)
+            .record_deposit(0, unknown_id, unknown_account.clone(), 1)
             .unwrap();
+        assert!(matches!(
+            deposits
+                .chain
+                .record_deposit(0, unknown_id, deposits.accounts[1].public_key(), 1,),
+            Err(SettlementError::DuplicateDeposit)
+        ));
         assert_eq!(deposits.chain.pending_deposits().total(), 2);
+        assert!(
+            deposits
+                .chain
+                .pending_deposits()
+                .records()
+                .iter()
+                .any(|record| record.account() == &unknown_account)
+        );
         assert_eq!(deposits.chain.custody_balance(), 22);
+    }
+
+    #[test]
+    fn deposit_creates_account_and_full_close_removes_it() {
+        let mut fixture = harness(&[]);
+        let account = SigningKey::from_seed(999);
+        let public_key = account.public_key();
+        fixture
+            .chain
+            .record_deposit(
+                0,
+                Sha256::hash(&[b"create-account-deposit"]),
+                public_key.clone(),
+                9,
+            )
+            .unwrap();
+
+        let deposits = fixture.chain.pending_deposits();
+        let withdrawals = WithdrawalBatch::empty();
+        let create_context = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &fixture.cache,
+            &deposits,
+            &withdrawals,
+            1,
+            2,
+        );
+        let (create, created) =
+            boundary_close(&fixture.cache, &create_context, &deposits, &withdrawals);
+        assert_eq!(created.leaves().len(), 1);
+        assert_eq!(created.leaves()[0].account, public_key);
+        assert_eq!(created.leaves()[0].state.balance, 9);
+        register_and_admit(
+            &mut fixture.chain,
+            &fixture.signer,
+            1,
+            create_context,
+            deposits,
+            withdrawals,
+            &create,
+        );
+        fixture.chain.finalize(3).unwrap();
+        assert_eq!(fixture.chain.current_state_root(), created.root());
+
+        let request = withdrawal(
+            fixture.deployment,
+            created.root(),
+            &account,
+            b"destroy-account-destination",
+            0,
+            true,
+            10,
+        );
+        fixture
+            .chain
+            .queue_withdrawal(
+                3,
+                request.clone(),
+                &[created.opening(&public_key).unwrap()],
+                |_| true,
+            )
+            .unwrap();
+        let deposits = DepositBatch::empty();
+        let withdrawals = fixture.chain.pending_withdrawals();
+        let destroy_context = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            1,
+            &created,
+            &deposits,
+            &withdrawals,
+            4,
+            5,
+        );
+        let (destroy, destroyed) =
+            boundary_close(&created, &destroy_context, &deposits, &withdrawals);
+        assert!(destroyed.leaves().is_empty());
+        register_and_admit(
+            &mut fixture.chain,
+            &fixture.signer,
+            4,
+            destroy_context,
+            deposits,
+            withdrawals,
+            &destroy,
+        );
+        let finalized = fixture.chain.finalize(6).unwrap();
+        assert_eq!(
+            finalized.released_withdrawals,
+            vec![WithdrawalRelease { request, amount: 9 }]
+        );
+        assert_eq!(fixture.chain.current_state_root(), destroyed.root());
+        assert_eq!(fixture.chain.custody_balance(), 0);
+    }
+
+    #[test]
+    fn external_send_releases_only_after_clean_finalization() {
+        let mut fixture = harness(&[100]);
+        let payer = &fixture.accounts[0];
+        let recipient = SigningKey::from_seed(1_001);
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let close_context = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &fixture.cache,
+            &deposits,
+            &withdrawals,
+            1,
+            2,
+        );
+        let (close, closing) = external_payout_close(
+            &fixture.cache,
+            &close_context,
+            &fixture.operator,
+            payer,
+            &recipient,
+            20,
+        );
+        register_and_admit(
+            &mut fixture.chain,
+            &fixture.signer,
+            1,
+            close_context,
+            deposits,
+            withdrawals,
+            &close,
+        );
+        assert_eq!(closing.liability(), 80);
+
+        assert_eq!(fixture.chain.custody_balance(), 100);
+        assert!(matches!(
+            fixture.chain.finalize(2),
+            Err(SettlementError::ChallengeWindowOpen)
+        ));
+        assert_eq!(fixture.chain.custody_balance(), 100);
+
+        let finalized = fixture.chain.finalize(3).unwrap();
+        assert!(finalized.released_withdrawals.is_empty());
+        assert_eq!(
+            finalized.released_payouts,
+            vec![ExternalPayout {
+                recipient: recipient.public_key(),
+                amount: 20,
+            }]
+        );
+        assert_eq!(finalized.custody_balance, 80);
+        assert_eq!(fixture.chain.custody_balance(), 80);
+    }
+
+    #[test]
+    fn challenged_external_send_is_not_released() {
+        let mut fixture = harness(&[100, 10, 10]);
+        let empty = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let first_context = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &fixture.cache,
+            &empty,
+            &withdrawals,
+            2,
+            6,
+        );
+        let first = empty_close(&fixture.cache, &first_context);
+        register_and_admit(
+            &mut fixture.chain,
+            &fixture.signer,
+            1,
+            first_context,
+            empty.clone(),
+            withdrawals.clone(),
+            &first,
+        );
+
+        let second_context = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            1,
+            &fixture.cache,
+            &empty,
+            &withdrawals,
+            3,
+            8,
+        );
+        let recipient = SigningKey::from_seed(1_002);
+        let (second, _) = external_payout_close(
+            &fixture.cache,
+            &second_context,
+            &fixture.operator,
+            &fixture.accounts[0],
+            &recipient,
+            20,
+        );
+        let second_id = register_and_admit(
+            &mut fixture.chain,
+            &fixture.signer,
+            2,
+            second_context.clone(),
+            empty,
+            withdrawals,
+            &second,
+        );
+        let left = fork_payment(
+            &second_context,
+            &fixture.operator,
+            &fixture.accounts[1],
+            &fixture.accounts[0],
+            2,
+        );
+        let right = fork_payment(
+            &second_context,
+            &fixture.operator,
+            &fixture.accounts[2],
+            &fixture.accounts[0],
+            3,
+        );
+        assert_eq!(
+            fixture
+                .chain
+                .challenge(8, &Challenge::receipt_fork(second_id, left, right))
+                .unwrap(),
+            Verdict::Proven(ChallengeKind::ReceiptFork)
+        );
+
+        let finalized = fixture.chain.finalize(8).unwrap();
+        assert!(finalized.released_payouts.is_empty());
+        assert_eq!(finalized.custody_balance, 120);
+        let settlement = fixture.chain.settle_hard_fault(&fixture.cache).unwrap();
+        assert_eq!(settlement.released_custody, 120);
+        assert!(settlement.payouts.iter().all(|payout| match payout {
+            FaultPayout::QueuedWithdrawal(_) => true,
+            FaultPayout::ResidualSettlement { account, .. } => {
+                account != &recipient.public_key()
+            }
+        }));
     }
 
     #[test]
@@ -3052,207 +3375,67 @@ mod tests {
     }
 
     #[test]
-    fn reconfigure_canonicalizes_inactive_changes_and_rejects_invalid_registries() {
+    fn admission_rejects_a_closing_state_above_terminal_capacity() {
         let settlement_config = SettlementConfig::new(
             NonZeroUsize::new(3).unwrap(),
             NonZeroU64::new(2).unwrap(),
             NonZeroU64::new(1_000).unwrap(),
-            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
             1_024,
             NonZeroUsize::new(1_024).unwrap(),
         );
-        let mut fixture = harness_with_states(
-            &[state(10), AccountState::default(), state(5)],
-            settlement_config,
-        );
-        let first_active = fixture.accounts[0].public_key();
-        let removed_inactive = fixture.accounts[1].public_key();
-        let second_active = fixture.accounts[2].public_key();
-        let added_inactive = SigningKey::from_seed(99).public_key();
-        let mut expected_registry = vec![
-            second_active.clone(),
-            added_inactive.clone(),
-            first_active.clone(),
-        ];
-        expected_registry.sort_unstable();
-
-        let next_state = fixture
+        let mut fixture = harness_with_config(&[10], settlement_config);
+        let created = SigningKey::from_seed(999).public_key();
+        fixture
             .chain
-            .reconfigure(
-                0,
-                &fixture.cache,
-                vec![
-                    second_active.clone(),
-                    added_inactive.clone(),
-                    first_active.clone(),
-                ],
-            )
+            .record_deposit(0, Sha256::hash(&[b"closing-state-capacity"]), created, 1)
             .unwrap();
-        assert_eq!(fixture.chain.current_registry(), expected_registry);
-        assert_eq!(fixture.chain.current_state_root(), next_state.root());
-        assert_eq!(next_state.liability(), 15);
-        assert_eq!(fixture.chain.custody_balance(), 15);
-        assert!(
-            next_state
-                .leaves()
-                .iter()
-                .all(|leaf| leaf.account != removed_inactive)
+        let deposits = fixture.chain.pending_deposits();
+        let withdrawals = WithdrawalBatch::empty();
+        let close_context = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &fixture.cache,
+            &deposits,
+            &withdrawals,
+            2,
+            3,
         );
-        assert_eq!(
-            next_state
-                .leaves()
-                .iter()
-                .find(|leaf| leaf.account == added_inactive)
-                .unwrap()
-                .state,
-            AccountState::default()
+        let (close, closing) =
+            boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        assert_eq!(closing.leaves().len(), 2);
+        let certificate = certificate(
+            &fixture.signer,
+            &close_context,
+            &deposits,
+            &withdrawals,
+            &close,
         );
+        let payout_proof = assemble_payout_proof::<Sha256, _, _>(
+            &close_context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &Sequential,
+        )
+        .unwrap();
+        fixture
+            .chain
+            .register(1, close_context, deposits, withdrawals)
+            .unwrap();
 
-        let stable_root = fixture.chain.current_state_root();
-        let stable_registry = fixture.chain.current_registry().to_vec();
-        assert!(matches!(
-            fixture.chain.reconfigure(
-                0,
-                &next_state,
-                vec![second_active.clone(), added_inactive.clone()],
-            ),
-            Err(SettlementError::ActiveAccountRemoval)
-        ));
-        assert!(matches!(
-            fixture.chain.reconfigure(
-                0,
-                &next_state,
-                vec![
-                    first_active.clone(),
-                    second_active.clone(),
-                    second_active.clone(),
-                ],
-            ),
-            Err(SettlementError::DuplicateAccount)
-        ));
-        assert!(matches!(
-            fixture.chain.reconfigure(
-                0,
-                &next_state,
-                vec![
-                    first_active.clone(),
-                    second_active,
-                    added_inactive,
-                    SigningKey::from_seed(100).public_key(),
-                ],
-            ),
-            Err(SettlementError::RegistryCapacity)
-        ));
-
-        let mut false_leaves = next_state.leaves().to_vec();
-        false_leaves
-            .iter_mut()
-            .find(|leaf| leaf.account == first_active)
-            .unwrap()
-            .state
-            .balance += 1;
-        let false_preimage = StateCache::new::<Sha256>(false_leaves).unwrap();
         assert!(matches!(
             fixture
                 .chain
-                .reconfigure(0, &false_preimage, stable_registry.clone()),
-            Err(SettlementError::StateAncestry)
+                .admit(1, close.header, close.roots, payout_proof, certificate),
+            Err(SettlementError::StateCapacity)
         ));
-        assert_eq!(fixture.chain.current_state_root(), stable_root);
-        assert_eq!(fixture.chain.current_registry(), stable_registry);
-        assert_eq!(fixture.chain.custody_balance(), 15);
-    }
-
-    #[test]
-    fn reconfigure_rejects_each_active_protocol_phase() {
-        let mut staged_deposit = harness(&[10]);
-        staged_deposit
-            .chain
-            .record_deposit(
-                0,
-                Sha256::hash(&[b"active-reconfiguration-deposit"]),
-                staged_deposit.accounts[0].public_key(),
-                1,
-            )
-            .unwrap();
-        assert!(matches!(
-            staged_deposit.chain.reconfigure(
-                0,
-                &staged_deposit.cache,
-                staged_deposit.chain.current_registry().to_vec(),
-            ),
-            Err(SettlementError::ReconfigurationActive)
-        ));
-
-        let mut staged_withdrawal = harness(&[10]);
-        let account = &staged_withdrawal.accounts[0];
-        let request = withdrawal(
-            staged_withdrawal.deployment,
-            staged_withdrawal.cache.root(),
-            account,
-            b"active-reconfiguration-withdrawal",
-            1,
-            false,
-            100,
-        );
-        staged_withdrawal
-            .chain
-            .queue_withdrawal(
-                0,
-                request,
-                &[staged_withdrawal
-                    .cache
-                    .opening(&account.public_key())
-                    .unwrap()],
-                |_| true,
-            )
-            .unwrap();
-        assert!(matches!(
-            staged_withdrawal.chain.reconfigure(
-                0,
-                &staged_withdrawal.cache,
-                staged_withdrawal.chain.current_registry().to_vec(),
-            ),
-            Err(SettlementError::ReconfigurationActive)
-        ));
-
-        let mut registered = harness(&[10]);
-        let deposits = DepositBatch::empty();
-        let withdrawals = WithdrawalBatch::empty();
-        let close_context = context(
-            registered.deployment,
-            &registered.operator,
-            registered.committee,
-            0,
-            &registered.cache,
-            &deposits,
-            &withdrawals,
-            1,
-            2,
-        );
-        registered
-            .chain
-            .register(0, close_context, deposits, withdrawals)
-            .unwrap();
-        assert!(matches!(
-            registered.chain.reconfigure(
-                0,
-                &registered.cache,
-                registered.chain.current_registry().to_vec(),
-            ),
-            Err(SettlementError::ReconfigurationActive)
-        ));
-
-        let mut admitted = harness(&[10]);
-        admit_empty_epoch(&mut admitted, 0, 1, 1, 2);
-        assert!(matches!(
-            admitted.chain.reconfigure(
-                1,
-                &admitted.cache,
-                admitted.chain.current_registry().to_vec(),
-            ),
-            Err(SettlementError::ReconfigurationActive)
-        ));
+        assert_eq!(fixture.chain.pending_epoch_count(), 0);
+        assert_eq!(fixture.chain.pending_deposits().total(), 1);
+        assert_eq!(fixture.chain.custody_balance(), 11);
+        fixture.chain.expire_unadmitted(3).unwrap();
     }
 
     #[test]
@@ -3315,7 +3498,7 @@ mod tests {
         );
         assert_eq!(finalized.custody_balance, 0);
         assert_eq!(fixture.chain.current_state_root(), closing.root());
-        assert_eq!(closing.leaves()[0].state, AccountState::default());
+        assert!(closing.leaves().is_empty());
     }
 
     #[test]
@@ -3447,7 +3630,7 @@ mod tests {
             );
             assert_eq!(finalized.custody_balance, 0);
             assert_eq!(fixture.chain.current_state_root(), closing.root());
-            assert_eq!(closing.leaves()[0].state, AccountState::default());
+            assert!(closing.leaves().is_empty());
         }
     }
 
@@ -3603,7 +3786,7 @@ mod tests {
     fn terminal_unwind_is_atomic_retryable_exact_and_permanent() {
         let mut fixture = harness(&[10, 5]);
         let source = &fixture.accounts[0];
-        let deposited = &fixture.accounts[1];
+        let deposited = SigningKey::from_seed(999);
         let request = withdrawal(
             fixture.deployment,
             fixture.cache.root(),
@@ -3661,13 +3844,7 @@ mod tests {
         let settlement = fixture.chain.settle_hard_fault(&fixture.cache).unwrap();
         assert_eq!(settlement.released_custody, 17);
         assert_eq!(settlement.terminal_state.liability(), 0);
-        assert!(
-            settlement
-                .terminal_state
-                .leaves()
-                .iter()
-                .all(|leaf| !leaf.state.active && leaf.state.balance == 0)
-        );
+        assert!(settlement.terminal_state.leaves().is_empty());
         assert!(settlement.payouts.iter().any(|payout| matches!(
             payout,
             FaultPayout::QueuedWithdrawal(release)
@@ -3685,7 +3862,12 @@ mod tests {
         assert!(settlement.payouts.iter().any(|payout| matches!(
             payout,
             FaultPayout::ResidualSettlement { account, amount }
-                if account == &deposited.public_key() && *amount == 7
+                if account == &fixture.accounts[1].public_key() && *amount == 5
+        )));
+        assert!(settlement.payouts.iter().any(|payout| matches!(
+            payout,
+            FaultPayout::ResidualSettlement { account, amount }
+                if account == &deposited.public_key() && *amount == 2
         )));
         assert_eq!(fixture.chain.custody_balance(), 0);
         assert_eq!(

@@ -154,7 +154,7 @@ impl BlogChainFixture {
         let external_certificate_bytes = commitment.2.encode_size();
         let validator_chain_commitment_bytes = header_bytes;
         assert_eq!(header_bytes, 32);
-        assert_eq!(root_bundle_witness_bytes, 96);
+        assert_eq!(root_bundle_witness_bytes, 128);
         assert_eq!(external_certificate_bytes, 69);
         assert_eq!(external_package_bytes, 101);
         assert_eq!(validator_chain_commitment_bytes, 32);
@@ -228,8 +228,8 @@ impl BlogChainFixture {
         .expect("benchmark validator dealing is valid")
     }
 
-    // Repeatable certified-commitment validation performed by SettlementChain::admit after
-    // registration.
+    // Repeatable root-witness and certificate validation. The mutating admission path, including
+    // payout extraction, is preflighted separately because its state cannot be reused per sample.
     fn check_certified_commitment(&self) -> BatchId<Digest> {
         let (header, roots, certificate) = &self.commitment;
         validate_header::<Sha256, _, _>(&self.close.context, header, roots)
@@ -271,7 +271,8 @@ fn exact_certificate(validators: &Validators, header: &Header<Digest>) -> bls123
 }
 
 fn chain(close: &CloseFixture, validators: &Validators) -> TestChain {
-    let registry = NonZeroUsize::new(close.cache.len()).expect("active registry is nonempty");
+    let live_accounts =
+        NonZeroUsize::new(close.cache.len()).expect("live account state is nonempty");
     let notice = NonZeroU64::new(1).expect("benchmark notice is nonzero");
     TestChain::new(
         *close.context.deployment(),
@@ -283,9 +284,9 @@ fn chain(close: &CloseFixture, validators: &Validators) -> TestChain {
             NonZeroUsize::new(1).expect("benchmark pipeline bound is nonzero"),
             notice,
             notice,
-            registry,
+            live_accounts,
             0,
-            registry,
+            live_accounts,
         ),
     )
     .expect("benchmark settlement chain is valid")
@@ -297,6 +298,10 @@ fn preflight_chain(
     commitment: &CommitmentPayload,
     encoded_challenge: &[u8],
 ) {
+    let payout_proof = close
+        .prepared
+        .payout_proof(&close.deposits, &close.withdrawals)
+        .expect("benchmark payout proof is valid");
     let mut chain = chain(close, validators);
     chain
         .register(
@@ -307,7 +312,13 @@ fn preflight_chain(
         )
         .expect("benchmark close can be registered");
     let batch = chain
-        .admit(0, commitment.0, commitment.1, commitment.2.clone())
+        .admit(
+            0,
+            commitment.0,
+            commitment.1,
+            payout_proof,
+            commitment.2.clone(),
+        )
         .expect("benchmark commitment can be admitted");
     assert_eq!(batch, commitment.0.batch_id::<Sha256>());
     let verdict = chain
@@ -338,12 +349,12 @@ fn preflight_chain(
 fn bench_blog_chain(c: &mut Criterion) {
     for (profile_index, profile) in selected_active_profiles() {
         let fixture = BlogChainFixture::new(profile);
-        let registry = profile.registry;
+        let live_accounts = profile.live_accounts;
         let changed = profile.changed_accounts;
         let credited = profile.credited_accounts;
         let shards = profile.receive_shards_per_credited;
         eprintln!(
-            "clearing blog chain metrics: profile={profile_index} N={registry} A={changed} B={credited} h={shards} n={VALIDATORS} f={FAULTS} q={QUORUM} slices={SLICES} workers={WORKERS} close_bytes={} slice_corpus_bytes={} validator={} dealing_bytes={} dealing_slices={} header_bytes={} root_bundle_witness_bytes={} external_certificate_bytes={} external_package_bytes={} validator_chain_commitment_bytes={} challenge_row_lookup_bytes={} challenge_shard_lookup_bytes={} challenge_bytes={}",
+            "clearing blog chain metrics: profile={profile_index} N={live_accounts} A={changed} B={credited} h={shards} n={VALIDATORS} f={FAULTS} q={QUORUM} slices={SLICES} workers={WORKERS} close_bytes={} slice_corpus_bytes={} validator={} dealing_bytes={} dealing_slices={} header_bytes={} root_bundle_witness_bytes={} external_certificate_bytes={} external_package_bytes={} validator_chain_commitment_bytes={} challenge_row_lookup_bytes={} challenge_shard_lookup_bytes={} challenge_bytes={}",
             fixture.metrics.close_bytes,
             fixture.metrics.slice_corpus_bytes,
             usize::from(fixture.validator),
@@ -360,7 +371,7 @@ fn bench_blog_chain(c: &mut Criterion) {
         );
 
         let labels = format!(
-            "N={registry} A={changed} B={credited} h={shards} n={VALIDATORS} q={QUORUM} slices={SLICES} w={WORKERS}"
+            "N={live_accounts} A={changed} B={credited} h={shards} n={VALIDATORS} q={QUORUM} slices={SLICES} w={WORKERS}"
         );
         c.bench_function(
             &format!("{}/p={profile_index} op=prepare {labels}", module_path!()),
@@ -374,7 +385,13 @@ fn bench_blog_chain(c: &mut Criterion) {
         );
         c.bench_function(
             &format!("{}/p={profile_index} op=deal {labels}", module_path!()),
-            |b| b.iter(|| black_box(fixture.deal())),
+            |b| {
+                b.iter_batched(
+                    || (),
+                    |()| black_box(fixture.deal()),
+                    BatchSize::PerIteration,
+                );
+            },
         );
         c.bench_function(
             &format!("{}/p={profile_index} op=seal {labels}", module_path!()),

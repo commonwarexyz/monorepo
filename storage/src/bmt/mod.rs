@@ -55,6 +55,9 @@ use commonware_parallel::Strategy;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
+mod streaming;
+pub use streaming::StreamingBuilder;
+
 /// There should never be more than 32 sibling levels in a proof. Because
 /// [Proof::leaf_count] is a `u32`, a tree can have at most `u32::MAX` leaves,
 /// which requires at most `u32::BITS` sibling hashes per proven item.
@@ -91,6 +94,77 @@ pub enum Error {
     },
     #[error("update does not belong to this tree")]
     InvalidUpdate,
+    /// A streaming builder received a zero, non-power-of-two, or unrepresentable subtree size.
+    #[error("invalid streaming subtree size: {0}")]
+    InvalidSubtreeSize(usize),
+    /// A streaming builder received more or fewer leaves than declared.
+    #[error("mismatched leaf count: expected {expected}, got {actual}")]
+    MismatchedLeafCount { expected: u32, actual: u64 },
+    /// A streaming builder could not reserve its bounded working buffers.
+    #[error("unable to reserve streaming builder capacity")]
+    InsufficientCapacity,
+}
+
+/// Position-hashes a contiguous slice of leaves beginning at `start`.
+fn hash_positioned_leaves<H: Hasher>(
+    leaves: &mut [H::Digest],
+    start: u32,
+    strategy: &impl Strategy,
+) {
+    let _: Vec<()> =
+        strategy.map_collect_vec(leaves.chunks_mut(2).enumerate(), |(pair_index, chunk)| {
+            let offset = u32::try_from(pair_index)
+                .ok()
+                .and_then(|pair_index| pair_index.checked_mul(2))
+                .expect("too many leaves");
+            let position = start.checked_add(offset).expect("too many leaves");
+            match chunk {
+                [first, second] => {
+                    let second_position = position.checked_add(1).expect("too many leaves");
+                    let (first_digest, second_digest) = H::hash_pair(
+                        &[&position.to_be_bytes(), (*first).as_ref()],
+                        &[&second_position.to_be_bytes(), (*second).as_ref()],
+                    );
+                    *first = first_digest;
+                    *second = second_digest;
+                }
+                [first] => {
+                    *first = H::hash(&[&position.to_be_bytes(), (*first).as_ref()]);
+                }
+                _ => unreachable!("chunks(2) yields one or two elements"),
+            }
+        });
+}
+
+/// Hashes one complete parent level into a pre-sized output slice.
+fn hash_parent_level<H: Hasher>(
+    current: &[H::Digest],
+    next: &mut [H::Digest],
+    strategy: &impl Strategy,
+) {
+    debug_assert_eq!(next.len(), current.len().div_ceil(2));
+    let _: Vec<()> =
+        strategy.map_collect_vec(next.chunks_mut(2).enumerate(), |(pair_index, output)| {
+            let start = pair_index.checked_mul(4).expect("tree level is too large");
+            let end = (start + 4).min(current.len());
+            match (&current[start..end], output) {
+                ([a, b, c, d], [left, right]) => {
+                    (*left, *right) =
+                        H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), d.as_ref()]);
+                }
+                ([a, b, c], [left, right]) => {
+                    (*left, *right) =
+                        H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), c.as_ref()]);
+                }
+                ([a, b], [parent]) => {
+                    *parent = H::hash(&[a.as_ref(), b.as_ref()]);
+                }
+                ([a], [parent]) => {
+                    *parent = H::hash(&[a.as_ref(), a.as_ref()]);
+                }
+                _ => unreachable!("output chunks correspond to groups of four nodes"),
+            }
+        });
 }
 
 /// Constructor for a Binary Merkle Tree (BMT).
@@ -131,25 +205,7 @@ impl<H: Hasher> Builder<H> {
     /// computed concurrently when selected by `strategy`.
     pub fn build(self, strategy: &impl Strategy) -> Tree<H::Digest> {
         let mut leaves = self.leaves;
-        let _: Vec<()> =
-            strategy.map_collect_vec(leaves.chunks_mut(2).enumerate(), |(pair_index, chunk)| {
-                let position = u32::try_from(pair_index * 2).expect("too many leaves");
-                match chunk {
-                    [first, second] => {
-                        let second_position = position + 1;
-                        let (first_digest, second_digest) = H::hash_pair(
-                            &[&position.to_be_bytes(), (*first).as_ref()],
-                            &[&second_position.to_be_bytes(), (*second).as_ref()],
-                        );
-                        *first = first_digest;
-                        *second = second_digest;
-                    }
-                    [first] => {
-                        *first = H::hash(&[&position.to_be_bytes(), (*first).as_ref()]);
-                    }
-                    _ => unreachable!("chunks(2) yields one or two elements"),
-                }
-            });
+        hash_positioned_leaves::<H>(&mut leaves, 0, strategy);
         Tree::new::<H>(leaves, strategy)
     }
 }
@@ -202,33 +258,7 @@ impl<D: Digest> Tree<D> {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             next_level.resize(current_level.len().get().div_ceil(2), D::EMPTY);
 
-            // Hash groups of two parents so each worker retains the hasher's
-            // two-message interleaving. Each disjoint output chunk owns its canonical
-            // positions, so worker completion order cannot reorder the tree.
-            let _: Vec<()> = strategy.map_collect_vec(
-                next_level.chunks_mut(2).enumerate(),
-                |(pair_index, output)| {
-                    let start = pair_index * 4;
-                    let end = (start + 4).min(current_level.len().get());
-                    match (&current_level[start..end], output) {
-                        ([a, b, c, d], [left, right]) => {
-                            (*left, *right) =
-                                H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), d.as_ref()]);
-                        }
-                        ([a, b, c], [left, right]) => {
-                            (*left, *right) =
-                                H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), c.as_ref()]);
-                        }
-                        ([a, b], [parent]) => {
-                            *parent = H::hash(&[a.as_ref(), b.as_ref()]);
-                        }
-                        ([a], [parent]) => {
-                            *parent = H::hash(&[a.as_ref(), a.as_ref()]);
-                        }
-                        _ => unreachable!("output chunks correspond to groups of four nodes"),
-                    }
-                },
-            );
+            hash_parent_level::<H>(current_level, &mut next_level, strategy);
 
             // Add the computed level to the tree
             levels.push(non_empty_vec![@next_level]);
@@ -905,6 +935,19 @@ impl<D: Digest> Default for Proof<D> {
     }
 }
 
+impl<D: Digest> Proof<D> {
+    /// Reads a proof while bounding the sibling frontier directly.
+    pub fn read_bounded(
+        reader: &mut impl Buf,
+        max_siblings: usize,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            leaf_count: u32::read(reader)?,
+            siblings: Vec::<D>::read_range(reader, ..=max_siblings)?,
+        })
+    }
+}
+
 impl<D: Digest> Write for Proof<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.leaf_count.write(writer);
@@ -922,13 +965,8 @@ impl<D: Digest> Read for Proof<D> {
         reader: &mut impl Buf,
         max_items: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let leaf_count = u32::read(reader)?;
         let max_siblings = max_items.saturating_mul(MAX_LEVELS);
-        let siblings = Vec::<D>::read_range(reader, ..=max_siblings)?;
-        Ok(Self {
-            leaf_count,
-            siblings,
-        })
+        Self::read_bounded(reader, max_siblings)
     }
 }
 
@@ -1597,6 +1635,22 @@ mod tests {
         // Append an extra byte.
         serialized.extend_from_slice(&[0u8]);
         assert!(Proof::<Digest>::decode_cfg(&mut serialized, &1).is_err());
+    }
+
+    #[test]
+    fn test_proof_decode_bounds_the_sibling_frontier_directly() {
+        let proof = Proof {
+            leaf_count: 1,
+            siblings: vec![Sha256::hash(&[b"sibling"])],
+        };
+        let encoded = proof.encode();
+
+        assert_eq!(
+            Proof::<Digest>::read_bounded(&mut encoded.clone(), 1).unwrap(),
+            proof
+        );
+        assert!(Proof::<Digest>::read_bounded(&mut encoded.clone(), 0).is_err());
+        assert_eq!(Proof::<Digest>::decode_cfg(encoded, &1).unwrap(), proof);
     }
 
     #[test]
@@ -3464,6 +3518,142 @@ mod tests {
             .err()
             .expect("malformed input was accepted")
             .to_string()
+    }
+
+    fn streaming_test_root(
+        leaves: &[Digest],
+        subtree_size: usize,
+        split: usize,
+        strategy: &impl Strategy,
+    ) -> Digest {
+        let mut builder = StreamingBuilder::<Sha256>::new(leaves.len() as u32, subtree_size)
+            .expect("test subtree size is valid");
+        builder
+            .extend(&leaves[..split], strategy)
+            .expect("first test chunk fits");
+        builder
+            .extend(&[], strategy)
+            .expect("empty test chunk fits");
+        builder
+            .extend(&leaves[split..], strategy)
+            .expect("second test chunk fits");
+        builder.finish(strategy).expect("test stream is complete")
+    }
+
+    #[test]
+    fn streaming_build_matches_dense_exhaustively() {
+        for leaf_count in 0..=64u32 {
+            let leaves: Vec<_> = (0..leaf_count)
+                .map(|position| update_test_digest(b"stream", position))
+                .collect();
+            let expected = update_test_tree(&leaves).root();
+
+            for subtree_size in [1, 2, 4, 8, 16, 32, 64, 128] {
+                for split in 0..=leaves.len() {
+                    assert_eq!(
+                        streaming_test_root(&leaves, subtree_size, split, &Sequential),
+                        expected,
+                        "leaf_count={leaf_count} subtree_size={subtree_size} split={split}",
+                    );
+                }
+
+                let mut scalar = StreamingBuilder::<Sha256>::new(leaf_count, subtree_size).unwrap();
+                for (position, leaf) in leaves.iter().enumerate() {
+                    assert_eq!(scalar.add(leaf, &Sequential).unwrap(), position as u32);
+                }
+                assert_eq!(scalar.finish(&Sequential).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_build_matches_dense_across_strategies_and_boundaries() {
+        let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+        let forced_parallel = parallel.manual();
+        for leaf_count in [
+            0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
+            255, 256, 257,
+        ] {
+            let leaves: Vec<_> = (0..leaf_count)
+                .map(|position| update_test_digest(b"stream-boundary", position))
+                .collect();
+            let expected = update_test_tree(&leaves).root();
+
+            for subtree_size in [1, 2, 4, 8, 64, 256, 512] {
+                assert_eq!(
+                    streaming_test_root(&leaves, subtree_size, leaves.len() / 3, &Sequential,),
+                    expected,
+                );
+                assert_eq!(
+                    streaming_test_root(&leaves, subtree_size, leaves.len() / 3, &parallel,),
+                    expected,
+                );
+                assert_eq!(
+                    streaming_test_root(&leaves, subtree_size, leaves.len() / 3, &forced_parallel,),
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_build_enforces_configuration_and_exact_count() {
+        assert!(matches!(
+            StreamingBuilder::<Sha256>::new(1, 0),
+            Err(Error::InvalidSubtreeSize(0))
+        ));
+        assert!(matches!(
+            StreamingBuilder::<Sha256>::new(1, 3),
+            Err(Error::InvalidSubtreeSize(3))
+        ));
+        if let Ok(too_large) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert!(matches!(
+                StreamingBuilder::<Sha256>::new(1, too_large),
+                Err(Error::InvalidSubtreeSize(size)) if size == too_large
+            ));
+        }
+
+        let leaves: Vec<_> = (0..3)
+            .map(|position| update_test_digest(b"stream-count", position))
+            .collect();
+        let mut over = StreamingBuilder::<Sha256>::new(2, 2).unwrap();
+        assert_eq!(over.add(&leaves[0], &Sequential).unwrap(), 0);
+        assert!(matches!(
+            over.extend(&leaves[1..], &Sequential),
+            Err(Error::MismatchedLeafCount {
+                expected: 2,
+                actual: 3,
+            })
+        ));
+        assert_eq!(over.add(&leaves[1], &Sequential).unwrap(), 1);
+        assert_eq!(
+            over.finish(&Sequential).unwrap(),
+            update_test_tree(&leaves[..2]).root()
+        );
+
+        let mut under = StreamingBuilder::<Sha256>::new(2, 4).unwrap();
+        assert_eq!(under.add(&leaves[0], &Sequential).unwrap(), 0);
+        assert!(matches!(
+            under.finish(&Sequential),
+            Err(Error::MismatchedLeafCount {
+                expected: 2,
+                actual: 1,
+            })
+        ));
+
+        let mut empty = StreamingBuilder::<Sha256>::new(0, 1).unwrap();
+        assert_eq!(empty.extend(&[], &Sequential).unwrap(), 0..0);
+        assert!(matches!(
+            empty.extend(&leaves[..1], &Sequential),
+            Err(Error::MismatchedLeafCount {
+                expected: 0,
+                actual: 1,
+            })
+        ));
+        assert_eq!(
+            empty.finish(&Sequential).unwrap(),
+            update_test_tree(&[]).root()
+        );
     }
 
     #[test]

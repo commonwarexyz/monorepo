@@ -9,7 +9,7 @@ use commonware_clearing::bajillion::{
         DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalBatch, WithdrawalBody,
         WithdrawalId,
     },
-    challenge::{AccountLookup, Challenge, RangeLower, RowOpening, StateOpening},
+    challenge::{AccountLookup, Challenge, RangeLower, RowOpening, StateLookup, StateOpening},
     commitment::{
         MultiOpening, Opening, RangeOpening, RangeUpdate, SparseUpdate, VectorKind, VectorRoot,
     },
@@ -17,8 +17,8 @@ use commonware_clearing::bajillion::{
     payment::{Payment, PaymentContext, ReceiptBody, SendBody, SignedReceipt, SignedSend, TxId},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, BatchId, ChangeRange, Close, CloseLimits, Header, ProofSlice, RootBundle,
-        StateBounds,
+        Assignment, BatchId, ChangeRange, Close, CloseLimits, Header, LayoutRange, PayoutProof,
+        ProofSlice, RootBundle, SliceBoundary, StateRange,
     },
 };
 use commonware_codec::conformance::CodecConformance;
@@ -37,6 +37,7 @@ commonware_conformance::conformance_tests! {
     CodecConformance<WithdrawalBatch<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<RowOpening<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<StateOpening<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<StateLookup<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<AccountLookup<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<RangeLower<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<Challenge<VerifyingKey, Sha256Digest>> => 1024,
@@ -68,8 +69,11 @@ commonware_conformance::conformance_tests! {
     CodecConformance<BatchId<Sha256Digest>>,
     CodecConformance<Header<Sha256Digest>>,
     CodecConformance<CloseLimits>,
+    CodecConformance<SliceBoundary>,
+    CodecConformance<LayoutRange<Sha256Digest>> => 1024,
     CodecConformance<ChangeRange<VerifyingKey, Sha256Digest>> => 256,
-    CodecConformance<StateBounds<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<StateRange<VerifyingKey, Sha256Digest>> => 1024,
+    CodecConformance<PayoutProof<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<ProofSlice<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<Close<VerifyingKey, Sha256Digest>> => 256,
 }

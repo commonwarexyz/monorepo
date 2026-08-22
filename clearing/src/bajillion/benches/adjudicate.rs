@@ -4,12 +4,12 @@ use commonware_cryptography::Sha256;
 use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
-const REGISTRY: usize = 1_024;
+const LIVE_ACCOUNTS: usize = 1_024;
 const CHANGE_ROWS: usize = 129;
 const RECEIVE_SHARDS: usize = 16;
 
 fn bench_adjudicate(c: &mut Criterion) {
-    let fixture = challenge_fixture(REGISTRY, CHANGE_ROWS, RECEIVE_SHARDS);
+    let fixture = challenge_fixture(LIVE_ACCOUNTS, CHANGE_ROWS, RECEIVE_SHARDS);
     c.bench_function(
         &format!(
             "{}/kind=higher_shard_tip change_rows={CHANGE_ROWS} receive_shards={RECEIVE_SHARDS}",

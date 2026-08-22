@@ -658,7 +658,7 @@ mod tests {
         );
 
         let mut malformed = slices;
-        malformed[0].state_bounds.end = malformed[0].state_bounds.end.saturating_add(1);
+        malformed[0].layout.end.opening = malformed[0].layout.end.opening.saturating_add(1);
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,

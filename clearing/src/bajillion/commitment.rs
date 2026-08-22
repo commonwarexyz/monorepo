@@ -24,11 +24,13 @@ const DEPOSIT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_LEAF";
 const DEPOSIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_ROOT";
 const WITHDRAWAL_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_LEAF";
 const WITHDRAWAL_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_ROOT";
+const LAYOUT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_LAYOUT_LEAF";
+const LAYOUT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_LAYOUT_ROOT";
 
 /// Maximum number of values in a committed vector or disclosed in one proof.
 ///
-/// The bound limits decoding and verification work while covering the protocol's largest account
-/// registry and public corpus.
+/// The bound limits decoding and verification work while covering the protocol's largest live
+/// state and public corpus.
 pub const MAX_VECTOR_LENGTH: u32 = 1 << 24;
 
 /// The semantic type of an exact-length vector commitment.
@@ -48,6 +50,8 @@ pub enum VectorKind {
     Deposit = 4,
     /// Chain-sealed withdrawal vector.
     Withdrawal = 5,
+    /// Gap-free deterministic proof-slice boundaries.
+    Layout = 6,
 }
 
 impl VectorKind {
@@ -58,6 +62,7 @@ impl VectorKind {
             Self::Credit => CREDIT_LEAF_DOMAIN,
             Self::Deposit => DEPOSIT_LEAF_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_LEAF_DOMAIN,
+            Self::Layout => LAYOUT_LEAF_DOMAIN,
         }
     }
 
@@ -68,6 +73,7 @@ impl VectorKind {
             Self::Credit => CREDIT_ROOT_DOMAIN,
             Self::Deposit => DEPOSIT_ROOT_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_ROOT_DOMAIN,
+            Self::Layout => LAYOUT_ROOT_DOMAIN,
         }
     }
 }
@@ -88,6 +94,7 @@ impl Read for VectorKind {
             3 => Ok(Self::Credit),
             4 => Ok(Self::Deposit),
             5 => Ok(Self::Withdrawal),
+            6 => Ok(Self::Layout),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -100,12 +107,13 @@ impl FixedSize for VectorKind {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for VectorKind {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(1..=5)? {
+        Ok(match u.int_in_range(1..=6)? {
             1 => Self::State,
             2 => Self::Change,
             3 => Self::Credit,
             4 => Self::Deposit,
             5 => Self::Withdrawal,
+            6 => Self::Layout,
             _ => unreachable!("range contains every vector kind"),
         })
     }
@@ -430,10 +438,6 @@ pub(crate) struct PreparedUpdate<D: Digest> {
 impl<D: Digest> PreparedUpdate<D> {
     pub(crate) const fn root(&self) -> VectorRoot<D> {
         self.root
-    }
-
-    pub(crate) fn positions(&self) -> &[u32] {
-        &self.positions
     }
 }
 
@@ -852,6 +856,22 @@ impl<D: Digest> RangeOpening<D> {
             Err(Error::InvalidOpening)
         }
     }
+
+    pub(crate) fn read_bounded(
+        reader: &mut impl Buf,
+        max_values: usize,
+        max_hashes: usize,
+    ) -> Result<Self, CodecError> {
+        let max_hashes = max_values.saturating_mul(bmt::MAX_LEVELS).min(max_hashes);
+        let opening = Self {
+            start: u32::read(reader)?,
+            proof: bmt::Proof::read_bounded(reader, max_hashes)?,
+        };
+        opening.validate_shape().map_err(|_| {
+            CodecError::Invalid("RangeOpening", "range proof shape is not canonical")
+        })?;
+        Ok(opening)
+    }
 }
 
 impl<D: Digest> Write for RangeOpening<D> {
@@ -872,14 +892,7 @@ impl<D: Digest> Read for RangeOpening<D> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, maximum: &Self::Cfg) -> Result<Self, CodecError> {
-        let opening = Self {
-            start: u32::read(reader)?,
-            proof: bmt::Proof::read_cfg(reader, maximum)?,
-        };
-        opening.validate_shape().map_err(|_| {
-            CodecError::Invalid("RangeOpening", "range proof shape is not canonical")
-        })?;
-        Ok(opening)
+        Self::read_bounded(reader, *maximum, usize::MAX)
     }
 }
 
@@ -1022,6 +1035,21 @@ impl<D: Digest> MultiOpening<D> {
         self.validate_shape()?;
         verify_multi_opening::<H, D, B>(kind, &self.positions, &self.proof, root, encoded_values)
     }
+
+    /// Reads a multiproof without allocating more positions than its enclosing object permits.
+    pub(crate) fn read_bounded(
+        reader: &mut impl Buf,
+        max_positions: usize,
+    ) -> Result<Self, CodecError> {
+        let positions =
+            Vec::<u32>::read_range(reader, ..=max_positions.min(MAX_VECTOR_LENGTH as usize))?;
+        let proof = bmt::Proof::read_cfg(reader, &positions.len())?;
+        let opening = Self { positions, proof };
+        opening.validate_shape().map_err(|_| {
+            CodecError::Invalid("MultiOpening", "multiproof shape is not canonical")
+        })?;
+        Ok(opening)
+    }
 }
 
 pub(crate) fn verify_multi_opening<H, D, B>(
@@ -1069,13 +1097,7 @@ impl<D: Digest> Read for MultiOpening<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let positions = Vec::<u32>::read_range(reader, ..=MAX_VECTOR_LENGTH as usize)?;
-        let proof = bmt::Proof::read_cfg(reader, &positions.len())?;
-        let opening = Self { positions, proof };
-        opening.validate_shape().map_err(|_| {
-            CodecError::Invalid("MultiOpening", "multiproof shape is not canonical")
-        })?;
-        Ok(opening)
+        Self::read_bounded(reader, MAX_VECTOR_LENGTH as usize)
     }
 }
 

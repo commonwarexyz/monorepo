@@ -1,3 +1,4 @@
+use super::fixtures::strategy;
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     admission::{Committee, bls12381},
@@ -7,7 +8,8 @@ use commonware_clearing::bajillion::{
     settlement::{SettlementChain, SettlementConfig},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, Header, RootBundle, StateCache, build_close,
+        Assignment, Close, CloseContext, CloseLimits, Header, PayoutProof, RootBundle, StateCache,
+        prepare_close_with_strategy,
     },
 };
 use commonware_cryptography::{
@@ -26,7 +28,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
 };
 
-const REGISTRY: usize = 1_024;
+const LIVE_ACCOUNTS: usize = 1_024;
 const OPENING_BALANCE: u64 = 1_000;
 const ADMISSION_DEADLINE: u64 = 10;
 const CHALLENGE_DEADLINE: u64 = 20;
@@ -59,6 +61,7 @@ type TestChain = SettlementChain<Sha256, VerifyingKey>;
 type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
 type TestHeader = Header<Digest>;
+type TestPayoutProof = PayoutProof<VerifyingKey, Digest>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
 
 struct Account {
@@ -106,12 +109,13 @@ impl Validators {
     }
 }
 
-struct PreparedClose {
+struct AdmissionFixture {
     context: TestContext,
     deposits: DepositBatch<VerifyingKey>,
     withdrawals: TestWithdrawals,
     header: TestHeader,
     roots: RootBundle<Digest>,
+    payout_proof: TestPayoutProof,
     certificate: bls12381::Certificate,
 }
 
@@ -125,6 +129,7 @@ struct AdmitInput {
     chain: TestChain,
     header: TestHeader,
     roots: RootBundle<Digest>,
+    payout_proof: TestPayoutProof,
     certificate: bls12381::Certificate,
 }
 
@@ -132,14 +137,14 @@ const fn nonzero_usize(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("benchmark bound is positive")
 }
 
-fn settlement_config(max_pending_epochs: usize, registry: usize) -> SettlementConfig {
+fn settlement_config(max_pending_epochs: usize, live_accounts: usize) -> SettlementConfig {
     SettlementConfig::new(
         nonzero_usize(max_pending_epochs.max(1)),
         NonZeroU64::new(1).expect("benchmark notice is positive"),
         NonZeroU64::new(MAXIMUM_WITHDRAWAL_NOTICE).expect("benchmark maximum notice is positive"),
-        nonzero_usize(registry),
+        nonzero_usize(live_accounts),
         64,
-        nonzero_usize(registry),
+        nonzero_usize(live_accounts),
     )
 }
 
@@ -147,8 +152,8 @@ fn deployment() -> Digest {
     Sha256::hash(&[b"clearing-settlement-benchmark"])
 }
 
-fn registry(registry: usize) -> (TestCache, Vec<Account>) {
-    let mut accounts = (0..registry)
+fn state_fixture(live_accounts: usize) -> (TestCache, Vec<Account>) {
+    let mut accounts = (0..live_accounts)
         .map(|index| {
             let index = u64::try_from(index).expect("account index fits in u64");
             let private = SigningKey::from_seed(ACCOUNT_SEED_START + index);
@@ -214,7 +219,7 @@ fn withdrawal_close(
     context: &TestContext,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &TestWithdrawals,
-) -> TestClose {
+) -> (TestClose, TestPayoutProof) {
     let mut prefix = Prefix::default();
     let mut rows = Vec::with_capacity(withdrawals.len());
     let mut shard_sets = Vec::with_capacity(withdrawals.len());
@@ -257,44 +262,61 @@ fn withdrawal_close(
         });
         shard_sets.push(shards);
     }
-    build_close::<Sha256, _, _>(cache, context, deposits, withdrawals, rows, shard_sets)
-        .expect("benchmark close is valid")
+    let prepared = prepare_close_with_strategy::<Sha256, _, _>(
+        cache,
+        context,
+        deposits,
+        withdrawals,
+        rows,
+        shard_sets,
+        strategy(),
+    )
+    .expect("benchmark close is valid");
+    prepared
+        .validate::<Sha256>(context, deposits, withdrawals)
+        .expect("benchmark close is valid");
+    let payout_proof = prepared
+        .payout_proof(deposits, withdrawals)
+        .expect("benchmark payout proof is valid");
+    (prepared.into_close(), payout_proof)
 }
 
-fn prepared_close(
+fn admission_fixture(
     cache: &TestCache,
     validators: &Validators,
     epoch: u64,
     withdrawals: TestWithdrawals,
-) -> PreparedClose {
+) -> AdmissionFixture {
     let deposits = DepositBatch::empty();
     let context = context(cache, validators, epoch, &deposits, &withdrawals);
-    let close = withdrawal_close(cache, &context, &deposits, &withdrawals);
+    let (close, payout_proof) = withdrawal_close(cache, &context, &deposits, &withdrawals);
     let certificate = validators.certificate(&close.header);
-    PreparedClose {
+    AdmissionFixture {
         context,
         deposits,
         withdrawals,
         header: close.header,
         roots: close.roots,
+        payout_proof,
         certificate,
     }
 }
 
-fn admit_prepared(chain: &mut TestChain, prepared: PreparedClose) {
-    let PreparedClose {
+fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
+    let AdmissionFixture {
         context,
         deposits,
         withdrawals,
         header,
         roots,
+        payout_proof,
         certificate,
-    } = prepared;
+    } = admission;
     chain
         .register(0, context, deposits, withdrawals)
         .expect("benchmark close can be registered");
     chain
-        .admit(0, header, roots, certificate)
+        .admit(0, header, roots, payout_proof, certificate)
         .expect("benchmark close can be admitted");
 }
 
@@ -316,14 +338,14 @@ fn signed_withdrawal(
 }
 
 fn queue_input(depth: usize) -> QueueInput {
-    let (cache, accounts) = registry(REGISTRY);
+    let (cache, accounts) = state_fixture(LIVE_ACCOUNTS);
     let validators = Validators::new(1);
     let mut chain = chain(&cache, &validators, depth);
     for epoch in 0..depth {
         let epoch = u64::try_from(epoch).expect("benchmark epoch fits in u64");
-        admit_prepared(
+        admit_fixture(
             &mut chain,
-            prepared_close(&cache, &validators, epoch, WithdrawalBatch::empty()),
+            admission_fixture(&cache, &validators, epoch, WithdrawalBatch::empty()),
         );
     }
     let opening = cache
@@ -337,7 +359,7 @@ fn queue_input(depth: usize) -> QueueInput {
 }
 
 fn admit_input() -> AdmitInput {
-    let (cache, accounts) = registry(REGISTRY);
+    let (cache, accounts) = state_fixture(LIVE_ACCOUNTS);
     let validators = Validators::new(ADMISSION_VALIDATORS);
     let mut chain = chain(&cache, &validators, 1);
     let request = signed_withdrawal(&cache, &accounts[0], WITHDRAWAL_DEADLINE);
@@ -351,20 +373,26 @@ fn admit_input() -> AdmitInput {
             |_| true,
         )
         .expect("benchmark withdrawal can be queued");
-    let prepared = prepared_close(&cache, &validators, 0, chain.pending_withdrawals());
+    let admission = admission_fixture(&cache, &validators, 0, chain.pending_withdrawals());
     chain
-        .register(0, prepared.context, prepared.deposits, prepared.withdrawals)
+        .register(
+            0,
+            admission.context,
+            admission.deposits,
+            admission.withdrawals,
+        )
         .expect("benchmark close can be registered");
     AdmitInput {
         chain,
-        header: prepared.header,
-        roots: prepared.roots,
-        certificate: prepared.certificate,
+        header: admission.header,
+        roots: admission.roots,
+        payout_proof: admission.payout_proof,
+        certificate: admission.certificate,
     }
 }
 
 fn finalize_input(withdrawals: usize) -> TestChain {
-    let (cache, accounts) = registry(REGISTRY);
+    let (cache, accounts) = state_fixture(LIVE_ACCOUNTS);
     let validators = Validators::new(1);
     let mut chain = chain(&cache, &validators, 1);
     for account in accounts.iter().take(withdrawals) {
@@ -380,14 +408,14 @@ fn finalize_input(withdrawals: usize) -> TestChain {
             )
             .expect("benchmark withdrawal can be queued");
     }
-    let prepared = prepared_close(&cache, &validators, 0, chain.pending_withdrawals());
-    admit_prepared(&mut chain, prepared);
+    let admission = admission_fixture(&cache, &validators, 0, chain.pending_withdrawals());
+    admit_fixture(&mut chain, admission);
     chain
 }
 
-fn hard_fault_input(registry_size: usize, claims: usize) -> (TestChain, TestCache) {
-    assert!(claims > 0 && claims <= registry_size);
-    let (cache, accounts) = registry(registry_size);
+fn hard_fault_input(live_accounts: usize, claims: usize) -> (TestChain, TestCache) {
+    assert!(claims > 0 && claims <= live_accounts);
+    let (cache, accounts) = state_fixture(live_accounts);
     let validators = Validators::new(1);
     let mut chain = chain(&cache, &validators, 1);
     for account in accounts.iter().take(claims) {
@@ -413,7 +441,7 @@ fn bench_queue_withdrawal(c: &mut Criterion) {
     for &depth in QUEUE_DEPTHS {
         c.bench_function(
             &format!(
-                "{}/op=queue depth={depth} registry={REGISTRY}",
+                "{}/op=queue depth={depth} live_accounts={LIVE_ACCOUNTS}",
                 module_path!()
             ),
             |b| {
@@ -441,7 +469,7 @@ fn bench_queue_withdrawal(c: &mut Criterion) {
 fn bench_admit(c: &mut Criterion) {
     c.bench_function(
         &format!(
-            "{}/op=admit registry={REGISTRY} n={ADMISSION_VALIDATORS} q={ADMISSION_QUORUM} withdrawals=1",
+            "{}/op=admit live_accounts={LIVE_ACCOUNTS} n={ADMISSION_VALIDATORS} q={ADMISSION_QUORUM} withdrawals=1",
             module_path!()
         ),
         |b| {
@@ -455,6 +483,7 @@ fn bench_admit(c: &mut Criterion) {
                                 black_box(0),
                                 input.header,
                                 input.roots,
+                                input.payout_proof,
                                 input.certificate,
                             )
                             .expect("benchmark close can be admitted"),
@@ -470,7 +499,7 @@ fn bench_finalize(c: &mut Criterion) {
     for &withdrawals in FINALIZE_WITHDRAWALS {
         c.bench_function(
             &format!(
-                "{}/op=finalize registry={REGISTRY} withdrawals={withdrawals}",
+                "{}/op=finalize live_accounts={LIVE_ACCOUNTS} withdrawals={withdrawals}",
                 module_path!()
             ),
             |b| {
@@ -491,15 +520,15 @@ fn bench_finalize(c: &mut Criterion) {
 }
 
 fn bench_hard_fault(c: &mut Criterion) {
-    for &(registry, claims) in HARD_FAULT_PROFILES {
+    for &(live_accounts, claims) in HARD_FAULT_PROFILES {
         c.bench_function(
             &format!(
-                "{}/op=unwind registry={registry} claims={claims}",
+                "{}/op=unwind live_accounts={live_accounts} claims={claims}",
                 module_path!()
             ),
             |b| {
                 b.iter_batched(
-                    || hard_fault_input(registry, claims),
+                    || hard_fault_input(live_accounts, claims),
                     |(mut chain, cache)| {
                         black_box(
                             chain

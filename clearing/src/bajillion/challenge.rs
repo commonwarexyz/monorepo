@@ -65,13 +65,191 @@ impl<P: PublicKey, D: Digest> Read for RowOpening<P, D> {
     }
 }
 
-/// One complete-state leaf and its opening under the opening state root.
+/// One live-state leaf and its opening under a state root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateOpening<P: PublicKey, D: Digest> {
-    /// Authenticated opening leaf.
+    /// Authenticated live leaf.
     pub leaf: StateLeaf<P>,
     /// Position and BMT authentication path.
     pub proof: commitment::Opening<D>,
+}
+
+/// Authenticated membership or ordered nonmembership under one state root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StateLookup<P: PublicKey, D: Digest> {
+    /// The requested account is a live state member.
+    Present(Box<StateOpening<P, D>>),
+    /// The requested account is absent, authenticated by its adjacent live leaves.
+    ///
+    /// One neighbor is absent at a state boundary, and both are absent for an empty state.
+    Absent {
+        /// Immediate state predecessor, if any.
+        predecessor: Option<Box<StateOpening<P, D>>>,
+        /// Immediate state successor, if any.
+        successor: Option<Box<StateOpening<P, D>>>,
+    },
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P, D> arbitrary::Arbitrary<'_> for StateLookup<P, D>
+where
+    P: PublicKey,
+    D: Digest,
+    StateOpening<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        if u.arbitrary()? {
+            Ok(Self::Present(Box::new(u.arbitrary()?)))
+        } else {
+            Ok(Self::Absent {
+                predecessor: u.arbitrary::<Option<StateOpening<P, D>>>()?.map(Box::new),
+                successor: u.arbitrary::<Option<StateOpening<P, D>>>()?.map(Box::new),
+            })
+        }
+    }
+}
+
+impl<P: PublicKey, D: Digest> StateLookup<P, D> {
+    /// Verifies this lookup and returns the member state, if present.
+    pub fn resolve<H: Hasher<Digest = D>>(
+        &self,
+        root: &VectorRoot<D>,
+        account: &P,
+    ) -> Result<Option<crate::bajillion::state::AccountState>, ChallengeError> {
+        match self {
+            Self::Present(opening) => {
+                if &opening.leaf.account != account {
+                    return Err(ChallengeError::LookupKey);
+                }
+                opening.proof.verify::<H>(
+                    VectorKind::State,
+                    root,
+                    opening.leaf.encode().as_ref(),
+                )?;
+                Ok(Some(opening.leaf.state))
+            }
+            Self::Absent {
+                predecessor,
+                successor,
+            } => {
+                let len = predecessor
+                    .as_ref()
+                    .or(successor.as_ref())
+                    .map_or(0, |opening| opening.proof.proof.leaf_count);
+                if len == 0 {
+                    if predecessor.is_some()
+                        || successor.is_some()
+                        || *root != commitment::empty_root::<H>(VectorKind::State)
+                    {
+                        return Err(ChallengeError::LookupOrder);
+                    }
+                } else {
+                    for opening in predecessor.iter().chain(successor.iter()) {
+                        opening.proof.verify::<H>(
+                            VectorKind::State,
+                            root,
+                            opening.leaf.encode().as_ref(),
+                        )?;
+                    }
+                    let insertion = successor
+                        .as_ref()
+                        .map_or(len, |opening| opening.proof.position);
+                    match predecessor {
+                        None if insertion == 0 => {}
+                        Some(opening)
+                            if opening.proof.position.checked_add(1) == Some(insertion)
+                                && opening.leaf.account < *account => {}
+                        _ => return Err(ChallengeError::LookupOrder),
+                    }
+                    match successor {
+                        None if insertion == len => {}
+                        Some(opening)
+                            if opening.proof.position == insertion
+                                && opening.leaf.account > *account => {}
+                        _ => return Err(ChallengeError::LookupOrder),
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
+fn write_optional_state<P: PublicKey, D: Digest>(
+    buf: &mut impl BufMut,
+    value: Option<&StateOpening<P, D>>,
+) {
+    match value {
+        None => 0_u8.write(buf),
+        Some(value) => {
+            1_u8.write(buf);
+            value.write(buf);
+        }
+    }
+}
+
+fn read_optional_state<P: PublicKey, D: Digest>(
+    buf: &mut impl Buf,
+) -> Result<Option<Box<StateOpening<P, D>>>, CodecError> {
+    match u8::read(buf)? {
+        0 => Ok(None),
+        1 => Ok(Some(Box::new(StateOpening::read(buf)?))),
+        tag => Err(CodecError::InvalidEnum(tag)),
+    }
+}
+
+fn optional_state_size<P: PublicKey, D: Digest>(value: Option<&StateOpening<P, D>>) -> usize {
+    u8::SIZE + value.map_or(0, EncodeSize::encode_size)
+}
+
+impl<P: PublicKey, D: Digest> Write for StateLookup<P, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Present(opening) => {
+                1_u8.write(buf);
+                opening.write(buf);
+            }
+            Self::Absent {
+                predecessor,
+                successor,
+            } => {
+                2_u8.write(buf);
+                write_optional_state(buf, predecessor.as_deref());
+                write_optional_state(buf, successor.as_deref());
+            }
+        }
+    }
+}
+
+impl<P: PublicKey, D: Digest> EncodeSize for StateLookup<P, D> {
+    fn encode_size(&self) -> usize {
+        match self {
+            Self::Present(opening) => u8::SIZE + opening.encode_size(),
+            Self::Absent {
+                predecessor,
+                successor,
+            } => {
+                u8::SIZE
+                    + optional_state_size(predecessor.as_deref())
+                    + optional_state_size(successor.as_deref())
+            }
+        }
+    }
+}
+
+impl<P: PublicKey, D: Digest> Read for StateLookup<P, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            1 => Ok(Self::Present(Box::new(StateOpening::read(buf)?))),
+            2 => Ok(Self::Absent {
+                predecessor: read_optional_state(buf)?,
+                successor: read_optional_state(buf)?,
+            }),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -120,8 +298,8 @@ pub enum AccountLookup<P: PublicKey, D: Digest> {
     Present(Box<RowOpening<P, D>>),
     /// The account is absent from the change vector and therefore unchanged.
     Absent {
-        /// Opening-state membership proof for the requested account.
-        state: Box<StateOpening<P, D>>,
+        /// Opening-state membership or ordered-nonmembership proof.
+        state: Box<StateLookup<P, D>>,
         /// Immediate changed-row predecessor, if any.
         predecessor: Option<Box<RowOpening<P, D>>>,
         /// Immediate changed-row successor, if any.
@@ -135,7 +313,7 @@ where
     P: PublicKey,
     D: Digest,
     RowOpening<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    StateOpening<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    StateLookup<P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         if u.arbitrary()? {
@@ -190,14 +368,9 @@ impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
                 predecessor,
                 successor,
             } => {
-                if &state.leaf.account != account {
-                    return Err(ChallengeError::LookupKey);
-                }
-                state.proof.verify::<H>(
-                    VectorKind::State,
-                    opening_root,
-                    state.leaf.encode().as_ref(),
-                )?;
+                let state = state
+                    .resolve::<H>(opening_root, account)?
+                    .unwrap_or_default();
 
                 let change_len = predecessor
                     .as_ref()
@@ -238,8 +411,8 @@ impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
                 }
 
                 Ok(ResolvedAccount {
-                    opening: state.leaf.state,
-                    closing: state.leaf.state,
+                    opening: state,
+                    closing: state,
                     row: None,
                 })
             }
@@ -320,7 +493,7 @@ impl<P: PublicKey, D: Digest> Read for AccountLookup<P, D> {
         match u8::read(buf)? {
             1 => Ok(Self::Present(Box::new(RowOpening::read(buf)?))),
             2 => Ok(Self::Absent {
-                state: Box::new(StateOpening::read(buf)?),
+                state: Box::new(StateLookup::read(buf)?),
                 predecessor: read_optional_row(buf)?,
                 successor: read_optional_row(buf)?,
             }),
@@ -1152,6 +1325,7 @@ mod tests {
             opening: state_tree.root(),
             change: change_tree.root(),
             closing: state_tree.root(),
+            layout: commitment::empty_root::<Sha256>(VectorKind::Layout),
         };
         let header = Header::new::<Sha256, _>(context.payment(), &roots);
         let batch = header.batch_id::<Sha256>();
@@ -1194,10 +1368,10 @@ mod tests {
                     })
                 };
                 AccountLookup::Absent {
-                    state: Box::new(StateOpening {
+                    state: Box::new(StateLookup::Present(Box::new(StateOpening {
                         leaf: fixture.leaves[state_position].clone(),
                         proof: fixture.state_tree.opening(state_position as u32).unwrap(),
-                    }),
+                    }))),
                     predecessor: insertion.checked_sub(1).map(row_opening),
                     successor: (insertion < fixture.rows.len()).then(|| row_opening(insertion)),
                 }
@@ -1404,13 +1578,13 @@ mod tests {
             batch: fixture.batch,
             payment: Box::new(payment),
             recipient: Box::new(AccountLookup::Absent {
-                state: Box::new(StateOpening {
+                state: Box::new(StateLookup::Present(Box::new(StateOpening {
                     leaf: StateLeaf {
                         account: state_key,
                         state: state(100),
                     },
                     proof: fixture.state_tree.opening(0).unwrap(),
-                }),
+                }))),
                 predecessor: Some(row(predecessor_account, predecessor_payment)),
                 successor: Some(row(successor_account, successor_payment)),
             }),
@@ -1482,10 +1656,10 @@ mod tests {
             .lookup::<Sha256>(9)
             .unwrap();
         let no_neighbor_account = AccountLookup::Absent {
-            state: Box::new(StateOpening {
+            state: Box::new(StateLookup::Present(Box::new(StateOpening {
                 leaf: fixture.leaves[0].clone(),
                 proof: fixture.state_tree.opening(0).unwrap(),
-            }),
+            }))),
             predecessor: None,
             successor: None,
         };
@@ -1579,9 +1753,9 @@ mod tests {
             leaf: fixture.leaves[0].clone(),
             proof: fixture.state_tree.opening(0).unwrap(),
         };
-        let optional_row_offset = u8::SIZE + state.encode_size();
+        let optional_row_offset = u8::SIZE * 2 + state.encode_size();
         let mut account_lookup = AccountLookup::<VerifyingKey, ShaDigest>::Absent {
-            state: Box::new(state),
+            state: Box::new(StateLookup::Present(Box::new(state))),
             predecessor: None,
             successor: None,
         }
@@ -2114,6 +2288,52 @@ mod tests {
                 &fixture.roots.change,
                 &fixture.dormant.public_key(),
             ),
+            Err(ChallengeError::LookupOrder)
+        ));
+    }
+
+    #[test]
+    fn state_lookup_proves_ordered_nonmembership() {
+        let fixture = fixture();
+        let account = (1_000..)
+            .map(|seed| SigningKey::from_seed(seed).public_key())
+            .find(|account| {
+                fixture
+                    .leaves
+                    .binary_search_by(|leaf| leaf.account.cmp(account))
+                    .is_err()
+            })
+            .unwrap();
+        let insertion = fixture
+            .leaves
+            .binary_search_by(|leaf| leaf.account.cmp(&account))
+            .unwrap_err();
+        let opening = |position: usize| {
+            Box::new(StateOpening {
+                leaf: fixture.leaves[position].clone(),
+                proof: fixture.state_tree.opening(position as u32).unwrap(),
+            })
+        };
+        let lookup = StateLookup::Absent {
+            predecessor: insertion.checked_sub(1).map(opening),
+            successor: (insertion < fixture.leaves.len()).then(|| opening(insertion)),
+        };
+
+        assert_eq!(
+            lookup
+                .resolve::<Sha256>(&fixture.roots.opening, &account)
+                .unwrap(),
+            None
+        );
+
+        let mut nonadjacent = lookup;
+        match &mut nonadjacent {
+            StateLookup::Absent { predecessor, .. } if predecessor.is_some() => *predecessor = None,
+            StateLookup::Absent { successor, .. } if successor.is_some() => *successor = None,
+            _ => panic!("a nonempty state tree has an absence guard"),
+        }
+        assert!(matches!(
+            nonadjacent.resolve::<Sha256>(&fixture.roots.opening, &account),
             Err(ChallengeError::LookupOrder)
         ));
     }

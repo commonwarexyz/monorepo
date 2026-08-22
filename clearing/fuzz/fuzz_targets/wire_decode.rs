@@ -7,8 +7,8 @@ use commonware_clearing::bajillion::{
     },
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalBatch, WithdrawalBody},
     challenge::{
-        AccountLookup, Challenge, ChallengeError, RangeLower, RowOpening, StateOpening, adjudicate,
-        decode_bounded,
+        AccountLookup, Challenge, ChallengeError, RangeLower, RowOpening, StateLookup,
+        StateOpening, adjudicate, decode_bounded,
     },
     commitment::{
         MultiOpening, Opening, RangeOpening, RangeUpdate, SparseUpdate, VectorKind, VectorRoot,
@@ -16,10 +16,11 @@ use commonware_clearing::bajillion::{
     },
     credit::{CreditRoot, ShardHead, ShardLookup, ShardOpening, ShardSet},
     payment::{Payment, PaymentContext},
-    state::AccountRow,
+    state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, BatchId, ChangeRange, Close, CloseContext, CloseLimits, Header, ProofSlice,
-        RootBundle, SliceCodecConfig, StateBounds, StateCache,
+        Assignment, BatchId, ChangeRange, Close, CloseContext, CloseLimits, Header, LayoutRange,
+        PayoutProof, ProofSlice, RootBundle, SliceBoundary, SliceCodecConfig, StateCache,
+        StateRange,
     },
 };
 use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg, Read};
@@ -31,6 +32,7 @@ use std::fmt::Debug;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_ITEMS: usize = 16;
 const MAX_DESTINATION_BYTES: usize = 256;
+const MAX_STATES: usize = 16;
 const MAX_ROWS: usize = 8;
 const MAX_SHARDS_PER_ACCOUNT: usize = 8;
 const MAX_TOTAL_SHARDS: usize = 32;
@@ -78,6 +80,7 @@ fn semantic_header(
         opening: cache.root(),
         change: empty_root::<Sha256>(VectorKind::Change),
         closing: cache.root(),
+        layout: empty_root::<Sha256>(VectorKind::Layout),
     };
     let header = Header::new::<Sha256, _>(context.payment(), &roots);
     (context, header, roots)
@@ -127,9 +130,10 @@ fuzz_target!(|data: &[u8]| {
     let item_limit = usize::from(limit_selector) % (MAX_ITEMS + 1);
     let destination_limit = usize::from(limit_selector) % (MAX_DESTINATION_BYTES + 1);
     let close_limits = CloseLimits::new(
-        u64::from(limit_selector) % (u64::try_from(MAX_ROWS).expect("row bound fits in u64") + 1),
         u64::from(limit_selector)
-            % (u64::try_from(MAX_ROWS).expect("withdrawal bound fits in u64") + 1),
+            % (u64::try_from(MAX_STATES).expect("state bound fits in u64") + 1),
+        u64::from(limit_selector) % (u64::try_from(MAX_ROWS).expect("row bound fits in u64") + 1),
+        u64::try_from(item_limit).expect("withdrawal bound fits in u64"),
         u64::from(limit_selector)
             % (u64::try_from(MAX_SHARDS_PER_ACCOUNT).expect("per-account shard bound fits in u64")
                 + 1),
@@ -139,7 +143,7 @@ fuzz_target!(|data: &[u8]| {
         u64::MAX,
         u64::MAX,
     );
-    match selector % 34 {
+    match selector % 41 {
         0 => roundtrip::<DepositBatch<VerifyingKey>>(bytes, &RangeCfg::new(..=item_limit)),
         1 => roundtrip::<WithdrawalBody<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         2 => roundtrip::<SignedWithdrawal<VerifyingKey, Digest>>(
@@ -155,37 +159,44 @@ fuzz_target!(|data: &[u8]| {
         ),
         4 => roundtrip::<Committee>(bytes, &item_limit),
         5 => roundtrip::<Certificate>(bytes, &item_limit),
-        6 => roundtrip::<AccountRow<VerifyingKey, Digest>>(bytes, &()),
-        7 => roundtrip::<Opening<Digest>>(bytes, &()),
-        8 => roundtrip::<MultiOpening<Digest>>(bytes, &()),
-        9 => roundtrip::<SparseUpdate<Digest>>(bytes, &()),
-        10 => roundtrip::<ShardSet<VerifyingKey, Digest>>(bytes, &()),
-        11 => roundtrip::<ShardOpening<VerifyingKey, Digest>>(bytes, &()),
-        12 => roundtrip::<ShardLookup<VerifyingKey, Digest>>(bytes, &()),
-        13 => roundtrip::<RowOpening<VerifyingKey, Digest>>(bytes, &()),
-        14 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &()),
-        15 => roundtrip::<AccountLookup<VerifyingKey, Digest>>(bytes, &()),
-        16 => roundtrip::<RangeLower<VerifyingKey, Digest>>(bytes, &()),
-        17 => challenge_roundtrip(bytes, limit_selector),
-        18 => roundtrip::<Close<VerifyingKey, Digest>>(bytes, &close_limits),
-        19 => roundtrip::<PaymentContext<VerifyingKey, Digest>>(bytes, &()),
-        20 => roundtrip::<Payment<VerifyingKey, Digest>>(bytes, &()),
-        21 => roundtrip::<Header<Digest>>(bytes, &()),
-        22 => roundtrip::<CreditRoot<Digest>>(bytes, &()),
-        23 => roundtrip::<VectorRoot<Digest>>(bytes, &()),
-        24 => roundtrip::<ShardHead<VerifyingKey, Digest>>(bytes, &()),
-        25 => roundtrip::<CloseLimits>(bytes, &()),
-        26 => roundtrip::<Assignment<Digest>>(bytes, &()),
-        27 => roundtrip::<RangeOpening<Digest>>(bytes, &item_limit),
-        28 => roundtrip::<RangeUpdate<Digest>>(bytes, &(item_limit, item_limit, item_limit)),
-        29 => roundtrip::<ChangeRange<VerifyingKey, Digest>>(bytes, &item_limit),
-        30 => roundtrip::<StateBounds<VerifyingKey, Digest>>(bytes, &()),
-        31 => roundtrip::<ProofSlice<VerifyingKey, Digest>>(
+        6 => roundtrip::<AccountState>(bytes, &()),
+        7 => roundtrip::<StateLeaf<VerifyingKey>>(bytes, &()),
+        8 => roundtrip::<Prefix>(bytes, &()),
+        9 => roundtrip::<AccountRow<VerifyingKey, Digest>>(bytes, &()),
+        10 => roundtrip::<Opening<Digest>>(bytes, &()),
+        11 => roundtrip::<MultiOpening<Digest>>(bytes, &()),
+        12 => roundtrip::<SparseUpdate<Digest>>(bytes, &()),
+        13 => roundtrip::<ShardSet<VerifyingKey, Digest>>(bytes, &()),
+        14 => roundtrip::<ShardOpening<VerifyingKey, Digest>>(bytes, &()),
+        15 => roundtrip::<ShardLookup<VerifyingKey, Digest>>(bytes, &()),
+        16 => roundtrip::<RowOpening<VerifyingKey, Digest>>(bytes, &()),
+        17 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &()),
+        18 => roundtrip::<StateLookup<VerifyingKey, Digest>>(bytes, &()),
+        19 => roundtrip::<AccountLookup<VerifyingKey, Digest>>(bytes, &()),
+        20 => roundtrip::<RangeLower<VerifyingKey, Digest>>(bytes, &()),
+        21 => challenge_roundtrip(bytes, limit_selector),
+        22 => roundtrip::<Close<VerifyingKey, Digest>>(bytes, &close_limits),
+        23 => roundtrip::<PaymentContext<VerifyingKey, Digest>>(bytes, &()),
+        24 => roundtrip::<Payment<VerifyingKey, Digest>>(bytes, &()),
+        25 => roundtrip::<Header<Digest>>(bytes, &()),
+        26 => roundtrip::<CreditRoot<Digest>>(bytes, &()),
+        27 => roundtrip::<VectorRoot<Digest>>(bytes, &()),
+        28 => roundtrip::<ShardHead<VerifyingKey, Digest>>(bytes, &()),
+        29 => roundtrip::<CloseLimits>(bytes, &()),
+        30 => roundtrip::<Assignment<Digest>>(bytes, &()),
+        31 => roundtrip::<RangeOpening<Digest>>(bytes, &item_limit),
+        32 => roundtrip::<RangeUpdate<Digest>>(bytes, &(item_limit, item_limit, item_limit)),
+        33 => roundtrip::<SliceBoundary>(bytes, &()),
+        34 => roundtrip::<LayoutRange<Digest>>(bytes, &()),
+        35 => roundtrip::<ChangeRange<VerifyingKey, Digest>>(bytes, &item_limit),
+        36 => roundtrip::<StateRange<VerifyingKey, Digest>>(bytes, &item_limit),
+        37 => roundtrip::<ProofSlice<VerifyingKey, Digest>>(
             bytes,
             &SliceCodecConfig::new(close_limits, item_limit),
         ),
-        32 => roundtrip::<RootBundle<Digest>>(bytes, &()),
-        33 => roundtrip::<Vote>(bytes, &()),
+        38 => roundtrip::<PayoutProof<VerifyingKey, Digest>>(bytes, &close_limits),
+        39 => roundtrip::<RootBundle<Digest>>(bytes, &()),
+        40 => roundtrip::<Vote>(bytes, &()),
         _ => unreachable!(),
     }
 

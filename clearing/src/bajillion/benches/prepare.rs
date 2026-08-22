@@ -1,22 +1,19 @@
-use super::fixtures::{active_close_fixture, selected_active_profiles};
-use commonware_clearing::bajillion::transition::build_close;
+use super::fixtures::{WORKERS, active_close_fixture, selected_active_profiles, strategy};
+use commonware_clearing::bajillion::transition::prepare_close_with_strategy;
 use commonware_cryptography::Sha256;
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
-fn bench_build_close(c: &mut Criterion) {
+fn bench_prepare(c: &mut Criterion) {
     for (_, profile) in selected_active_profiles() {
-        // The complete opening tree is persistent epoch state and is outside active-close timing.
-        // `build_close` performs full validation before returning; the validation bench isolates
-        // the cost of checking an already-constructed corpus.
         let fixture = active_close_fixture(profile);
-        let registry = profile.registry;
+        let live_accounts = profile.live_accounts;
         let changed = profile.changed_accounts;
         let credited = profile.credited_accounts;
         let shards = profile.receive_shards_per_credited;
         c.bench_function(
             &format!(
-                "{}/N={registry} A={changed} B={credited} h={shards}",
+                "{}/N={live_accounts} A={changed} B={credited} h={shards} workers={WORKERS}",
                 module_path!()
             ),
             |b| {
@@ -24,18 +21,19 @@ fn bench_build_close(c: &mut Criterion) {
                     || (fixture.rows.clone(), fixture.shard_sets.clone()),
                     |(rows, shard_sets)| {
                         black_box(
-                            build_close::<Sha256, _, _>(
+                            prepare_close_with_strategy::<Sha256, _, _>(
                                 &fixture.cache,
                                 &fixture.context,
                                 &fixture.deposits,
                                 &fixture.withdrawals,
                                 rows,
                                 shard_sets,
+                                strategy(),
                             )
-                            .expect("benchmark close is valid"),
+                            .expect("benchmark preparation is valid"),
                         )
                     },
-                    BatchSize::LargeInput,
+                    BatchSize::PerIteration,
                 );
             },
         );
@@ -45,5 +43,5 @@ fn bench_build_close(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_build_close,
+    targets = bench_prepare,
 }

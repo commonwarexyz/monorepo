@@ -1,23 +1,26 @@
-use super::fixtures::{STATE_CACHE_REGISTRIES, TestStateCache, state_leaves};
+use super::fixtures::{STATE_CACHE_SIZES, TestStateCache, state_leaves};
 use commonware_cryptography::Sha256;
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_state_cache(c: &mut Criterion) {
-    for &registry in STATE_CACHE_REGISTRIES {
-        let leaves = state_leaves(registry);
-        c.bench_function(&format!("{}/registry={registry}", module_path!()), |b| {
-            b.iter_batched(
-                || leaves.clone(),
-                |leaves| {
-                    black_box(
-                        TestStateCache::new::<Sha256>(leaves)
-                            .expect("benchmark state is canonical"),
-                    )
-                },
-                BatchSize::LargeInput,
-            );
-        });
+    for &live_accounts in STATE_CACHE_SIZES {
+        let leaves = state_leaves(live_accounts);
+        c.bench_function(
+            &format!("{}/live_accounts={live_accounts}", module_path!()),
+            |b| {
+                b.iter_batched(
+                    || leaves.clone(),
+                    |leaves| {
+                        black_box(
+                            TestStateCache::new::<Sha256>(leaves)
+                                .expect("benchmark state is canonical"),
+                        )
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
     }
 }
 

@@ -17,12 +17,12 @@ fn bench_seal(c: &mut Criterion) {
         let fixture = validator_fixture(profile);
         let assigned_slices = fixture.slices.len();
         let scheme = fixture.validators.signer(fixture.validator);
-        let registry = profile.registry;
+        let live_accounts = profile.live_accounts;
         let changed = profile.changed_accounts;
         let credited = profile.credited_accounts;
         let shards = profile.receive_shards_per_credited;
         eprintln!(
-            "clearing benchmark corpus: N={registry} A={changed} B={credited} h={shards} close_bytes={} slice_corpus_bytes={} validator={} assignment_bytes={} assigned_slices={} workers={WORKERS}",
+            "clearing benchmark corpus: N={live_accounts} A={changed} B={credited} h={shards} close_bytes={} slice_corpus_bytes={} validator={} assignment_bytes={} assigned_slices={} workers={WORKERS}",
             fixture.public_corpus_bytes,
             fixture.slice_corpus_bytes,
             usize::from(fixture.validator),
@@ -32,7 +32,7 @@ fn bench_seal(c: &mut Criterion) {
 
         c.bench_function(
             &format!(
-                "{}/N={registry} A={changed} B={credited} h={shards} n={VALIDATORS} q={QUORUM} slices={SLICES} assigned={assigned_slices} workers={WORKERS}",
+                "{}/N={live_accounts} A={changed} B={credited} h={shards} n={VALIDATORS} q={QUORUM} slices={SLICES} assigned={assigned_slices} workers={WORKERS}",
                 module_path!()
             ),
             |b| {

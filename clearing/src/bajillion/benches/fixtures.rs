@@ -1,7 +1,6 @@
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     challenge::{AccountLookup, Challenge, ChallengeKind, Verdict, adjudicate},
-    commitment::{Builder, SparseUpdate, Tree, VectorKind, VectorRoot},
     credit::{ShardHead, ShardLookup, ShardSet},
     payment::{Payment, PaymentContext, SignedReceipt, SignedSend},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
@@ -28,7 +27,7 @@ pub(crate) fn strategy() -> &'static Rayon {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ActiveProfile {
-    pub(crate) registry: usize,
+    pub(crate) live_accounts: usize,
     pub(crate) changed_accounts: usize,
     pub(crate) credited_accounts: usize,
     pub(crate) receive_shards_per_credited: usize,
@@ -36,13 +35,13 @@ pub(crate) struct ActiveProfile {
 
 impl ActiveProfile {
     const fn new(
-        registry: usize,
+        live_accounts: usize,
         changed_accounts: usize,
         credited_accounts: usize,
         receive_shards_per_credited: usize,
     ) -> Self {
         Self {
-            registry,
+            live_accounts,
             changed_accounts,
             credited_accounts,
             receive_shards_per_credited,
@@ -55,10 +54,10 @@ impl ActiveProfile {
             .expect("benchmark terminal shard count fits in usize")
     }
 
-    const fn credited_registry_position(self, credited: usize) -> usize {
+    const fn credited_state_position(self, credited: usize) -> usize {
         credited
-            .checked_mul(self.registry)
-            .expect("benchmark credited-account registry spacing fits in usize")
+            .checked_mul(self.live_accounts)
+            .expect("benchmark credited-account state spacing fits in usize")
             / self.credited_accounts
     }
 
@@ -66,7 +65,7 @@ impl ActiveProfile {
         (0..self.changed_accounts)
             .map(|changed| {
                 changed
-                    .checked_mul(self.registry)
+                    .checked_mul(self.live_accounts)
                     .expect("benchmark changed-account spacing fits in usize")
                     / self.changed_accounts
             })
@@ -77,7 +76,7 @@ impl ActiveProfile {
         (0..self.credited_accounts)
             .map(|credited| {
                 changed_positions
-                    .binary_search(&self.credited_registry_position(credited))
+                    .binary_search(&self.credited_state_position(credited))
                     .expect("every benchmark recipient is a changed account")
             })
             .collect()
@@ -86,26 +85,24 @@ impl ActiveProfile {
 
 #[cfg(not(full_bench))]
 pub(crate) const ACTIVE_PROFILES: &[ActiveProfile] = &[
-    ActiveProfile::new(1_024, 32, 8, 1),
-    ActiveProfile::new(2_048, 32, 8, 1),
-    ActiveProfile::new(2_048, 64, 8, 1),
-    ActiveProfile::new(2_048, 64, 16, 1),
-    ActiveProfile::new(2_048, 64, 16, 8),
+    ActiveProfile::new(128, 128, 64, 1),
+    ActiveProfile::new(256, 256, 64, 1),
+    ActiveProfile::new(512, 512, 64, 1),
+    ActiveProfile::new(1_024, 1_024, 64, 1),
 ];
 
 #[cfg(full_bench)]
 pub(crate) const ACTIVE_PROFILES: &[ActiveProfile] = &[
-    ActiveProfile::new(1_000_000, 1_024, 512, 1),
-    ActiveProfile::new(1_000_000, 1_024, 512, 512),
+    ActiveProfile::new(1_024, 1_024, 512, 1),
+    ActiveProfile::new(10_000, 10_000, 512, 1),
+    ActiveProfile::new(100_000, 100_000, 512, 1),
     ActiveProfile::new(1_000_000, 1_000_000, 512, 1),
-    ActiveProfile::new(1_000_000, 1_000_000, 512, 512),
 ];
-pub(crate) const SPARSE_PROFILES: &[(usize, usize)] = &[(1_024, 8), (16_384, 32), (65_536, 256)];
 
 fn profile_key(profile: ActiveProfile) -> String {
     format!(
         "N={},A={},B={},h={}",
-        profile.registry,
+        profile.live_accounts,
         profile.changed_accounts,
         profile.credited_accounts,
         profile.receive_shards_per_credited,
@@ -140,9 +137,9 @@ pub(crate) fn selected_active_profiles() -> Vec<(usize, ActiveProfile)> {
 }
 
 #[cfg(not(full_bench))]
-pub(crate) const STATE_CACHE_REGISTRIES: &[usize] = &[1_024, 16_384];
+pub(crate) const STATE_CACHE_SIZES: &[usize] = &[1_024, 16_384];
 #[cfg(full_bench)]
-pub(crate) const STATE_CACHE_REGISTRIES: &[usize] = &[1_024, 16_384, 1_000_000];
+pub(crate) const STATE_CACHE_SIZES: &[usize] = &[1_024, 16_384, 1_000_000];
 
 const ACCOUNT_SEED_START: u64 = 10_000;
 const OPERATOR_SEED: u64 = 1;
@@ -150,7 +147,6 @@ const EPOCH: u64 = 7;
 const OPENING_BALANCE: u64 = 1_000_000;
 const ADMISSION_DEADLINE: u64 = 98;
 const CHALLENGE_DEADLINE: u64 = 99;
-const VALUE_SIZE: usize = 64;
 
 pub(crate) type TestPayment = Payment<VerifyingKey, Digest>;
 pub(crate) type TestStateCache = StateCache<VerifyingKey, Digest>;
@@ -200,16 +196,6 @@ pub(crate) struct ChallengeFixture {
     pub(crate) challenge: Challenge<VerifyingKey, Digest>,
 }
 
-pub(crate) struct SparseFixture {
-    pub(crate) tree: Tree<Digest>,
-    pub(crate) positions: Vec<u32>,
-    pub(crate) opening_root: VectorRoot<Digest>,
-    pub(crate) closing_root: VectorRoot<Digest>,
-    pub(crate) opening_values: Vec<[u8; VALUE_SIZE]>,
-    pub(crate) closing_values: Vec<[u8; VALUE_SIZE]>,
-    pub(crate) update: SparseUpdate<Digest>,
-}
-
 fn opening_state() -> AccountState {
     AccountState {
         balance: OPENING_BALANCE,
@@ -218,10 +204,10 @@ fn opening_state() -> AccountState {
     }
 }
 
-fn accounts(registry: usize) -> Vec<Account> {
-    let mut accounts = (0..registry)
+fn accounts(live_accounts: usize) -> Vec<Account> {
+    let mut accounts = (0..live_accounts)
         .map(|index| {
-            let index = u64::try_from(index).expect("benchmark registry index fits in u64");
+            let index = u64::try_from(index).expect("benchmark account index fits in u64");
             let private = SigningKey::from_seed(ACCOUNT_SEED_START + index);
             Account {
                 public: private.public_key(),
@@ -243,8 +229,8 @@ fn leaves(accounts: &[Account]) -> Vec<StateLeaf<VerifyingKey>> {
         .collect()
 }
 
-pub(crate) fn state_leaves(registry: usize) -> Vec<StateLeaf<VerifyingKey>> {
-    leaves(&accounts(registry))
+pub(crate) fn state_leaves(live_accounts: usize) -> Vec<StateLeaf<VerifyingKey>> {
+    leaves(&accounts(live_accounts))
 }
 
 fn payment_context(operator: &SigningKey) -> PaymentContext<VerifyingKey, Digest> {
@@ -281,7 +267,7 @@ fn signed_payment(
 }
 
 fn assemble_close_fixture<F>(
-    registry: usize,
+    live_accounts: usize,
     changed_positions: &[usize],
     assignment: Assignment<Digest>,
     endpoints: F,
@@ -290,14 +276,14 @@ where
     F: FnOnce(&PaymentContext<VerifyingKey, Digest>, &SigningKey, &[&Account]) -> EndpointSet,
 {
     let changed = changed_positions.len();
-    assert!(changed > 0 && changed <= registry);
-    assert!(changed_positions[0] < registry);
+    assert!(changed > 0 && changed <= live_accounts);
+    assert!(changed_positions[0] < live_accounts);
     assert!(
         changed_positions
             .windows(2)
-            .all(|positions| positions[0] < positions[1] && positions[1] < registry)
+            .all(|positions| positions[0] < positions[1] && positions[1] < live_accounts)
     );
-    let accounts = accounts(registry);
+    let accounts = accounts(live_accounts);
     let cache = StateCache::new::<Sha256>(leaves(&accounts)).expect("benchmark state is canonical");
     let changed_accounts = changed_positions
         .iter()
@@ -408,14 +394,14 @@ where
 }
 
 fn make_close_fixture(
-    registry: usize,
+    live_accounts: usize,
     changed: usize,
     edges: &[Edge],
     assignment: Assignment<Digest>,
 ) -> (CloseFixture, Vec<Account>) {
     let changed_positions = (0..changed).collect::<Vec<_>>();
     assemble_close_fixture(
-        registry,
+        live_accounts,
         &changed_positions,
         assignment,
         |context, operator, accounts| {
@@ -465,12 +451,12 @@ fn active_close_fixture_parts(
     assignment: Assignment<Digest>,
 ) -> (CloseFixture, Vec<Account>) {
     let ActiveProfile {
-        registry,
+        live_accounts,
         changed_accounts,
         credited_accounts,
         receive_shards_per_credited,
     } = profile;
-    assert!(changed_accounts > 0 && changed_accounts <= registry);
+    assert!(changed_accounts > 0 && changed_accounts <= live_accounts);
     assert!(credited_accounts > 0 && credited_accounts <= changed_accounts);
     assert!(receive_shards_per_credited > 0);
     let terminal_shards = profile.terminal_shards();
@@ -478,11 +464,11 @@ fn active_close_fixture_parts(
     let changed_positions = profile.changed_positions();
     let credited_rows = profile.credited_accounts(&changed_positions);
     assert!((0..credited_accounts).all(|credited| {
-        changed_positions[credited_rows[credited]] == profile.credited_registry_position(credited)
+        changed_positions[credited_rows[credited]] == profile.credited_state_position(credited)
     }));
 
     let (fixture, accounts) = assemble_close_fixture(
-        registry,
+        live_accounts,
         &changed_positions,
         assignment,
         |context, operator, accounts| {
@@ -678,7 +664,7 @@ pub(crate) fn active_chain_fixture(
 }
 
 pub(crate) fn challenge_fixture(
-    registry: usize,
+    live_accounts: usize,
     change_rows: usize,
     receive_shards: usize,
 ) -> ChallengeFixture {
@@ -703,7 +689,7 @@ pub(crate) fn challenge_fixture(
 
     let assignment = Assignment::new(Sha256::hash(&[b"clearing-benchmark-committee"]), 8)
         .expect("benchmark assignment is valid");
-    let (fixture, accounts) = make_close_fixture(registry, change_rows, &edges, assignment);
+    let (fixture, accounts) = make_close_fixture(live_accounts, change_rows, &edges, assignment);
     let operator = SigningKey::from_seed(OPERATOR_SEED);
     let retained = signed_payment(
         fixture.context.payment(),
@@ -754,68 +740,5 @@ pub(crate) fn challenge_fixture(
         header,
         roots,
         challenge,
-    }
-}
-
-fn encoded_value(position: usize) -> [u8; VALUE_SIZE] {
-    let mut value = [0_u8; VALUE_SIZE];
-    let position = u64::try_from(position).expect("benchmark position fits in u64");
-    value[..8].copy_from_slice(&position.to_be_bytes());
-    value[8..16].copy_from_slice(&position.rotate_left(17).to_be_bytes());
-    value
-}
-
-pub(crate) fn sparse_fixture(registry: usize, changed: usize) -> SparseFixture {
-    assert!(changed > 0 && changed <= registry);
-    let values = (0..registry).map(encoded_value).collect::<Vec<_>>();
-    let len = u32::try_from(registry).expect("benchmark registry fits in u32");
-    let mut builder =
-        Builder::<Sha256>::new(VectorKind::State, len).expect("benchmark registry length is valid");
-    for value in &values {
-        builder
-            .add_encoded(value)
-            .expect("benchmark value count matches the builder");
-    }
-    let tree = builder
-        .build(strategy())
-        .expect("benchmark state tree is valid");
-    let positions = (0..changed)
-        .map(|index| {
-            u32::try_from(index * registry / changed)
-                .expect("benchmark sparse position fits in u32")
-        })
-        .collect::<Vec<_>>();
-    let opening_values = positions
-        .iter()
-        .map(|position| values[*position as usize])
-        .collect::<Vec<_>>();
-    let mut closing_values = opening_values.clone();
-    for value in &mut closing_values {
-        value[VALUE_SIZE - 1] ^= 1;
-    }
-    let update = tree
-        .sparse_update(&positions)
-        .expect("benchmark sparse positions are canonical");
-    let opening_root = tree.root();
-    let closing_root = update
-        .reconstruct_closing::<Sha256, _>(VectorKind::State, &closing_values)
-        .expect("benchmark closing root is valid");
-    update
-        .verify::<Sha256, _, _>(
-            VectorKind::State,
-            &opening_root,
-            &closing_root,
-            &opening_values,
-            &closing_values,
-        )
-        .expect("benchmark sparse update is valid");
-    SparseFixture {
-        tree,
-        positions,
-        opening_root,
-        closing_root,
-        opening_values,
-        closing_values,
-        update,
     }
 }

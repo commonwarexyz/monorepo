@@ -12,14 +12,15 @@ Stability varies by primitive. See [README](https://github.com/commonwarexyz/mon
 Bajillion is **ALPHA**. Its API and wire format may change without a migration path.
 
 The `bajillion` module provides the runtime-agnostic objects and verification rules for Bajillion:
-signed payments and receipts, receive-shard commitments, sparse exact state transitions,
+signed payments and receipts, receive-shard commitments, fresh live-state transitions,
 deterministic proof slices for authenticated dissemination, exact-quorum commitment certificates and
 retained dealings, bounded receipt challenges, and a bounded in-memory settlement state machine
 for registration, admission, FIFO finalization, custody accounting, hard-fault fencing, and terminal
-unwind. Admission binds a 32-byte context-bound root-of-roots Header to an ordered opening,
-change, and closing root bundle. The 96-byte RootBundle is public witness data. It is retained by
-validators and the data-availability layer and must be supplied or cached by external settlement
-operations.
+unwind. Deposits can create accounts, zero balances leave the committed state, and sends to absent
+recipients become certified external payouts. Admission binds a 32-byte context-bound root-of-roots
+Header to an ordered opening, change, closing, and slice-layout root bundle. The 128-byte
+RootBundle is public witness data. It is retained by validators and the data-availability layer and
+must be supplied or cached by external settlement operations.
 
 `seal` authenticates and takes ownership of a validator's dealing before signing the Header. A
 dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator.
@@ -46,7 +47,7 @@ or asset-adapter implementation.
 ## Benchmarks
 
 The exact benchmark matrix from the Clearing blog uses one adaptive pool with eight workers and
-selects one million-account profile per fresh process. Run profiles `0` through `3` separately:
+selects one live-account profile per fresh process. Run profiles `0` through `3` separately:
 
 ```bash
 COMMONWARE_CLEARING_PROFILE=0 \
@@ -55,15 +56,14 @@ RUSTFLAGS='--cfg full_bench' \
 cargo bench -p commonware-clearing --bench bajillion
 ```
 
-The harness reports raw encoded sizes and separately times dealing, the complete validator `seal`
-path for the byte-largest dealing, repeatable certified-commitment validation, and bounded
-challenge decode plus adjudication. The protocol accounting distinguishes the 32-byte
-validator-chain commitment, the external MinSig certificate's 48-byte signature plus
-`ceil(n / 8)`-byte signer bitmap, and the 96-byte RootBundle witness. The generic codec adds an
+The harness reports raw encoded sizes and separately times preparing roots, dealing slices, the
+complete validator `seal` path for the byte-largest dealing, repeatable certified-commitment
+validation, and bounded challenge decode plus adjudication. The protocol accounting distinguishes
+the 32-byte validator-chain commitment, the external MinSig certificate's 48-byte signature plus
+`ceil(n / 8)`-byte signer bitmap, and the 128-byte RootBundle witness. The generic codec adds an
 eight-byte bitmap-length prefix, so the raw encoded Header-plus-certificate package is
 `88 + ceil(n / 8)` bytes. The harness also preflights the corresponding mutating
-`SettlementChain` admission and challenge
-paths outside Criterion's timed loops.
+`SettlementChain` admission and challenge paths outside Criterion's timed loops.
 
 Ordinary withdrawal amounts are exact. A full-close amount is a minimum floor, and settlement
 effects pair the signed request with the exact authenticated balance released to its destination.

@@ -5,7 +5,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
 
-/// Persistent state for one registered account.
+/// Persistent state for one account row side.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AccountState {
@@ -17,7 +17,7 @@ pub struct AccountState {
     pub cumulative_credit: u64,
     /// Total number of receipts contributing to `cumulative_credit`.
     pub receipt_count: u64,
-    /// Whether the account may participate in online payments.
+    /// Whether this row side is present in the corresponding live-state vector.
     pub active: bool,
 }
 
@@ -49,11 +49,11 @@ impl Read for AccountState {
     }
 }
 
-/// One leaf in the complete account-state vector.
+/// One active, positive-balance leaf in a live account-state vector.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateLeaf<P: PublicKey> {
-    /// Registered account occupying this vector position.
+    /// Live account occupying this vector position.
     pub account: P,
     /// Account state at this root.
     pub state: AccountState,
@@ -89,6 +89,8 @@ pub struct Prefix {
     pub debit: u64,
     /// Gross payment credit through this row.
     pub credit: u64,
+    /// Receipt value paid externally instead of entering live state.
+    pub payout: u64,
     /// Deposits through this row.
     pub deposit: u64,
     /// Withdrawals through this row.
@@ -105,6 +107,7 @@ impl Prefix {
         Some(Self {
             debit: self.debit.checked_add(delta.debit)?,
             credit: self.credit.checked_add(delta.credit)?,
+            payout: self.payout.checked_add(delta.payout)?,
             deposit: self.deposit.checked_add(delta.deposit)?,
             withdrawal: self.withdrawal.checked_add(delta.withdrawal)?,
             withdrawals: self.withdrawals.checked_add(delta.withdrawals)?,
@@ -117,6 +120,7 @@ impl Write for Prefix {
     fn write(&self, buf: &mut impl BufMut) {
         self.debit.write(buf);
         self.credit.write(buf);
+        self.payout.write(buf);
         self.deposit.write(buf);
         self.withdrawal.write(buf);
         self.withdrawals.write(buf);
@@ -125,7 +129,7 @@ impl Write for Prefix {
 }
 
 impl FixedSize for Prefix {
-    const SIZE: usize = u64::SIZE * 6;
+    const SIZE: usize = u64::SIZE * 7;
 }
 
 impl Read for Prefix {
@@ -135,6 +139,7 @@ impl Read for Prefix {
         Ok(Self {
             debit: u64::read(buf)?,
             credit: u64::read(buf)?,
+            payout: u64::read(buf)?,
             deposit: u64::read(buf)?,
             withdrawal: u64::read(buf)?,
             withdrawals: u64::read(buf)?,
@@ -248,20 +253,22 @@ mod tests {
         let prefix = Prefix {
             debit: 1,
             credit: 2,
-            deposit: 3,
-            withdrawal: 4,
-            withdrawals: 5,
-            shards: 6,
+            payout: 3,
+            deposit: 4,
+            withdrawal: 5,
+            withdrawals: 6,
+            shards: 7,
         };
         assert_eq!(
             prefix.checked_extend(prefix),
             Some(Prefix {
                 debit: 2,
                 credit: 4,
-                deposit: 6,
-                withdrawal: 8,
-                withdrawals: 10,
-                shards: 12,
+                payout: 6,
+                deposit: 8,
+                withdrawal: 10,
+                withdrawals: 12,
+                shards: 14,
             })
         );
         assert!(

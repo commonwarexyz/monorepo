@@ -1,26 +1,123 @@
 //! Proof slices for authenticating deterministic account intervals from one public close corpus.
 
 use super::{
-    Assignment, Close, CloseContext, CloseLimits, Header, RootBundle, StateCache, TransitionError,
-    account_slice, change_tree_with_strategy, read_shard_sets, validate_boundary_roots,
-    validate_header, validate_row, validate_row_structure, validate_terminal_prefix,
+    Assignment, Close, CloseContext, CloseLimits, Header, PreparedClose, RootBundle, StateCache,
+    TransitionError, account_slice, change_tree_with_strategy, derive_state_vectors, is_live_state,
+    read_shard_sets, state_tree_with_strategy, validate_boundary_roots, validate_header,
+    validate_row, validate_row_structure, validate_terminal_prefix,
 };
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
-    commitment::{self, RangeOpening, RangeUpdate, VectorKind},
+    commitment::{self, RangeOpening, VectorKind},
     credit::ShardSet,
     state::{AccountRow, Prefix, StateLeaf},
 };
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    Decode, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
+    Decode, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::Strategy;
-use commonware_storage::bmt;
+use core::ops::Range;
 
-const STATE_BOUNDARY_VALUES: usize = 4;
+/// Header-committed positions and cumulative prefix before one deterministic slice.
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SliceBoundary {
+    /// Position in the opening live-state vector.
+    pub opening: u32,
+    /// Position in the changed-row vector.
+    pub change: u32,
+    /// Position in the closing live-state vector.
+    pub closing: u32,
+    /// Exact cumulative row prefix before `change`.
+    pub prefix: Prefix,
+}
+
+impl Write for SliceBoundary {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.opening.write(writer);
+        self.change.write(writer);
+        self.closing.write(writer);
+        self.prefix.write(writer);
+    }
+}
+
+impl FixedSize for SliceBoundary {
+    const SIZE: usize = u32::SIZE * 3 + Prefix::SIZE;
+}
+
+impl Read for SliceBoundary {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            opening: u32::read(reader)?,
+            change: u32::read(reader)?,
+            closing: u32::read(reader)?,
+            prefix: Prefix::read(reader)?,
+        })
+    }
+}
+
+/// Two adjacent authenticated layout boundaries defining one slice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LayoutRange<D: Digest> {
+    /// Boundary before this slice.
+    pub start: SliceBoundary,
+    /// Boundary after this slice.
+    pub end: SliceBoundary,
+    /// Authentication of the two adjacent boundary values.
+    pub opening: RangeOpening<D>,
+}
+
+impl<D: Digest> Write for LayoutRange<D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.start.write(writer);
+        self.end.write(writer);
+        self.opening.write(writer);
+    }
+}
+
+impl<D: Digest> EncodeSize for LayoutRange<D> {
+    fn encode_size(&self) -> usize {
+        SliceBoundary::SIZE * 2 + self.opening.encode_size()
+    }
+}
+
+impl<D: Digest> Read for LayoutRange<D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Self::read_bounded(reader, usize::MAX)
+    }
+}
+
+impl<D: Digest> LayoutRange<D> {
+    fn read_bounded(reader: &mut impl Buf, max_hashes: usize) -> Result<Self, CodecError> {
+        Ok(Self {
+            start: SliceBoundary::read(reader)?,
+            end: SliceBoundary::read(reader)?,
+            opening: RangeOpening::read_bounded(reader, 2, max_hashes)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<D> arbitrary::Arbitrary<'_> for LayoutRange<D>
+where
+    D: Digest,
+    RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            start: u.arbitrary()?,
+            end: u.arbitrary()?,
+            opening: u.arbitrary()?,
+        })
+    }
+}
 
 /// Exact contiguous changed-row slice for one account-key interval.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,14 +155,24 @@ impl<P: PublicKey, D: Digest> Read for ChangeRange<P, D> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, maximum: &Self::Cfg) -> Result<Self, CodecError> {
+        Self::read_bounded(reader, *maximum, usize::MAX)
+    }
+}
+
+impl<P: PublicKey, D: Digest> ChangeRange<P, D> {
+    fn read_bounded(
+        reader: &mut impl Buf,
+        maximum: usize,
+        max_hashes: usize,
+    ) -> Result<Self, CodecError> {
         let predecessor = Option::<AccountRow<P, D>>::read(reader)?;
-        let rows = Vec::<AccountRow<P, D>>::read_cfg(reader, &(RangeCfg::new(..=*maximum), ()))?;
+        let rows = Vec::<AccountRow<P, D>>::read_cfg(reader, &(RangeCfg::new(..=maximum), ()))?;
         let successor = Option::<AccountRow<P, D>>::read(reader)?;
-        let proof_values = rows
+        let values = rows
             .len()
             .saturating_add(usize::from(predecessor.is_some()))
             .saturating_add(usize::from(successor.is_some()));
-        let opening = RangeOpening::read_cfg(reader, &proof_values)?;
+        let opening = RangeOpening::read_bounded(reader, values, max_hashes)?;
         Ok(Self {
             predecessor,
             rows,
@@ -93,71 +200,75 @@ where
     }
 }
 
-/// Authenticated opening-state guards defining one exact account-key interval.
+/// Authentication of one exact live-state interval.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StateBounds<P: PublicKey, D: Digest> {
-    /// First state-vector position in the interval.
-    pub start: u32,
-    /// Exclusive state-vector end position.
-    pub end: u32,
-    /// Existing predecessor, first, last, and successor leaves in position order.
-    pub leaves: Vec<StateLeaf<P>>,
-    /// One BMT multiproof authenticating the boundary leaves.
-    pub proof: bmt::Proof<D>,
+pub struct StateRange<P: PublicKey, D: Digest> {
+    /// Immediate live-state predecessor, when one exists.
+    pub predecessor: Option<StateLeaf<P>>,
+    /// Immediate live-state successor, when one exists.
+    pub successor: Option<StateLeaf<P>>,
+    /// Authentication of the contiguous guard-and-member slice.
+    pub opening: RangeOpening<D>,
 }
 
-impl<P: PublicKey, D: Digest> Write for StateBounds<P, D> {
+impl<P: PublicKey, D: Digest> Write for StateRange<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.start.write(writer);
-        self.end.write(writer);
-        self.leaves.write(writer);
-        self.proof.write(writer);
+        self.predecessor.write(writer);
+        self.successor.write(writer);
+        self.opening.write(writer);
     }
 }
 
-impl<P: PublicKey, D: Digest> EncodeSize for StateBounds<P, D> {
+impl<P: PublicKey, D: Digest> EncodeSize for StateRange<P, D> {
     fn encode_size(&self) -> usize {
-        self.start.encode_size()
-            + self.end.encode_size()
-            + self.leaves.encode_size()
-            + self.proof.encode_size()
+        self.predecessor.encode_size() + self.successor.encode_size() + self.opening.encode_size()
     }
 }
 
-impl<P: PublicKey, D: Digest> Read for StateBounds<P, D> {
-    /// No caller-supplied limits are needed because an interval has at most four boundary leaves.
-    type Cfg = ();
+impl<P: PublicKey, D: Digest> Read for StateRange<P, D> {
+    /// Exact number of projected member leaves.
+    type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, members: &Self::Cfg) -> Result<Self, CodecError> {
+        Self::read_bounded(reader, *members, usize::MAX)
+    }
+}
+
+impl<P: PublicKey, D: Digest> StateRange<P, D> {
+    fn read_bounded(
+        reader: &mut impl Buf,
+        members: usize,
+        max_hashes: usize,
+    ) -> Result<Self, CodecError> {
+        let predecessor = Option::<StateLeaf<P>>::read(reader)?;
+        let successor = Option::<StateLeaf<P>>::read(reader)?;
+        let values = members
+            .checked_add(usize::from(predecessor.is_some()))
+            .and_then(|values| values.checked_add(usize::from(successor.is_some())))
+            .ok_or(CodecError::Invalid(
+                "StateRange",
+                "range value count overflows",
+            ))?;
         Ok(Self {
-            start: u32::read(reader)?,
-            end: u32::read(reader)?,
-            leaves: Vec::<StateLeaf<P>>::read_cfg(
-                reader,
-                &(RangeCfg::new(..=STATE_BOUNDARY_VALUES), ()),
-            )?,
-            proof: bmt::Proof::read_cfg(reader, &STATE_BOUNDARY_VALUES)?,
+            predecessor,
+            successor,
+            opening: RangeOpening::read_bounded(reader, values, max_hashes)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for StateBounds<P, D>
+impl<P, D> arbitrary::Arbitrary<'_> for StateRange<P, D>
 where
     P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
     D: Digest + for<'a> arbitrary::Arbitrary<'a>,
+    RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let count = usize::from(u.int_in_range(0..=STATE_BOUNDARY_VALUES as u8)?);
-        let mut leaves = Vec::with_capacity(count);
-        for _ in 0..count {
-            leaves.push(u.arbitrary()?);
-        }
         Ok(Self {
-            start: u.arbitrary()?,
-            end: u.arbitrary()?,
-            leaves,
-            proof: u.arbitrary()?,
+            predecessor: u.arbitrary()?,
+            successor: u.arbitrary()?,
+            opening: u.arbitrary()?,
         })
     }
 }
@@ -167,33 +278,41 @@ where
 pub struct ProofSlice<P: PublicKey, D: Digest> {
     /// Deterministic interval index.
     pub index: u16,
+    /// Header-bound positions and prefix for this interval.
+    pub layout: LayoutRange<D>,
     /// Exact changed rows in this interval.
     pub changes: ChangeRange<P, D>,
     /// Terminal shard sets aligned one-for-one with [`ChangeRange::rows`].
     pub shard_sets: Vec<ShardSet<P, D>>,
-    /// Exact positions occupied by this interval in the opening state vector.
-    pub state_bounds: StateBounds<P, D>,
-    /// Exact opening-to-closing state update within this interval.
-    pub update: RangeUpdate<D>,
+    /// Live leaves unchanged across both roots in this interval.
+    pub unchanged: Vec<StateLeaf<P>>,
+    /// Exact guarded opening-state interval.
+    pub opening: StateRange<P, D>,
+    /// Exact guarded closing-state interval.
+    pub closing: StateRange<P, D>,
 }
 
 impl<P: PublicKey, D: Digest> Write for ProofSlice<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.index.write(writer);
+        self.layout.write(writer);
         self.changes.write(writer);
         self.shard_sets.write(writer);
-        self.state_bounds.write(writer);
-        self.update.write(writer);
+        self.unchanged.write(writer);
+        self.opening.write(writer);
+        self.closing.write(writer);
     }
 }
 
 impl<P: PublicKey, D: Digest> EncodeSize for ProofSlice<P, D> {
     fn encode_size(&self) -> usize {
         self.index.encode_size()
+            + self.layout.encode_size()
             + self.changes.encode_size()
             + self.shard_sets.encode_size()
-            + self.state_bounds.encode_size()
-            + self.update.encode_size()
+            + self.unchanged.encode_size()
+            + self.opening.encode_size()
+            + self.closing.encode_size()
     }
 }
 
@@ -202,7 +321,7 @@ impl<P: PublicKey, D: Digest> EncodeSize for ProofSlice<P, D> {
 pub struct SliceCodecConfig {
     /// Anchor-bound close limits.
     pub close: CloseLimits,
-    /// Maximum hashes accepted in either range-update frontier.
+    /// Maximum proof hashes accepted within the outer byte bound.
     pub max_proof_hashes: usize,
 }
 
@@ -228,23 +347,41 @@ impl<P: PublicKey, D: Digest> Read for ProofSlice<P, D> {
         let row_limit = usize::try_from(row_limit)
             .map_err(|_| CodecError::Invalid("ProofSlice", "row limit is not representable"))?;
         let index = u16::read(reader)?;
-        let changes = ChangeRange::read_cfg(reader, &row_limit)?;
+        let layout = LayoutRange::read_bounded(reader, config.max_proof_hashes)?;
+        let changes = ChangeRange::read_bounded(reader, row_limit, config.max_proof_hashes)?;
         let shard_sets = read_shard_sets(reader, changes.rows.len(), &config.close)?;
-        let state_bounds = StateBounds::read(reader)?;
-        let update = RangeUpdate::read_cfg(
-            reader,
-            &(
-                changes.rows.len(),
-                config.max_proof_hashes,
-                config.max_proof_hashes,
-            ),
-        )?;
+        let state_limit = config
+            .close
+            .max_states()
+            .min(u64::from(commitment::MAX_VECTOR_LENGTH));
+        let state_limit = usize::try_from(state_limit)
+            .map_err(|_| CodecError::Invalid("ProofSlice", "state limit is not representable"))?;
+        let unchanged =
+            Vec::<StateLeaf<P>>::read_cfg(reader, &(RangeCfg::new(..=state_limit), ()))?;
+        let opening_members = unchanged
+            .len()
+            .checked_add(changes.rows.iter().filter(|row| row.opening.active).count())
+            .ok_or(CodecError::Invalid(
+                "ProofSlice",
+                "opening member count overflows",
+            ))?;
+        let closing_members = unchanged
+            .len()
+            .checked_add(changes.rows.iter().filter(|row| row.closing.active).count())
+            .ok_or(CodecError::Invalid(
+                "ProofSlice",
+                "closing member count overflows",
+            ))?;
+        let opening = StateRange::read_bounded(reader, opening_members, config.max_proof_hashes)?;
+        let closing = StateRange::read_bounded(reader, closing_members, config.max_proof_hashes)?;
         Ok(Self {
             index,
+            layout,
             changes,
             shard_sets,
-            state_bounds,
-            update,
+            unchanged,
+            opening,
+            closing,
         })
     }
 }
@@ -254,18 +391,21 @@ impl<P, D> arbitrary::Arbitrary<'_> for ProofSlice<P, D>
 where
     P: PublicKey,
     D: Digest,
+    LayoutRange<D>: for<'a> arbitrary::Arbitrary<'a>,
     ChangeRange<P, D>: for<'a> arbitrary::Arbitrary<'a>,
     ShardSet<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    StateBounds<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    RangeUpdate<D>: for<'a> arbitrary::Arbitrary<'a>,
+    StateLeaf<P>: for<'a> arbitrary::Arbitrary<'a>,
+    StateRange<P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             index: u.arbitrary()?,
+            layout: u.arbitrary()?,
             changes: u.arbitrary()?,
             shard_sets: u.arbitrary()?,
-            state_bounds: u.arbitrary()?,
-            update: u.arbitrary()?,
+            unchanged: u.arbitrary()?,
+            opening: u.arbitrary()?,
+            closing: u.arbitrary()?,
         })
     }
 }
@@ -296,33 +436,43 @@ const fn max_proof_hashes(digest_size: usize, max_bytes: usize) -> Result<usize,
     Ok(max_bytes / digest_size)
 }
 
-/// Returns the canonical predecessor, first, last, and successor positions for an interval.
-fn state_boundary_positions(start: u32, end: u32, len: u32) -> Result<Vec<u32>, TransitionError> {
-    if start > end || end > len {
-        return Err(TransitionError::SliceStateBounds);
+/// Authenticates the two header-bound boundaries assigned to one slice.
+fn validate_layout_range<H, D>(
+    assignment: &Assignment<D>,
+    index: u16,
+    root: &commitment::VectorRoot<D>,
+    range: &LayoutRange<D>,
+) -> Result<(), TransitionError>
+where
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    let expected_len = u32::from(assignment.slice_count()) + 1;
+    if range.opening.start != u32::from(index)
+        || range.opening.proof.leaf_count != expected_len
+        || range.start.opening > range.end.opening
+        || range.start.change > range.end.change
+        || range.start.closing > range.end.closing
+        || (index == 0 && range.start != SliceBoundary::default())
+    {
+        return Err(TransitionError::SliceLayout);
     }
-    let mut positions = Vec::with_capacity(STATE_BOUNDARY_VALUES);
-    if let Some(predecessor) = start.checked_sub(1) {
-        positions.push(predecessor);
-    }
-    if start < end {
-        positions.push(start);
-        if end - start > 1 {
-            positions.push(end - 1);
-        }
-    }
-    if end < len {
-        positions.push(end);
-    }
-    Ok(positions)
+    range.opening.verify::<H, _>(
+        VectorKind::Layout,
+        root,
+        &[range.start.encode(), range.end.encode()],
+    )?;
+    Ok(())
 }
 
-/// Authenticates the guarded changed-row interval and its deterministic slice membership.
+/// Authenticates the exact changed-row interval and its deterministic slice membership.
 fn validate_change_range<H, P, D>(
     assignment: &Assignment<D>,
     index: u16,
     root: &commitment::VectorRoot<D>,
     range: &ChangeRange<P, D>,
+    start: u32,
+    end: u32,
 ) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
@@ -330,23 +480,28 @@ where
     D: Digest,
 {
     let len = range.opening.proof.leaf_count;
-    let start = range
+    let actual_start = range
         .opening
         .start
         .checked_add(u32::from(range.predecessor.is_some()))
         .ok_or(TransitionError::SliceRange)?;
     let members = u32::try_from(range.rows.len()).map_err(|_| TransitionError::SliceRange)?;
-    let end = start
+    let actual_end = actual_start
         .checked_add(members)
         .filter(|end| *end <= len)
         .ok_or(TransitionError::SliceRange)?;
-    if range.predecessor.is_some() != (start > 0) || range.successor.is_some() != (end < len) {
-        return Err(TransitionError::SliceRange);
-    }
-    if range
-        .rows
-        .windows(2)
-        .any(|pair| pair[0].account >= pair[1].account)
+    if actual_start != start
+        || actual_end != end
+        || range.predecessor.is_some() != (start > 0)
+        || range.successor.is_some() != (end < len)
+        || range
+            .predecessor
+            .iter()
+            .chain(&range.rows)
+            .chain(range.successor.iter())
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair[0].account >= pair[1].account)
     {
         return Err(TransitionError::SliceRange);
     }
@@ -356,24 +511,15 @@ where
         }
     }
     if let Some(predecessor) = &range.predecessor
-        && (account_slice(&predecessor.account, assignment.slice_bits())? >= index
-            || range
-                .rows
-                .first()
-                .is_some_and(|row| predecessor.account >= row.account))
+        && account_slice(&predecessor.account, assignment.slice_bits())? >= index
     {
         return Err(TransitionError::SliceRange);
     }
     if let Some(successor) = &range.successor
-        && (account_slice(&successor.account, assignment.slice_bits())? <= index
-            || range
-                .rows
-                .last()
-                .is_some_and(|row| row.account >= successor.account))
+        && account_slice(&successor.account, assignment.slice_bits())? <= index
     {
         return Err(TransitionError::SliceRange);
     }
-
     let encoded = range
         .predecessor
         .iter()
@@ -387,62 +533,76 @@ where
     Ok(())
 }
 
-/// Authenticates the opening-state guards that prove the slice's exact key interval.
-fn validate_state_bounds<H, P, D>(
+/// Authenticates one exact live-state interval.
+fn validate_state_range<H, P, D>(
     assignment: &Assignment<D>,
     index: u16,
     root: &commitment::VectorRoot<D>,
-    bounds: &StateBounds<P, D>,
-) -> Result<Vec<u32>, TransitionError>
+    range: &StateRange<P, D>,
+    members: &[StateLeaf<P>],
+    max_states: u64,
+    positions: Range<u32>,
+) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
     D: Digest,
 {
-    let len = bounds.proof.leaf_count;
-    let positions = state_boundary_positions(bounds.start, bounds.end, len)?;
-    if positions.len() != bounds.leaves.len()
-        || bounds
-            .leaves
+    let len = range.opening.proof.leaf_count;
+    if u64::from(len) > max_states || len > commitment::MAX_VECTOR_LENGTH {
+        return Err(TransitionError::SliceStateRange);
+    }
+    let actual_start = range
+        .opening
+        .start
+        .checked_add(u32::from(range.predecessor.is_some()))
+        .ok_or(TransitionError::SliceStateRange)?;
+    let count = u32::try_from(members.len()).map_err(|_| TransitionError::SliceStateRange)?;
+    let actual_end = actual_start
+        .checked_add(count)
+        .filter(|end| *end <= len)
+        .ok_or(TransitionError::SliceStateRange)?;
+    if actual_start != positions.start
+        || actual_end != positions.end
+        || range.predecessor.is_some() != (positions.start > 0)
+        || range.successor.is_some() != (positions.end < len)
+    {
+        return Err(TransitionError::SliceStateRange);
+    }
+
+    let leaves = range
+        .predecessor
+        .iter()
+        .chain(members)
+        .chain(range.successor.iter())
+        .collect::<Vec<_>>();
+    if leaves.iter().any(|leaf| !is_live_state(&leaf.state))
+        || leaves
             .windows(2)
             .any(|pair| pair[0].account >= pair[1].account)
     {
-        return Err(TransitionError::SliceStateBounds);
+        return Err(TransitionError::SliceStateRange);
     }
-    let encoded = bounds.leaves.iter().map(Encode::encode).collect::<Vec<_>>();
-    commitment::verify_multi_opening::<H, D, _>(
-        VectorKind::State,
-        &positions,
-        &bounds.proof,
-        root,
-        &encoded,
-    )?;
-
-    let mut leaf = 0_usize;
-    if bounds.start > 0 {
-        if account_slice(&bounds.leaves[leaf].account, assignment.slice_bits())? >= index {
-            return Err(TransitionError::SliceStateBounds);
-        }
-        leaf += 1;
-    }
-    if bounds.start < bounds.end {
-        if account_slice(&bounds.leaves[leaf].account, assignment.slice_bits())? != index {
-            return Err(TransitionError::SliceStateBounds);
-        }
-        leaf += 1;
-        if bounds.end - bounds.start > 1 {
-            if account_slice(&bounds.leaves[leaf].account, assignment.slice_bits())? != index {
-                return Err(TransitionError::SliceStateBounds);
-            }
-            leaf += 1;
+    for leaf in members {
+        if account_slice(&leaf.account, assignment.slice_bits())? != index {
+            return Err(TransitionError::SliceStateRange);
         }
     }
-    if bounds.end < len
-        && account_slice(&bounds.leaves[leaf].account, assignment.slice_bits())? <= index
+    if let Some(predecessor) = &range.predecessor
+        && account_slice(&predecessor.account, assignment.slice_bits())? >= index
     {
-        return Err(TransitionError::SliceStateBounds);
+        return Err(TransitionError::SliceStateRange);
     }
-    Ok(positions)
+    if let Some(successor) = &range.successor
+        && account_slice(&successor.account, assignment.slice_bits())? <= index
+    {
+        return Err(TransitionError::SliceStateRange);
+    }
+    let encoded = leaves.into_iter().map(Encode::encode).collect::<Vec<_>>();
+    range
+        .opening
+        .verify::<H, _>(VectorKind::State, root, &encoded)?;
+    Ok(())
 }
 
 /// Establishes the shared header and boundary precondition for one or more slices.
@@ -478,62 +638,52 @@ where
     P: PublicKey,
     D: Digest,
 {
-    // The two authenticated intervals must describe the requested deterministic slice and align
-    // every changed row with one shard set and one sparse state update.
+    // The three authenticated intervals describe one deterministic account slice. State ranges
+    // are independent because creation and destruction can shift every following position.
     let assignment = context.assignment();
     if slice.index >= assignment.slice_count() {
         return Err(TransitionError::SliceIndex);
     }
-    validate_change_range::<H, P, D>(assignment, slice.index, &roots.change, &slice.changes)?;
-    validate_state_bounds::<H, P, D>(assignment, slice.index, &roots.opening, &slice.state_bounds)?;
-    if slice.shard_sets.len() != slice.changes.rows.len()
-        || slice.update.start != slice.state_bounds.start
-        || slice.update.end != slice.state_bounds.end
-        || slice.update.positions.len() != slice.changes.rows.len()
-    {
+    validate_layout_range::<H, D>(assignment, slice.index, &roots.layout, &slice.layout)?;
+    validate_change_range::<H, P, D>(
+        assignment,
+        slice.index,
+        &roots.change,
+        &slice.changes,
+        slice.layout.start.change,
+        slice.layout.end.change,
+    )?;
+    if slice.shard_sets.len() != slice.changes.rows.len() {
         return Err(TransitionError::ShardAlignment);
     }
 
-    // Reconstruct both state roots from the exact opening and closing values carried by the rows.
-    let opening = slice
-        .changes
-        .rows
-        .iter()
-        .map(|row| {
-            StateLeaf {
-                account: row.account.clone(),
-                state: row.opening,
-            }
-            .encode()
-        })
-        .collect::<Vec<_>>();
-    let closing = slice
-        .changes
-        .rows
-        .iter()
-        .map(|row| {
-            StateLeaf {
-                account: row.account.clone(),
-                state: row.closing,
-            }
-            .encode()
-        })
-        .collect::<Vec<_>>();
-    slice.update.verify::<H, _, _>(
-        VectorKind::State,
+    let (opening, closing) = derive_state_vectors(
+        &slice.unchanged,
+        &slice.changes.rows,
+        context.limits().max_states(),
+    )?;
+    validate_state_range::<H, P, D>(
+        assignment,
+        slice.index,
         &roots.opening,
-        &roots.closing,
+        &slice.opening,
         &opening,
+        context.limits().max_states(),
+        slice.layout.start.opening..slice.layout.end.opening,
+    )?;
+    validate_state_range::<H, P, D>(
+        assignment,
+        slice.index,
+        &roots.closing,
+        &slice.closing,
         &closing,
+        context.limits().max_states(),
+        slice.layout.start.closing..slice.layout.end.closing,
     )?;
 
     // Row equations advance the predecessor prefix through the interval. Admission defers only
     // signature checks so every distinct payment envelope can share one randomized batch.
-    let mut prefix = slice
-        .changes
-        .predecessor
-        .as_ref()
-        .map_or_else(Prefix::default, |row| row.prefix);
+    let mut prefix = slice.layout.start.prefix;
     let mut total_shards = 0_u64;
     for (row, shards) in slice.changes.rows.iter().zip(&slice.shard_sets) {
         let shard_count =
@@ -557,21 +707,19 @@ where
             return Err(TransitionError::Prefix);
         }
     }
+    if prefix != slice.layout.end.prefix {
+        return Err(TransitionError::Prefix);
+    }
 
-    // The last nonempty change interval owns the corpus-wide terminal totals check.
-    let member_start = slice
-        .changes
-        .opening
-        .start
-        .checked_add(u32::from(slice.changes.predecessor.is_some()))
-        .ok_or(TransitionError::SliceRange)?;
-    let end = member_start
-        .checked_add(
-            u32::try_from(slice.changes.rows.len()).map_err(|_| TransitionError::SliceRange)?,
-        )
-        .ok_or(TransitionError::SliceRange)?;
+    // The final authenticated boundary binds all vector lengths and corpus-wide totals.
     let change_len = slice.changes.opening.proof.leaf_count;
-    if end == change_len {
+    if slice.index + 1 == assignment.slice_count() {
+        if slice.layout.end.opening != slice.opening.opening.proof.leaf_count
+            || slice.layout.end.change != change_len
+            || slice.layout.end.closing != slice.closing.opening.proof.leaf_count
+        {
+            return Err(TransitionError::SliceLayout);
+        }
         validate_terminal_prefix(context, deposits, withdrawals, change_len, prefix)?;
     }
     Ok(())
@@ -611,31 +759,136 @@ where
     validate_slice_after_header::<H, P, D>(context, deposits, withdrawals, roots, slice, false)
 }
 
-/// Opens the canonical state guards for one interval from the retained opening tree.
-fn build_state_bounds<P: PublicKey, D: Digest>(
-    cache: &StateCache<P, D>,
+fn state_boundaries<P: PublicKey>(
+    leaves: &[StateLeaf<P>],
+    slice_bits: u8,
+) -> Result<Vec<u32>, TransitionError> {
+    if slice_bits > super::MAX_SLICE_BITS {
+        return Err(TransitionError::SliceBits);
+    }
+    let slice_count = 1_u16 << slice_bits;
+    let mut boundaries = Vec::with_capacity(usize::from(slice_count) + 1);
+    boundaries.push(0);
+    let mut cursor = 0_usize;
+    for index in 0..slice_count {
+        while let Some(leaf) = leaves.get(cursor) {
+            let member = account_slice(&leaf.account, slice_bits)?;
+            if member < index {
+                return Err(TransitionError::NonCanonicalSliceOrder);
+            }
+            if member != index {
+                break;
+            }
+            cursor += 1;
+        }
+        boundaries.push(u32::try_from(cursor).map_err(|_| TransitionError::TooManyStates)?);
+    }
+    if cursor != leaves.len() {
+        return Err(TransitionError::NonCanonicalSliceOrder);
+    }
+    Ok(boundaries)
+}
+
+fn row_boundaries<P: PublicKey, D: Digest>(
+    rows: &[AccountRow<P, D>],
+    slice_bits: u8,
+) -> Result<Vec<u32>, TransitionError> {
+    let slice_count = 1_u16 << slice_bits;
+    let mut boundaries = Vec::with_capacity(usize::from(slice_count) + 1);
+    boundaries.push(0);
+    let mut cursor = 0_usize;
+    for index in 0..slice_count {
+        while let Some(row) = rows.get(cursor) {
+            let member = account_slice(&row.account, slice_bits)?;
+            if member < index {
+                return Err(TransitionError::NonCanonicalSliceOrder);
+            }
+            if member != index {
+                break;
+            }
+            cursor += 1;
+        }
+        boundaries.push(u32::try_from(cursor).map_err(|_| TransitionError::TooManyRows)?);
+    }
+    if cursor != rows.len() {
+        return Err(TransitionError::NonCanonicalSliceOrder);
+    }
+    Ok(boundaries)
+}
+
+pub(super) fn derive_layout<P: PublicKey, D: Digest>(
+    rows: &[AccountRow<P, D>],
+    opening: &[StateLeaf<P>],
+    closing: &[StateLeaf<P>],
+    slice_bits: u8,
+) -> Result<Vec<SliceBoundary>, TransitionError> {
+    let opening = state_boundaries(opening, slice_bits)?;
+    let changes = row_boundaries(rows, slice_bits)?;
+    let closing = state_boundaries(closing, slice_bits)?;
+    opening
+        .into_iter()
+        .zip(changes)
+        .zip(closing)
+        .map(|((opening, change), closing)| {
+            let prefix = if change == 0 {
+                Prefix::default()
+            } else {
+                rows[change as usize - 1].prefix
+            };
+            Ok(SliceBoundary {
+                opening,
+                change,
+                closing,
+                prefix,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn layout_tree_with_strategy<H, D>(
+    layout: &[SliceBoundary],
+    strategy: &impl Strategy,
+) -> Result<commitment::Tree<D>, TransitionError>
+where
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    let len = u32::try_from(layout.len()).map_err(|_| TransitionError::SliceLayout)?;
+    let mut builder = commitment::Builder::<H>::new(VectorKind::Layout, len)?;
+    builder.add_values(layout, strategy)?;
+    Ok(builder.build(strategy)?)
+}
+
+/// Opens the canonical guards and members for one retained state interval.
+fn build_state_range<P: PublicKey, D: Digest>(
+    leaves: &[StateLeaf<P>],
+    tree: &commitment::Tree<D>,
     start: u32,
     end: u32,
-) -> Result<StateBounds<P, D>, TransitionError> {
-    let len = u32::try_from(cache.len()).map_err(|_| TransitionError::TooManyStates)?;
-    let positions = state_boundary_positions(start, end, len)?;
-    let leaves = positions
-        .iter()
-        .map(|position| cache.leaves[*position as usize].clone())
-        .collect::<Vec<_>>();
-    let proof = cache.tree.multi_opening(&positions)?.proof;
-    Ok(StateBounds {
-        start,
-        end,
-        leaves,
-        proof,
+) -> Result<StateRange<P, D>, TransitionError> {
+    let len = u32::try_from(leaves.len()).map_err(|_| TransitionError::TooManyStates)?;
+    if start > end || end > len {
+        return Err(TransitionError::SliceStateRange);
+    }
+    let predecessor = start
+        .checked_sub(1)
+        .map(|position| leaves[position as usize].clone());
+    let successor = (end < len).then(|| leaves[end as usize].clone());
+    let proof_start = start.saturating_sub(u32::from(predecessor.is_some()));
+    let proof_end = end
+        .checked_add(u32::from(successor.is_some()))
+        .ok_or(TransitionError::SliceStateRange)?;
+    Ok(StateRange {
+        predecessor,
+        successor,
+        opening: tree.range_opening(proof_start, proof_end - proof_start)?,
     })
 }
 
 /// Deals every deterministic proof slice for dissemination.
 ///
-/// This convenience function reconstructs the roots before dealing. Close producers can retain
-/// that work with [`super::PreparedClose`] and avoid rebuilding either root.
+/// This convenience function reconstructs the Merkle material before dealing. Close producers can
+/// retain that work with [`super::PreparedClose`] and avoid rebuilding it.
 pub fn assemble_slices<H, P, D>(
     cache: &StateCache<P, D>,
     context: &CloseContext<P, D>,
@@ -650,90 +903,129 @@ where
     D: Digest,
 {
     validate_slice_header::<H, P, D>(context, deposits, withdrawals, &close.header, &close.roots)?;
-    if cache.root() != close.roots.opening
-        || close.rows.len() != close.shard_sets.len()
-        || close.update.positions.len() != close.rows.len()
-    {
+    if cache.root() != close.roots.opening || close.rows.len() != close.shard_sets.len() {
         return Err(TransitionError::RowCount);
     }
     let changes = change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?;
     if changes.root() != close.roots.change {
         return Err(TransitionError::ChangeRoot);
     }
-    let closing_values = strategy.map_collect_vec(&close.rows, |row| {
-        StateLeaf {
-            account: row.account.clone(),
-            state: row.closing,
-        }
-        .encode()
-    });
-    let closing =
-        cache
-            .tree
-            .prepare_update::<H, _>(&close.update.positions, &closing_values, strategy)?;
+    let (opening, closing_leaves) =
+        derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
+    if opening != cache.leaves {
+        return Err(TransitionError::OpeningLinkage);
+    }
+    let closing = state_tree_with_strategy::<H, P, D>(&closing_leaves, strategy)?;
     if closing.root() != close.roots.closing {
         return Err(TransitionError::Commitment(commitment::Error::HiddenChange));
     }
-    assemble_prepared_slices(
+    let layout_boundaries = derive_layout(
+        &close.rows,
+        &opening,
+        &closing_leaves,
+        context.assignment().slice_bits(),
+    )?;
+    let layout = layout_tree_with_strategy::<H, D>(&layout_boundaries, strategy)?;
+    if layout.root() != close.roots.layout {
+        return Err(TransitionError::SliceLayout);
+    }
+    assemble_slice_material(
         cache,
         context.assignment().slice_bits(),
-        close,
-        &changes,
-        &closing,
+        SliceMaterial {
+            close,
+            changes: &changes,
+            closing_leaves: &closing_leaves,
+            closing: &closing,
+            layout_boundaries: &layout_boundaries,
+            layout: &layout,
+        },
         strategy,
     )
 }
 
-/// Builds slices from roots already reconstructed and matched to the close.
+struct SliceMaterial<'a, P: PublicKey, D: Digest> {
+    close: &'a Close<P, D>,
+    changes: &'a commitment::Tree<D>,
+    closing_leaves: &'a [StateLeaf<P>],
+    closing: &'a commitment::Tree<D>,
+    layout_boundaries: &'a [SliceBoundary],
+    layout: &'a commitment::Tree<D>,
+}
+
+/// Builds slices from the Merkle material retained by a prepared close.
 pub(super) fn assemble_prepared_slices<P, D>(
     cache: &StateCache<P, D>,
-    slice_bits: u8,
-    close: &Close<P, D>,
-    changes: &commitment::Tree<D>,
-    closing: &commitment::PreparedUpdate<D>,
+    prepared: &PreparedClose<P, D>,
     strategy: &impl Strategy,
 ) -> Result<Vec<ProofSlice<P, D>>, TransitionError>
 where
     P: PublicKey,
     D: Digest,
 {
-    if cache.root() != close.roots.opening {
+    assemble_slice_material(
+        cache,
+        prepared.slice_bits,
+        SliceMaterial {
+            close: &prepared.close,
+            changes: &prepared.changes,
+            closing_leaves: &prepared.closing_leaves,
+            closing: &prepared.closing,
+            layout_boundaries: &prepared.layout_boundaries,
+            layout: &prepared.layout,
+        },
+        strategy,
+    )
+}
+
+fn assemble_slice_material<P, D>(
+    cache: &StateCache<P, D>,
+    slice_bits: u8,
+    material: SliceMaterial<'_, P, D>,
+    strategy: &impl Strategy,
+) -> Result<Vec<ProofSlice<P, D>>, TransitionError>
+where
+    P: PublicKey,
+    D: Digest,
+{
+    let SliceMaterial {
+        close,
+        changes,
+        closing_leaves,
+        closing,
+        layout_boundaries,
+        layout,
+    } = material;
+    if cache.root() != close.roots.opening
+        || closing.root() != close.roots.closing
+        || changes.root() != close.roots.change
+        || layout.root() != close.roots.layout
+    {
         return Err(TransitionError::OpeningRoot);
     }
+    let (opening, derived_closing) = derive_state_vectors(
+        &close.unchanged,
+        &close.rows,
+        commitment::MAX_VECTOR_LENGTH.into(),
+    )?;
+    if opening != cache.leaves || derived_closing != closing_leaves {
+        return Err(TransitionError::OpeningLinkage);
+    }
+    let expected_layout = derive_layout(&close.rows, &opening, closing_leaves, slice_bits)?;
+    if layout_boundaries != expected_layout {
+        return Err(TransitionError::SliceLayout);
+    }
 
-    // State boundaries partition the complete registry and share one prepared sparse update.
-    let state_boundaries = cache.slice_boundaries(slice_bits)?;
-    let updates = cache
-        .tree
-        .range_updates_from_prepared(closing, &state_boundaries, strategy)?;
-
-    // Canonical row order yields one contiguous changed-row interval per slice.
-    let mut row_boundaries = Vec::with_capacity(state_boundaries.len());
-    row_boundaries.push(0_usize);
-    let mut cursor = 0_usize;
+    let unchanged_boundaries = state_boundaries(&close.unchanged, slice_bits)?;
     let slice_count = 1_u16 << slice_bits;
-    for index in 0..slice_count {
-        while let Some(row) = close.rows.get(cursor) {
-            let row_slice = account_slice(&row.account, slice_bits)?;
-            if row_slice < index {
-                return Err(TransitionError::NonCanonicalSliceOrder);
-            }
-            if row_slice != index {
-                break;
-            }
-            cursor += 1;
-        }
-        row_boundaries.push(cursor);
-    }
-    if cursor != close.rows.len() {
-        return Err(TransitionError::NonCanonicalSliceOrder);
-    }
 
-    // Each slice reuses the prepared roots and owns only its range openings and local values.
+    // Each slice carries unchanged values once and independently opens both live-state ranges.
     strategy.try_map_collect_vec(0..slice_count, |index| {
         let slice = usize::from(index);
-        let start = row_boundaries[slice];
-        let end = row_boundaries[slice + 1];
+        let start_boundary = layout_boundaries[slice];
+        let end_boundary = layout_boundaries[slice + 1];
+        let start = start_boundary.change as usize;
+        let end = end_boundary.change as usize;
         let predecessor = start
             .checked_sub(1)
             .map(|position| close.rows[position].clone());
@@ -748,6 +1040,11 @@ where
         )?;
         Ok(ProofSlice {
             index,
+            layout: LayoutRange {
+                start: start_boundary,
+                end: end_boundary,
+                opening: layout.range_opening(u32::from(index), 2)?,
+            },
             changes: ChangeRange {
                 predecessor,
                 rows: close.rows[start..end].to_vec(),
@@ -755,12 +1052,21 @@ where
                 opening,
             },
             shard_sets: close.shard_sets[start..end].to_vec(),
-            state_bounds: build_state_bounds(
-                cache,
-                state_boundaries[slice],
-                state_boundaries[slice + 1],
+            unchanged: close.unchanged
+                [unchanged_boundaries[slice] as usize..unchanged_boundaries[slice + 1] as usize]
+                .to_vec(),
+            opening: build_state_range(
+                cache.leaves(),
+                &cache.tree,
+                start_boundary.opening,
+                end_boundary.opening,
             )?,
-            update: updates[slice].clone(),
+            closing: build_state_range(
+                closing_leaves,
+                closing,
+                start_boundary.closing,
+                end_boundary.closing,
+            )?,
         })
     })
 }
@@ -768,6 +1074,64 @@ where
 #[cfg(test)]
 mod codec_tests {
     use super::*;
+    use crate::bajillion::{credit::ShardSet, state::AccountState};
+    use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as ShaDigest};
+    use commonware_cryptography_curve25519::signing::{
+        SigningKey, StrictVerifyingKey as VerifyingKey,
+    };
+    use commonware_parallel::Sequential;
+
+    fn partitioned_accounts() -> (VerifyingKey, VerifyingKey) {
+        let mut low = None;
+        let mut high = None;
+        for seed in 0..1_000 {
+            let account = SigningKey::from_seed(seed).public_key();
+            match account_slice(&account, 1).unwrap() {
+                0 if low.is_none() => low = Some(account),
+                1 if high.is_none() => high = Some(account),
+                _ => {}
+            }
+            if low.is_some() && high.is_some() {
+                break;
+            }
+        }
+        (low.unwrap(), high.unwrap())
+    }
+
+    fn test_assignment() -> Assignment<ShaDigest> {
+        Assignment::new(Sha256::hash(&[b"layout-regression"]), 1).unwrap()
+    }
+
+    fn live_leaf(account: VerifyingKey) -> StateLeaf<VerifyingKey> {
+        StateLeaf {
+            account,
+            state: AccountState {
+                balance: 1,
+                active: true,
+                ..AccountState::default()
+            },
+        }
+    }
+
+    fn changed_row(account: VerifyingKey) -> AccountRow<VerifyingKey, ShaDigest> {
+        let shards = ShardSet::empty(0, account.clone());
+        AccountRow {
+            account,
+            opening: AccountState {
+                balance: 1,
+                active: true,
+                ..AccountState::default()
+            },
+            closing: AccountState {
+                balance: 2,
+                active: true,
+                ..AccountState::default()
+            },
+            outgoing: None,
+            credit_root: shards.root::<Sha256>().unwrap(),
+            prefix: Prefix::default(),
+        }
+    }
 
     #[test]
     fn bounded_slice_decode_rejects_zero_sized_digests() {
@@ -775,5 +1139,89 @@ mod codec_tests {
             max_proof_hashes(0, 1),
             Err(CodecError::Invalid("ProofSlice", _))
         ));
+    }
+
+    #[test]
+    fn layout_positions_reject_reversed_state_guards() {
+        let (low, high) = partitioned_accounts();
+        let low = live_leaf(low);
+        let high = live_leaf(high);
+        let reversed = vec![high.clone(), low.clone()];
+        let tree = state_tree_with_strategy::<Sha256, _, _>(&reversed, &Sequential).unwrap();
+        let low_guard = StateRange {
+            predecessor: None,
+            successor: Some(high),
+            opening: tree.range_opening(0, 1).unwrap(),
+        };
+        let high_guard = StateRange {
+            predecessor: Some(low),
+            successor: None,
+            opening: tree.range_opening(1, 1).unwrap(),
+        };
+        let assignment = test_assignment();
+
+        for shared_boundary in 0..=2 {
+            let low = validate_state_range::<Sha256, _, _>(
+                &assignment,
+                0,
+                &tree.root(),
+                &low_guard,
+                &[],
+                2,
+                0..shared_boundary,
+            );
+            let high = validate_state_range::<Sha256, _, _>(
+                &assignment,
+                1,
+                &tree.root(),
+                &high_guard,
+                &[],
+                2,
+                shared_boundary..2,
+            );
+            assert!(low.is_err() || high.is_err());
+        }
+    }
+
+    #[test]
+    fn layout_positions_reject_reversed_change_guards() {
+        let (low, high) = partitioned_accounts();
+        let low = changed_row(low);
+        let high = changed_row(high);
+        let reversed = vec![high.clone(), low.clone()];
+        let tree = change_tree_with_strategy::<Sha256, _, _>(&reversed, &Sequential).unwrap();
+        let low_guard = ChangeRange {
+            predecessor: None,
+            rows: Vec::new(),
+            successor: Some(high),
+            opening: tree.range_opening(0, 1).unwrap(),
+        };
+        let high_guard = ChangeRange {
+            predecessor: Some(low),
+            rows: Vec::new(),
+            successor: None,
+            opening: tree.range_opening(1, 1).unwrap(),
+        };
+        let assignment = test_assignment();
+
+        for shared_boundary in 0..=2 {
+            let low = validate_change_range::<Sha256, _, _>(
+                &assignment,
+                0,
+                &tree.root(),
+                &low_guard,
+                0,
+                shared_boundary,
+            );
+            let high = validate_change_range::<Sha256, _, _>(
+                &assignment,
+                1,
+                &tree.root(),
+                &high_guard,
+                shared_boundary,
+                2,
+            );
+            assert!(low.is_err() || high.is_err());
+        }
     }
 }

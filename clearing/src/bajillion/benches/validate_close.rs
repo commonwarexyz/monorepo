@@ -7,13 +7,13 @@ use std::hint::black_box;
 fn bench_validate_close(c: &mut Criterion) {
     for (_, profile) in selected_active_profiles() {
         let fixture = active_close_fixture(profile);
-        let registry = profile.registry;
+        let live_accounts = profile.live_accounts;
         let changed = profile.changed_accounts;
         let credited = profile.credited_accounts;
         let shards = profile.receive_shards_per_credited;
         c.bench_function(
             &format!(
-                "{}/N={registry} A={changed} B={credited} h={shards}",
+                "{}/N={live_accounts} A={changed} B={credited} h={shards}",
                 module_path!()
             ),
             |b| {
