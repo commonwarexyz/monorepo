@@ -1921,7 +1921,7 @@ mod tests {
     #[test_traced]
     fn test_segmented_variable_replay_repairs_torn_interior_page_when_reached() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             const LOGICAL_PAGE_SIZE: u64 = 64;
             const FIRST_SECTION: u64 = 0;
             const PARTITION: &str = "segmented-variable-torn-interior";
@@ -1958,7 +1958,14 @@ mod tests {
             // a prefetched later page fails validation. FIRST_SECTION establishes the ordered
             // lifecycle boundary: replay setup and consumption of an earlier section must not
             // read or repair this later section.
-            corrupt_page(&context, &cfg.partition, TORN_SECTION, 1, LOGICAL_PAGE_SIZE).await;
+            corrupt_page(
+                &mut context,
+                &cfg.partition,
+                TORN_SECTION,
+                1,
+                LOGICAL_PAGE_SIZE,
+            )
+            .await;
 
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
                 .await

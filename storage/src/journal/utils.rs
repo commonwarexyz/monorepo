@@ -1,17 +1,20 @@
 use commonware_runtime::{Blob as _, ReadOptions, Storage as _, WriteOptions, deterministic};
+use rand::RngExt as _;
+
+const CHECKSUM_RECORD_SIZE: u64 = 12;
 
 /// Flip one byte inside physical page `page` of `blob`, leaving every other page valid. Models
 /// a torn interior page: a crash during an in-flight fsync can lose an interior page while later
-/// pages persist. Physical pages are the logical page plus the 12-byte checksum record.
+/// pages persist. Physical pages are the logical page plus the checksum record.
 pub(crate) async fn corrupt_page(
-    context: &deterministic::Context,
+    context: &mut deterministic::Context,
     partition: &str,
     blob: u64,
     page: u64,
     logical_page_size: u64,
 ) {
-    let physical_page_size = logical_page_size + 12;
-    let offset = page * physical_page_size + 5;
+    let physical_page_size = logical_page_size + CHECKSUM_RECORD_SIZE;
+    let offset = page * physical_page_size + context.random_range(0..logical_page_size);
     let (blob, size) = context.open(partition, &blob.to_be_bytes()).await.unwrap();
     assert!(
         offset < size - physical_page_size,

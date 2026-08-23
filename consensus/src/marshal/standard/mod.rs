@@ -114,12 +114,8 @@ mod tests {
         vec::NonEmptyVec,
     };
     use std::{
-        collections::BTreeSet,
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::Arc,
         time::Duration,
     };
 
@@ -549,8 +545,8 @@ mod tests {
                 context.child("seed_notarized"),
                 prunable::Config {
                     translator: TwoCap,
-                    key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
                     metadata_partition: format!("{cache_prefix}-cache-{epoch}-notarized-metadata"),
+                    key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
                     key_page_cache: page_cache,
                     value_partition: format!("{cache_prefix}-cache-{epoch}-notarized-value"),
                     items_per_section: NonZeroU64::new(10).unwrap(),
@@ -6848,8 +6844,8 @@ mod tests {
                 context.child("finalizations_by_height"),
                 prunable::Config {
                     translator: EightCap,
-                    key_partition: format!("{partition_prefix}-fbh-key"),
                     metadata_partition: format!("{partition_prefix}-fbh-metadata"),
+                    key_partition: format!("{partition_prefix}-fbh-key"),
                     key_page_cache: page_cache.clone(),
                     value_partition: format!("{partition_prefix}-fbh-value"),
                     compression: None,
@@ -6866,8 +6862,8 @@ mod tests {
                 context.child("finalized_blocks"),
                 prunable::Config {
                     translator: EightCap,
-                    key_partition: format!("{partition_prefix}-fb-key"),
                     metadata_partition: format!("{partition_prefix}-fb-metadata"),
+                    key_partition: format!("{partition_prefix}-fb-key"),
                     key_page_cache: page_cache,
                     value_partition: format!("{partition_prefix}-fb-value"),
                     compression: None,
@@ -7176,183 +7172,6 @@ mod tests {
         fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
             self.inner.ranges_from(from)
         }
-
-        fn last_readable_index_at_or_before(&self, height: Height) -> Option<Height> {
-            self.inner.last_readable_index_at_or_before(height)
-        }
-    }
-
-    struct ReadProbe {
-        context: deterministic::Context,
-        delay: Duration,
-        reads: Arc<AtomicUsize>,
-    }
-
-    /// A certificate store whose optimistic index view remains stable after selected values read
-    /// as absent.
-    struct UnreadableCertificates<T: store::Certificates> {
-        inner: T,
-        unreadable: Vec<(Height, T::BlockDigest)>,
-        probe: Option<ReadProbe>,
-    }
-
-    impl<T: store::Certificates> store::Certificates for UnreadableCertificates<T> {
-        type BlockDigest = T::BlockDigest;
-        type Commitment = T::Commitment;
-        type Scheme = T::Scheme;
-        type Error = T::Error;
-
-        async fn put(
-            mut self,
-            height: Height,
-            digest: Self::BlockDigest,
-            finalization: Finalization<Self::Scheme, Self::Commitment>,
-        ) -> Result<Self, Self::Error> {
-            self.inner = self.inner.put(height, digest, finalization).await?;
-            self.unreadable
-                .retain(|(unreadable_height, _)| *unreadable_height != height);
-            Ok(self)
-        }
-
-        async fn sync(mut self) -> Result<Self, Self::Error> {
-            self.inner = self.inner.sync().await?;
-            Ok(self)
-        }
-
-        async fn start_sync(
-            mut self,
-        ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
-            let handle;
-            (self.inner, handle) = self.inner.start_sync().await?;
-            Ok((self, handle))
-        }
-
-        async fn get(
-            &self,
-            id: commonware_storage::archive::Identifier<'_, Self::BlockDigest>,
-        ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
-            let unreadable = match &id {
-                commonware_storage::archive::Identifier::Index(index) => self
-                    .unreadable
-                    .iter()
-                    .find_map(|(height, _)| (*index == height.get()).then_some(*height)),
-                commonware_storage::archive::Identifier::Key(digest) => self
-                    .unreadable
-                    .iter()
-                    .find_map(|(height, expected)| (*digest == expected).then_some(*height)),
-            };
-            let Some(_) = unreadable else {
-                return self.inner.get(id).await;
-            };
-
-            if let Some(probe) = &self.probe {
-                probe.reads.fetch_add(1, Ordering::Relaxed);
-                probe.context.sleep(probe.delay).await;
-            }
-            Ok(None)
-        }
-
-        async fn has(&self, height: Height) -> Result<bool, Self::Error> {
-            if self
-                .unreadable
-                .iter()
-                .any(|(unreadable, _)| height == *unreadable)
-            {
-                return Ok(false);
-            }
-            self.inner.has(height).await
-        }
-
-        async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {
-            self.inner = self.inner.prune(min).await?;
-            Ok(self)
-        }
-
-        fn last_index(&self) -> Option<Height> {
-            self.inner.last_index()
-        }
-
-        fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
-            self.inner.ranges_from(from)
-        }
-
-        fn last_readable_index_at_or_before(&self, mut height: Height) -> Option<Height> {
-            loop {
-                let candidate = self.inner.last_readable_index_at_or_before(height)?;
-                if !self
-                    .unreadable
-                    .iter()
-                    .any(|(unreadable, _)| *unreadable == candidate)
-                {
-                    return Some(candidate);
-                }
-                height = candidate.previous()?;
-            }
-        }
-    }
-
-    /// A block store whose index metadata retains one unreadable occurrence.
-    struct UnreadableBlocks<T: store::Blocks> {
-        inner: T,
-        height: Height,
-        digest: <T::Block as Digestible>::Digest,
-    }
-
-    impl<T: store::Blocks> store::Blocks for UnreadableBlocks<T> {
-        type Block = T::Block;
-        type Error = T::Error;
-
-        async fn put(mut self, block: Self::Block) -> Result<Self, Self::Error> {
-            self.inner = self.inner.put(block).await?;
-            Ok(self)
-        }
-
-        async fn sync(mut self) -> Result<Self, Self::Error> {
-            self.inner = self.inner.sync().await?;
-            Ok(self)
-        }
-
-        async fn start_sync(
-            mut self,
-        ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
-            let handle;
-            (self.inner, handle) = self.inner.start_sync().await?;
-            Ok((self, handle))
-        }
-
-        async fn get(
-            &self,
-            id: commonware_storage::archive::Identifier<'_, <Self::Block as Digestible>::Digest>,
-        ) -> Result<Option<Self::Block>, Self::Error> {
-            match id {
-                commonware_storage::archive::Identifier::Index(index)
-                    if index == self.height.get() =>
-                {
-                    Ok(None)
-                }
-                commonware_storage::archive::Identifier::Key(digest) if digest == &self.digest => {
-                    Ok(None)
-                }
-                id => self.inner.get(id).await,
-            }
-        }
-
-        async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {
-            self.inner = self.inner.prune(min).await?;
-            Ok(self)
-        }
-
-        fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-            self.inner.missing_items(start, max)
-        }
-
-        fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
-            self.inner.next_gap(value)
-        }
-
-        fn last_index(&self) -> Option<Height> {
-            self.inner.last_index()
-        }
     }
 
     fn prunable_actor_config<P>(
@@ -7397,8 +7216,8 @@ mod tests {
             context.child("finalizations_by_height"),
             prunable::Config {
                 translator: EightCap,
-                key_partition: format!("{partition_prefix}-fbh-key"),
                 metadata_partition: format!("{partition_prefix}-fbh-metadata"),
+                key_partition: format!("{partition_prefix}-fbh-key"),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{partition_prefix}-fbh-value"),
                 compression: None,
@@ -7415,8 +7234,8 @@ mod tests {
             context.child("finalized_blocks"),
             prunable::Config {
                 translator: EightCap,
-                key_partition: format!("{partition_prefix}-fb-key"),
                 metadata_partition: format!("{partition_prefix}-fb-metadata"),
+                key_partition: format!("{partition_prefix}-fb-key"),
                 key_page_cache: page_cache,
                 value_partition: format!("{partition_prefix}-fb-value"),
                 compression: None,
@@ -7459,17 +7278,17 @@ mod tests {
     }
 
     /// The finalized block and certificate archives are separate durability domains. A supported
-    /// subset-write crash can retain both index entries while losing both height-1 value frames;
-    /// readable height-2 frames keep the bad entries away from recovery's physical tail:
+    /// subset-write crash can lose both height-1 value frames while retaining the later height-2
+    /// frames in the same sections. Startup truncates each section at its first CRC-invalid value:
     ///
     /// ```text
-    /// after crash:
-    ///   block index: [h1 -> bad CRC] [h2 -> readable]
-    ///   cert index:  [h1 -> bad CRC] [h2 -> readable]
+    /// after recovery:
+    ///   block archive: [h1 bad CRC] [h2 retained] -> []
+    ///   cert archive:  [h1 bad CRC] [h2 retained] -> []
     ///
     /// one authenticated h1 delivery:
-    ///   block index: [h1 bad, h1 replacement] [h2 readable]
-    ///   cert index:  [h1 bad, h1 replacement] [h2 readable]
+    ///   block archive: [h1]
+    ///   cert archive:  [h1]
     /// ```
     ///
     /// Height 1 is dispatched only after the joined archive sync completes. A subsequent crash and
@@ -7545,7 +7364,7 @@ mod tests {
                 finalizations,
                 Height::new(2),
                 block_2.digest(),
-                finalization_2.clone(),
+                finalization_2,
             )
             .await
             .unwrap();
@@ -7566,7 +7385,7 @@ mod tests {
             drop(finalizations);
             drop(blocks);
 
-            (schemes, block_1, block_2, finalization_1, finalization_2)
+            (schemes, block_1, block_2, finalization_1)
         });
 
         let (fixture, checkpoint) =
@@ -7574,59 +7393,34 @@ mod tests {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let (finalizations, blocks) =
                     prunable_finalized_stores(&context, PREFIX, NZUsize!(1024)).await;
-                let (schemes, block_1, block_2, finalization_1, finalization_2) = fixture;
+                let (schemes, block_1, block_2, finalization_1) = fixture;
 
-                // The public Archive view is exact: height 1 is absent because both value frames
-                // failed startup validation. Marshal's indexed view retains that physical
-                // occurrence so recovery can assign it to the resolver before a replacement is
-                // stored.
-                assert_eq!(finalizations.ranges().collect::<Vec<_>>(), vec![(2, 2)]);
-                assert_eq!(blocks.ranges().collect::<Vec<_>>(), vec![(2, 2)]);
-                assert_eq!(
-                    store::Certificates::ranges_from(&finalizations, Height::zero())
-                        .collect::<Vec<_>>(),
-                    vec![(Height::new(1), Height::new(2))]
-                );
-                assert_eq!(
-                    store::Blocks::next_gap(&blocks, Height::new(1)),
-                    (Some(Height::new(2)), None)
-                );
-                assert_eq!(
-                    store::Certificates::get(
-                        &finalizations,
-                        commonware_storage::archive::Identifier::Index(2),
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .proposal,
-                    finalization_2.proposal,
-                );
-                assert_eq!(
-                    store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(2),)
+                // The first invalid value removes the entire same-section suffix from each
+                // archive, including the retained height-2 frame.
+                assert!(finalizations.ranges().next().is_none());
+                assert!(blocks.ranges().next().is_none());
+                for height in [Height::new(1), Height::new(2)] {
+                    assert!(
+                        store::Certificates::get(
+                            &finalizations,
+                            commonware_storage::archive::Identifier::Index(height.get()),
+                        )
                         .await
                         .unwrap()
-                        .unwrap()
-                        .digest(),
-                    block_2.digest(),
-                );
-                assert_eq!(
-                    store::Certificates::get(
-                        &finalizations,
-                        commonware_storage::archive::Identifier::Index(1),
-                    )
-                    .await
-                    .unwrap(),
-                    None,
-                    "the certificate value must be unreadable before the delivery repairs it"
-                );
-                assert_eq!(
-                    store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(1),)
+                        .is_none(),
+                        "certificate archive retained truncated height {height:?}"
+                    );
+                    assert!(
+                        store::Blocks::get(
+                            &blocks,
+                            commonware_storage::archive::Identifier::Index(height.get()),
+                        )
                         .await
-                        .unwrap(),
-                    None,
-                    "the block value must be unreadable before the delivery repairs it"
-                );
+                        .unwrap()
+                        .is_none(),
+                        "block archive retained truncated height {height:?}"
+                    );
+                }
 
                 let provider = ConstantProvider::new(schemes[0].clone());
                 let config = prunable_actor_config(&context, PREFIX, provider);
@@ -7679,15 +7473,16 @@ mod tests {
 
                 actor_handle.abort();
                 drop(mailbox);
-                (block_1, block_2, finalization_1, finalization_2)
+                (block_1, block_2, finalization_1)
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let (finalizations, blocks) =
                 prunable_finalized_stores(&context, PREFIX, NZUsize!(1024)).await;
-            let (block_1, block_2, finalization_1, finalization_2) = fixture;
+            let (block_1, block_2, finalization_1) = fixture;
             let block_1_digest = block_1.digest();
+            let block_2_digest = block_2.digest();
 
             let recovered_finalization = store::Certificates::get(
                 &finalizations,
@@ -7725,642 +7520,43 @@ mod tests {
                 block_1_digest,
             );
 
-            assert_eq!(
+            assert!(
                 store::Certificates::get(
                     &finalizations,
                     commonware_storage::archive::Identifier::Index(2),
                 )
                 .await
                 .unwrap()
-                .unwrap()
-                .proposal,
-                finalization_2.proposal,
-            );
-            assert_eq!(
-                store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(2),)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .digest(),
-                block_2.digest(),
-            );
-        });
-    }
-
-    /// Eager Archive validation removes a torn value from the readable range view, but Marshal
-    /// must retain the corresponding index-journal occurrence long enough to give it a resolver
-    /// owner. This is load-bearing for an unreadable tail: there is no readable descendant whose
-    /// gap can rediscover the missing height.
-    ///
-    /// ```text
-    /// readable: [height 1] [        ]
-    /// indexed:  [height 1] [height 2]
-    ///                              \----> resolver fetch(2)
-    /// ```
-    #[test_traced("WARN")]
-    fn test_standard_recovery_requests_terminal_unreadable_indexed_pair() {
-        const PREFIX: &str = "terminal-unreadable-indexed-pair";
-
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let block_1 = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let block_2 = make_raw_block(block_1.digest(), Height::new(2), 200);
-            let finalization_1 = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    block_1.digest(),
-                ),
-                &schemes,
-                QUORUM,
-            );
-            let finalization_2 = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(2)),
-                    View::new(1),
-                    block_2.digest(),
-                ),
-                &schemes,
-                QUORUM,
-            );
-            seed_processed_height(context.child("metadata"), PREFIX, Height::new(1)).await;
-
-            let fault_config = context.storage_fault_config();
-            let pending = PendingSyncs::default();
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let (mut finalizations, mut blocks) =
-                prunable_finalized_stores(&context, PREFIX, NZUsize!(1)).await;
-
-            // Values are issued under the fault policy active at append time. Tear height 2, then
-            // append a fully retained height 1 so the bad frame is interior rather than recoverable
-            // tail debris. Finally retain the buffered index pages for both logical heights.
-            *fault_config.write() = deterministic::FaultConfig {
-                write_rate: Some(WriteConfig {
-                    failure_rate: Probability!(0.0),
-                    retention_rate: Probability!(0.9),
-                    mode: PartialWriteMode::Subset,
-                }),
-                ..Default::default()
-            };
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(2),
-                block_2.digest(),
-                finalization_2,
-            )
-            .await
-            .unwrap();
-            blocks = store::Blocks::put(blocks, block_2).await.unwrap();
-
-            *fault_config.write() = deterministic::FaultConfig {
-                write_rate: Some(WriteConfig {
-                    failure_rate: Probability!(0.0),
-                    retention_rate: Probability!(1.0),
-                    mode: PartialWriteMode::Subset,
-                }),
-                ..Default::default()
-            };
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(1),
-                block_1.digest(),
-                finalization_1,
-            )
-            .await
-            .unwrap();
-            blocks = store::Blocks::put(blocks, block_1).await.unwrap();
-
-            let (finalizations, finalizations_sync) =
-                store::Certificates::start_sync(finalizations)
-                    .await
-                    .unwrap();
-            let (blocks, blocks_sync) = store::Blocks::start_sync(blocks).await.unwrap();
-            assert_eq!(pending.lock().len(), 4);
-            drop(finalizations_sync);
-            drop(blocks_sync);
-            drop(finalizations);
-            drop(blocks);
-
-            schemes
-        });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let (finalizations, blocks) =
-                prunable_finalized_stores(&context, PREFIX, NZUsize!(1024)).await;
-            let schemes = fixture;
-
-            assert_eq!(finalizations.ranges().collect::<Vec<_>>(), vec![(1, 1)]);
-            assert_eq!(blocks.ranges().collect::<Vec<_>>(), vec![(1, 1)]);
-            assert_eq!(
-                store::Certificates::ranges_from(&finalizations, Height::zero())
-                    .collect::<Vec<_>>(),
-                vec![(Height::new(1), Height::new(2))]
-            );
-            assert_eq!(
-                store::Certificates::last_readable_index_at_or_before(
-                    &finalizations,
-                    Height::new(2),
-                ),
-                Some(Height::new(1))
-            );
-            assert_eq!(
-                store::Blocks::next_gap(&blocks, Height::new(2)),
-                (Some(Height::new(2)), None)
-            );
-
-            let provider = ConstantProvider::new(schemes[0].clone());
-            let config = prunable_actor_config(&context, PREFIX, provider);
-            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("actor"),
-                finalizations,
-                blocks,
-                config,
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let actor_handle = actor
-                .start_unbuffered(Application::<B>::default(), (resolver_rx, resolver.clone()));
-
-            let _ = mailbox.get_processed_height().await;
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "terminal unreadable pair fetch",
-                || {
-                    resolver.fetches().iter().any(|fetch| {
-                        matches!(
-                            &fetch.key,
-                            handler::Key::Finalized { height } if *height == Height::new(2)
-                        )
-                    })
-                },
-            )
-            .await;
-            actor_handle.abort();
-        });
-    }
-
-    /// Range metadata can optimistically include a finalization whose value is unreadable and is
-    /// not required to change after the failed read. Startup must move its own cursor backward to
-    /// the latest readable certificate instead of repeatedly probing the range endpoint:
-    ///
-    /// ```text
-    /// indexed:   [height 1: readable] [height 2: unreadable]
-    /// recovered:              ^ latest readable
-    /// ```
-    #[test_traced("WARN")]
-    fn test_standard_startup_skips_unreadable_finalization_range_tail() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = ConstantProvider::new(schemes[0].clone());
-            let prefix = "unreadable-finalization-tail";
-            let (mut finalizations, mut blocks) =
-                paced_finalized_stores(&context, prefix, Duration::ZERO).await;
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let block_1 = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let block_2 = make_raw_block(block_1.digest(), Height::new(2), 200);
-            let finalization_1 = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    block_1.digest(),
-                ),
-                &schemes,
-                QUORUM,
-            );
-            let finalization_2 = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(2)),
-                    View::new(1),
-                    block_2.digest(),
-                ),
-                &schemes,
-                QUORUM,
-            );
-
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(1),
-                block_1.digest(),
-                finalization_1,
-            )
-            .await
-            .unwrap();
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(2),
-                block_2.digest(),
-                finalization_2,
-            )
-            .await
-            .unwrap();
-            blocks = store::Blocks::put(blocks, block_1.clone()).await.unwrap();
-            blocks = store::Blocks::put(blocks, block_2.clone()).await.unwrap();
-            finalizations = store::Certificates::sync(finalizations).await.unwrap();
-            blocks = store::Blocks::sync(blocks).await.unwrap();
-
-            let finalizations = UnreadableCertificates {
-                inner: finalizations,
-                unreadable: vec![(Height::new(2), block_2.digest())],
-                probe: None,
-            };
-            let config = prunable_actor_config(&context, prefix, provider);
-            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("actor"),
-                finalizations,
-                blocks,
-                config,
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let actor_handle =
-                actor.start_unbuffered(Application::<B>::default(), (resolver_rx, resolver));
-
-            let latest: B = mailbox
-                .get_block(Identifier::Latest)
-                .await
-                .expect("latest readable finalized block should remain available");
-            assert_eq!(latest.height(), Height::new(1));
-            actor_handle.abort();
-        });
-    }
-
-    /// Processed-height metadata and the two finalized archives are durable independently. A
-    /// supported subset write can therefore leave the certificate at the processed endpoint
-    /// unreadable while the next block and certificate are both durable:
-    ///
-    /// ```text
-    /// processed height:       1
-    /// finalizations:     [1: bad CRC] [2: readable, round 2]
-    /// blocks:                         [2: readable]
-    ///                                      \ authenticated successor pair
-    /// restored round:                         round 2
-    /// ```
-    ///
-    /// The unreadable endpoint cannot contribute a round. The matching successor pair still
-    /// supplies the exact durable floor without replaying older value blobs.
-    #[test_traced("WARN")]
-    fn test_standard_processed_round_uses_successor_after_unreadable_endpoint() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = ConstantProvider::new(schemes[0].clone());
-            let prefix = "unreadable-processed-round-endpoint";
-            let (mut finalizations, mut blocks) =
-                paced_finalized_stores(&context, prefix, Duration::ZERO).await;
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let block_1 = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let block_2 = make_raw_block(block_1.digest(), Height::new(2), 200);
-            let round_1 = Round::new(Epoch::zero(), View::new(1));
-            let round_2 = Round::new(Epoch::zero(), View::new(2));
-            let finalization_1 = StandardHarness::make_finalization(
-                Proposal::new(round_1, View::zero(), block_1.digest()),
-                &schemes,
-                QUORUM,
-            );
-            let finalization_2 = StandardHarness::make_finalization(
-                Proposal::new(round_2, View::new(1), block_2.digest()),
-                &schemes,
-                QUORUM,
-            );
-
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(1),
-                block_1.digest(),
-                finalization_1,
-            )
-            .await
-            .unwrap();
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(2),
-                block_2.digest(),
-                finalization_2,
-            )
-            .await
-            .unwrap();
-            blocks = store::Blocks::put(blocks, block_2).await.unwrap();
-            finalizations = store::Certificates::sync(finalizations).await.unwrap();
-            blocks = store::Blocks::sync(blocks).await.unwrap();
-            seed_processed_height(context.child("metadata"), prefix, Height::new(1)).await;
-
-            let finalizations = UnreadableCertificates {
-                inner: finalizations,
-                unreadable: vec![(Height::new(1), block_1.digest())],
-                probe: None,
-            };
-            let config = prunable_actor_config(&context, prefix, provider);
-            let (_actor, _mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("actor"),
-                finalizations,
-                blocks,
-                config,
-            )
-            .await;
-
-            assert_eq!(floor.height(), Some(Height::new(1)));
-            assert_eq!(floor.round(), round_2);
-        });
-    }
-
-    /// Processed-height metadata and certificate values cross independent durability boundaries.
-    /// A restart can therefore retain an earlier authenticated round while the physical endpoint
-    /// at the processed height has no readable value:
-    ///
-    /// ```text
-    /// processed height:                         2
-    /// physical finalizations: [1: round 1] [2: unreadable]
-    /// readable finalizations: [1: round 1] [             ]
-    /// restored round:             round 1
-    /// ```
-    ///
-    /// The unreadable occurrence remains visible for repair, but cannot erase the earlier
-    /// authenticated floor or force recovery to scan values backward.
-    #[test_traced("WARN")]
-    fn test_standard_processed_round_uses_previous_readable_finalization() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = ConstantProvider::new(schemes[0].clone());
-            let prefix = "previous-readable-processed-round";
-            let (mut finalizations, mut blocks) =
-                paced_finalized_stores(&context, prefix, Duration::ZERO).await;
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let block_1 = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let block_2 = make_raw_block(block_1.digest(), Height::new(2), 200);
-            let round_1 = Round::new(Epoch::zero(), View::new(1));
-            let finalization_1 = StandardHarness::make_finalization(
-                Proposal::new(round_1, View::zero(), block_1.digest()),
-                &schemes,
-                QUORUM,
-            );
-            let finalization_2 = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(2)),
-                    View::new(1),
-                    block_2.digest(),
-                ),
-                &schemes,
-                QUORUM,
-            );
-
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(1),
-                block_1.digest(),
-                finalization_1,
-            )
-            .await
-            .unwrap();
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(2),
-                block_2.digest(),
-                finalization_2,
-            )
-            .await
-            .unwrap();
-            blocks = store::Blocks::put(blocks, block_2.clone()).await.unwrap();
-            finalizations = store::Certificates::sync(finalizations).await.unwrap();
-            blocks = store::Blocks::sync(blocks).await.unwrap();
-            seed_processed_height(context.child("metadata"), prefix, Height::new(2)).await;
-
-            let finalizations = UnreadableCertificates {
-                inner: finalizations,
-                unreadable: vec![(Height::new(2), block_2.digest())],
-                probe: None,
-            };
-            assert_eq!(
-                store::Certificates::ranges_from(&finalizations, Height::zero())
-                    .collect::<Vec<_>>(),
-                vec![(Height::new(1), Height::new(2))]
+                .is_none(),
+                "height-2 finalization suffix reappeared after repair"
             );
             assert!(
                 store::Certificates::get(
                     &finalizations,
-                    commonware_storage::archive::Identifier::Index(Height::new(1).get()),
+                    commonware_storage::archive::Identifier::Key(&block_2_digest),
                 )
                 .await
                 .unwrap()
-                .is_some()
+                .is_none(),
+                "height-2 finalization key reappeared after repair"
             );
             assert!(
-                store::Certificates::get(
-                    &finalizations,
-                    commonware_storage::archive::Identifier::Index(Height::new(2).get()),
-                )
-                .await
-                .unwrap()
-                .is_none()
-            );
-
-            let config = prunable_actor_config(&context, prefix, provider);
-            let (_actor, _mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("actor"),
-                finalizations,
-                blocks,
-                config,
-            )
-            .await;
-
-            assert_eq!(floor.height(), Some(Height::new(2)));
-            assert_eq!(floor.round(), round_1);
-        });
-    }
-
-    /// Recovery must not read an arbitrary number of values before servicing the mailbox. Each
-    /// startup phase applies the same repair budget to an optimistic unreadable tail:
-    ///
-    /// ```text
-    /// index view: [1: readable] [2 ... 13: unreadable]
-    ///                           <---- newest first
-    /// get tip:                 read 2, stop
-    /// repair tail:             read 2, stop
-    /// actor loop:              service mailbox
-    /// ```
-    #[test_traced("WARN")]
-    fn test_standard_startup_bounds_unreadable_finalization_tail() {
-        const UNREADABLE_TAIL: u64 = 12;
-        const MAX_REPAIR: usize = 2;
-
-        let runner = deterministic::Runner::timed(Duration::from_secs(15));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = ConstantProvider::new(schemes[0].clone());
-            let prefix = "bounded-unreadable-finalization-tail";
-            let (mut finalizations, blocks) =
-                paced_finalized_stores(&context, prefix, Duration::ZERO).await;
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let mut parent = genesis.digest();
-            let mut unreadable = Vec::new();
-
-            for value in 1..=UNREADABLE_TAIL + 1 {
-                let height = Height::new(value);
-                let block = make_raw_block(parent, height, value * 100);
-                let digest = block.digest();
-                let finalization = StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), View::new(value)),
-                        View::new(value - 1),
-                        digest,
-                    ),
-                    &schemes,
-                    QUORUM,
-                );
-
-                finalizations =
-                    store::Certificates::put(finalizations, height, digest, finalization)
-                        .await
-                        .unwrap();
-                if value > 1 {
-                    unreadable.push((height, digest));
-                }
-                parent = digest;
-            }
-            finalizations = store::Certificates::sync(finalizations).await.unwrap();
-
-            let reads = Arc::new(AtomicUsize::new(0));
-            let finalizations = UnreadableCertificates {
-                inner: finalizations,
-                unreadable,
-                probe: Some(ReadProbe {
-                    context: context.child("read_probe"),
-                    delay: Duration::from_secs(1),
-                    reads: reads.clone(),
-                }),
-            };
-            let mut config = prunable_actor_config(&context, prefix, provider);
-            config.max_repair = NonZeroUsize::new(MAX_REPAIR).unwrap();
-            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("actor"),
-                finalizations,
-                blocks,
-                config,
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let resolver_observer = resolver.clone();
-            let actor_handle =
-                actor.start_unbuffered(Application::<B>::default(), (resolver_rx, resolver));
-
-            let _ = mailbox.get_processed_height().await;
-            assert_eq!(
-                reads.load(Ordering::Relaxed),
-                MAX_REPAIR * 2,
-                "startup must stop after its two bounded recovery passes"
-            );
-            let fetched = resolver_observer
-                .fetches()
-                .into_iter()
-                .filter_map(|fetch| match fetch.key {
-                    handler::Key::Finalized { height } if height > Height::new(1) => Some(height),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>();
-            assert_eq!(
-                fetched,
-                (UNREADABLE_TAIL..=UNREADABLE_TAIL + 1)
-                    .map(Height::new)
-                    .collect(),
-                "each attempted tail candidate must have a resolver owner"
-            );
-            actor_handle.abort();
-        });
-    }
-
-    /// A range endpoint is only a candidate until its block value is read. Gap repair must request
-    /// an unreadable endpoint rather than assuming `next_gap` proved the block exists.
-    #[test_traced("WARN")]
-    fn test_standard_gap_repair_fetches_unreadable_range_endpoint() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = ConstantProvider::new(schemes[0].clone());
-            let prefix = "unreadable-block-endpoint";
-            let (mut finalizations, mut blocks) =
-                paced_finalized_stores(&context, prefix, Duration::ZERO).await;
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let block = make_raw_block(genesis.digest(), Height::new(2), 200);
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(2)),
-                    View::new(1),
-                    block.digest(),
-                ),
-                &schemes,
-                QUORUM,
-            );
-
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(2),
-                block.digest(),
-                finalization,
-            )
-            .await
-            .unwrap();
-            blocks = store::Blocks::put(blocks, block.clone()).await.unwrap();
-            finalizations = store::Certificates::sync(finalizations).await.unwrap();
-            blocks = store::Blocks::sync(blocks).await.unwrap();
-
-            let blocks = UnreadableBlocks {
-                inner: blocks,
-                height: Height::new(2),
-                digest: block.digest(),
-            };
-            let config = prunable_actor_config(&context, prefix, provider);
-            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("actor"),
-                finalizations,
-                blocks,
-                config,
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let actor_handle = actor
-                .start_unbuffered(Application::<B>::default(), (resolver_rx, resolver.clone()));
-
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "unreadable endpoint fetch",
-                || {
-                    resolver.fetches().iter().any(|fetch| {
-                        matches!(
-                            (&fetch.key, &fetch.subscriber),
-                            (
-                                handler::Key::Block(commitment),
-                                handler::Annotation::Finalized(
-                                    handler::Finalized::ByHeight { height }
-                                )
-                            ) if *commitment == block.digest() && *height == Height::new(2)
-                        )
-                    })
-                },
-            )
-            .await;
-            assert!(
-                mailbox
-                    .get_block(Identifier::Height(Height::zero()))
+                store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(2))
                     .await
-                    .is_some(),
-                "marshal must remain live after discovering the unreadable endpoint"
+                    .unwrap()
+                    .is_none(),
+                "height-2 block suffix reappeared after repair"
             );
-            actor_handle.abort();
+            assert!(
+                store::Blocks::get(
+                    &blocks,
+                    commonware_storage::archive::Identifier::Key(&block_2_digest),
+                )
+                .await
+                .unwrap()
+                .is_none(),
+                "height-2 block key reappeared after repair"
+            );
         });
     }
 

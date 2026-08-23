@@ -20,7 +20,6 @@ use commonware_storage::{
     qmdb::current::{VariableConfig, unordered::variable::Db as Current},
     translator::TwoCap,
 };
-use commonware_storage_fuzz::write_config;
 use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -84,7 +83,6 @@ struct FuzzInput {
     write_buffer: usize,
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
-    #[arbitrary(with = write_config)]
     write_config: deterministic::WriteConfig,
     operations: Vec<CurrentOperation>,
 }

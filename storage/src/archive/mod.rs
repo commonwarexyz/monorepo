@@ -44,10 +44,9 @@ pub enum Error {
 /// A write-once key-value store addressed by both an index and a key.
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
-/// dropped future) destroys the handle. Pruning implementations satisfy puts below the current
-/// handle's prune floor without storing: pruning declared that range obsolete, so nothing is
-/// mutated and nothing below the floor is readable through that handle. An implementation may
-/// require callers to reapply the floor after reinitialization.
+/// dropped future) destroys the handle. Pruning implementations satisfy puts below the prune
+/// floor without storing: pruning declared that range obsolete, so nothing is mutated and
+/// nothing below the floor is ever readable.
 pub trait Archive: Send + Sized {
     /// The type of the key.
     type Key: Array;
@@ -57,12 +56,10 @@ pub trait Archive: Send + Sized {
 
     /// Store an item in [Archive].
     ///
-    /// Indices are unique: if the index already stores a readable value, put does nothing and
-    /// returns. If every existing occurrence is unreadable, the put stores a replacement.
-    /// Duplicate readable values can be stored via [MultiArchive::put_multi].
-    /// Keys need not be unique: the same key may be stored at multiple indices, and a subsequent
-    /// [Archive::get] or [Archive::has] call with an [Identifier::Key] identifier may return any
-    /// associated readable value.
+    /// Indices are unique: if the index already exists, put does nothing and returns. Duplicate
+    /// indices can be stored via [MultiArchive::put_multi]. Keys need not be unique: the same key
+    /// may be stored at multiple indices, and a subsequent [Archive::get] or [Archive::has] call
+    /// with an [Identifier::Key] identifier may return any of the values associated with that key.
     ///
     /// A put below the prune floor is satisfied without storing (see the trait docs).
     fn put(
@@ -84,9 +81,9 @@ pub trait Archive: Send + Sized {
 
     /// Perform a [Archive::put] and [Archive::start_sync] in a single operation.
     ///
-    /// If the index already contains a readable value (making the put a no-op), the returned
-    /// handle still reports the durability of all previously accepted writes, including the
-    /// original write for this index if its sync is still in flight.
+    /// If the index already exists (making the put a no-op), the returned handle still reports
+    /// the durability of all previously accepted writes, including the original write for this
+    /// index if its sync is still in flight.
     fn put_start_sync(
         self,
         index: u64,
@@ -99,15 +96,14 @@ pub trait Archive: Send + Sized {
     /// Retrieve an item from [Archive].
     ///
     /// Note that if the [Archive] is a [MultiArchive], there may be multiple values associated with the
-    /// same [Identifier::Index]. If there are multiple readable values, the first stored readable
-    /// value will be returned. Use [MultiArchive::get_all] to retrieve all readable values at an
-    /// index.
+    /// same [Identifier::Index]. If there are multiple values, the first stored will be returned. Use
+    /// [MultiArchive::get_all] to retrieve all values at an index.
     fn get<'a>(
         &'a self,
         identifier: Identifier<'a, Self::Key>,
     ) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send + use<'a, Self>;
 
-    /// Check whether a readable item exists in [Archive].
+    /// Check if an item exists in [Archive].
     fn has<'a>(
         &'a self,
         identifier: Identifier<'a, Self::Key>,
@@ -116,30 +112,25 @@ pub trait Archive: Send + Sized {
     /// Retrieve the end of the current range including `index` (inclusive) and
     /// the start of the next range after `index` (if it exists).
     ///
-    /// This is useful for driving backfill operations over the archive. Only indices with at
-    /// least one readable value are included.
+    /// This is useful for driving backfill operations over the archive.
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>);
 
     /// Returns up to `max` missing items starting from `start`.
     ///
-    /// This method iterates through gaps between existing readable ranges, collecting missing
-    /// indices until either `max` items are found or there are no more gaps to fill.
+    /// This method iterates through gaps between existing ranges, collecting missing indices
+    /// until either `max` items are found or there are no more gaps to fill.
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64>;
 
-    /// Retrieve an iterator over all indexed ranges (inclusive) within the [Archive].
-    ///
-    /// Only indices with at least one readable value are included.
+    /// Retrieve an iterator over all populated ranges (inclusive) within the [Archive].
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)>;
 
-    /// Retrieve indexed ranges that overlap or follow `from`.
-    ///
-    /// Only indices with at least one readable value are included.
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
     fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)>;
 
-    /// Retrieve the first index in the same readable view as [Archive::ranges].
+    /// Retrieve the first index in the [Archive].
     fn first_index(&self) -> Option<u64>;
 
-    /// Retrieve the last index in the same readable view as [Archive::ranges].
+    /// Retrieve the last index in the [Archive].
     fn last_index(&self) -> Option<u64>;
 
     /// Sync all pending writes.
@@ -166,21 +157,22 @@ pub trait Archive: Send + Sized {
 
 /// Extension of [Archive] that supports multiple items at the same index.
 ///
-/// Unlike [Archive::put], which is a no-op when the index already has a readable value,
+/// Unlike [Archive::put], which is a no-op when the index already exists,
 /// [MultiArchive::put_multi] allows storing additional `(key, value)` pairs
 /// at an existing index.
 pub trait MultiArchive: Archive {
-    /// Retrieve all readable values stored at the given index.
+    /// Retrieve all values stored at the given index.
     ///
-    /// Returns `None` if the index does not exist, has been pruned, or has no readable values.
+    /// Returns `None` if the index does not exist or has been pruned.
     fn get_all(
         &self,
         index: u64,
     ) -> impl Future<Output = Result<Option<Vec<Self::Value>>, Error>> + Send + use<'_, Self>;
 
-    /// Check whether a readable value for `key` is stored at `index`.
+    /// Check whether `key` is stored at `index`.
     ///
-    /// Unlike [Archive::has] with [Identifier::Key], the check is scoped to a single index.
+    /// Unlike [Archive::has] with [Identifier::Key], the check is scoped to a
+    /// single index. Unlike [MultiArchive::get_all], no values are fetched.
     fn has_at<'a>(
         &'a self,
         index: u64,
@@ -258,8 +250,8 @@ mod tests {
     ) -> impl MultiArchive<Key = FixedBytes<64>, Value = i32> {
         let cfg = prunable::Config {
             translator: TwoCap,
-            key_partition: "test-key".into(),
             metadata_partition: "test-prunable-metadata".into(),
+            key_partition: "test-key".into(),
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             compression,

@@ -55,6 +55,42 @@ pub struct WriteConfig {
     pub mode: PartialWriteMode,
 }
 
+#[cfg(feature = "arbitrary")]
+const WRITE_CONFIG_RATE_STEPS: u16 = 101;
+#[cfg(feature = "arbitrary")]
+const WRITE_CONFIG_RATE_PAIRS: u16 = WRITE_CONFIG_RATE_STEPS * WRITE_CONFIG_RATE_STEPS;
+#[cfg(feature = "arbitrary")]
+const WRITE_CONFIG_CELLS: u16 = WRITE_CONFIG_RATE_PAIRS * 2;
+
+#[cfg(feature = "arbitrary")]
+fn write_config_from_cell(cell: u16) -> WriteConfig {
+    let rates = cell % WRITE_CONFIG_RATE_PAIRS;
+    let failure = rates % WRITE_CONFIG_RATE_STEPS;
+    let retention = rates / WRITE_CONFIG_RATE_STEPS;
+    WriteConfig {
+        failure_rate: Probability::new(u64::from(failure), 100).unwrap(),
+        retention_rate: Probability::new(u64::from(retention), 100).unwrap(),
+        mode: if cell < WRITE_CONFIG_RATE_PAIRS {
+            PartialWriteMode::Prefix
+        } else {
+            PartialWriteMode::Subset
+        },
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for WriteConfig {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(write_config_from_cell(
+            u.int_in_range(0..=WRITE_CONFIG_CELLS - 1)?,
+        ))
+    }
+
+    fn size_hint(_: usize) -> (usize, Option<usize>) {
+        (2, Some(2))
+    }
+}
+
 /// Fault configuration for `resize` operations and partial failure behavior.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResizeConfig {
@@ -870,6 +906,38 @@ mod tests {
         sync::atomic::AtomicBool,
         task::{Context, Poll},
     };
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn test_write_config_arbitrary_is_compact_and_covers_grid() {
+        use arbitrary::{Arbitrary as _, Unstructured};
+
+        assert_eq!(WriteConfig::size_hint(0), (2, Some(2)));
+        let mut input = Unstructured::new(&[0, 0, 0]);
+        WriteConfig::arbitrary(&mut input).unwrap();
+        assert_eq!(input.len(), 1);
+
+        for cell in 0..WRITE_CONFIG_CELLS {
+            let config = write_config_from_cell(cell);
+            let rates = cell % WRITE_CONFIG_RATE_PAIRS;
+            assert_eq!(
+                config.failure_rate,
+                Probability::new(u64::from(rates % WRITE_CONFIG_RATE_STEPS), 100).unwrap()
+            );
+            assert_eq!(
+                config.retention_rate,
+                Probability::new(u64::from(rates / WRITE_CONFIG_RATE_STEPS), 100).unwrap()
+            );
+            assert_eq!(
+                config.mode,
+                if cell < WRITE_CONFIG_RATE_PAIRS {
+                    PartialWriteMode::Prefix
+                } else {
+                    PartialWriteMode::Subset
+                }
+            );
+        }
+    }
 
     #[derive(Clone)]
     struct OperationGate<B> {

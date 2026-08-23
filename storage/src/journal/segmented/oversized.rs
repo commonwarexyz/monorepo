@@ -60,7 +60,10 @@ use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{Error as RError, Handle, ReadOptions};
 use futures::future::try_join;
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, HashSet},
+    num::NonZeroUsize,
+};
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -145,13 +148,43 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         cfg: Config<V::Cfg>,
         checkpoint: Option<(u64, u64)>,
     ) -> Result<Self, Error> {
+        Self::init_inner(context, cfg, checkpoint, None).await
+    }
+
+    /// Initialize while preserving at least the given item count in each section.
+    pub(crate) async fn init_with_floors(
+        context: E,
+        cfg: Config<V::Cfg>,
+        minimum_items: &BTreeMap<u64, u64>,
+    ) -> Result<Self, Error> {
+        Self::init_inner(
+            context,
+            cfg,
+            None,
+            (!minimum_items.is_empty()).then_some(minimum_items),
+        )
+        .await
+    }
+
+    async fn init_inner(
+        context: E,
+        cfg: Config<V::Cfg>,
+        checkpoint: Option<(u64, u64)>,
+        minimum_items: Option<&BTreeMap<u64, u64>>,
+    ) -> Result<Self, Error> {
         // Initialize both journals
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
             page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
         };
-        let index = FixedJournal::init(context.child("index"), index_cfg).await?;
+        let index = match minimum_items {
+            Some(minimum_items) => {
+                FixedJournal::init_with_floors(context.child("index"), index_cfg, minimum_items)
+                    .await?
+            }
+            None => FixedJournal::init(context.child("index"), index_cfg).await?,
+        };
 
         let value_cfg = GlobConfig {
             partition: cfg.value_partition,
@@ -162,11 +195,14 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let values = Glob::init(context.child("values"), value_cfg).await?;
 
         let oversized = Self { index, values };
+        if let Some(minimum_items) = minimum_items {
+            oversized.validate_value_floors(minimum_items).await?;
+        }
 
         // Perform crash recovery
         let oversized = match checkpoint {
             Some((section, index_size)) => oversized.restore(section, index_size).await?,
-            None => oversized.repair().await?,
+            None => oversized.repair(minimum_items).await?,
         };
 
         Ok(oversized)
@@ -178,7 +214,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// are appended sequentially and value offsets are monotonically increasing within a
     /// section, all earlier entries must be range-valid (their value checksums are
     /// verified lazily at read).
-    async fn repair(mut self) -> Result<Self, Error> {
+    async fn repair(mut self, minimum_items: Option<&BTreeMap<u64, u64>>) -> Result<Self, Error> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
 
@@ -235,6 +271,16 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             let (valid_count, glob_target) = self
                 .find_last_valid_entry(section, entry_count, glob_size)
                 .await?;
+            let minimum = minimum_items
+                .and_then(|items| items.get(&section))
+                .copied()
+                .unwrap_or(0);
+            if valid_count < minimum {
+                return Err(Error::Corruption(format!(
+                    "section {section} retains {valid_count} valid items, below its validation \
+                     floor of {minimum}"
+                )));
+            }
 
             // Rewind index if any entries are invalid
             if valid_count < entry_count {
@@ -266,6 +312,41 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 
         // Clean up orphan value sections that don't exist in index
         self.cleanup_orphan_value_sections().await
+    }
+
+    /// Verify that every floor's final index entry is backed by retained value bytes before repair
+    /// can rewind either journal. Value checksums within the floor were verified before publication
+    /// and are not read again here.
+    async fn validate_value_floors(&self, minimum_items: &BTreeMap<u64, u64>) -> Result<(), Error> {
+        for (&section, &minimum) in minimum_items {
+            if minimum == 0 {
+                continue;
+            }
+
+            let entry = match self.index.get(section, minimum - 1).await {
+                Ok(entry) => entry,
+                Err(Error::ItemOutOfRange(_) | Error::Runtime(RError::InvalidChecksum)) => {
+                    return Err(Error::Corruption(format!(
+                        "section {section} validation floor ends at an unreadable index entry"
+                    )));
+                }
+                Err(err) => return Err(err),
+            };
+            let (offset, size) = entry.value_location();
+            let required = offset.checked_add(u64::from(size)).ok_or_else(|| {
+                Error::Corruption(format!(
+                    "section {section} validation floor has an overflowing value range"
+                ))
+            })?;
+            let retained = self.values.size(section)?;
+            if retained < required {
+                return Err(Error::Corruption(format!(
+                    "section {section} retains {retained} value bytes, below the validation \
+                     floor of {required}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Restore the journals to exactly the durable state `(section, index_size)`
@@ -479,6 +560,12 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Return the number of index entries in `section`.
     pub(crate) fn section_len(&self, section: u64) -> Result<u64, Error> {
         self.index.section_len(section)
+    }
+
+    /// Return the number of bytes retained in a section's value blob, including bytes that are no
+    /// longer referenced by an index entry.
+    pub(crate) fn value_section_size(&self, section: u64) -> Result<u64, Error> {
+        self.values.size(section)
     }
 
     /// Consumes the journal and returns an owned [Replay] reader over index entries

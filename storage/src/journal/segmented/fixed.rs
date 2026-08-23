@@ -24,11 +24,15 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    Blob, Handle, Metrics, ReadOptions, Storage,
-    buffer::paged::{CacheRef, Replay as BlobReplay},
+    Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
+    buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use commonware_utils::NZUsize;
-use std::{collections::VecDeque, marker::PhantomData, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    marker::PhantomData,
+    num::NonZeroUsize,
+};
 use tracing::{trace, warn};
 
 /// State for replaying a single section's blob.
@@ -63,7 +67,46 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// See [Journal::init].
-    async fn init(context: E, cfg: Config) -> Result<Self, Error> {
+    async fn init(
+        context: E,
+        cfg: Config,
+        minimum_items: Option<&BTreeMap<u64, u64>>,
+    ) -> Result<Self, Error> {
+        if let Some(minimum_items) = minimum_items {
+            let stored = match context.scan(&cfg.partition).await {
+                Ok(names) => names.into_iter().collect::<BTreeSet<_>>(),
+                Err(RError::PartitionMissing(_)) => BTreeSet::new(),
+                Err(err) => return Err(Error::Runtime(err)),
+            };
+            for (&section, &items) in minimum_items {
+                let name = section.to_be_bytes();
+                if !stored.contains(name.as_slice()) {
+                    return Err(Error::Corruption(format!(
+                        "section {section} has a validation floor but no blob"
+                    )));
+                }
+                let required = items.checked_mul(Self::CHUNK_SIZE_U64).ok_or_else(|| {
+                    Error::Corruption(format!(
+                        "section {section} validation floor {items} overflows its byte size"
+                    ))
+                })?;
+                let (blob, physical_size) = context.open(&cfg.partition, &name).await?;
+                let recoverable = Writer::<E::Blob>::has_recoverable_prefix(
+                    &blob,
+                    physical_size,
+                    cfg.page_cache.page_size(),
+                    required,
+                    ReadOptions::default(),
+                )
+                .await?;
+                if !recoverable {
+                    return Err(Error::Corruption(format!(
+                        "section {section} does not retain its {required}-byte validation floor"
+                    )));
+                }
+            }
+        }
+
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: AppendFactory {
@@ -335,7 +378,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Backing blobs are opened and their page prefixes are validated during initialization. Use
     /// `replay` to iterate over all items.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+        Ok(Self(Box::new(Inner::init(context, cfg, None).await?)))
+    }
+
+    /// Initialize while preserving at least the given item count in each section.
+    pub(crate) async fn init_with_floors(
+        context: E,
+        cfg: Config,
+        minimum_items: &BTreeMap<u64, u64>,
+    ) -> Result<Self, Error> {
+        Ok(Self(Box::new(
+            Inner::init(context, cfg, Some(minimum_items)).await?,
+        )))
     }
 
     /// Append a new item to the journal in the given section.
@@ -1575,7 +1629,7 @@ mod tests {
     #[test_traced]
     fn test_segmented_fixed_validates_pages_before_trailing_bytes() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             const LOGICAL_PAGE_SIZE: u64 = 5;
             const SECTION: u64 = 0;
 
@@ -1617,7 +1671,7 @@ mod tests {
             // Backward sizing stops at valid page 5 and reports 30 logical bytes. Item alignment
             // alone selects 24, inside torn page 4, which `Writer::resize` cannot preserve.
             // Forward page validation finds 20 contiguous bytes and selects safe item boundary 16.
-            corrupt_page(&context, &cfg.partition, SECTION, 4, LOGICAL_PAGE_SIZE).await;
+            corrupt_page(&mut context, &cfg.partition, SECTION, 4, LOGICAL_PAGE_SIZE).await;
 
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
                 .await

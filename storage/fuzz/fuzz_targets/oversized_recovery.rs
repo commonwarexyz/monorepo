@@ -15,11 +15,10 @@ use commonware_storage::journal::{
     Error as JournalError,
     segmented::oversized::{Config, Oversized, Record},
 };
-use commonware_storage_fuzz::IndexMutations;
 use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     num::{NonZeroU16, NonZeroUsize},
 };
 
@@ -108,9 +107,9 @@ enum CorruptionType {
     /// Delete glob section
     DeleteGlob { section: u64 },
     /// Extend index with garbage
-    ExtendIndex { section: u64 },
+    ExtendIndex { section: u64, garbage: [u8; 32] },
     /// Extend glob with garbage
-    ExtendGlob { section: u64 },
+    ExtendGlob { section: u64, garbage: [u8; 64] },
 }
 
 impl<'a> Arbitrary<'a> for CorruptionType {
@@ -143,9 +142,11 @@ impl<'a> Arbitrary<'a> for CorruptionType {
             }),
             6 => Ok(CorruptionType::ExtendIndex {
                 section: u.int_in_range(1..=3)?,
+                garbage: u.arbitrary()?,
             }),
             _ => Ok(CorruptionType::ExtendGlob {
                 section: u.int_in_range(1..=3)?,
+                garbage: u.arbitrary()?,
             }),
         }
     }
@@ -165,16 +166,6 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
-
-// Fixed invalid extensions cannot replay an authenticated page or value frame into a truncated
-// section, so every CRC-valid record remains suitable for the entry-identity oracle.
-const INDEX_EXTENSION: [u8; 32] = [0xFF; 32];
-const VALUE_EXTENSION: [u8; 64] = [0xFF; 64];
-
-fn overlaps_existing_blob(offset: u64, write_len: usize, blob_size: u64) -> bool {
-    let end = offset.saturating_add(write_len as u64);
-    offset < blob_size && end > offset
-}
 
 fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
     Config {
@@ -256,12 +247,17 @@ fn fuzz(input: FuzzInput) {
             drop(oversized);
         }
 
-        // Phase 2: Apply corruptions
-        // A successful checksum authenticates bytes for this oracle. Limit each journal section
-        // to one byte-producing mutation so the mutator cannot assemble a replacement payload and
-        // matching checksum across an extension and later overwrite. Truncations remain composable.
-        let mut index_mutations = IndexMutations::default();
-        let mut modified_value_sections = BTreeSet::new();
+        // Phase 2: Apply corruptions. Under the fuzzer's CRC assumption, only a write overlapping
+        // bytes from an original authenticated index page can explain an integrity error. Track
+        // those original extents so a pure extension, including a later rewrite of that extension,
+        // cannot suppress the recovery oracle.
+        let mut authenticated_index_extents = BTreeMap::new();
+        for section in 1u64..=3 {
+            if let Ok((_blob, size)) = context.open(INDEX_PARTITION, &section.to_be_bytes()).await {
+                authenticated_index_extents.insert(section, size);
+            }
+        }
+        let mut index_page_integrity_may_be_invalidated = false;
         for corruption in &input.corruptions {
             match corruption {
                 CorruptionType::TruncateIndex {
@@ -272,8 +268,12 @@ fn fuzz(input: FuzzInput) {
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
                         let new_size = (size * (*size_factor as u64)) / 256;
-                        let _ = blob.resize(new_size).await;
-                        let _ = blob.sync().await;
+                        if blob.resize(new_size).await.is_ok()
+                            && blob.sync().await.is_ok()
+                            && let Some(extent) = authenticated_index_extents.get_mut(section)
+                        {
+                            *extent = (*extent).min(new_size);
+                        }
                     }
                 }
                 CorruptionType::TruncateGlob {
@@ -293,9 +293,6 @@ fn fuzz(input: FuzzInput) {
                     offset_factor,
                     data,
                 } => {
-                    if !index_mutations.can_modify(*section) {
-                        continue;
-                    }
                     if let Ok((blob, size)) =
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                         && size > 0
@@ -307,8 +304,12 @@ fn fuzz(input: FuzzInput) {
                         let result = blob
                             .write_at(offset, data.to_vec(), WriteOptions::SYNC)
                             .await;
-                        if result.is_ok() && overlaps_existing_blob(offset, data.len(), size) {
-                            index_mutations.record_overwrite(*section);
+                        if result.is_ok()
+                            && authenticated_index_extents
+                                .get(section)
+                                .is_some_and(|&authenticated_extent| offset < authenticated_extent)
+                        {
+                            index_page_integrity_may_be_invalidated = true;
                         }
                     }
                 }
@@ -317,20 +318,14 @@ fn fuzz(input: FuzzInput) {
                     offset_factor,
                     data,
                 } => {
-                    if modified_value_sections.contains(section) {
-                        continue;
-                    }
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                         && size > 0
                     {
                         let offset = (size * (*offset_factor as u64)) / 256;
-                        let result = blob
+                        let _ = blob
                             .write_at(offset, data.to_vec(), WriteOptions::SYNC)
                             .await;
-                        if result.is_ok() && overlaps_existing_blob(offset, data.len(), size) {
-                            modified_value_sections.insert(*section);
-                        }
                     }
                 }
                 CorruptionType::DeleteIndex { section } => {
@@ -339,44 +334,30 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .is_ok()
                     {
-                        index_mutations.remove(*section);
+                        authenticated_index_extents.remove(section);
                     }
                 }
                 CorruptionType::DeleteGlob { section } => {
-                    if context
+                    let _ = context
                         .remove(VALUE_PARTITION, Some(&section.to_be_bytes()))
-                        .await
-                        .is_ok()
-                    {
-                        modified_value_sections.remove(section);
-                    }
+                        .await;
                 }
-                CorruptionType::ExtendIndex { section } => {
-                    if !index_mutations.can_modify(*section) {
-                        continue;
-                    }
+                CorruptionType::ExtendIndex { section, garbage } => {
                     if let Ok((blob, size)) =
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
-                        && blob
-                            .write_at(size, INDEX_EXTENSION.to_vec(), WriteOptions::SYNC)
-                            .await
-                            .is_ok()
                     {
-                        index_mutations.record_extension(*section);
+                        let _ = blob
+                            .write_at(size, garbage.to_vec(), WriteOptions::SYNC)
+                            .await;
                     }
                 }
-                CorruptionType::ExtendGlob { section } => {
-                    if modified_value_sections.contains(section) {
-                        continue;
-                    }
+                CorruptionType::ExtendGlob { section, garbage } => {
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
-                        && blob
-                            .write_at(size, VALUE_EXTENSION.to_vec(), WriteOptions::SYNC)
-                            .await
-                            .is_ok()
                     {
-                        modified_value_sections.insert(*section);
+                        let _ = blob
+                            .write_at(size, garbage.to_vec(), WriteOptions::SYNC)
+                            .await;
                     }
                 }
             }
@@ -389,7 +370,7 @@ fn fuzz(input: FuzzInput) {
                 // Existing-byte overwrites in the paged index can invalidate fixed-journal
                 // integrity checks before oversized recovery has a chance to inspect entries.
                 Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
-                    if index_mutations.may_accept_invalid_checksum() =>
+                    if index_page_integrity_may_be_invalidated =>
                 {
                     return;
                 }

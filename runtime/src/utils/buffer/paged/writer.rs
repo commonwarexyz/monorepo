@@ -885,10 +885,57 @@ impl<B: Blob> Writer<B> {
     pub async fn recoverable_prefix_len(&self, read_options: ReadOptions) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size();
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
+        Self::recoverable_prefix_len_from_pages(
+            &self.blob,
+            logical_page_size,
+            total_pages,
+            None,
+            read_options,
+        )
+        .await
+    }
+
+    /// Return whether a raw paged blob has a well-formed logical prefix of `minimum_len` bytes.
+    ///
+    /// Unlike [`Self::new`], this does not resize the blob. `physical_size` is the size reported
+    /// when `blob` was opened, and `logical_page_size` is the page size used to write it. Validation
+    /// stops once the requested prefix is covered or the first short or invalid page is reached.
+    pub async fn has_recoverable_prefix(
+        blob: &B,
+        physical_size: u64,
+        logical_page_size: u64,
+        minimum_len: u64,
+        read_options: ReadOptions,
+    ) -> Result<bool, Error> {
+        if minimum_len == 0 {
+            return Ok(true);
+        }
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        let total_pages = physical_size / physical_page_size;
+        let recoverable = Self::recoverable_prefix_len_from_pages(
+            blob,
+            logical_page_size,
+            total_pages,
+            Some(minimum_len),
+            read_options,
+        )
+        .await?;
+        Ok(recoverable >= minimum_len)
+    }
+
+    async fn recoverable_prefix_len_from_pages(
+        blob: &B,
+        logical_page_size: u64,
+        total_pages: u64,
+        stop_at: Option<u64>,
+        read_options: ReadOptions,
+    ) -> Result<u64, Error> {
         let mut valid_len = 0u64;
         for page in 0..total_pages {
             match super::get_page_with_checksum_from_blob(
-                &self.blob,
+                blob,
                 page,
                 logical_page_size,
                 read_options,
@@ -898,13 +945,16 @@ impl<B: Blob> Writer<B> {
                 Ok((logical, _)) => {
                     let len = logical.len() as u64;
                     valid_len += len;
-                    // A partial page can only legitimately be the last one, so stop here.
-                    if len < logical_page_size {
+                    // A partial page can only legitimately be the last one. A bounded caller also
+                    // needs no information after the page covering its requested prefix.
+                    if len < logical_page_size
+                        || stop_at.is_some_and(|minimum| valid_len >= minimum)
+                    {
                         break;
                     }
                 }
                 // First torn/invalid page: the contiguous valid prefix ends here.
-                Err(Error::InvalidChecksum) => break,
+                Err(Error::InvalidChecksum | Error::BlobInsufficientLength) => break,
                 Err(err) => return Err(err),
             }
         }

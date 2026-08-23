@@ -23,17 +23,6 @@ use std::{
     task::Poll,
 };
 
-/// Construct in-memory storage with a shared default storage buffer pool.
-#[cfg(any(test, feature = "test-utils"))]
-pub fn memory_storage() -> MemoryStorage {
-    static POOL: std::sync::OnceLock<BufferPool> = std::sync::OnceLock::new();
-    let pool = POOL.get_or_init(|| {
-        let mut registry = crate::telemetry::metrics::Registry::default();
-        BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry)
-    });
-    MemoryStorage::new(pool.clone())
-}
-
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
 const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;

@@ -164,8 +164,8 @@ fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()
 fn prunable_archive_config(page_cache: CacheRef, partition: &str) -> prunable::Config<TwoCap, ()> {
     prunable::Config {
         translator: TwoCap,
-        key_partition: format!("{partition}-key"),
         metadata_partition: format!("{partition}-metadata"),
+        key_partition: format!("{partition}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{partition}-value"),
         compression: None,

@@ -4,10 +4,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
-    Blob, ReadOptions, Storage, WriteOptions,
-    mocks::{MemoryStorage, memory_storage},
+    Blob, BufferPooler, ReadOptions, Runner, Storage, WriteOptions, deterministic,
+    mocks::MemoryStorage,
 };
-use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 
 const PARTITION: &str = "blob_creation";
@@ -70,9 +69,8 @@ async fn assert_recovers(
 }
 
 fn fuzz(input: FuzzInput) {
-    let storage = memory_storage();
-
-    block_on(async move {
+    deterministic::Runner::default().start(|context| async move {
+        let storage = MemoryStorage::new(context.storage_buffer_pool().clone());
         let versions = input.blob_version..=input.blob_version;
 
         // Create the canonical V1 region through the same storage path used in production.

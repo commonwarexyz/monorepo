@@ -13,7 +13,6 @@ use commonware_storage::merkle::{
     Bagging::ForwardFold, Family as MerkleFamily, Location, full::Config,
     hasher::Standard as StandardHasher, mmb, mmr,
 };
-use commonware_storage_fuzz::write_config;
 use commonware_utils::{NZU64, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -82,7 +81,6 @@ struct FuzzInput {
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
     /// Failure and byte-retention configuration for write operations.
-    #[arbitrary(with = write_config)]
     write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
