@@ -118,6 +118,11 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Per-section boundaries that may be published once their data sync completes.
     barriers: BTreeMap<u64, Barrier>,
 
+    /// Sections whose latest completed blocking data sync has not been published by a later
+    /// checkpoint sync. This set is replaced, rather than accumulated, after each blocking sync
+    /// so restart validation remains bounded by one completed sync batch.
+    unpublished: BTreeSet<u64>,
+
     /// Sections with writes not yet included in any sync request. Moved into `requested` when a
     /// sync is requested; the `syncs` metric counts only this set, so each section of writes is
     /// counted once per request.
@@ -430,6 +435,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             oversized,
             checkpoint,
             barriers,
+            unpublished: BTreeSet::new(),
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
@@ -614,6 +620,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.pending = self.pending.split_off(&min);
         self.requested = self.requested.split_off(&min);
         self.barriers = self.barriers.split_off(&min);
+        self.unpublished = self.unpublished.split_off(&min);
         self.invalid_positions = self.invalid_positions.split_off(&min);
 
         // Remove all indices that are less than min
@@ -656,30 +663,14 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     }
 
     /// See [crate::archive::Archive::sync].
-    async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
-        // Update metrics (`requested` sections were already counted by `start_sync`)
-        self.syncs.inc_by(self.pending.len() as u64);
-        self.requested.append(&mut self.pending);
-
-        let lengths = self
-            .requested
-            .iter()
-            .map(|&section| Ok((section, self.oversized.section_len(section)?)))
-            .collect::<Result<Vec<_>, crate::journal::Error>>()?;
-        self.oversized = self.oversized.sync(&self.requested).await?;
-
-        for (section, length) in lengths {
-            self.barriers
-                .entry(section)
-                .or_insert_with(|| Barrier::new(0))
-                .mark_durable(length);
-            self.stage_checkpoint(section, length);
-        }
-        if !self.requested.is_empty() {
-            self.checkpoint = self.checkpoint.sync().await?;
-        }
-        self.requested.clear();
-        Ok(self)
+    async fn sync(self: Box<Self>) -> Result<Box<Self>, Error> {
+        // The validation checkpoint is derived state, so it may safely trail the data by one
+        // completed sync. Reuse the pipelined path to publish that prior boundary concurrently
+        // with current data, then clear the covered requests only after both operations succeed.
+        let (mut archive, handle) = self.start_sync().await?;
+        handle.await.map_err(crate::journal::Error::Runtime)?;
+        archive.unpublished = std::mem::take(&mut archive.requested);
+        Ok(archive)
     }
 
     /// See [crate::archive::Archive::start_sync].
@@ -695,19 +686,23 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             .collect::<Result<Vec<_>, crate::journal::Error>>()?;
         let data;
         (self.oversized, data) = self.oversized.start_sync(&self.requested).await?;
-        if lengths.is_empty() {
-            return Ok((self, data));
-        }
 
         let completion: SyncCompletion = data.boxed().shared();
-        let mut publish = Vec::with_capacity(lengths.len());
+        let mut publish = Vec::with_capacity(self.unpublished.len() + lengths.len());
+        for &section in self.unpublished.difference(&self.requested) {
+            let barrier = self
+                .barriers
+                .entry(section)
+                .or_insert_with(|| Barrier::new(0));
+            publish.push((section, barrier.boundary()));
+        }
         for (section, length) in lengths {
             let barrier = self
                 .barriers
                 .entry(section)
                 .or_insert_with(|| Barrier::new(0));
-            barrier.record(length, completion.clone());
-            publish.push((section, barrier.boundary()));
+            let validated = barrier.record(length, completion.clone());
+            publish.push((section, validated));
         }
         let mut checkpoint_dirty = false;
         for (section, validated) in publish {

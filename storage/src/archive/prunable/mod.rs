@@ -251,8 +251,8 @@ mod tests {
         BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Storage as _,
         Supervisor as _, deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
-            release_next_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
+            fail_pending_syncs, release_next_pending_syncs, release_pending_syncs,
         },
         telemetry::metrics::has_metric_value,
     };
@@ -948,8 +948,7 @@ mod tests {
                 .expect("put_start_sync after prune should succeed");
             release_pending_syncs(&pending);
             second.await.expect("second sync handle should complete");
-            let archive = archive
-                .sync()
+            let archive = drive_pending_syncs(&pending, archive.sync())
                 .await
                 .expect("sync after prune should succeed");
 
@@ -1246,13 +1245,27 @@ mod tests {
         deterministic::Runner::from(checkpoint).start(|context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = subset_crash_config(&context);
-            let archive = Archive::<_, _, FixedBytes<4>, i32>::init(context.child("archive"), cfg)
-                .await
-                .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 0);
+            let archive = Archive::<_, _, FixedBytes<4>, i32>::init(
+                context.child("first_reopen"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+
+            // The repair sync publishes the checkpoint that preceded the appended occurrence.
+            // Startup validates only that one-item suffix and publishes its completed boundary.
+            assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
             assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![20, 99]));
             assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(1, 1)]);
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<4>, i32>::init(context.child("second_reopen"), cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+            assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![20, 99]));
         });
     }
 
@@ -1437,6 +1450,235 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(archive.values_validated_on_init(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_lazily_publishes_previous_durable_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(4));
+            cfg.key_partition = "blocking-checkpoint-lag-index".into();
+            cfg.metadata_partition = "blocking-checkpoint-lag-metadata".into();
+            cfg.value_partition = "blocking-checkpoint-lag-values".into();
+
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let archive = Archive::init(delayed.child("archive"), cfg.clone())
+                .await
+                .unwrap();
+
+            let (archive, first) = archive
+                .put_start_sync(0, test_key("zero"), 10)
+                .await
+                .unwrap();
+            assert_eq!(pending.lock().len(), 2);
+            release_pending_syncs(&pending);
+            first.await.unwrap();
+
+            let archive = archive.put(1, test_key("one"), 20).await.unwrap();
+            pending.arm();
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let task = delayed.inner.child("sync").spawn(|_| async move {
+                let archive = archive.sync().await.unwrap();
+                completed_clone.store(1, Ordering::Relaxed);
+                archive
+            });
+
+            while pending.calls() < 2 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+
+            // The marker for the first completed prefix must start alongside the second data sync,
+            // rather than after it:
+            //
+            // data:   [0 -------- 1 -------- 2)  <- current sync, two journals
+            // marker: [0 -------- 1)             <- previous durable boundary
+            let parked_syncs = pending.lock().len();
+            if parked_syncs != 3 {
+                // Let the spawned operation unwind before reporting the regression. Otherwise the
+                // deterministic runner would correctly keep waiting for its parked durability work.
+                pending.unblock();
+                let _ = task.await;
+                panic!(
+                    "blocking sync must not serialize the derived marker behind data: \
+                     parked {parked_syncs} durability operations"
+                );
+            }
+
+            // The two data journals enqueue first. Release only the metadata operation to prove
+            // that publishing the older boundary cannot satisfy the blocking data contract.
+            let metadata = pending.lock().remove(2);
+            metadata.blocked.await.unwrap();
+            metadata.release.send(Ok(())).unwrap();
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "publishing the previous marker must not complete the current data sync"
+            );
+
+            release_pending_syncs(&pending);
+            let archive = task.await.unwrap();
+            drop(archive);
+
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                delayed.inner.child("first_reopen"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 1);
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
+            drop(archive);
+
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                delayed.inner.child("second_reopen"),
+                cfg,
+            )
+            .await
+            .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_delays_immediately_ready_durable_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(4));
+            cfg.key_partition = "ready-checkpoint-lag-index".into();
+            cfg.metadata_partition = "ready-checkpoint-lag-metadata".into();
+            cfg.value_partition = "ready-checkpoint-lag-values".into();
+
+            let archive = Archive::init(context.child("archive"), cfg.clone())
+                .await
+                .unwrap();
+            let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
+            drop(archive);
+
+            // MemoryStorage returns an already-completed data-sync handle. The current boundary
+            // must still become publication debt for the next sync, rather than making this call
+            // synchronously persist a marker after its data:
+            //
+            // call 1: data [0, 1) ready, marker absent
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("first_reopen"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 1);
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_publishes_previous_durable_sections_across_section_changes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(1));
+            cfg.key_partition = "cross-section-checkpoint-lag-index".into();
+            cfg.metadata_partition = "cross-section-checkpoint-lag-metadata".into();
+            cfg.value_partition = "cross-section-checkpoint-lag-values".into();
+
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let archive = Archive::init(delayed.child("archive"), cfg.clone())
+                .await
+                .unwrap();
+            let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), 10))
+                .await
+                .unwrap();
+            let archive = drive_pending_syncs(&pending, archive.put_sync(1, test_key("one"), 20))
+                .await
+                .unwrap();
+            let archive = drive_pending_syncs(&pending, archive.put_sync(2, test_key("two"), 30))
+                .await
+                .unwrap();
+            drop(archive);
+
+            // Every item occupies its own section. Each blocking sync publishes the preceding
+            // call's completed section while synchronizing the current section:
+            //
+            // call 1: data section 0, marker absent
+            // call 2: data section 1, marker section 0
+            // call 3: data section 2, marker section 1
+            //
+            // The marker may trail the data once, but changing sections must not strand every
+            // earlier proof and turn startup validation into an unbounded full-archive scan.
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("first_reopen"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 1);
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(30));
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_empty_sync_publishes_final_durable_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(1));
+            cfg.key_partition = "empty-sync-checkpoint-index".into();
+            cfg.metadata_partition = "empty-sync-checkpoint-metadata".into();
+            cfg.value_partition = "empty-sync-checkpoint-values".into();
+
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let archive = Archive::init(delayed.child("archive"), cfg.clone())
+                .await
+                .unwrap();
+            let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), 10))
+                .await
+                .unwrap();
+            assert_eq!(pending.starts(), 2);
+
+            // A blocking sync with no new data flushes the final lagging marker without
+            // re-synchronizing the already durable section:
+            //
+            // call 1: data section 0, marker absent
+            // call 2: data absent,    marker section 0
+            let archive = drive_pending_syncs(&pending, archive.sync()).await.unwrap();
+            assert_eq!(pending.starts(), 3);
+            drop(archive);
+
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
         });
     }
 
