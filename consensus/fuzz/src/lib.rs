@@ -100,9 +100,21 @@ pub(crate) const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 1;
 const MAX_REQUIRED_CONTAINERS: u64 = 30;
+const MAX_TERM_LENGTH: u32 = 5;
+/// Scripted adversarial rounds a twins campaign generates at most. Each round
+/// is one leader term, so the scripted prefix spans `rounds * term_length`
+/// views before the liveness gate starts counting.
+const TWINS_MAX_ROUNDS: u64 = 8;
 pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 const FUZZ_RUNTIME_TIMEOUT_FLOOR: Duration = Duration::from_secs(360);
-const FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER: Duration = Duration::from_secs(4);
+/// Budget per finalization a liveness gate demands. Sized for stable leaders
+/// facing an equivocating twin, where a nullify inside a term withholds
+/// finalize votes for the rest of that term (see `Same-Term Vote Safety` in
+/// [commonware_consensus::simplex]), so a finalization costs several views.
+const FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER: Duration = Duration::from_secs(14);
+/// Budget per view of a twins run's scripted adversarial prefix, sized for a
+/// term that stalls rather than one that certifies promptly.
+const FUZZ_RUNTIME_TIMEOUT_PER_PREFIX_VIEW: Duration = Duration::from_secs(3);
 /// Bounded pre-GST fault phase: how long network faults stay active before a
 /// run that has not already finished is given a GST transition. Shared by the
 /// ByzzFuzz runner and the marshal multi-node liveness runner.
@@ -111,20 +123,37 @@ const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
 
-fn fuzz_runtime_timeout(required_containers: u64) -> Duration {
-    let work = u32::try_from(required_containers).unwrap_or(u32::MAX);
-    FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER
-        .saturating_mul(work)
+/// Simulated-time deadline for a run, derived from the work it demands: a run
+/// traverses `prefix_views` scripted adversarial views (zero outside twins) and
+/// then waits for `required_containers` finalizations at every checked reporter.
+/// The floor keeps cheap runs at the budget they have always had.
+fn fuzz_runtime_timeout(required_containers: u64, prefix_views: u64) -> Duration {
+    let scale =
+        |unit: Duration, count: u64| unit.saturating_mul(u32::try_from(count).unwrap_or(u32::MAX));
+    scale(FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER, required_containers)
+        .saturating_add(scale(FUZZ_RUNTIME_TIMEOUT_PER_PREFIX_VIEW, prefix_views))
         .max(FUZZ_RUNTIME_TIMEOUT_FLOOR)
+}
+
+/// Views of scripted adversarial prefix a twins run traverses before its
+/// liveness gate opens (see `MockTwinsBackend::framework`).
+fn twins_prefix_views(required_containers: u64, term_length: TermLength) -> u64 {
+    required_containers
+        .clamp(1, TWINS_MAX_ROUNDS)
+        .saturating_mul(term_length.get())
 }
 
 fn bounded_fuzz_runtime_config(
     raw_bytes: &[u8],
     required_containers: u64,
+    prefix_views: u64,
 ) -> deterministic::Config {
     deterministic::Config::new()
         .with_rng(Box::new(FuzzRng::new(raw_bytes.to_vec())))
-        .with_timeout(Some(fuzz_runtime_timeout(required_containers)))
+        .with_timeout(Some(fuzz_runtime_timeout(
+            required_containers,
+            prefix_views,
+        )))
 }
 
 pub(crate) fn fuzz_mailbox_size(
@@ -479,7 +508,7 @@ impl Arbitrary<'_> for FuzzInput {
 
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
-        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
         let optimistic_views =
             ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
         let heterogeneous_optimism = u.arbitrary()?;
@@ -1998,7 +2027,7 @@ fn run_standard_once<P: simplex::Simplex>(
     happens_before: bool,
     warn_dispatch: Option<Dispatch>,
 ) -> Option<RunAudit> {
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -2252,7 +2281,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
     mut input: FuzzInput,
     notarize_omission: Option<NotarizeOmission>,
 ) -> (bool, bool) {
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(move |mut context| async move {
@@ -3134,7 +3163,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         twins::Framework {
             participants,
             faults: self.input.configuration.faults as usize,
-            rounds: (self.input.required_containers as usize).clamp(1, 8),
+            rounds: self.input.required_containers.clamp(1, TWINS_MAX_ROUNDS) as usize,
             mode,
             max_cases: 16,
         }
@@ -3563,7 +3592,14 @@ fn run_twins<P: simplex::Simplex>(
     // all-honest configuration would stall this quorum-tight one.
     input.certify = CertifyChoice::Always;
 
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
+    let cfg = bounded_fuzz_runtime_config(
+        &input.raw_bytes,
+        input.required_containers,
+        twins_prefix_views(
+            input.required_containers,
+            P::effective_term_length(input.term_length),
+        ),
+    );
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -4072,10 +4108,30 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
 mod tests {
     use super::*;
 
+    /// The deadline must outlast the costliest workload the sampler can draw.
+    /// A twins campaign under stable leaders was measured at ~12s of simulated
+    /// time per demanded finalization, so widening any sampled bound without
+    /// revisiting the per-unit budgets must fail here rather than in the fuzzer.
     #[test]
-    fn fuzz_runtime_timeout_scales_for_large_in_tree_runs() {
-        assert_eq!(fuzz_runtime_timeout(30), FUZZ_RUNTIME_TIMEOUT_FLOOR);
-        assert_eq!(fuzz_runtime_timeout(1_000), Duration::from_secs(4_000));
+    fn fuzz_runtime_timeout_covers_worst_sampled_workload() {
+        assert_eq!(
+            fuzz_runtime_timeout(MIN_REQUIRED_CONTAINERS, 0),
+            FUZZ_RUNTIME_TIMEOUT_FLOOR
+        );
+
+        let prefix_views = twins_prefix_views(
+            MAX_REQUIRED_CONTAINERS,
+            TermLength::new(NZU32!(MAX_TERM_LENGTH)),
+        );
+        let worst = fuzz_runtime_timeout(MAX_REQUIRED_CONTAINERS, prefix_views);
+        assert!(
+            worst > FUZZ_RUNTIME_TIMEOUT_FLOOR,
+            "per-workload scaling never engages inside the sampled input space"
+        );
+        assert!(
+            worst >= Duration::from_secs(12) * MAX_REQUIRED_CONTAINERS as u32,
+            "{worst:?} is below the measured cost of {MAX_REQUIRED_CONTAINERS} finalizations"
+        );
     }
 
     fn audit_input() -> FuzzInput {
