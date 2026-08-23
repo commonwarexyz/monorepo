@@ -7176,6 +7176,10 @@ mod tests {
         fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
             self.inner.ranges_from(from)
         }
+
+        fn last_readable_index_at_or_before(&self, height: Height) -> Option<Height> {
+            self.inner.last_readable_index_at_or_before(height)
+        }
     }
 
     struct ReadProbe {
@@ -7270,6 +7274,20 @@ mod tests {
 
         fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
             self.inner.ranges_from(from)
+        }
+
+        fn last_readable_index_at_or_before(&self, mut height: Height) -> Option<Height> {
+            loop {
+                let candidate = self.inner.last_readable_index_at_or_before(height)?;
+                if !self
+                    .unreadable
+                    .iter()
+                    .any(|(unreadable, _)| *unreadable == candidate)
+                {
+                    return Some(candidate);
+                }
+                height = candidate.previous()?;
+            }
         }
     }
 
@@ -7846,6 +7864,13 @@ mod tests {
                 vec![(Height::new(1), Height::new(2))]
             );
             assert_eq!(
+                store::Certificates::last_readable_index_at_or_before(
+                    &finalizations,
+                    Height::new(2),
+                ),
+                Some(Height::new(1))
+            );
+            assert_eq!(
                 store::Blocks::next_gap(&blocks, Height::new(2)),
                 (Some(Height::new(2)), None)
             );
@@ -8046,6 +8071,112 @@ mod tests {
 
             assert_eq!(floor.height(), Some(Height::new(1)));
             assert_eq!(floor.round(), round_2);
+        });
+    }
+
+    /// Processed-height metadata and certificate values cross independent durability boundaries.
+    /// A restart can therefore retain an earlier authenticated round while the physical endpoint
+    /// at the processed height has no readable value:
+    ///
+    /// ```text
+    /// processed height:                         2
+    /// physical finalizations: [1: round 1] [2: unreadable]
+    /// readable finalizations: [1: round 1] [             ]
+    /// restored round:             round 1
+    /// ```
+    ///
+    /// The unreadable occurrence remains visible for repair, but cannot erase the earlier
+    /// authenticated floor or force recovery to scan values backward.
+    #[test_traced("WARN")]
+    fn test_standard_processed_round_uses_previous_readable_finalization() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let prefix = "previous-readable-processed-round";
+            let (mut finalizations, mut blocks) =
+                paced_finalized_stores(&context, prefix, Duration::ZERO).await;
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block_1 = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_2 = make_raw_block(block_1.digest(), Height::new(2), 200);
+            let round_1 = Round::new(Epoch::zero(), View::new(1));
+            let finalization_1 = StandardHarness::make_finalization(
+                Proposal::new(round_1, View::zero(), block_1.digest()),
+                &schemes,
+                QUORUM,
+            );
+            let finalization_2 = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(2)),
+                    View::new(1),
+                    block_2.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+
+            finalizations = store::Certificates::put(
+                finalizations,
+                Height::new(1),
+                block_1.digest(),
+                finalization_1,
+            )
+            .await
+            .unwrap();
+            finalizations = store::Certificates::put(
+                finalizations,
+                Height::new(2),
+                block_2.digest(),
+                finalization_2,
+            )
+            .await
+            .unwrap();
+            blocks = store::Blocks::put(blocks, block_2.clone()).await.unwrap();
+            finalizations = store::Certificates::sync(finalizations).await.unwrap();
+            blocks = store::Blocks::sync(blocks).await.unwrap();
+            seed_processed_height(context.child("metadata"), prefix, Height::new(2)).await;
+
+            let finalizations = UnreadableCertificates {
+                inner: finalizations,
+                unreadable: vec![(Height::new(2), block_2.digest())],
+                probe: None,
+            };
+            assert_eq!(
+                store::Certificates::ranges_from(&finalizations, Height::zero())
+                    .collect::<Vec<_>>(),
+                vec![(Height::new(1), Height::new(2))]
+            );
+            assert!(
+                store::Certificates::get(
+                    &finalizations,
+                    commonware_storage::archive::Identifier::Index(Height::new(1).get()),
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+            assert!(
+                store::Certificates::get(
+                    &finalizations,
+                    commonware_storage::archive::Identifier::Index(Height::new(2).get()),
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+
+            let config = prunable_actor_config(&context, prefix, provider);
+            let (_actor, _mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                finalizations,
+                blocks,
+                config,
+            )
+            .await;
+
+            assert_eq!(floor.height(), Some(Height::new(2)));
+            assert_eq!(floor.round(), round_1);
         });
     }
 

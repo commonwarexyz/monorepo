@@ -118,6 +118,13 @@ pub trait Certificates: Send + Sync + Sized + 'static {
     /// The ranges include retained index-journal occurrences whose values failed validation so
     /// recovery can request replacements. Call [Self::get] before relying on a candidate value.
     fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)>;
+
+    /// Retrieve the highest readable finalization height at or below `height`.
+    ///
+    /// Unlike [Self::ranges_from], this excludes physical index occurrences whose values failed
+    /// validation. Implementations must answer from maintained readable metadata without probing
+    /// an unbounded sequence of values.
+    fn last_readable_index_at_or_before(&self, height: Height) -> Option<Height>;
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and block digest.
@@ -297,6 +304,13 @@ where
         <Self as Archive>::ranges_from(self, from.get())
             .map(|(s, e)| (Height::new(s), Height::new(e)))
     }
+
+    fn last_readable_index_at_or_before(&self, height: Height) -> Option<Height> {
+        <Self as Archive>::ranges_from(self, Height::zero().get())
+            .filter_map(|(start, end)| (start <= height.get()).then_some(end.min(height.get())))
+            .max()
+            .map(Height::new)
+    }
 }
 
 impl<E, B> Blocks for immutable::Archive<E, B::Digest, B>
@@ -400,6 +414,13 @@ where
     fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
         self.indexed_ranges_from(from.get())
             .map(|(s, e)| (Height::new(s), Height::new(e)))
+    }
+
+    fn last_readable_index_at_or_before(&self, height: Height) -> Option<Height> {
+        <Self as Archive>::ranges_from(self, Height::zero().get())
+            .filter_map(|(start, end)| (start <= height.get()).then_some(end.min(height.get())))
+            .max()
+            .map(Height::new)
     }
 }
 

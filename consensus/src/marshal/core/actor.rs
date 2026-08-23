@@ -2415,22 +2415,15 @@ where
         finalized_blocks: &FB,
         height: Option<Height>,
     ) -> Round {
-        let processed_round = height.and_then(|height| {
-            finalizations_by_height
-                .ranges_from(Height::zero())
-                .filter_map(|(start, end)| (start <= height).then_some(end.min(height)))
-                .max()
-        });
+        let processed_round = height
+            .and_then(|height| finalizations_by_height.last_readable_index_at_or_before(height));
         let processed_round = match processed_round {
-            // Section-granular pruning can retain an unreadable indexed value below a durable
-            // floor anchor. Such a candidate contributes no authenticated round; the matching
-            // successor block and finalization below remain authoritative when present.
             Some(finalization_height) => match finalizations_by_height
                 .get(ArchiveID::Index(finalization_height.get()))
                 .await
             {
                 Ok(Some(finalization)) => finalization.round(),
-                Ok(None) => Round::zero(),
+                Ok(None) => panic!("readable processed finalization is missing"),
                 Err(err) => panic!("failed to get processed finalization: {err}"),
             },
             None => Round::zero(),
