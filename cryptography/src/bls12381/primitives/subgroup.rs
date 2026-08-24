@@ -125,10 +125,18 @@ const LOG2_3_SCALED_LOWER_BOUND: usize = 1584;
 ///
 /// Each combination has error at most `1/3`, so `t` of them give
 /// `3^-t <= 2^-security` once `t >= security / log2(3)` (81 at 128-bit).
+///
+/// The scaling is done in `u128` and saturates upward, so an absurd target asks
+/// for more combinations than any batch can afford — which falls back to
+/// per-point checking — rather than silently asking for fewer.
 const fn combinations_for_security(security: usize) -> usize {
-    security
-        .saturating_mul(1000)
-        .div_ceil(LOG2_3_SCALED_LOWER_BOUND)
+    let scaled = (security as u128) * 1000;
+    let combinations = scaled.div_ceil(LOG2_3_SCALED_LOWER_BOUND as u128);
+    if combinations > usize::MAX as u128 {
+        usize::MAX
+    } else {
+        combinations as usize
+    }
 }
 
 /// Largest supported number of parallel combinations per round.
@@ -210,13 +218,6 @@ fn round_cost(n: usize, m: u32) -> usize {
     (n - occupied) + 2 * occupied + (m as usize) * CHECK_COST
 }
 
-/// Plan the rounds: one width per round, together covering `combinations`.
-///
-/// Returns `None` if checking each point individually is cheaper.
-///
-/// Soundness holds for every plan (a round of width `m` has error `3^-m`, and
-/// the widths sum to at least `combinations`), so the cost model's constants
-/// only affect performance.
 /// Spread `combinations` over `rounds` rounds as evenly as possible.
 ///
 /// The widths differ by at most one, so a round count that does not divide the
@@ -230,6 +231,34 @@ fn spread(combinations: usize, rounds: usize) -> Vec<u32> {
         .collect()
 }
 
+/// Modeled cost of the plan that spreads `combinations` over `rounds` rounds,
+/// or `None` if that spread needs a round wider than `widest`.
+fn plan_cost(n: usize, combinations: usize, rounds: usize, widest: u32) -> Option<usize> {
+    let width = (combinations / rounds) as u32;
+    let wide = combinations % rounds;
+    if width + u32::from(wide > 0) > widest {
+        return None;
+    }
+    Some(
+        wide.saturating_mul(round_cost(n, width + 1))
+            .saturating_add((rounds - wide).saturating_mul(round_cost(n, width))),
+    )
+}
+
+/// Plan the rounds: one width per round, together covering `combinations`.
+///
+/// Returns `None` if checking each point individually is cheaper.
+///
+/// Only a couple of round counts per width can be worth considering. Round
+/// counts sharing a base width form a contiguous band, and within a band the
+/// modeled cost is linear in the round count, so an optimum always sits at a
+/// band's edge — which keeps the search proportional to the widths available
+/// rather than to the combinations required, and so bounded whatever soundness
+/// target a caller asks for.
+///
+/// Soundness holds for every plan (a round of width `m` has error `3^-m`, and
+/// the widths sum to `combinations`), so the cost model's constants only affect
+/// performance.
 fn plan(n: usize, combinations: usize) -> Option<Vec<u32>> {
     if combinations == 0 {
         return Some(Vec::new());
@@ -243,26 +272,26 @@ fn plan(n: usize, combinations: usize) -> Option<Vec<u32>> {
     {
         widest += 1;
     }
-    if widest == 0 {
-        return None;
-    }
     let mut best_cost = n.saturating_mul(CHECK_COST);
     let mut best = None;
-    for rounds in combinations.div_ceil(widest as usize)..=combinations {
-        let widths = spread(combinations, rounds);
-        // Spreading evenly cannot push a round past `widest`: a round count that
-        // leaves a remainder also leaves the base width below it.
-        debug_assert!(widths.iter().all(|&m| m <= widest));
-        let cost = widths
-            .iter()
-            .map(|&m| round_cost(n, m))
-            .fold(0usize, |total, cost| total.saturating_add(cost));
-        if cost < best_cost {
-            best_cost = cost;
-            best = Some(widths);
+    for width in 1..=widest as usize {
+        // The round counts whose spread has base width `width`, which is where
+        // the modeled cost is linear.
+        let band = [combinations / (width + 1) + 1, combinations / width];
+        for rounds in band {
+            if rounds == 0 || rounds > combinations {
+                continue;
+            }
+            let Some(cost) = plan_cost(n, combinations, rounds, widest) else {
+                continue;
+            };
+            if cost < best_cost {
+                best_cost = cost;
+                best = Some(rounds);
+            }
         }
     }
-    best
+    best.map(|rounds| spread(combinations, rounds))
 }
 
 /// Verify that every point in `points` lies in the prime-order subgroup G1,
@@ -539,12 +568,15 @@ impl Round {
                 }
             }
             if let Some(&ones) = self.marginals[2 * j].first() {
-                // SAFETY: both operands are valid; the routine handles the
-                // identity and equal operands, and permits out == a.
+                // Copied rather than passed twice: handing the same local out
+                // as both `&mut` and `&` would alias.
+                let twos = combination;
+                // SAFETY: all operands are valid blst values, the identity
+                // included, and the routine handles equal operands.
                 unsafe {
                     blst_p1_add_or_double_affine(
                         &mut combination,
-                        &combination,
+                        &twos,
                         &self.sums[ones as usize],
                     );
                 }
@@ -886,7 +918,9 @@ fn prefix_inverse(values: &[blst_fp], prefix: &mut Vec<blst_fp>) -> Option<blst_
 
 /// Hint that `slots[index]` will be read soon.
 ///
-/// A point spans two cache lines, and the caller reads both.
+/// A point spans two cache lines, and the caller reads both. This is only a
+/// hint, so a target without one is slower here, never wrong; aarch64's
+/// prefetch intrinsics are still unstable, so it goes without.
 #[inline(always)]
 fn prefetch(slots: &[blst_p1_affine], index: usize) {
     let _ = (slots, index);
@@ -899,16 +933,6 @@ fn prefetch(slots: &[blst_p1_affine], index: usize) {
         unsafe {
             _mm_prefetch(base, _MM_HINT_T0);
             _mm_prefetch(base.wrapping_add(64), _MM_HINT_T0);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        use core::arch::aarch64::{_PREFETCH_LOCALITY3, _PREFETCH_READ, _prefetch};
-        let base = slots.as_ptr().wrapping_add(index).cast::<i8>();
-        // SAFETY: _prefetch never dereferences its argument.
-        unsafe {
-            _prefetch::<_PREFETCH_READ, _PREFETCH_LOCALITY3>(base);
-            _prefetch::<_PREFETCH_READ, _PREFETCH_LOCALITY3>(base.wrapping_add(64));
         }
     }
 }
@@ -1306,6 +1330,69 @@ mod tests {
     }
 
     #[test]
+    fn plan_matches_exhaustive_search() {
+        // The search only visits the edges of each base-width band, on the
+        // argument that the modeled cost is linear inside one. Check that
+        // against the exhaustive search it replaces.
+        for combinations in [1usize, 2, 5, 37, 81, 128, 200] {
+            for n in [0usize, 1, 7, 130, 200, 999, 1000, 6000, 20_000, 100_000, 400_000] {
+                let mut widest = 0u32;
+                while widest < MAX_WIDTH
+                    && 3usize.pow(widest + 1) <= 4 * n.max(1)
+                    && 3usize.pow(widest + 1) * size_of::<blst_p1_affine>() <= SLOT_BUDGET
+                {
+                    widest += 1;
+                }
+                let mut best = (n.saturating_mul(CHECK_COST), None);
+                for rounds in 1..=combinations {
+                    let Some(cost) = plan_cost(n, combinations, rounds, widest) else {
+                        continue;
+                    };
+                    if cost < best.0 {
+                        best = (cost, Some(rounds));
+                    }
+                }
+                let exhaustive = best.1.map(|rounds| spread(combinations, rounds));
+                let got = plan(n, combinations);
+                // Equal cost is enough; ties may be broken differently.
+                match (&got, &exhaustive) {
+                    (None, None) => {}
+                    (Some(got), Some(exhaustive)) => {
+                        let cost = |widths: &[u32]| {
+                            widths.iter().map(|&m| round_cost(n, m)).sum::<usize>()
+                        };
+                        assert_eq!(
+                            cost(got),
+                            cost(exhaustive),
+                            "n={n} c={combinations}: {got:?} vs {exhaustive:?}"
+                        );
+                    }
+                    _ => panic!("n={n} c={combinations}: {got:?} vs {exhaustive:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plan_is_bounded_for_absurd_targets() {
+        // `security` is a caller-supplied parameter with no upper bound, so the
+        // search must not grow with it. These return promptly, and ask for
+        // per-point checking rather than a plan that is short of the target.
+        for security in [1_000_000usize, usize::MAX / 2, usize::MAX] {
+            let combinations = combinations_for_security(security);
+            assert!(combinations >= security / 2, "saturated downward");
+            for n in [1000usize, 100_000] {
+                assert_eq!(plan(n, combinations), None);
+            }
+        }
+        // The scaling never rounds down below the target either.
+        for security in [1usize, 40, 128, 1000, 100_000] {
+            let combinations = combinations_for_security(security);
+            assert!((combinations as f64) * 3f64.log2() >= security as f64);
+        }
+    }
+
+    #[test]
     fn spread_is_even_and_complete() {
         for combinations in [1usize, 2, 7, 81, 128, 255] {
             for rounds in 1..=combinations {
@@ -1347,6 +1434,64 @@ mod tests {
         // Expected 1000 per id; the window is ~6.7 standard deviations wide.
         for &count in &counts {
             assert!((800..1200).contains(&count), "{counts:?}");
+        }
+    }
+
+    #[test]
+    fn coefficients_are_uniform_and_independent() {
+        // Exact uniformity of every coefficient is soundness-bearing, and the
+        // sampler packs several ids into one drawn word, so a skew could hide in
+        // one digit position or in the correlation between two of them rather
+        // than in the ids overall. Windows below are ~6 standard deviations.
+        const DRAWS: usize = 90_000;
+        let mut rng = test_rng();
+        for m in [5u32, 9, 10] {
+            // Drawing in one call and in many small ones exercise different
+            // word-boundary behaviour; both must be unbiased.
+            for batch in [DRAWS, 7] {
+                let mut trits = Trits::new(&mut rng);
+                let mut ids = Vec::with_capacity(DRAWS);
+                while ids.len() < DRAWS {
+                    ids.extend(trits.fill(m, batch.min(DRAWS - ids.len())));
+                }
+                let mut digits = vec![[0usize; 3]; m as usize];
+                let mut pairs = vec![[0usize; 9]; m as usize - 1];
+                for id in ids {
+                    assert!(id < 3u32.pow(m));
+                    let mut value = id;
+                    let mut previous = None;
+                    for (position, counts) in digits.iter_mut().enumerate() {
+                        let digit = (value % 3) as usize;
+                        value /= 3;
+                        counts[digit] += 1;
+                        if let Some(previous) = previous {
+                            pairs[position - 1][previous * 3 + digit] += 1;
+                        }
+                        previous = Some(digit);
+                    }
+                }
+                for (position, counts) in digits.iter().enumerate() {
+                    let expected = DRAWS / 3;
+                    let window = 6 * ((DRAWS * 2 / 9) as f64).sqrt() as usize;
+                    for &count in counts {
+                        assert!(
+                            count.abs_diff(expected) < window,
+                            "m={m} batch={batch} digit {position} skewed: {counts:?}"
+                        );
+                    }
+                }
+                for (position, counts) in pairs.iter().enumerate() {
+                    let expected = DRAWS / 9;
+                    let window = 6 * ((DRAWS * 8 / 81) as f64).sqrt() as usize;
+                    for &count in counts {
+                        assert!(
+                            count.abs_diff(expected) < window,
+                            "m={m} batch={batch} digits {position},{} correlated: {counts:?}",
+                            position + 1
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1687,7 +1832,6 @@ mod tests {
         }
     }
 
-
     /// Randomized differential fuzz: every combination's exact value against a
     /// direct computation, over adversarial id and point distributions.
     #[test]
@@ -1738,20 +1882,32 @@ mod tests {
                         expected += point;
                     }
                 }
+                // Rebuild the combination from the round's marginals exactly
+                // as `run` does, so a wiring bug shows up as a value mismatch.
                 let mut got = blst_p1::default();
                 if let Some(&twos) = round.marginals[2 * j as usize + 1].first() {
                     let mut point = blst_p1::default();
+                    // SAFETY: the index names a live affine point, and blst_p1
+                    // defaults to the identity.
                     unsafe {
                         blst_p1_from_affine(&mut point, &round.sums[twos as usize]);
                         blst_p1_double(&mut got, &point);
                     }
                 }
                 if let Some(&ones) = round.marginals[2 * j as usize].first() {
+                    let doubled = got;
+                    // SAFETY: all operands are valid blst values, the identity
+                    // included, and the routine handles equal operands.
                     unsafe {
-                        blst_p1_add_or_double_affine(&mut got, &got, &round.sums[ones as usize]);
+                        blst_p1_add_or_double_affine(
+                            &mut got,
+                            &doubled,
+                            &round.sums[ones as usize],
+                        );
                     }
                 }
                 let mut got_affine = blst_p1_affine::default();
+                // SAFETY: both pointers reference valid blst values.
                 unsafe { blst::blst_p1_to_affine(&mut got_affine, &got) };
                 let expected_affine = G1::batch_to_affine(&[expected])[0];
                 assert_eq!(
@@ -1773,7 +1929,7 @@ mod tests {
     fn trit_ids_are_uniform_per_position() {
         let mut rng = test_rng();
         for m in 1..=MAX_WIDTH {
-            let buckets = 3usize.pow(m) as usize;
+            let buckets = 3usize.pow(m);
             if buckets > 6561 {
                 continue;
             }
@@ -1813,7 +1969,8 @@ mod tests {
         }
     }
 
-
+    /// The widest plans the cost model can pick, checked bucket by bucket
+    /// against a naive running sum.
     #[test]
     fn accumulate_large_widths_match_naive() {
         for seed in 0..3u64 {
@@ -1841,12 +1998,16 @@ mod tests {
                 let mut round = Round::new(m);
                 round.widen(m);
                 round.accumulate(&affine, &affine_ids);
-                for bucket in 0..3usize.pow(m) {
-                    let want_inf = affine_is_inf(&expected[bucket]);
-                    assert_eq!(round.live[bucket], !want_inf, "seed {seed} m {m} bucket {bucket} liveness");
-                    if !want_inf {
-                        assert_eq!(round.sums[bucket].x.l, expected[bucket].x.l, "seed {seed} m {m} bucket {bucket} x");
-                        assert_eq!(round.sums[bucket].y.l, expected[bucket].y.l, "seed {seed} m {m} bucket {bucket} y");
+                for (bucket, expected) in expected.iter().enumerate() {
+                    let empty = affine_is_inf(expected);
+                    assert_eq!(
+                        round.live[bucket], !empty,
+                        "seed={seed} m={m} bucket {bucket} liveness"
+                    );
+                    if !empty {
+                        let got = round.sums[bucket];
+                        assert_eq!(got.x.l, expected.x.l, "seed={seed} m={m} bucket {bucket} x");
+                        assert_eq!(got.y.l, expected.y.l, "seed={seed} m={m} bucket {bucket} y");
                     }
                 }
             }
