@@ -138,7 +138,10 @@ Three implementation choices carry most of the constant:
   uniform bucket ids only ~5% of points ever are. A point is therefore read
   once, added once, and never copied to a work list. Slots are touched in
   random order, so the accumulator prefetches the slot each point will land in
-  a couple of dozen iterations ahead.
+  a couple of dozen iterations ahead, and so does the completion walk, which
+  reopens those same slots in the same random order a chunk later — long after
+  the accumulator's read of them has been evicted. The hint is an intrinsic on
+  x86_64 and inline assembly on aarch64, where the intrinsic is still unstable.
 - **A shared collapse for the combine.** Recovering the `m` combinations one at
   a time touches `2·3^(m-1)` bucket sums each, which caps `m` where the combine
   costs more than the accumulation it saves. Summing away one digit at a time
@@ -152,7 +155,9 @@ Three implementation choices carry most of the constant:
   out-parameter cost more than the arithmetic), multiplications write into
   `MaybeUninit` rather than a zeroed temporary, and each addition consumes its
   inverse where the inversion's backward walk produces it, so no inverse is
-  ever written to memory.
+  ever written to memory. The running product that walk unwinds is extended as
+  each addition is queued, riding along with work already holding the
+  denominator, so the queue is written once and walked once instead of twice.
 
 A round's bucket slots are the accumulator's working set (and its collapse
 workspace is half as large again), so the cost model caps the width at what fits
@@ -195,6 +200,62 @@ Phase breakdown at n = 10⁶ (3.5 s total): 3.2 s in the nine rounds, 0.38 s
 converting the batch to affine, 0.04 s drawing coefficients. The conversion is
 7 field multiplications per point against 54 for the rounds, and it disappears
 entirely for callers whose points arrive already affine (as decoded points do).
+
+## On a second machine (Apple M5 Pro)
+
+The Xeon figures above are what the cost model was calibrated against. Repeating
+the measurement on an 18-core Apple M5 Pro (macOS, 6 performance cores) checks
+that the model travels: an exact check costs 22.5 µs there and a batch-affine
+addition ~145 ns, so a check is worth ~153 additions — within 2% of the Xeon's
+150, which is why no constant needed retuning.
+
+Single-threaded, on points in decoded (`z = 1`) form, best of several runs; the
+per-point column is measured on a 20 000-point prefix and scaled, since it is
+exactly linear:
+
+| n         | per-point | previous engine | C serial            |
+|-----------|-----------|-----------------|---------------------|
+| 1 000     | 22.5 ms   | 6.81 ms (3.3×)  | 5.28 ms (4.3×)      |
+| 6 000     | 135 ms    | 24.0 ms (5.6×)  | 15.6 ms (8.7×)      |
+| 100 000   | 2.26 s    | 299 ms (7.5×)   | 154 ms (14.7×)      |
+| 1 000 000 | 22.6 s    | 3.19 s (7.0×)   | **1.30 s (17.3×)**  |
+
+"Previous engine" is the single-combination-per-round implementation this
+strategy replaced, measured on the same batches in the same session. Run-to-run
+spread here is ±2%, tighter than the virtualized Xeon's ±5%.
+
+The million-point row is above the Xeon's ~15× because this machine's ratio of
+addition cost to check cost is slightly better and its cache holds a round's
+`3^9` slots more comfortably; the shape — flat below a thousand points, still
+climbing at a hundred thousand, flattening toward the nine-pass floor after a
+million — is the same on both.
+
+## What did not pay
+
+Recorded because each looked like it should, and the measurement is the only
+reason to believe otherwise. All figures are single-threaded on the M5 Pro,
+against per-point checking.
+
+- **Queueing the denominators instead of recomputing them.** A queued addition
+  stores its denominator and reads it back, 96 bytes of traffic that the
+  completing walk could avoid: it holds both operands already, so one
+  subtraction reproduces the value. It costs 3% (17.5× → 17.0× at a million
+  points). The stored denominator is a sequential load the hardware has
+  prefetched, while recomputing it puts the inversion chain's serial
+  multiplication — `running *= denominator` — behind the *random* slot load it
+  was previously independent of. The memory saved is not on the critical path;
+  the dependency added is.
+- **Resizing the inversion chunk.** 1024 additions per shared inversion holds
+  ~100 KB of denominators and prefix products, around this core's L1. Neither
+  direction moves it: 256 → 14.3×, 512 → 14.4×, 1024 → 14.7×, 2048 → 14.7× at a
+  hundred thousand points. An inversion is ~1.5 µs, so past a few hundred
+  additions its share is already under 2 ns each, and nothing else is
+  chunk-sensitive enough to show through the noise.
+- **Tiling the accumulation.** Worth it for an engine that materializes a work
+  list per pass; this one streams, so there is no per-tile buffer to keep
+  resident and the point array is read sequentially either way. Nine passes
+  over a million points is 864 MB of sequential reads against ~1.3 s of
+  arithmetic — under 2% of the time at this machine's bandwidth.
 
 ## Same-engine strategy comparison
 

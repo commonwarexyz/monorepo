@@ -4,6 +4,29 @@ Complete working notes for writing an ePrint note. Everything below is verified
 (proofs re-derived, measurements reproduced, prior art read first-hand) unless
 explicitly marked TODO. Written 2026-08-19.
 
+> **Stale as of 2026-08-24 — performance sections only.** The engine was
+> rebuilt after these notes were written: streaming accumulation into per-bucket
+> slots, a shared digit-collapse for the combine, per-round widths, and inlined
+> field arithmetic. Rounds went from seventeen of width five to **nine of width
+> nine**, which is the floor at this soundness target. What that invalidates
+> here: §2's construction parameters (the `m <= 5` cap and its `u8` bucket ids
+> are gone, `MAX_WIDTH` is now 11 with a cache budget binding first), §4's cost
+> model and its prediction-vs-measurement table, and §5's entire measurement
+> record — including the "possible follow-up" notes about `m = 6` and the
+> B-tie at 100k, both of which the rebuild settled. Single-threaded on an Apple
+> M5 Pro the check is now **17.3x** per-point checking at a million points and
+> 14.7x at a hundred thousand, against 7.0x and 7.5x for the engine these notes
+> describe.
+>
+> What is unaffected: §3 (soundness) in full — the bound, its tightness, the
+> any-distribution barrier, the uniformity margin and the even-cofactor
+> extension all concern the scheme, not the engine — along with §6 (prior art),
+> §7 (objections) and §8's checklist. §0's thesis holds and its headline
+> numbers are now conservative.
+>
+> `BATCHED_SUBGROUP.md` is the current source for the construction, the cost
+> analysis and every measurement; take numbers from there, not from below.
+
 ## 0. Thesis and framing
 
 **One-sentence claim:** batch subgroup membership testing on *unmodified*
