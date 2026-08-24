@@ -683,10 +683,15 @@ fn absorb(
     state: &mut [u8],
     pending: &mut Pending,
 ) {
-    let Some(mut running) = prefix_inverse(&pending.denominators, &mut pending.prefix) else {
+    let Some(mut running) = pending.total_inverse() else {
         return;
     };
     for index in (0..pending.jobs.len()).rev() {
+        // The walk runs backwards, so the slot a job below will reopen is as
+        // far off as the one the accumulation loop looks ahead for.
+        if let Some(&(ahead, _)) = pending.jobs.get(index.wrapping_sub(PREFETCH_DISTANCE)) {
+            prefetch(slots, (ahead & !DOUBLE) as usize);
+        }
         let (slot, point) = pending.jobs[index];
         let inverse = pending.unwind(index, &mut running);
         let bucket = (slot & !DOUBLE) as usize;
@@ -751,10 +756,13 @@ fn queue_add(
 
 /// Finish the additions queued by [`queue_add`].
 fn complete(slots: &mut [blst_p1_affine], pending: &mut Pending) {
-    let Some(mut running) = prefix_inverse(&pending.denominators, &mut pending.prefix) else {
+    let Some(mut running) = pending.total_inverse() else {
         return;
     };
     for index in (0..pending.jobs.len()).rev() {
+        if let Some(&(ahead, _)) = pending.jobs.get(index.wrapping_sub(PREFETCH_DISTANCE)) {
+            prefetch(slots, (ahead & !DOUBLE) as usize);
+        }
         let (slot, second) = pending.jobs[index];
         let inverse = pending.unwind(index, &mut running);
         let out = (slot & !DOUBLE) as usize;
@@ -825,7 +833,7 @@ impl Pending {
         Self {
             jobs: Vec::with_capacity(CHUNK),
             denominators: Vec::with_capacity(CHUNK),
-            prefix: vec![blst_fp::default(); CHUNK],
+            prefix: Vec::with_capacity(CHUNK),
             limit: CHUNK,
         }
     }
@@ -841,10 +849,34 @@ impl Pending {
     }
 
     /// Queue one addition.
+    ///
+    /// The running product the shared inversion needs is extended here rather
+    /// than in a pass of its own, so the queue is written once and walked once:
+    /// the multiplication rides along with work that is already touching the
+    /// denominator.
     #[inline(always)]
     fn push(&mut self, slot: u32, second: u32, denominator: blst_fp) {
+        let product = match self.prefix.last() {
+            Some(running) => fp_mul(running, &denominator),
+            None => denominator,
+        };
+        self.prefix.push(product);
         self.jobs.push((slot, second));
         self.denominators.push(denominator);
+    }
+
+    /// Invert the running product of every queued denominator, or `None` when
+    /// nothing is queued.
+    ///
+    /// Every denominator MUST be nonzero (`blst_fp_inverse(0) == 0` would
+    /// silently poison the shared product); the callers' classification
+    /// guarantees it.
+    fn total_inverse(&self) -> Option<blst_fp> {
+        let total = self.prefix.last()?;
+        let mut inverse = blst_fp::default();
+        // SAFETY: both pointers reference valid blst_fp values.
+        unsafe { blst_fp_inverse(&mut inverse, total) };
+        Some(inverse)
     }
 
     /// Whether the queue has grown to a full inversion's worth of work.
@@ -868,6 +900,7 @@ impl Pending {
     fn clear(&mut self) {
         self.jobs.clear();
         self.denominators.clear();
+        self.prefix.clear();
     }
 }
 
@@ -899,10 +932,12 @@ fn chord(
 /// Fill `prefix` with the running products of `values` and return the inverse
 /// of their total, or `None` when there is nothing to invert.
 ///
-/// This is the forward half of Montgomery's trick; each caller walks back down
-/// the prefix products itself so that an element's inverse is consumed where it
-/// is produced. Together the two halves cost one field inversion plus three
-/// multiplications per element.
+/// This is the forward half of Montgomery's trick, for a caller holding its
+/// values before it needs any inverse; [`Pending`] instead extends the same
+/// running product as it queues, which is cheaper when the two coincide.
+/// Either way the caller walks back down the prefix products itself, so that an
+/// element's inverse is consumed where it is produced, and the two halves
+/// together cost one field inversion plus three multiplications per element.
 ///
 /// Every element MUST be nonzero (`blst_fp_inverse(0) == 0` would silently
 /// poison the shared product); the callers' classification guarantees it.
@@ -926,8 +961,7 @@ fn prefix_inverse(values: &[blst_fp], prefix: &mut Vec<blst_fp>) -> Option<blst_
 /// Hint that `slots[index]` will be read soon.
 ///
 /// A point spans two cache lines, and the caller reads both. This is only a
-/// hint, so a target without one is slower here, never wrong; aarch64's
-/// prefetch intrinsics are still unstable, so it goes without.
+/// hint, so a target without one is slower here, never wrong.
 #[inline(always)]
 fn prefetch(slots: &[blst_p1_affine], index: usize) {
     let _ = (slots, index);
@@ -940,6 +974,25 @@ fn prefetch(slots: &[blst_p1_affine], index: usize) {
         unsafe {
             _mm_prefetch(base, _MM_HINT_T0);
             _mm_prefetch(base.wrapping_add(64), _MM_HINT_T0);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let base = slots.as_ptr().wrapping_add(index);
+        // SAFETY: `prfm` is architecturally a hint. It takes its address as an
+        // addressing mode rather than dereferencing it, cannot fault whatever
+        // the address, and changes nothing a program can observe apart from
+        // the cache; the index is in range for the slice regardless. The
+        // intrinsic wrapping this instruction is still unstable, so it is
+        // written out — `readonly` matches the memory clobber the x86 arm's
+        // intrinsic carries.
+        unsafe {
+            core::arch::asm!(
+                "prfm pldl1keep, [{base}]",
+                "prfm pldl1keep, [{base}, #64]",
+                base = in(reg) base,
+                options(nostack, preserves_flags, readonly),
+            );
         }
     }
 }
