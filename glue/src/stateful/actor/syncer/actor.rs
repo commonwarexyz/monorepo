@@ -293,7 +293,11 @@ mod tests {
 
         fn readers(&self) -> Self::Readers {}
 
-        async fn finalize(&self, _batches: Self::Merkleized) -> (Self::Snapshots, Barrier) {
+        async fn apply(&self, _batches: Self::Merkleized) {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        async fn finalize(&self) -> (Self::Snapshots, Barrier) {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 

@@ -294,13 +294,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -390,13 +394,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -559,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_finalize_commits_fixed_keyless_batches() {
+    fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
@@ -577,12 +585,13 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
                 let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
 
             let guard = db.read().await;
@@ -670,12 +679,13 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
                 let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
 
             // A fresh batch without an explicit floor must commit at the raised
@@ -687,12 +697,13 @@ mod tests {
             let fork = MerkleizedTrait::new_batch(&merkleized);
             {
                 let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
                 let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*db.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
@@ -704,12 +715,13 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
                 let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*db.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));

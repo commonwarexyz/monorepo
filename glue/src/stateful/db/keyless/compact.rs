@@ -244,12 +244,13 @@ where
         batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, handle) = db.start_sync().await?;
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        let (db, handle) = self.start_sync().await?;
         let snapshot = Self::snapshot(&db);
         Ok((db, snapshot, handle))
     }
@@ -321,12 +322,13 @@ where
         batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, handle) = db.start_sync().await?;
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        let (db, handle) = self.start_sync().await?;
         let snapshot = Self::snapshot(&db);
         Ok((db, snapshot, handle))
     }
@@ -550,7 +552,7 @@ mod tests {
             .merkleize(&source, Some(U64::new(9)), floor)
             .await
             .unwrap();
-        let (source, _) = source.apply_batch(batch).unwrap();
+        let (source, _) = source.apply_batch(batch).await.unwrap();
         source.sync().await.unwrap()
     }
 
@@ -571,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_finalize_commits_fixed_keyless_unjournaled_batches() {
+    fn managed_db_apply_and_finalize_persists_fixed_keyless_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
@@ -590,12 +592,13 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
                 let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
 
             let guard = db.read().await;
@@ -605,6 +608,66 @@ mod tests {
             let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.size, mmr::Location::new(3));
+        });
+    }
+
+    #[test]
+    fn managed_db_apply_retains_each_keyless_rewind_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "apply-checkpoints");
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = Shared::new("test", db);
+
+            let first = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_metadata(U64::new(11));
+            let first = crate::stateful::db::Unmerkleized::merkleize(first)
+                .await
+                .unwrap();
+            let first_target = sync::CompactTarget {
+                root: first.root(),
+                size: first.bounds().tip.size,
+            };
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                .await
+                .unwrap();
+            slot.put(database);
+
+            let second = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(8))
+                .with_metadata(U64::new(22));
+            let second = crate::stateful::db::Unmerkleized::merkleize(second)
+                .await
+                .unwrap();
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, second)
+                .await
+                .unwrap();
+            let (database, _snapshot, sync) =
+                <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+            sync.await.expect("database sync failed");
+            slot.put(database);
+            drop(db);
+
+            let database = FixedDb::init(
+                context.child("reopen"),
+                fixed_config(&context, "apply-checkpoints"),
+            )
+            .await
+            .unwrap();
+            let database =
+                <FixedDb as ManagedDb<_>>::rewind_to_target(database, first_target.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(
+                <FixedDb as ManagedDb<_>>::sync_target(&database),
+                first_target,
+            );
         });
     }
 
@@ -772,7 +835,7 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let target = source.target();
 
@@ -861,7 +924,7 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let stale_target = source.target();
 
@@ -872,7 +935,7 @@ mod tests {
                 .merkleize(&source, Some(U64::new(10)), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let latest_target = source.target();
 
@@ -931,7 +994,7 @@ mod tests {
                 .merkleize(&db, Some(U64::new(11)), floor)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(batch).unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
             db = db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
@@ -944,7 +1007,7 @@ mod tests {
                     .merkleize(&db, Some(U64::new(i * 11)), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
             let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
@@ -978,7 +1041,7 @@ mod tests {
                     .merkleize(&db, Some(U64::new(i * 11)), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }

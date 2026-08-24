@@ -14,7 +14,14 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
-use std::{convert::Infallible, sync::Arc};
+use std::{
+    cell::RefCell,
+    convert::Infallible,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -57,12 +64,25 @@ struct PruneGate {
     release: oneshot::Receiver<()>,
 }
 
+/// Signals that a snapshot capture has started, then blocks it until the test releases it.
+struct SnapshotGate {
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+thread_local! {
+    /// Single-use gate consumed by the next [`TestDb`] snapshot capture. Parks an actor's
+    /// startup publish between database recovery and mailbox polling.
+    static SNAPSHOT_GATE: RefCell<Option<SnapshotGate>> = const { RefCell::new(None) };
+}
+
 /// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
 /// prune targets.
 #[derive(Clone, Default)]
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+    pub(crate) applied: Arc<AtomicUsize>,
     prune_gate: Arc<Mutex<Option<PruneGate>>>,
 }
 
@@ -88,27 +108,45 @@ impl FlushControl {
 
 #[derive(Default)]
 pub(crate) struct TestDb {
-    finalize: Mutex<Option<Handle<()>>>,
+    sync: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
     finalized: u64,
 }
 
 impl TestDb {
-    pub(crate) fn with_finalize(handle: Handle<()>) -> Self {
+    pub(crate) fn with_sync(handle: Handle<()>) -> Self {
         Self {
-            finalize: Mutex::new(Some(handle)),
+            sync: Mutex::new(Some(handle)),
             control: None,
             finalized: 0,
         }
     }
 
-    /// A database with test-controlled finalize flushes and pruning.
     pub(crate) fn gated(control: FlushControl) -> Self {
         Self {
-            finalize: Mutex::new(None),
+            sync: Mutex::new(None),
             control: Some(control),
             finalized: 0,
         }
+    }
+
+    /// Gates the next snapshot capture on this thread. The receiver reports entry, and
+    /// sending on the returned sender lets the capture continue.
+    pub(crate) fn gate_next_snapshot() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        SNAPSHOT_GATE.with(|gate| {
+            assert!(
+                gate.borrow_mut()
+                    .replace(SnapshotGate {
+                        started,
+                        release: release_rx,
+                    })
+                    .is_none(),
+                "snapshot gate already installed",
+            );
+        });
+        (started_rx, release)
     }
 }
 
@@ -121,6 +159,12 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Snapshot = u64;
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+        if let Some(mut gate) = SNAPSHOT_GATE.with(|gate| gate.borrow_mut().take()) {
+            gate.started
+                .send(())
+                .expect("test must await the snapshot gate");
+            let _ = (&mut gate.release).await;
+        }
         let snapshot = self.finalized;
         Ok((self, snapshot))
     }
@@ -141,11 +185,15 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(
-        mut self,
-        _batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+    async fn apply(mut self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
         self.finalized += 1;
+        if let Some(control) = &self.control {
+            control.applied.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(self)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
         let snapshot = self.finalized;
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
@@ -153,7 +201,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
             return Ok((self, snapshot, Handle::from_receiver(released)));
         }
         let handle = self
-            .finalize
+            .sync
             .lock()
             .take()
             .unwrap_or_else(|| Handle::ready(Ok(())));
