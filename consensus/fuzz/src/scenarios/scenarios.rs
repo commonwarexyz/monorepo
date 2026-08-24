@@ -58,6 +58,19 @@
 //! journal exactly as in [`StandardCertifyMissingCandidateFetchesByRound`],
 //! so the same composition argument applies and the first attackable live
 //! view is view 2 over the recovered source block.
+//!
+//! [`StandardVerifyMissingCandidateWaitsWithoutFetching`] reproduces
+//! `test_standard_verify_missing_candidate_waits_without_fetching`
+//! (consensus/src/marshal/standard/mod.rs:2413) through its handoff point:
+//! the real wrapper `verify` of an unknown digest registers a local wait,
+//! issues no fetch of any kind, and remains pending; the source then drops
+//! the verify receiver, canceling the wait's consumer. Cancellation must not
+//! convert the wait into a fetch or register a new wait (the marshal prunes
+//! a canceled wait; it never falls back to fetching). The prefix fabricates
+//! no certificate and the source leaves nothing to recover, so the engines
+//! start bare from the genesis floor, the first attackable live view is
+//! view 1 over genesis, and the handoff fetch multiset is explicitly empty
+//! on every node.
 
 use super::{
     environment::{
@@ -77,7 +90,8 @@ use commonware_consensus::{
     simplex::Floor,
     types::{Epoch, Height, Round, View},
 };
-use commonware_cryptography::{Digestible as _, Sha256};
+use commonware_cryptography::{Digestible as _, Hasher as _, Sha256};
+use commonware_utils::channel::oneshot::error::TryRecvError;
 
 /// A scripted prefix that drives the cluster to a source-defined marshal state.
 pub(crate) trait Scenario {
@@ -116,6 +130,11 @@ where
         }
         ScenarioKind::StandardCertifyBumpsNotarizedFetchForPendingVerify => {
             StandardCertifyBumpsNotarizedFetchForPendingVerify
+                .drive(harness)
+                .await
+        }
+        ScenarioKind::StandardVerifyMissingCandidateWaitsWithoutFetching => {
+            StandardVerifyMissingCandidateWaitsWithoutFetching
                 .drive(harness)
                 .await
         }
@@ -610,6 +629,141 @@ impl Scenario for StandardCertifyBumpsNotarizedFetchForPendingVerify {
                 NodeExpectation::new(Node::B).holds(digest),
                 NodeExpectation::new(Node::C).lacks(digest),
                 NodeExpectation::new(Node::D).lacks(digest),
+            ],
+            expectation: Expectation::genesis_rooted(),
+        }
+    }
+}
+
+/// Source: consensus/src/marshal/standard/mod.rs::test_standard_verify_missing_candidate_waits_without_fetching
+///
+/// Handoff: after the real wrapper `verify` of an unknown digest (naming no
+/// block anywhere) registered a local wait, issued no fetch of any kind, and
+/// remained pending, the source dropped the verify receiver. Canceling the
+/// wait's consumer must not convert the local wait into a fetch or register
+/// a new wait: the marshal prunes a canceled wait (the wrapper task exits on
+/// the closed receiver and the actor retains only open subscribers) rather
+/// than escalating it, so the handoff fetch multiset is explicitly empty on
+/// every node. The source iterates both wrapper kinds in one test body; per
+/// R2 the variant is fixed per fuzz target, so each target runs this prefix
+/// under its own variant.
+///
+/// Node mapping (the node-addressing divergence S6 permits): the same uniform
+/// permutation as [`StandardCertifyMissingCandidateFetchesByRound`], source
+/// participant `i` -> {0: B, 1: C, 2: D, 3: A}. The source's
+/// `me = participants[0]` maps wholly to [`Node::B`]: the marshal actor under
+/// test, its scheme provider, and the leader named by the verify context.
+///
+/// Harness divergences (S6 plumbing):
+/// - The source sleeps 50ms before observing the local wait; the harness
+///   equivalent barrier-polls the victim's buffer-subscription count, as in
+///   [`StandardVerifyHeightLieParentFetchIsRoundBound`].
+/// - The source sleeps 10ms after dropping the receiver before re-checking
+///   the resolver; the harness equivalent is one mailbox barrier.
+/// - The source's `resolver.fetches().is_empty()` assertions (both before
+///   and after the drop) are carried by the handoff multiset, whose empty
+///   lists require that no fetch was issued at all.
+/// - The wait counter (like the source's `RecordingBuffer` count) counts
+///   registrations and cannot observe the prune, so the post-drop check is
+///   that no new wait registered, alongside the multiset's no-fetch lists.
+///
+/// Composition soundness (I5): the prefix fabricates no certificate and the
+/// source leaves nothing for an engine to recover, so the ledger and journal
+/// are empty, the engines start bare from the genesis floor, and the attack
+/// anchor is the first live view above it (view 1, height 1, over genesis).
+/// The canceled state is invisible to the engines: the unknown digest is the
+/// hash of a literal, not of any block encoding, the marshal prunes the
+/// canceled wait, and any certification gate the pending verify parked is
+/// keyed by (round, digest), so no live `certify` at view 1 can take it.
+/// Nothing the fuzzing phase produces can conflict with prefix state.
+pub(crate) struct StandardVerifyMissingCandidateWaitsWithoutFetching;
+
+impl Scenario for StandardVerifyMissingCandidateWaitsWithoutFetching {
+    async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
+        &self,
+        harness: &mut FuzzScenarioStandardHarness<P, M>,
+    ) -> ScenarioHandoff<P>
+    where
+        M::Wrapper: Clone,
+    {
+        harness.begin("test_standard_verify_missing_candidate_waits_without_fetching");
+        // The unknown candidate: a digest that names no block, in a view-1
+        // context on genesis led by the source's `me` (Node::B under the
+        // participant permutation), built as in the source.
+        let genesis_digest = harness.genesis().digest();
+        let round_one = round(1);
+        let consensus_context = harness.context(round_one, Node::B, View::zero(), genesis_digest);
+        let missing = Sha256::hash(&[b"missing candidate"]);
+
+        // Source order: `verify` first, then the local wait is observed. The
+        // wait count is captured before `verify` so the barrier-poll below
+        // cannot race the wrapper's registration.
+        let waits_before = harness.buffer_subscription_count(Node::B);
+        let mut verify = harness
+            .wrapper_verify(Node::B, consensus_context, missing)
+            .await;
+        let mut rounds_waited = 0;
+        while harness.buffer_subscription_count(Node::B) == waits_before {
+            rounds_waited += 1;
+            assert!(
+                rounds_waited <= 64,
+                "unavailable candidate verification never registered a local wait"
+            );
+            let _ = harness.barrier(Node::B).await;
+        }
+        assert!(
+            harness.targeted_is_empty(Node::B),
+            "unavailable candidate verification must not issue targeted fetches"
+        );
+        assert!(
+            matches!(verify.try_recv(), Err(TryRecvError::Empty)),
+            "unavailable candidate verification must remain pending"
+        );
+
+        // The source drops the pending verify receiver: cancellation must
+        // not convert the local wait into a fetch or register a new wait
+        // (the counter counts registrations, so equality rules out a
+        // cancel-triggered re-subscription; the handoff multiset carries the
+        // source's post-drop no-fetch assertion).
+        let registered_waits = harness.buffer_subscription_count(Node::B);
+        drop(verify);
+        let _ = harness.barrier(Node::B).await;
+        assert_eq!(
+            harness.buffer_subscription_count(Node::B),
+            registered_waits,
+            "canceling a missing candidate wait must not register a new wait"
+        );
+        assert!(
+            harness.targeted_is_empty(Node::B),
+            "canceling a missing candidate wait must not issue targeted fetches"
+        );
+
+        ScenarioHandoff {
+            engine_floor: Floor::Genesis(genesis_digest),
+            engine_journal: Vec::new(),
+            attack_anchor: attack_above::<P>(harness.genesis()),
+            reference_chain: Vec::new(),
+            // Explicitly empty multisets: the defining state is that no fetch
+            // of any kind was issued, before or after the receiver drop.
+            node_fetches: vec![
+                (Node::A, Vec::new()),
+                (Node::B, Vec::new()),
+                (Node::C, Vec::new()),
+                (Node::D, Vec::new()),
+            ],
+            node_active_fetches: vec![
+                (Node::A, Vec::new()),
+                (Node::B, Vec::new()),
+                (Node::C, Vec::new()),
+                (Node::D, Vec::new()),
+            ],
+            // The unknown digest names no block: every node lacks it, as in
+            // the source (which stores nothing anywhere).
+            expected_nodes: vec![
+                NodeExpectation::new(Node::A).lacks(missing),
+                NodeExpectation::new(Node::B).lacks(missing),
+                NodeExpectation::new(Node::C).lacks(missing),
+                NodeExpectation::new(Node::D).lacks(missing),
             ],
             expectation: Expectation::genesis_rooted(),
         }

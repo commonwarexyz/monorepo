@@ -53,6 +53,12 @@ pub enum ScenarioKind {
     /// fabricated notarization from their seeded voter journals
     /// (see `scenarios.rs`).
     StandardCertifyBumpsNotarizedFetchForPendingVerify,
+    /// `test_standard_verify_missing_candidate_waits_without_fetching`: a
+    /// `verify` of an unknown digest waits locally and issues no fetch at
+    /// all, and dropping the verify receiver cancels the wait without
+    /// converting it into a fetch; the engines start bare from the genesis
+    /// floor with the fetch multiset explicitly empty (see `scenarios.rs`).
+    StandardVerifyMissingCandidateWaitsWithoutFetching,
 }
 
 /// How the byzantine leader disseminates its attack-view block on channels 2 + 3.

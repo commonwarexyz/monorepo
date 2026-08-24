@@ -683,4 +683,8 @@ mod tests {
         certify_bumps_notarized_fetch,
         StandardCertifyBumpsNotarizedFetchForPendingVerify
     );
+    scenario_smoke!(
+        verify_missing_candidate_waits,
+        StandardVerifyMissingCandidateWaitsWithoutFetching
+    );
 }
