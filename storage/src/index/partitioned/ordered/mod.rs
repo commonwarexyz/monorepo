@@ -158,6 +158,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Hint that partition `i` is about to be searched (see `Partition::prefetch`). Spilled
     /// partitions are left to their side-table.
+    #[commonware_macros::stability(ALPHA)]
     fn prefetch_slot(&self, i: usize) {
         if let Some(partition) = self.partitions.get(i) {
             partition.prefetch();
