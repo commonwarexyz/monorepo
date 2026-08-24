@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     admission::{Committee, assigned_slice_indices, bls12381, seal},
-    boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalBatch},
+    boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::{
         AccountLookup, Challenge, ChallengeKind, RangeLower, StateLookup, Verdict, adjudicate,
         decode_bounded,
@@ -17,8 +17,9 @@ use commonware_clearing::bajillion::{
     },
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, Header, ProofSlice, RootBundle, StateCache,
-        assemble_slices, build_close, prepare_close_with_strategy, validate_close, validate_slice,
+        Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, ProofSlice, RootBundle,
+        StateCache, TransitionError, assemble_slices, assemble_withdrawal_claim, build_close,
+        prepare_close_with_strategy, validate_close, validate_slice,
     },
 };
 use commonware_codec::{Encode, EncodeSize};
@@ -52,6 +53,34 @@ type TestPayment = Payment<VerifyingKey, Digest>;
 type TestContext = PaymentContext<VerifyingKey, Digest>;
 type TestCloseContext = CloseContext<VerifyingKey, Digest>;
 type TestChallenge = Challenge<VerifyingKey, Digest>;
+
+#[allow(clippy::too_many_arguments)]
+fn close_context(
+    deployment: Digest,
+    epoch: u64,
+    operator: VerifyingKey,
+    cache: &StateCache<VerifyingKey, Digest>,
+    deposits: &DepositBatch<VerifyingKey>,
+    withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
+    admission_deadline: u64,
+    challenge_deadline: u64,
+    limits: CloseLimits,
+    assignment: Assignment<Digest>,
+) -> Result<TestCloseContext, TransitionError> {
+    EpochContext::new::<Sha256>(
+        deployment,
+        epoch,
+        operator,
+        deposits,
+        withdrawals,
+        cache.liability(),
+        admission_deadline,
+        challenge_deadline,
+        limits,
+        assignment,
+    )
+    .and_then(|epoch| epoch.bind::<Sha256>(cache, deposits, withdrawals))
+}
 
 #[derive(Arbitrary, Debug)]
 struct PaymentCase {
@@ -467,7 +496,7 @@ fn fuzz_challenge(case: ChallengeCase) {
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
     let challenge_deadline = case.now % 1_024 + 1;
-    let context = CloseContext::new::<Sha256>(
+    let context = close_context(
         Sha256::hash(&[b"challenge-fuzz-deployment", &case.seed.to_be_bytes()]),
         case.seed,
         operator.public_key(),
@@ -974,7 +1003,7 @@ fn fuzz_transition(mut case: TransitionCase) {
     let cache =
         StateCache::new::<Sha256>(leaves).expect("sanitized arbitrary opening cache must be valid");
     let (operator, _, _, _) = private_keys(case.seed);
-    let _ = CloseContext::new::<Sha256>(
+    let _ = close_context(
         case.deployment,
         case.header.context.epoch(),
         operator.public_key(),
@@ -989,7 +1018,7 @@ fn fuzz_transition(mut case: TransitionCase) {
 
     let empty_deposits = DepositBatch::empty();
     let empty_withdrawals = WithdrawalBatch::empty();
-    let context = CloseContext::new::<Sha256>(
+    let context = close_context(
         case.deployment,
         case.header.context.epoch(),
         operator.public_key(),
@@ -1022,7 +1051,7 @@ fn fuzz_transition(mut case: TransitionCase) {
         .expect("empty state cache must be valid");
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
-    let context = CloseContext::new::<Sha256>(
+    let context = close_context(
         Sha256::hash(&[b"fuzz-deployment", &case.seed.to_be_bytes()]),
         case.seed,
         operator.public_key(),
@@ -1076,7 +1105,7 @@ fn fuzz_transition(mut case: TransitionCase) {
             .expect("positive fuzz deposit must be valid"),
     ])
     .expect("singleton fuzz deposit batch must be valid");
-    let context = CloseContext::new::<Sha256>(
+    let context = close_context(
         Sha256::hash(&[b"fuzz-deployment", &case.seed.to_be_bytes()]),
         case.seed.wrapping_add(1),
         operator.public_key(),
@@ -1150,9 +1179,9 @@ fn fuzz_transition(mut case: TransitionCase) {
     );
 
     let account = SigningKey::from_seed(case.seed.wrapping_add(20));
-    let requested_amount = case.seed.to_be_bytes()[1] as u64 + 1;
+    let opening_balance = case.seed.to_be_bytes()[1] as u64 + 2;
     let opening = AccountState {
-        balance: requested_amount + 1,
+        balance: opening_balance,
         active: true,
         ..AccountState::default()
     };
@@ -1167,16 +1196,14 @@ fn fuzz_transition(mut case: TransitionCase) {
         deployment,
         authorization_root,
         Bytes::from_static(b"fuzz-destination"),
-        requested_amount,
-        true,
+        WithdrawalAction::Close,
         case.challenge_deadline,
         &account,
-    )
-    .expect("positive covered withdrawal must sign");
+    );
     let withdrawals = WithdrawalBatch::new(vec![withdrawal])
         .expect("singleton withdrawal batch must be canonical");
     let deposits = DepositBatch::empty();
-    let context = CloseContext::new::<Sha256>(
+    let context = close_context(
         deployment,
         case.seed.wrapping_add(2),
         operator.public_key(),
@@ -1212,10 +1239,27 @@ fn fuzz_transition(mut case: TransitionCase) {
         vec![row],
         vec![shards],
     )
-    .expect("constructed full-close withdrawal must validate");
+    .expect("constructed close withdrawal must validate");
     assert_eq!(close.roots.closing, empty_root::<Sha256>(VectorKind::State));
     validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
-        .expect("constructed full-close withdrawal must validate again");
+        .expect("constructed close withdrawal must validate again");
+    let claim = assemble_withdrawal_claim::<Sha256, _, _>(
+        &close,
+        &withdrawals,
+        &account.public_key(),
+        &Sequential,
+    )
+    .expect("constructed withdrawal must have a claim");
+    assert_eq!(
+        claim
+            .verify::<Sha256>(
+                context.deployment(),
+                context.withdrawal_root(),
+                &close.roots.change,
+            )
+            .expect("constructed withdrawal claim must verify"),
+        opening.balance
+    );
     let slices = assemble_slices::<Sha256, _, _>(
         &cache,
         &context,
@@ -1252,7 +1296,7 @@ fn fuzz_transition(mut case: TransitionCase) {
     .expect("single live payout payer is a valid opening cache");
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
-    let context = CloseContext::new::<Sha256>(
+    let context = close_context(
         Sha256::hash(&[b"fuzz-payout-deployment", &case.seed.to_be_bytes()]),
         case.seed.wrapping_add(3),
         operator.public_key(),
@@ -1355,9 +1399,9 @@ fn fuzz_transition(mut case: TransitionCase) {
     prepared
         .validate::<Sha256>(&context, &deposits, &withdrawals)
         .expect("constructed external payout must validate");
-    let payout_proof = prepared
-        .payout_proof(&deposits, &withdrawals)
-        .expect("constructed external payout has a canonical extraction proof");
+    let terminal_proof = prepared
+        .terminal_proof()
+        .expect("constructed external payout has a canonical terminal proof");
     let close = prepared.close();
     assert_eq!(
         close
@@ -1368,18 +1412,34 @@ fn fuzz_transition(mut case: TransitionCase) {
             .payout,
         payout
     );
-    let external_payouts = payout_proof
-        .verify::<Sha256>(
+    let totals = terminal_proof
+        .verify::<Sha256, VerifyingKey>(
             &context,
             &deposits,
             &withdrawals,
             &close.header,
             &close.roots,
         )
-        .expect("constructed external payout proof must verify");
-    assert_eq!(external_payouts.len(), 1);
-    assert_eq!(external_payouts[0].recipient, recipient.public_key());
-    assert_eq!(external_payouts[0].amount, payout);
+        .expect("constructed terminal proof must verify");
+    assert_eq!(totals.payout, payout);
+    let claim = prepared
+        .external_payout_claim(&recipient.public_key())
+        .expect("constructed external payout must have a claim");
+    let claimed = claim
+        .verify::<Sha256>(&close.roots.change)
+        .expect("constructed external payout claim must verify");
+    assert_eq!(claimed.recipient, recipient.public_key());
+    assert_eq!(claimed.amount, payout);
+    let payout_row = close
+        .rows
+        .iter()
+        .find(|row| row.account == recipient.public_key())
+        .expect("constructed external payout retains its recipient row");
+    assert_eq!(payout_row.opening, AccountState::default());
+    assert!(!payout_row.closing.active);
+    assert_eq!(payout_row.closing.balance, 0);
+    assert!(payout_row.outgoing.is_none());
+    assert_eq!(payout_row.checked_deltas(), Some((0, payout, 1)));
     validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close)
         .expect("constructed external payout must validate again");
     let slices = prepared
@@ -1450,7 +1510,7 @@ fn fuzz_admission(case: AdmissionCase) {
     let withdrawals = WithdrawalBatch::empty();
     let assignment = Assignment::new(committee.commitment::<Sha256>(), case.slice_bits % 3 + 2)
         .expect("fuzz slice bits are bounded");
-    let context = CloseContext::new::<Sha256>(
+    let context = close_context(
         Sha256::hash(&[b"fuzz-admission-deployment", &seed.to_be_bytes()]),
         seed,
         operator.public_key(),

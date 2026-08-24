@@ -76,8 +76,6 @@ pub enum Error {
     UnalignedProof,
     #[error("duplicate position: {0}")]
     DuplicatePosition(u32),
-    #[error("invalid range: {0}..{1}")]
-    InvalidRange(u32, u32),
     /// A streaming builder received a zero, non-power-of-two, or unrepresentable subtree size.
     #[error("invalid streaming subtree size: {0}")]
     InvalidSubtreeSize(usize),
@@ -350,7 +348,6 @@ impl<D: Digest> Tree<D> {
             siblings,
         })
     }
-
 }
 
 /// A Merkle proof for multiple non-contiguous leaves in a Binary Merkle Tree.
@@ -3092,10 +3089,7 @@ mod tests {
                 actual: 1,
             })
         ));
-        assert_eq!(
-            empty.finish(&Sequential).unwrap(),
-            test_tree(&[]).root()
-        );
+        assert_eq!(empty.finish(&Sequential).unwrap(), test_tree(&[]).root());
     }
 
     #[test]

@@ -4,7 +4,10 @@ use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     admission::{Committee, assigned_slice_indices, bls12381, seal},
-    boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalBatch, WithdrawalId},
+    boundary::{
+        DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
+        WithdrawalId,
+    },
     challenge::{
         AccountLookup, Challenge, ChallengeKind, RangeLower, RowOpening, StateLookup, StateOpening,
         Verdict,
@@ -18,8 +21,9 @@ use commonware_clearing::bajillion::{
     },
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, BatchId, Close, CloseContext, CloseLimits, ExternalPayout, PayoutProof,
-        StateCache, assemble_payout_proof, assemble_slices, build_close, validate_close,
+        Assignment, BatchId, Close, CloseContext, CloseLimits, EpochContext, ExternalPayout,
+        StateCache, TerminalProof, assemble_slices, assemble_terminal_proof,
+        assemble_withdrawal_claim, build_close, validate_close,
     },
 };
 use commonware_codec::Encode;
@@ -59,7 +63,7 @@ type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
 type TestDeposits = DepositBatch<VerifyingKey>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
-type TestPayoutProof = PayoutProof<VerifyingKey, Digest>;
+type TestTerminalProof = TerminalProof<Digest>;
 type Certificate = bls12381::Certificate;
 
 #[derive(Arbitrary, Debug)]
@@ -84,7 +88,7 @@ enum Action {
         amount: u8,
         destination: u64,
         destination_len: u8,
-        full_close: bool,
+        closes_account: bool,
         mutation: u8,
     },
     Register {
@@ -136,7 +140,7 @@ struct Prepared {
     withdrawals: TestWithdrawals,
     withdrawal_releases: Vec<WithdrawalRelease<VerifyingKey, Digest>>,
     external_payouts: Vec<ExternalPayout<VerifyingKey>>,
-    payout_proof: TestPayoutProof,
+    terminal_proof: TestTerminalProof,
     close: TestClose,
     closing: TestCache,
 }
@@ -232,8 +236,8 @@ struct Harness {
     slots: VecDeque<Slot>,
     registered: Option<Prepared>,
     staged_deposits: BTreeMap<VerifyingKey, u64>,
-    staged_withdrawals: BTreeMap<VerifyingKey, WithdrawalRelease<VerifyingKey, Digest>>,
-    outstanding: BTreeMap<VerifyingKey, WithdrawalRelease<VerifyingKey, Digest>>,
+    staged_withdrawals: BTreeMap<VerifyingKey, SignedWithdrawal<VerifyingKey, Digest>>,
+    outstanding: BTreeMap<VerifyingKey, SignedWithdrawal<VerifyingKey, Digest>>,
     consumed_deposit_ids: BTreeSet<Digest>,
     withdrawal_replays: BTreeMap<WithdrawalId<Digest>, u64>,
     authorization_history: Vec<SignedWithdrawal<VerifyingKey, Digest>>,
@@ -283,6 +287,7 @@ impl Harness {
             NonZeroU64::new(MAXIMUM_WITHDRAWAL_NOTICE).unwrap(),
             NonZeroUsize::new(MAX_ACCOUNTS).unwrap(),
             MAX_DESTINATION_BYTES,
+            NonZeroUsize::new(MAX_DEPOSIT_IDS).unwrap(),
             NonZeroUsize::new(MAX_DEPOSIT_IDS).unwrap(),
         );
         let chain = SettlementChain::new(
@@ -351,7 +356,7 @@ impl Harness {
                 amount,
                 destination,
                 destination_len,
-                full_close,
+                closes_account,
                 mutation,
             } => self.withdrawal(
                 *tick,
@@ -359,7 +364,7 @@ impl Harness {
                 *amount,
                 *destination,
                 *destination_len,
-                *full_close,
+                *closes_account,
                 *mutation,
             ),
             Action::Register { tick, mutated } => self.register(*tick, *mutated),
@@ -553,27 +558,23 @@ impl Harness {
                 self.chain.pending_withdrawal_deadline(&public),
                 self.outstanding
                     .get(&public)
-                    .map(|release| release.request.body().deadline())
+                    .map(|request| request.body().deadline())
             );
         }
-        for (account, release) in &self.staged_withdrawals {
-            assert_eq!(self.outstanding.get(account), Some(release));
-            let tail_balance = self
+        for (account, request) in &self.staged_withdrawals {
+            assert_eq!(self.outstanding.get(account), Some(request));
+            assert_eq!(request.account(), account);
+            let tail = self
                 .tail_cache()
                 .leaves()
                 .iter()
                 .find(|leaf| &leaf.account == account)
                 .expect("staged withdrawal account remains live")
-                .state
-                .balance;
-            let expected_amount = if release.request.body().full_close() {
-                tail_balance
-                    .checked_add(self.staged_deposits.get(account).copied().unwrap_or(0))
-                    .expect("bounded staged full-close amount")
-            } else {
-                release.request.body().amount()
-            };
-            assert_eq!(release.amount, expected_amount);
+                .state;
+            assert!(tail.active);
+            if let WithdrawalAction::Amount(amount) = request.body().action() {
+                assert!(amount.get() <= tail.balance);
+            }
         }
         if self.settled {
             assert_eq!(self.custody, 0);
@@ -642,7 +643,7 @@ impl Harness {
     fn earliest_outstanding(&self) -> Option<(u64, VerifyingKey)> {
         self.outstanding
             .iter()
-            .map(|(account, release)| (release.request.body().deadline(), account.clone()))
+            .map(|(account, request)| (request.body().deadline(), account.clone()))
             .min()
     }
 
@@ -668,9 +669,11 @@ impl Harness {
             self.staged_deposits
                 .iter()
                 .filter_map(|(account, amount)| {
-                    let deferred = self.staged_withdrawals.get(account).is_some_and(|release| {
-                        !release.request.body().full_close()
-                            && release.request.body().amount() == *amount
+                    let deferred = self.staged_withdrawals.get(account).is_some_and(|request| {
+                        matches!(
+                            request.body().action(),
+                            WithdrawalAction::Amount(withdrawal) if withdrawal.get() == *amount
+                        )
                     });
                     (!deferred).then(|| {
                         DepositRecord::new(account.clone(), *amount)
@@ -683,13 +686,8 @@ impl Harness {
     }
 
     fn withdrawal_batch(&self) -> TestWithdrawals {
-        WithdrawalBatch::new(
-            self.staged_withdrawals
-                .values()
-                .map(|release| release.request.clone())
-                .collect(),
-        )
-        .expect("model withdrawals remain canonical")
+        WithdrawalBatch::new(self.staged_withdrawals.values().cloned().collect())
+            .expect("model withdrawals remain canonical")
     }
 
     fn tail_cache(&self) -> &TestCache {
@@ -707,18 +705,19 @@ impl Harness {
         admission_deadline: u64,
         challenge_deadline: u64,
     ) -> TestContext {
-        CloseContext::new::<Sha256>(
+        EpochContext::new::<Sha256>(
             self.deployment,
             epoch,
             self.operator.public_key(),
-            cache,
             deposits,
             withdrawals,
+            cache.liability(),
             admission_deadline,
             challenge_deadline,
             CloseLimits::protocol_maximum(),
             Assignment::new(self.committee_digest, 0).unwrap(),
         )
+        .and_then(|epoch| epoch.bind::<Sha256>(cache, deposits, withdrawals))
         .expect("sanitized close context must be valid")
     }
 
@@ -726,11 +725,6 @@ impl Harness {
         let cache = self.tail_cache();
         let deposits = self.deposit_batch();
         let withdrawals = self.withdrawal_batch();
-        let withdrawal_releases = self
-            .staged_withdrawals
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
         let admission_deadline = self.now.saturating_add(2);
         let challenge_deadline = admission_deadline.saturating_add(2);
         let context = self.make_context(
@@ -742,28 +736,36 @@ impl Harness {
             challenge_deadline,
         );
         let (close, closing) = boundary_close(cache, &context, &deposits, &withdrawals);
-        self.finish_prepared(
-            cache,
-            context,
-            deposits,
-            withdrawals,
-            withdrawal_releases,
-            close,
-            closing,
-        )
+        self.finish_prepared(cache, context, deposits, withdrawals, close, closing)
     }
 
     fn make_payout_prepared(&self, payer_selector: u8, raw_amount: u8) -> Option<Prepared> {
-        if !self.staged_deposits.is_empty() || !self.staged_withdrawals.is_empty() {
+        if !self.staged_deposits.is_empty() || self.staged_withdrawals.len() > 1 {
+            return None;
+        }
+        let close_request = self.staged_withdrawals.values().next();
+        if close_request
+            .is_some_and(|request| !matches!(request.body().action(), WithdrawalAction::Close))
+        {
             return None;
         }
         let cache = self.tail_cache();
-        let candidates = cache
-            .leaves()
-            .iter()
-            .filter(|leaf| leaf.state.balance > 1)
-            .collect::<Vec<_>>();
-        let leaf = candidates.get(usize::from(payer_selector) % candidates.len().max(1))?;
+        let leaf = match close_request {
+            Some(request) => cache
+                .leaves()
+                .iter()
+                .find(|leaf| &leaf.account == request.account())?,
+            None => {
+                let candidates = cache
+                    .leaves()
+                    .iter()
+                    .filter(|leaf| leaf.state.balance > 1)
+                    .collect::<Vec<_>>();
+                candidates
+                    .get(usize::from(payer_selector) % candidates.len().max(1))
+                    .copied()?
+            }
+        };
         let payer = self
             .accounts
             .iter()
@@ -778,7 +780,7 @@ impl Harness {
         }
 
         let deposits = DepositBatch::empty();
-        let withdrawals = WithdrawalBatch::empty();
+        let withdrawals = self.withdrawal_batch();
         let admission_deadline = self.now.saturating_add(2);
         let challenge_deadline = admission_deadline.saturating_add(2);
         let context = self.make_context(
@@ -789,7 +791,12 @@ impl Harness {
             admission_deadline,
             challenge_deadline,
         );
-        let amount = (u64::from(raw_amount % 4) + 1).min(leaf.state.balance - 1);
+        let maximum = if close_request.is_some() {
+            leaf.state.balance
+        } else {
+            leaf.state.balance.checked_sub(1)?
+        };
+        let amount = u64::from(raw_amount).wrapping_rem(maximum) + 1;
         let shard = u64::from(payer_selector % 4);
         let payment = linked_payment(
             &context,
@@ -808,8 +815,13 @@ impl Harness {
         )
         .expect("one external receipt is a canonical shard set");
         let mut payer_closing = leaf.state;
-        payer_closing.balance -= amount;
         payer_closing.cumulative_debit = payment.send().body().cumulative_debit();
+        if close_request.is_some() {
+            payer_closing.balance = 0;
+            payer_closing.active = false;
+        } else {
+            payer_closing.balance -= amount;
+        }
         let recipient_closing = AccountState {
             cumulative_credit: amount,
             receipt_count: 1,
@@ -849,11 +861,22 @@ impl Harness {
             let (debit, credit, _) = row
                 .checked_deltas()
                 .expect("constructed payout counters are monotonic");
+            let closes_payer = close_request.is_some() && row.account == leaf.account;
+            let withdrawal = if closes_payer {
+                row.opening
+                    .balance
+                    .checked_sub(debit)
+                    .expect("constructed close payment is affordable")
+            } else {
+                0
+            };
             prefix = prefix
                 .checked_extend(Prefix {
                     debit,
                     credit,
+                    withdrawal,
                     payout: if row.opening.active { 0 } else { credit },
+                    withdrawals: u64::from(closes_payer),
                     shards: shards.heads().len() as u64,
                     ..Prefix::default()
                 })
@@ -865,53 +888,100 @@ impl Harness {
             build_close::<Sha256, _, _>(cache, &context, &deposits, &withdrawals, rows, shard_sets)
                 .expect("sanitized external payout close must build");
         let closing = closing_cache(cache, &close);
-        Some(self.finish_prepared(
-            cache,
-            context,
-            deposits,
-            withdrawals,
-            Vec::new(),
-            close,
-            closing,
-        ))
+        Some(self.finish_prepared(cache, context, deposits, withdrawals, close, closing))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn finish_prepared(
         &self,
         opening: &TestCache,
         context: TestContext,
         deposits: TestDeposits,
         withdrawals: TestWithdrawals,
-        withdrawal_releases: Vec<WithdrawalRelease<VerifyingKey, Digest>>,
         close: TestClose,
         closing: TestCache,
     ) -> Prepared {
+        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
+            .expect("sanitized close must validate before deriving settlement outputs");
+        let withdrawal_releases = withdrawals
+            .requests()
+            .iter()
+            .map(|request| {
+                let claim = assemble_withdrawal_claim::<Sha256, _, _>(
+                    &close,
+                    &withdrawals,
+                    request.account(),
+                    &Sequential,
+                )
+                .expect("validated withdrawal has a canonical claim");
+                assert_eq!(claim.request(), request);
+                let amount = claim
+                    .verify::<Sha256>(
+                        context.deployment(),
+                        context.withdrawal_root(),
+                        &close.roots.change,
+                    )
+                    .expect("validated withdrawal claim verifies");
+                let row = close
+                    .rows
+                    .iter()
+                    .find(|row| &row.account == request.account())
+                    .expect("validated withdrawal has an authenticated row");
+                match request.body().action() {
+                    WithdrawalAction::Amount(expected) => assert_eq!(amount, expected.get()),
+                    WithdrawalAction::Close => {
+                        let (debit, credit, _) = row
+                            .checked_deltas()
+                            .expect("validated close counters are monotonic");
+                        let available = u128::from(row.opening.balance)
+                            + u128::from(deposits.amount_for(&row.account))
+                            + u128::from(credit);
+                        let expected = u64::try_from(
+                            available
+                                .checked_sub(u128::from(debit))
+                                .expect("validated close debit is affordable"),
+                        )
+                        .expect("validated close tail fits in u64");
+                        assert_eq!(amount, expected);
+                        assert!(!row.closing.active);
+                        assert_eq!(row.closing.balance, 0);
+                    }
+                }
+                WithdrawalRelease {
+                    request: request.clone(),
+                    amount,
+                }
+            })
+            .collect::<Vec<_>>();
+        let terminal = close
+            .rows
+            .last()
+            .map_or(Prefix::default(), |row| row.prefix);
         assert_eq!(
-            close.rows.last().map_or(0, |row| row.prefix.withdrawal),
-            release_total(&withdrawal_releases)
+            terminal.withdrawals,
+            u64::try_from(withdrawals.len()).expect("bounded withdrawal count fits in u64")
         );
-        let payout_proof = assemble_payout_proof::<Sha256, _, _>(
+        assert!(terminal.withdrawal >= withdrawals.total());
+        assert_eq!(terminal.withdrawal, release_total(&withdrawal_releases));
+        let terminal_proof = assemble_terminal_proof::<Sha256, _, _>(
             &context,
             &deposits,
             &withdrawals,
             &close,
             &Sequential,
         )
-        .expect("sanitized close has a canonical payout proof");
-        let external_payouts = payout_proof
-            .verify::<Sha256>(
+        .expect("sanitized close has a canonical terminal proof");
+        let totals = terminal_proof
+            .verify::<Sha256, VerifyingKey>(
                 &context,
                 &deposits,
                 &withdrawals,
                 &close.header,
                 &close.roots,
             )
-            .expect("sanitized payout proof verifies");
-        assert_eq!(
-            close.rows.last().map_or(0, |row| row.prefix.payout),
-            payout_total(&external_payouts)
-        );
+            .expect("sanitized terminal proof verifies");
+        let external_payouts = expected_external_payouts(&close, &deposits, &withdrawals);
+        assert_eq!(totals.withdrawal, release_total(&withdrawal_releases));
+        assert_eq!(totals.payout, payout_total(&external_payouts));
         Prepared {
             opening: opening.clone(),
             context,
@@ -919,7 +989,7 @@ impl Harness {
             withdrawals,
             withdrawal_releases,
             external_payouts,
-            payout_proof,
+            terminal_proof,
             close,
             closing,
         }
@@ -1037,11 +1107,6 @@ impl Harness {
             && !self.consumed_deposit_ids.contains(&id)
             && self.consumed_deposit_ids.len() < MAX_DEPOSIT_IDS
             && aggregate.is_some()
-            && self
-                .staged_withdrawals
-                .get(&account)
-                .filter(|release| release.request.body().full_close())
-                .is_none_or(|release| release.amount.checked_add(amount).is_some())
             && self.custody.checked_add(amount).is_some()
         {
             OutcomeClass::Success
@@ -1052,15 +1117,6 @@ impl Harness {
         assert_eq!(OutcomeClass::of(&result), expected);
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
-            if let Some(release) = self.staged_withdrawals.get_mut(&account)
-                && release.request.body().full_close()
-            {
-                release.amount = release
-                    .amount
-                    .checked_add(amount)
-                    .expect("the oracle checked full-close release aggregation");
-                self.outstanding.insert(account.clone(), release.clone());
-            }
             self.staged_deposits.insert(
                 account,
                 aggregate.expect("the oracle checked accepted deposit aggregation"),
@@ -1082,7 +1138,7 @@ impl Harness {
         raw_amount: u8,
         destination_seed: u64,
         destination_len: u8,
-        wants_full_close: bool,
+        wants_close: bool,
         mutation: u8,
     ) -> ActionOutcome {
         let now = self.advance(tick);
@@ -1094,15 +1150,8 @@ impl Harness {
                 1,
             )
         });
-        let mut full_close = wants_full_close;
-        let mut amount = if full_close {
-            minimum_balance.checked_add(1).map_or_else(
-                || u64::from(raw_amount),
-                |range| u64::from(raw_amount).wrapping_rem(range),
-            )
-        } else {
-            u64::from(raw_amount).wrapping_rem(minimum_balance) + 1
-        };
+        let mut closes_account = wants_close;
+        let mut amount = u64::from(raw_amount).wrapping_rem(minimum_balance) + 1;
         let len = usize::from(destination_len) % MAX_DESTINATION_BYTES + 1;
         let mut destination = Bytes::from(vec![destination_seed as u8; len]);
         let mut deployment = self.deployment;
@@ -1127,7 +1176,7 @@ impl Harness {
             7 => {
                 if let Some(excessive) = minimum_balance.checked_add(1) {
                     amount = excessive;
-                    full_close = false;
+                    closes_account = false;
                 } else {
                     destination = Bytes::from(vec![0; MAX_DESTINATION_BYTES + 1]);
                 }
@@ -1156,18 +1205,14 @@ impl Harness {
                         .iter()
                         .find(|key| key.public_key() == depositing_account)
                     {
-                        full_close = false;
-                        amount = 1;
                         let request = SignedWithdrawal::sign(
                             deployment,
                             root,
                             destination.clone(),
-                            amount,
-                            full_close,
+                            WithdrawalAction::Amount(NonZeroU64::MIN),
                             deadline,
                             depositing_key,
-                        )
-                        .expect("positive withdrawal must sign");
+                        );
                         replay = Some(request);
                     }
                 } else {
@@ -1176,16 +1221,14 @@ impl Harness {
             }
         }
         let request = replay.unwrap_or_else(|| {
-            SignedWithdrawal::sign(
-                deployment,
-                root,
-                destination,
-                amount,
-                full_close,
-                deadline,
-                &key,
-            )
-            .expect("sanitized withdrawal must sign")
+            let action = if closes_account {
+                WithdrawalAction::Close
+            } else {
+                WithdrawalAction::Amount(
+                    NonZeroU64::new(amount).expect("sanitized withdrawal amount is positive"),
+                )
+            };
+            SignedWithdrawal::sign(deployment, root, destination, action, deadline, &key)
         });
         let account = request.account().clone();
         let mut openings = self.safety_openings(&account).unwrap_or_default();
@@ -1200,17 +1243,6 @@ impl Harness {
             } else {
                 OutcomeClass::Error
             };
-        let clean_amount = if request.body().full_close() {
-            openings.last().and_then(|opening| {
-                opening
-                    .leaf
-                    .state
-                    .balance
-                    .checked_add(self.staged_deposits.get(&account).copied().unwrap_or(0))
-            })
-        } else {
-            Some(request.body().amount())
-        };
         let result = self
             .chain
             .queue_withdrawal(now, request.clone(), &openings, |_| eligible);
@@ -1218,18 +1250,13 @@ impl Harness {
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
             let request_id = request.id::<Sha256>();
-            let release = WithdrawalRelease {
-                request: request.clone(),
-                amount: clean_amount
-                    .expect("successful withdrawal authenticates the tail safety opening"),
-            };
             assert!(!self.withdrawal_replays.contains_key(&request_id));
             assert!(
                 self.staged_withdrawals
-                    .insert(account.clone(), release.clone())
+                    .insert(account.clone(), request.clone())
                     .is_none()
             );
-            assert!(self.outstanding.insert(account, release).is_none());
+            assert!(self.outstanding.insert(account, request.clone()).is_none());
             self.withdrawal_replays
                 .insert(request_id, request.body().deadline());
             self.authorization_history.push(request);
@@ -1313,9 +1340,13 @@ impl Harness {
         if expected_openings != openings {
             return false;
         }
-        expected_openings
-            .iter()
-            .all(|opening| opening.leaf.state.active && body.amount() <= opening.leaf.state.balance)
+        expected_openings.iter().all(|opening| {
+            opening.leaf.state.active
+                && match body.action() {
+                    WithdrawalAction::Amount(amount) => amount.get() <= opening.leaf.state.balance,
+                    WithdrawalAction::Close => true,
+                }
+        })
     }
 
     fn register(&mut self, tick: u8, mutated: bool) -> ActionOutcome {
@@ -1377,7 +1408,7 @@ impl Harness {
             .registered
             .clone()
             .unwrap_or_else(|| self.make_prepared());
-        let payout_proof = prepared.payout_proof.clone();
+        let terminal_proof = prepared.terminal_proof.clone();
         let certificate = self.certificate(&prepared);
         let retained_certificate = certificate.clone();
         let mut header = prepared.close.header;
@@ -1403,7 +1434,7 @@ impl Harness {
         };
         let result = self
             .chain
-            .admit(now, header, roots, payout_proof, certificate);
+            .admit(now, header, roots, terminal_proof, certificate);
         assert_eq!(OutcomeClass::of(&result), expected);
         if expected == OutcomeClass::Success {
             let batch_id = result
@@ -1475,8 +1506,11 @@ impl Harness {
             assert_eq!(finalized.batch_id, slot.batch_id());
             assert_eq!(finalized.epoch, self.expected_epoch);
             assert_eq!(finalized.closing_state_root, slot.closing.root());
-            assert_eq!(finalized.released_withdrawals, slot.withdrawal_releases);
-            assert_eq!(finalized.released_payouts, slot.external_payouts);
+            assert_eq!(
+                finalized.withdrawal_total,
+                release_total(&slot.withdrawal_releases)
+            );
+            assert_eq!(finalized.payout_total, payout_total(&slot.external_payouts));
             assert_eq!(
                 finalized.custody_balance,
                 self.custody
@@ -1503,7 +1537,7 @@ impl Harness {
             for release in &slot.withdrawal_releases {
                 assert_eq!(
                     self.outstanding.remove(release.request.account()),
-                    Some(release.clone())
+                    Some(release.request.clone())
                 );
             }
             self.finalized = slot.closing;
@@ -1918,18 +1952,17 @@ impl Harness {
         let mut total = 0_u64;
         for leaf in self.finalized.leaves() {
             let withdrawal = self.outstanding.get(&leaf.account);
-            let withdrawal_amount = withdrawal.map_or(0, |release| {
-                if release.request.body().full_close() {
-                    leaf.state.balance
-                } else {
-                    release.request.body().amount()
-                }
+            let withdrawal_amount = withdrawal.map_or(0, |request| match request.body().action() {
+                WithdrawalAction::Amount(amount) => amount.get(),
+                WithdrawalAction::Close => leaf.state.balance,
             });
-            if let Some(release) = withdrawal {
+            if let Some(request) = withdrawal {
                 assert!(leaf.state.active);
-                assert!(release.request.body().amount() <= leaf.state.balance);
+                if let WithdrawalAction::Amount(amount) = request.body().action() {
+                    assert!(amount.get() <= leaf.state.balance);
+                }
                 expected.push(FaultPayout::QueuedWithdrawal(WithdrawalRelease {
-                    request: release.request.clone(),
+                    request: request.clone(),
                     amount: withdrawal_amount,
                 }));
             }
@@ -1970,6 +2003,42 @@ fn release_total(releases: &[WithdrawalRelease<VerifyingKey, Digest>]) -> u64 {
         .expect("authenticated withdrawal releases fit custody")
 }
 
+fn expected_external_payouts(
+    close: &TestClose,
+    deposits: &TestDeposits,
+    withdrawals: &TestWithdrawals,
+) -> Vec<ExternalPayout<VerifyingKey>> {
+    close
+        .rows
+        .iter()
+        .filter_map(|row| {
+            if row.opening != AccountState::default()
+                || row.closing.active
+                || row.closing.balance != 0
+                || row.outgoing.is_some()
+                || deposits.amount_for(&row.account) != 0
+                || withdrawals.request_for(&row.account).is_some()
+            {
+                return None;
+            }
+
+            let (debit, credit, receipts) = row
+                .checked_deltas()
+                .expect("validated payout row counters are monotonic");
+            assert_eq!(debit, 0);
+            assert!(credit > 0);
+            assert!(receipts > 0);
+            assert!(row.credit_root.len > 0);
+            assert_eq!(row.credit_root.total_credit, credit);
+            assert_eq!(row.credit_root.total_receipts, receipts);
+            Some(ExternalPayout {
+                recipient: row.account.clone(),
+                amount: credit,
+            })
+        })
+        .collect()
+}
+
 fn payout_total(payouts: &[ExternalPayout<VerifyingKey>]) -> u64 {
     payouts
         .iter()
@@ -2008,16 +2077,12 @@ fn boundary_close(
             .map_or_else(AccountState::default, |leaf| leaf.state);
         let deposit = deposits.amount_for(&account);
         let withdrawal = withdrawals.request_for(&account);
-        let full_close = withdrawal.is_some_and(|request| request.body().full_close());
-        let applied = withdrawal.map_or(0, |request| {
-            if full_close {
-                opening
-                    .balance
-                    .checked_add(deposit)
-                    .expect("bounded closing balance")
-            } else {
-                request.body().amount()
-            }
+        let applied = withdrawal.map_or(0, |request| match request.body().action() {
+            WithdrawalAction::Amount(amount) => amount.get(),
+            WithdrawalAction::Close => opening
+                .balance
+                .checked_add(deposit)
+                .expect("bounded closing balance"),
         });
         let mut closing = opening;
         closing.balance = opening

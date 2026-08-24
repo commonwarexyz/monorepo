@@ -1,11 +1,13 @@
 //! Bounded contradictions to an admitted public close.
 
+#[cfg(test)]
+use crate::bajillion::transition::EpochContext;
 use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     credit::{self, CreditRoot, ShardLookup},
     payment::{Payment, PaymentError, receipt_range_is_feasible},
     state::{AccountRow, StateLeaf},
-    transition::{BatchId, CloseContext, Header, RootBundle},
+    transition::{self, BatchId, CloseContext, Header, RootBundle},
 };
 use alloc::boxed::Box;
 use bytes::{Buf, BufMut};
@@ -730,7 +732,7 @@ where
     if challenge.batch() != &header.batch_id::<H>() {
         return Err(ChallengeError::WrongBatch);
     }
-    if !header.verify::<H, P>(context.payment(), roots) {
+    if transition::validate_header::<H, P, _>(context, header, roots).is_err() {
         return Err(ChallengeError::HeaderRoot);
     }
     let context = context.payment();
@@ -1257,18 +1259,19 @@ mod tests {
         let cache = StateCache::new::<Sha256>(leaves.clone()).unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = EpochContext::new::<Sha256>(
             Sha256::hash(&[b"challenge-deployment"]),
             7,
             operator.public_key(),
-            &cache,
             &deposits,
             &withdrawals,
+            cache.liability(),
             99,
             100,
             CloseLimits::protocol_maximum(),
             Assignment::new(Sha256::hash(&[b"challenge-committee"]), 0).unwrap(),
         )
+        .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
         .unwrap();
         let accepted = payment(
             context.payment(),
@@ -2262,6 +2265,57 @@ mod tests {
         assert!(
             matches!(&result, Err(ChallengeError::WrongBatch)),
             "a batch ID from header A must not authorize header B inputs: {result:?}"
+        );
+    }
+
+    #[test]
+    fn adjudication_rejects_another_same_liability_opening_root() {
+        let fixture = fixture();
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let mut leaves = fixture.leaves.clone();
+        let dormant = leaves
+            .iter_mut()
+            .find(|leaf| leaf.account == fixture.dormant.public_key())
+            .unwrap();
+        dormant.account = SigningKey::from_seed(99).public_key();
+        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let cache = StateCache::new::<Sha256>(leaves).unwrap();
+        let other = EpochContext::new::<Sha256>(
+            Sha256::hash(&[b"challenge-deployment"]),
+            7,
+            fixture.operator.public_key(),
+            &deposits,
+            &withdrawals,
+            cache.liability(),
+            99,
+            100,
+            CloseLimits::protocol_maximum(),
+            Assignment::new(Sha256::hash(&[b"challenge-committee"]), 0).unwrap(),
+        )
+        .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
+        .unwrap();
+        assert_eq!(other.payment(), fixture.context.payment());
+        assert_ne!(other.opening_root(), fixture.context.opening_root());
+
+        let mut roots = fixture.roots;
+        roots.opening = *other.opening_root();
+        let header = Header::new::<Sha256, _>(other.payment(), &roots);
+        let challenge = Challenge::LatestAcknowledgedSend {
+            batch: header.batch_id::<Sha256>(),
+            payment: Box::new(fixture.payment.clone()),
+            payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
+        };
+        let result = super::adjudicate::<Sha256, _>(
+            &fixture.context,
+            &header,
+            &roots,
+            fixture.context.challenge_deadline(),
+            &challenge,
+        );
+        assert!(
+            matches!(result, Err(ChallengeError::HeaderRoot)),
+            "a header from another bound opening root was accepted: {result:?}"
         );
     }
 

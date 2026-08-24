@@ -6,8 +6,8 @@ use commonware_clearing::bajillion::{
         bls12381::{Certificate, Vote},
     },
     boundary::{
-        DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalBatch, WithdrawalBody,
-        WithdrawalId,
+        DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
+        WithdrawalBody, WithdrawalId,
     },
     challenge::{AccountLookup, Challenge, RangeLower, RowOpening, StateLookup, StateOpening},
     commitment::{MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot},
@@ -15,8 +15,9 @@ use commonware_clearing::bajillion::{
     payment::{Payment, PaymentContext, ReceiptBody, SendBody, SignedReceipt, SignedSend, TxId},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, BatchId, ChangeRange, Close, CloseLimits, Header, LayoutRange, PayoutProof,
-        ProofSlice, RootBundle, SliceBoundary, StateRange,
+        Assignment, BatchId, ChangeRange, Close, CloseLimits, ExternalPayoutClaim, Header,
+        LayoutRange, ProofSlice, RootBundle, SliceBoundary, StateRange, TerminalProof,
+        WithdrawalClaim,
     },
 };
 use commonware_codec::conformance::CodecConformance;
@@ -30,6 +31,7 @@ commonware_conformance::conformance_tests! {
     CodecConformance<DepositRecord<VerifyingKey>> => 1024,
     CodecConformance<DepositBatch<VerifyingKey>> => 1024,
     CodecConformance<WithdrawalId<Sha256Digest>>,
+    CodecConformance<WithdrawalAction>,
     CodecConformance<WithdrawalBody<Sha256Digest>>,
     CodecConformance<SignedWithdrawal<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<WithdrawalBatch<VerifyingKey, Sha256Digest>> => 1024,
@@ -69,7 +71,9 @@ commonware_conformance::conformance_tests! {
     CodecConformance<LayoutRange<Sha256Digest>> => 1024,
     CodecConformance<ChangeRange<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<StateRange<VerifyingKey, Sha256Digest>> => 1024,
-    CodecConformance<PayoutProof<VerifyingKey, Sha256Digest>> => 256,
+    CodecConformance<TerminalProof<Sha256Digest>> => 1024,
+    CodecConformance<ExternalPayoutClaim<VerifyingKey, Sha256Digest>> => 256,
+    CodecConformance<WithdrawalClaim<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<ProofSlice<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<Close<VerifyingKey, Sha256Digest>> => 256,
 }

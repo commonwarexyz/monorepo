@@ -65,5 +65,6 @@ eight-byte bitmap-length prefix, so the raw encoded Header-plus-certificate pack
 `88 + ceil(n / 8)` bytes. The harness also preflights the corresponding mutating
 `SettlementChain` admission and challenge paths outside Criterion's timed loops.
 
-Ordinary withdrawal amounts are exact. A full-close amount is a minimum floor, and settlement
-effects pair the signed request with the exact authenticated balance released to its destination.
+Ordinary withdrawals authorize an exact positive amount. A close carries no amount and releases
+the account's authenticated epoch-tail balance after that epoch's deposits, credits, and debits.
+A zero tail is valid and removes the account without creating a payout claim.

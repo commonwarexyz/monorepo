@@ -33,7 +33,6 @@ use core::{marker::PhantomData, ops::Range};
 pub struct StreamingBuilder<H: Hasher> {
     expected: u32,
     added: u32,
-    processed: u32,
     subtree_size: usize,
     buffer: Vec<H::Digest>,
     scratch: Vec<H::Digest>,
@@ -68,7 +67,6 @@ impl<H: Hasher> StreamingBuilder<H> {
         Ok(Self {
             expected: leaves,
             added: 0,
-            processed: 0,
             subtree_size,
             buffer,
             scratch,
@@ -145,7 +143,6 @@ impl<H: Hasher> StreamingBuilder<H> {
         if !self.buffer.is_empty() {
             self.flush(strategy);
         }
-        debug_assert_eq!(self.processed, self.expected);
 
         // Frontier entries are ordered from the newest/rightmost subtree at the
         // lowest occupied height to older/leftward subtrees at greater heights.
@@ -178,8 +175,10 @@ impl<H: Hasher> StreamingBuilder<H> {
     fn flush(&mut self, strategy: &impl Strategy) {
         let leaves = self.buffer.len();
         debug_assert!(leaves > 0 && leaves <= self.subtree_size);
+        let start =
+            self.added - u32::try_from(leaves).expect("the configured subtree size fits in u32");
         let height = leaves.next_power_of_two().trailing_zeros() as usize;
-        hash_positioned_leaves::<H>(&mut self.buffer, self.processed, strategy);
+        hash_positioned_leaves::<H>(&mut self.buffer, start, strategy);
 
         let mut current = core::mem::take(&mut self.buffer);
         let mut next = core::mem::take(&mut self.scratch);
@@ -205,10 +204,6 @@ impl<H: Hasher> StreamingBuilder<H> {
             self.scratch = current;
         }
 
-        self.processed = self
-            .processed
-            .checked_add(u32::try_from(leaves).expect("subtree size fits in u32"))
-            .expect("validated leaf count fits in u32");
         self.insert(height, root);
     }
 

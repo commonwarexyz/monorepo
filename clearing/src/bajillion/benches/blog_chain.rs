@@ -15,8 +15,8 @@ use commonware_clearing::bajillion::{
     settlement::{BatchStatus, HardFaultReason, SettlementChain, SettlementConfig},
     state::AccountRow,
     transition::{
-        BatchId, Header, PreparedClose, ProofSlice, RootBundle, prepare_close_with_strategy,
-        validate_close, validate_header,
+        BatchId, Header, PreparedClose, ProofSlice, RootBundle, TerminalProof,
+        prepare_close_with_strategy, validate_close,
     },
 };
 use commonware_codec::{Encode, EncodeSize};
@@ -56,6 +56,7 @@ struct BlogChainFixture {
     validator_scheme: bls12381::Scheme,
     dealing: Vec<ProofSlice<VerifyingKey, Digest>>,
     commitment: CommitmentPayload,
+    terminal_proof: TerminalProof<Digest>,
     verifier: bls12381::Scheme,
     encoded_challenge: Bytes,
     metrics: Metrics,
@@ -107,6 +108,10 @@ impl BlogChainFixture {
         let external_package_bytes = external_package.encode_size();
         assert_eq!(external_package.encode().len(), external_package_bytes);
         let commitment = (header, close.prepared.close().roots, certificate);
+        let terminal_proof = close
+            .prepared
+            .terminal_proof()
+            .expect("benchmark terminal proof is valid");
 
         let (challenge_row_lookup_bytes, challenge_shard_lookup_bytes) = match &challenge {
             Challenge::HigherShardTip {
@@ -135,7 +140,13 @@ impl BlogChainFixture {
             challenge
         );
 
-        preflight_chain(&close, &validators, &commitment, encoded_challenge.as_ref());
+        preflight_chain(
+            &close,
+            &validators,
+            &commitment,
+            &terminal_proof,
+            encoded_challenge.as_ref(),
+        );
         seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &validator_scheme,
             &close.context,
@@ -179,6 +190,7 @@ impl BlogChainFixture {
             validator_scheme,
             dealing,
             commitment,
+            terminal_proof,
             verifier,
             encoded_challenge,
             metrics,
@@ -228,12 +240,19 @@ impl BlogChainFixture {
         .expect("benchmark validator dealing is valid")
     }
 
-    // Repeatable root-witness and certificate validation. The mutating admission path, including
-    // payout extraction, is preflighted separately because its state cannot be reused per sample.
+    // Admission authenticates aggregate boundary flows before mutating settlement state. The
+    // retained proof and certificate make that verification repeatable across Criterion samples.
     fn check_certified_commitment(&self) -> BatchId<Digest> {
         let (header, roots, certificate) = &self.commitment;
-        validate_header::<Sha256, _, _>(&self.close.context, header, roots)
-            .expect("benchmark header matches its registration");
+        self.terminal_proof
+            .verify::<Sha256, _>(
+                &self.close.context,
+                &self.close.deposits,
+                &self.close.withdrawals,
+                header,
+                roots,
+            )
+            .expect("benchmark terminal proof matches its registration");
         assert!(self.verifier.verify_exact(header, certificate));
         header.batch_id::<Sha256>()
     }
@@ -287,6 +306,7 @@ fn chain(close: &CloseFixture, validators: &Validators) -> TestChain {
             live_accounts,
             0,
             live_accounts,
+            live_accounts,
         ),
     )
     .expect("benchmark settlement chain is valid")
@@ -296,12 +316,9 @@ fn preflight_chain(
     close: &CloseFixture,
     validators: &Validators,
     commitment: &CommitmentPayload,
+    terminal_proof: &TerminalProof<Digest>,
     encoded_challenge: &[u8],
 ) {
-    let payout_proof = close
-        .prepared
-        .payout_proof(&close.deposits, &close.withdrawals)
-        .expect("benchmark payout proof is valid");
     let mut chain = chain(close, validators);
     chain
         .register(
@@ -316,7 +333,7 @@ fn preflight_chain(
             0,
             commitment.0,
             commitment.1,
-            payout_proof,
+            terminal_proof.clone(),
             commitment.2.clone(),
         )
         .expect("benchmark commitment can be admitted");
@@ -370,9 +387,7 @@ fn bench_blog_chain(c: &mut Criterion) {
             fixture.metrics.challenge_bytes,
         );
 
-        let labels = format!(
-            "N={live_accounts} A={changed} B={credited} h={shards} n={VALIDATORS} q={QUORUM} slices={SLICES} w={WORKERS}"
-        );
+        let labels = format!("N={live_accounts} A={changed} B={credited} h={shards}");
         c.bench_function(
             &format!("{}/p={profile_index} op=prepare {labels}", module_path!()),
             |b| {

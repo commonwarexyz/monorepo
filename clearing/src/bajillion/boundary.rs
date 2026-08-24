@@ -8,6 +8,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use commonware_parallel::Sequential;
+use core::num::NonZeroU64;
 use thiserror::Error;
 
 fn vector_len(len: usize) -> Result<u32, commitment::Error> {
@@ -244,9 +245,51 @@ impl<D: Digest> Read for WithdrawalId<D> {
     }
 }
 
+/// Account-authorized withdrawal operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WithdrawalAction {
+    /// Withdraw one exact positive amount.
+    Amount(NonZeroU64),
+    /// Authorizes an amountless close that withdraws the authenticated epoch-tail balance.
+    Close,
+}
+
+impl Write for WithdrawalAction {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Amount(amount) => {
+                1_u8.write(buf);
+                amount.write(buf);
+            }
+            Self::Close => 2_u8.write(buf),
+        }
+    }
+}
+
+impl EncodeSize for WithdrawalAction {
+    fn encode_size(&self) -> usize {
+        match self {
+            Self::Amount(_) => u8::SIZE + NonZeroU64::SIZE,
+            Self::Close => u8::SIZE,
+        }
+    }
+}
+
+impl Read for WithdrawalAction {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            1 => Ok(Self::Amount(NonZeroU64::read(buf)?)),
+            2 => Ok(Self::Close),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
 /// Canonical withdrawal tuple signed by an account.
 ///
-/// The signed fields are exactly `(deployment, state_root, destination, amount, full_close,
+/// The signed fields are exactly `(deployment, state_root, destination, action,
 /// absolute_deadline)`. The signing account is carried by [`SignedWithdrawal`] so the destination
 /// remains opaque adapter-defined bytes rather than a clearing account key.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -254,52 +297,24 @@ pub struct WithdrawalBody<D: Digest> {
     deployment: D,
     state_root: D,
     destination: Bytes,
-    amount: u64,
-    full_close: bool,
+    action: WithdrawalAction,
     deadline: Deadline,
 }
 
 impl<D: Digest> WithdrawalBody<D> {
-    /// Creates a withdrawal body with a positive amount, or a zero-amount full close.
-    pub fn new(
+    /// Creates a withdrawal body.
+    pub const fn new(
         deployment: D,
         state_root: D,
         destination: Bytes,
-        amount: u64,
-        full_close: bool,
-        deadline: Deadline,
-    ) -> Result<Self, BoundaryError> {
-        if amount == 0 && !full_close {
-            return Err(BoundaryError::ZeroWithdrawal);
-        }
-        Ok(Self {
-            deployment,
-            state_root,
-            destination,
-            amount,
-            full_close,
-            deadline,
-        })
-    }
-
-    /// Constructs an arbitrary raw body without checking withdrawal invariants.
-    ///
-    /// This models everything a faulty account authority may sign in challenge tests. Normal
-    /// construction should use [`Self::new`].
-    pub const fn from_raw_unchecked(
-        deployment: D,
-        state_root: D,
-        destination: Bytes,
-        amount: u64,
-        full_close: bool,
+        action: WithdrawalAction,
         deadline: Deadline,
     ) -> Self {
         Self {
             deployment,
             state_root,
             destination,
-            amount,
-            full_close,
+            action,
             deadline,
         }
     }
@@ -319,26 +334,14 @@ impl<D: Digest> WithdrawalBody<D> {
         &self.destination
     }
 
-    /// Returns the requested amount.
-    pub const fn amount(&self) -> u64 {
-        self.amount
-    }
-
-    /// Returns whether successful application must deactivate the account.
-    pub const fn full_close(&self) -> bool {
-        self.full_close
+    /// Returns the authorized action.
+    pub const fn action(&self) -> &WithdrawalAction {
+        &self.action
     }
 
     /// Returns the absolute settlement-chain deadline.
     pub const fn deadline(&self) -> Deadline {
         self.deadline
-    }
-
-    const fn validate(&self) -> Result<(), BoundaryError> {
-        if self.amount == 0 && !self.full_close {
-            return Err(BoundaryError::ZeroWithdrawal);
-        }
-        Ok(())
     }
 }
 
@@ -347,19 +350,18 @@ impl<D: Digest> Write for WithdrawalBody<D> {
         self.deployment.write(buf);
         self.state_root.write(buf);
         self.destination.write(buf);
-        self.amount.write(buf);
-        self.full_close.write(buf);
+        self.action.write(buf);
         self.deadline.write(buf);
     }
 }
 
 impl<D: Digest> EncodeSize for WithdrawalBody<D> {
     fn encode_size(&self) -> usize {
-        D::SIZE * 2 + self.destination.encode_size() + u64::SIZE + bool::SIZE + u64::SIZE
+        D::SIZE * 2 + self.destination.encode_size() + self.action.encode_size() + u64::SIZE
     }
 
     fn encode_inline_size(&self) -> usize {
-        D::SIZE * 2 + self.destination.encode_inline_size() + u64::SIZE + bool::SIZE + u64::SIZE
+        D::SIZE * 2 + self.destination.encode_inline_size() + self.action.encode_size() + u64::SIZE
     }
 }
 
@@ -371,8 +373,7 @@ impl<D: Digest> Read for WithdrawalBody<D> {
             deployment: D::read(buf)?,
             state_root: D::read(buf)?,
             destination: Bytes::read_cfg(buf, destination_cfg)?,
-            amount: u64::read(buf)?,
-            full_close: bool::read(buf)?,
+            action: WithdrawalAction::read(buf)?,
             deadline: u64::read(buf)?,
         })
     }
@@ -388,31 +389,19 @@ pub struct SignedWithdrawal<P: PublicKey, D: Digest> {
 
 impl<P: PublicKey, D: Digest> SignedWithdrawal<P, D> {
     /// Creates and signs a withdrawal authorization.
-    #[allow(clippy::too_many_arguments)]
     pub fn sign<S: Signer<PublicKey = P, Signature = P::Signature>>(
         deployment: D,
         state_root: D,
         destination: Bytes,
-        amount: u64,
-        full_close: bool,
+        action: WithdrawalAction,
         deadline: Deadline,
         account: &S,
-    ) -> Result<Self, BoundaryError> {
-        let body = WithdrawalBody::new(
-            deployment,
-            state_root,
-            destination,
-            amount,
-            full_close,
-            deadline,
-        )?;
-        Ok(Self::sign_body_by_authority(body, account))
+    ) -> Self {
+        let body = WithdrawalBody::new(deployment, state_root, destination, action, deadline);
+        Self::sign_body_by_authority(body, account)
     }
 
     /// Signs an explicit body with the supplied account authority.
-    ///
-    /// This intentionally permits a semantically invalid body to model everything a faulty
-    /// account can authorize. Call [`Self::verify_context`] before relying on the result.
     pub fn sign_body_by_authority<S: Signer<PublicKey = P, Signature = P::Signature>>(
         body: WithdrawalBody<D>,
         account: &S,
@@ -425,7 +414,7 @@ impl<P: PublicKey, D: Digest> SignedWithdrawal<P, D> {
         }
     }
 
-    /// Constructs a raw envelope without checking its account, signature, or body.
+    /// Constructs a raw envelope without checking its account or signature.
     ///
     /// This is intended for adversarial decoding fixtures. Normal construction should use
     /// [`Self::sign`] or [`Self::sign_body_by_authority`].
@@ -471,9 +460,8 @@ impl<P: PublicKey, D: Digest> SignedWithdrawal<P, D> {
         (self.account, self.body, self.account_signature)
     }
 
-    /// Verifies the signature and basic amount invariant without binding a context.
+    /// Verifies the account signature without binding a context.
     pub fn verify_signature(&self) -> Result<(), BoundaryError> {
-        self.body.validate()?;
         if !self.account.verify(
             WITHDRAWAL_SIGNATURE_NAMESPACE,
             &self.body.encode(),
@@ -484,7 +472,7 @@ impl<P: PublicKey, D: Digest> SignedWithdrawal<P, D> {
         Ok(())
     }
 
-    /// Verifies the deployment, signature, and basic amount invariant.
+    /// Verifies the deployment and signature.
     ///
     /// The authorization root remains request-local: one sealed batch may contain
     /// withdrawals queued against different finalized roots.
@@ -562,9 +550,6 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
     }
 
     fn from_sorted(requests: Vec<SignedWithdrawal<P, D>>) -> Result<Self, BoundaryError> {
-        for request in &requests {
-            request.body.validate()?;
-        }
         if requests
             .windows(2)
             .any(|pair| pair[0].account >= pair[1].account)
@@ -572,8 +557,12 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
             return Err(BoundaryError::NonCanonicalWithdrawals);
         }
         let total = requests.iter().try_fold(0_u64, |total, request| {
+            let amount = match request.body.action {
+                WithdrawalAction::Amount(amount) => amount.get(),
+                WithdrawalAction::Close => 0,
+            };
             total
-                .checked_add(request.body.amount)
+                .checked_add(amount)
                 .ok_or(BoundaryError::ArithmeticOverflow)
         })?;
         Ok(Self { requests, total })
@@ -594,7 +583,7 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
         self.requests.is_empty()
     }
 
-    /// Returns the checked aggregate withdrawal amount.
+    /// Returns the checked aggregate of exact withdrawal amounts.
     pub const fn total(&self) -> u64 {
         self.total
     }
@@ -605,12 +594,6 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
             .binary_search_by(|request| request.account.cmp(account))
             .ok()
             .map(|index| &self.requests[index])
-    }
-
-    /// Returns one account's requested amount, or zero when absent.
-    pub fn amount_for(&self, account: &P) -> u64 {
-        self.request_for(account)
-            .map_or(0, |request| request.body.amount)
     }
 
     /// Verifies every request against the exact deployment and finalized state root.
@@ -672,10 +655,6 @@ impl<P: PublicKey, D: Digest> Read for WithdrawalBatch<P, D> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let requests = Vec::<SignedWithdrawal<P, D>>::read_cfg(buf, &(cfg.0, cfg.1))?;
         Self::from_sorted(requests).map_err(|error| match error {
-            BoundaryError::ZeroWithdrawal => CodecError::Invalid(
-                "clearing::WithdrawalBatch",
-                "zero amount requires a full close",
-            ),
             BoundaryError::NonCanonicalWithdrawals => CodecError::Invalid(
                 "clearing::WithdrawalBatch",
                 "withdrawal accounts are not strictly sorted and unique",
@@ -695,9 +674,6 @@ pub enum BoundaryError {
     /// Deposit records must carry value.
     #[error("deposit amount must be positive")]
     ZeroDeposit,
-    /// A zero withdrawal amount is valid only for a full close.
-    #[error("zero withdrawal amount requires a full close")]
-    ZeroWithdrawal,
     /// Deposit accounts are not strictly sorted and unique.
     #[error("deposit accounts are not strictly sorted and unique")]
     NonCanonicalDeposits,
@@ -764,6 +740,17 @@ mod arbitrary_impls {
         }
     }
 
+    impl arbitrary::Arbitrary<'_> for WithdrawalAction {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            if u.arbitrary()? {
+                Ok(Self::Close)
+            } else {
+                let amount = NonZeroU64::new(u.arbitrary()?).unwrap_or(NonZeroU64::MIN);
+                Ok(Self::Amount(amount))
+            }
+        }
+    }
+
     impl<'a, D> arbitrary::Arbitrary<'a> for WithdrawalBody<D>
     where
         D: Digest + arbitrary::Arbitrary<'a>,
@@ -773,8 +760,7 @@ mod arbitrary_impls {
                 deployment: u.arbitrary()?,
                 state_root: u.arbitrary()?,
                 destination: bytes(u)?,
-                amount: u.arbitrary()?,
-                full_close: u.arbitrary()?,
+                action: u.arbitrary()?,
                 deadline: u.arbitrary()?,
             })
         }
@@ -803,14 +789,9 @@ mod arbitrary_impls {
     {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             let len = usize::from(u.arbitrary::<u8>()? % 33);
-            let mut requests = Vec::with_capacity(len);
+            let mut requests: Vec<SignedWithdrawal<P, D>> = Vec::with_capacity(len);
             for _ in 0..len {
-                let mut request: SignedWithdrawal<P, D> = u.arbitrary()?;
-                request.body.amount = u.arbitrary::<u32>()? as u64;
-                if request.body.amount == 0 {
-                    request.body.full_close = true;
-                }
-                requests.push(request);
+                requests.push(u.arbitrary()?);
             }
             requests.sort_unstable_by(|left, right| left.account.cmp(&right.account));
             requests.dedup_by(|left, right| left.account == right.account);
@@ -822,7 +803,7 @@ mod arbitrary_impls {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, DecodeExt as _, Encode};
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_cryptography_curve25519::signing::{
         SigningKey, StrictVerifyingKey as VerifyingKey,
@@ -836,10 +817,13 @@ mod tests {
         (Sha256::hash(&[b"deployment"]), Sha256::hash(&[b"state"]))
     }
 
+    fn amount(value: u64) -> WithdrawalAction {
+        WithdrawalAction::Amount(NonZeroU64::new(value).unwrap())
+    }
+
     fn withdrawal(
         account: &SigningKey,
-        amount: u64,
-        full_close: bool,
+        action: WithdrawalAction,
         destination: &'static [u8],
     ) -> TestWithdrawal {
         let (deployment, state_root) = context();
@@ -847,17 +831,15 @@ mod tests {
             deployment,
             state_root,
             Bytes::from_static(destination),
-            amount,
-            full_close,
+            action,
             99,
             account,
         )
-        .unwrap()
     }
 
     #[test]
     fn withdrawal_decode_rejects_a_low_order_account_identity() {
-        let mut encoded = withdrawal(&SigningKey::from_seed(1), 1, false, b"destination")
+        let mut encoded = withdrawal(&SigningKey::from_seed(1), amount(1), b"destination")
             .encode()
             .to_vec();
         encoded[..VerifyingKey::SIZE].fill(0);
@@ -894,12 +876,19 @@ mod tests {
 
     #[test]
     fn boundary_totals_never_wrap() {
-        let a = SigningKey::from_seed(1).public_key();
-        let b = SigningKey::from_seed(2).public_key();
+        let a = SigningKey::from_seed(1);
+        let b = SigningKey::from_seed(2);
         assert_eq!(
             DepositBatch::new(vec![
-                DepositRecord::new(a, u64::MAX).unwrap(),
-                DepositRecord::new(b, 1).unwrap(),
+                DepositRecord::new(a.public_key(), u64::MAX).unwrap(),
+                DepositRecord::new(b.public_key(), 1).unwrap(),
+            ]),
+            Err(BoundaryError::ArithmeticOverflow)
+        );
+        assert_eq!(
+            WithdrawalBatch::new(vec![
+                withdrawal(&a, amount(u64::MAX), b"a"),
+                withdrawal(&b, amount(1), b"b"),
             ]),
             Err(BoundaryError::ArithmeticOverflow)
         );
@@ -935,8 +924,8 @@ mod tests {
         );
 
         let withdrawals = WithdrawalBatch::new(vec![
-            withdrawal(&b, 2, false, b"b"),
-            withdrawal(&a, 1, false, b"a"),
+            withdrawal(&b, amount(2), b"b"),
+            withdrawal(&a, amount(1), b"a"),
         ])
         .unwrap();
         let withdrawal_root = withdrawals.root::<Sha256>().unwrap();
@@ -958,9 +947,9 @@ mod tests {
     }
 
     #[test]
-    fn withdrawal_matches_blog_tuple_and_verifies_context() {
+    fn withdrawal_action_is_signed_and_verifies_context() {
         let account = SigningKey::from_seed(4);
-        let request = withdrawal(&account, 8, false, b"adapter-destination");
+        let request = withdrawal(&account, amount(8), b"adapter-destination");
         let (deployment, state_root) = context();
         assert_eq!(request.account(), &account.public_key());
         assert_eq!(request.body().deployment(), &deployment);
@@ -969,48 +958,64 @@ mod tests {
             request.body().destination(),
             b"adapter-destination".as_slice()
         );
-        assert_eq!(request.body().amount(), 8);
-        assert!(!request.body().full_close());
+        assert_eq!(request.body().action(), &amount(8));
         assert_eq!(request.body().deadline(), 99);
         assert_eq!(request.verify_context(&deployment, &state_root), Ok(()));
         assert_eq!(
             request.verify_context(&Sha256::hash(&[b"other"]), &state_root),
             Err(BoundaryError::WrongContext)
         );
-    }
 
-    #[test]
-    fn zero_value_is_reserved_for_full_close() {
-        let account = SigningKey::from_seed(5);
-        let (deployment, state_root) = context();
+        let mut wrong_action = request;
+        wrong_action.body.action = WithdrawalAction::Close;
         assert_eq!(
-            SignedWithdrawal::sign(deployment, state_root, Bytes::new(), 0, false, 1, &account,),
-            Err(BoundaryError::ZeroWithdrawal)
-        );
-        assert!(
-            SignedWithdrawal::sign(deployment, state_root, Bytes::new(), 0, true, 1, &account,)
-                .is_ok()
+            wrong_action.verify_context(&deployment, &state_root),
+            Err(BoundaryError::InvalidWithdrawalSignature)
         );
     }
 
     #[test]
-    fn authority_constructor_exposes_faults_but_verification_rejects_them() {
-        let account = SigningKey::from_seed(6);
-        let (deployment, state_root) = context();
-        let invalid =
-            WithdrawalBody::from_raw_unchecked(deployment, state_root, Bytes::new(), 0, false, 10);
-        let invalid = SignedWithdrawal::sign_body_by_authority(invalid, &account);
+    fn withdrawal_action_codec_is_explicit_and_canonical() {
+        let encoded_amount = amount(8).encode();
+        assert_eq!(encoded_amount.as_ref(), &[1, 0, 0, 0, 0, 0, 0, 0, 8]);
+        assert_eq!(WithdrawalAction::decode(encoded_amount).unwrap(), amount(8));
         assert_eq!(
-            invalid.verify_context(&deployment, &state_root),
-            Err(BoundaryError::ZeroWithdrawal)
+            WithdrawalAction::decode(amount(u64::MAX).encode()).unwrap(),
+            amount(u64::MAX)
         );
+        assert_eq!(WithdrawalAction::Close.encode().as_ref(), &[2]);
+        assert_eq!(
+            WithdrawalAction::decode([2].as_slice()).unwrap(),
+            WithdrawalAction::Close
+        );
+
+        assert!(matches!(
+            WithdrawalAction::decode([0].as_slice()),
+            Err(CodecError::InvalidEnum(0))
+        ));
+        assert!(matches!(
+            WithdrawalAction::decode([3].as_slice()),
+            Err(CodecError::InvalidEnum(3))
+        ));
+        assert!(matches!(
+            WithdrawalAction::decode([1].as_slice()),
+            Err(CodecError::EndOfBuffer)
+        ));
+        assert!(matches!(
+            WithdrawalAction::decode([1, 0, 0, 0, 0, 0, 0, 0, 0].as_slice()),
+            Err(CodecError::Invalid("NonZeroU64", _))
+        ));
+        assert!(matches!(
+            WithdrawalAction::decode([2, 0].as_slice()),
+            Err(CodecError::ExtraData(1))
+        ));
     }
 
     #[test]
     fn withdrawal_id_binds_account_but_excludes_signature() {
         let account = SigningKey::from_seed(7);
         let other = SigningKey::from_seed(8);
-        let request = withdrawal(&account, 2, false, b"destination");
+        let request = withdrawal(&account, amount(2), b"destination");
         let different_envelope =
             SignedWithdrawal::sign_body_by_authority(request.body().clone(), &other);
         assert_ne!(request.id::<Sha256>(), different_envelope.id::<Sha256>());
@@ -1026,20 +1031,35 @@ mod tests {
         let a = SigningKey::from_seed(9);
         let b = SigningKey::from_seed(10);
         let requests = WithdrawalBatch::new(vec![
-            withdrawal(&b, 4, false, b"b"),
-            withdrawal(&a, 3, false, b"a"),
+            withdrawal(&b, WithdrawalAction::Close, b"b"),
+            withdrawal(&a, amount(3), b"a"),
         ])
         .unwrap();
         assert!(requests.requests()[0].account() < requests.requests()[1].account());
-        assert_eq!(requests.total(), 7);
-        assert_eq!(requests.amount_for(&a.public_key()), 3);
+        assert_eq!(requests.total(), 3);
+        assert_eq!(
+            requests
+                .request_for(&a.public_key())
+                .unwrap()
+                .body()
+                .action(),
+            &amount(3)
+        );
+        assert_eq!(
+            requests
+                .request_for(&b.public_key())
+                .unwrap()
+                .body()
+                .action(),
+            &WithdrawalAction::Close
+        );
         let (deployment, state_root) = context();
         assert_eq!(requests.verify_context(&deployment, &state_root), Ok(()));
 
         assert_eq!(
             WithdrawalBatch::new(vec![
-                withdrawal(&a, 1, false, b"one"),
-                withdrawal(&a, 2, false, b"two"),
+                withdrawal(&a, amount(1), b"one"),
+                withdrawal(&a, WithdrawalAction::Close, b"two"),
             ]),
             Err(BoundaryError::NonCanonicalWithdrawals)
         );
@@ -1057,22 +1077,18 @@ mod tests {
                 deployment,
                 first_root,
                 Bytes::from_static(b"first"),
-                1,
-                false,
+                amount(1),
                 50,
                 &first,
-            )
-            .unwrap(),
+            ),
             SignedWithdrawal::sign(
                 deployment,
                 second_root,
                 Bytes::from_static(b"second"),
-                2,
-                false,
+                amount(2),
                 51,
                 &second,
-            )
-            .unwrap(),
+            ),
         ])
         .unwrap();
 
@@ -1089,7 +1105,7 @@ mod tests {
 
     #[test]
     fn destination_and_record_decoding_are_bounded() {
-        let request = withdrawal(&SigningKey::from_seed(11), 1, false, b"four");
+        let request = withdrawal(&SigningKey::from_seed(11), amount(1), b"four");
         let encoded = request.encode();
         assert!(matches!(
             TestWithdrawal::decode_cfg(encoded.clone(), &(..=3).into()),
@@ -1111,8 +1127,8 @@ mod tests {
         ));
 
         let requests = WithdrawalBatch::new(vec![
-            withdrawal(&SigningKey::from_seed(14), 1, false, b"a"),
-            withdrawal(&SigningKey::from_seed(15), 1, false, b"b"),
+            withdrawal(&SigningKey::from_seed(14), amount(1), b"a"),
+            withdrawal(&SigningKey::from_seed(15), amount(1), b"b"),
         ])
         .unwrap();
         assert!(matches!(
@@ -1147,8 +1163,7 @@ mod tests {
 
         let requests = WithdrawalBatch::new(vec![withdrawal(
             &SigningKey::from_seed(20),
-            3,
-            false,
+            amount(3),
             b"destination",
         )])
         .unwrap();

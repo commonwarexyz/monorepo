@@ -5,7 +5,7 @@ use commonware_clearing::bajillion::{
         Committee,
         bls12381::{Certificate, Vote},
     },
-    boundary::{DepositBatch, SignedWithdrawal, WithdrawalBatch, WithdrawalBody},
+    boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch, WithdrawalBody},
     challenge::{
         AccountLookup, Challenge, ChallengeError, RangeLower, RowOpening, StateLookup,
         StateOpening, adjudicate, decode_bounded,
@@ -15,9 +15,9 @@ use commonware_clearing::bajillion::{
     payment::{Payment, PaymentContext},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, BatchId, ChangeRange, Close, CloseContext, CloseLimits, Header, LayoutRange,
-        PayoutProof, ProofSlice, RootBundle, SliceBoundary, SliceCodecConfig, StateCache,
-        StateRange,
+        Assignment, BatchId, ChangeRange, Close, CloseContext, CloseLimits, EpochContext,
+        ExternalPayoutClaim, Header, LayoutRange, ProofSlice, RootBundle, SliceBoundary,
+        SliceCodecConfig, StateCache, StateRange, TerminalProof, WithdrawalClaim,
     },
 };
 use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg, Read};
@@ -59,19 +59,20 @@ fn semantic_header(
     let cache = StateCache::new::<Sha256>(Vec::new()).expect("empty cache is canonical");
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
-    let context = CloseContext::new::<Sha256>(
+    let context = EpochContext::new::<Sha256>(
         Sha256::hash(&[b"wire-decode-challenge", &[seed]]),
         u64::from(seed),
         operator.public_key(),
-        &cache,
         &deposits,
         &withdrawals,
+        cache.liability(),
         u64::from(seed),
         u64::from(seed) + 1,
         CloseLimits::protocol_maximum(),
         Assignment::new(Sha256::hash(&[b"wire-decode-committee"]), 0)
             .expect("zero-bit assignment is valid"),
     )
+    .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
     .expect("bounded semantic context must construct");
     let roots = RootBundle {
         opening: cache.root(),
@@ -140,7 +141,7 @@ fuzz_target!(|data: &[u8]| {
         u64::MAX,
         u64::MAX,
     );
-    match selector % 39 {
+    match selector % 42 {
         0 => roundtrip::<DepositBatch<VerifyingKey>>(bytes, &RangeCfg::new(..=item_limit)),
         1 => roundtrip::<WithdrawalBody<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         2 => roundtrip::<SignedWithdrawal<VerifyingKey, Digest>>(
@@ -189,9 +190,15 @@ fuzz_target!(|data: &[u8]| {
             bytes,
             &SliceCodecConfig::new(close_limits, item_limit),
         ),
-        36 => roundtrip::<PayoutProof<VerifyingKey, Digest>>(bytes, &close_limits),
-        37 => roundtrip::<RootBundle<Digest>>(bytes, &()),
-        38 => roundtrip::<Vote>(bytes, &()),
+        36 => roundtrip::<TerminalProof<Digest>>(bytes, &()),
+        37 => roundtrip::<ExternalPayoutClaim<VerifyingKey, Digest>>(bytes, &()),
+        38 => roundtrip::<WithdrawalClaim<VerifyingKey, Digest>>(
+            bytes,
+            &RangeCfg::new(..=destination_limit),
+        ),
+        39 => roundtrip::<RootBundle<Digest>>(bytes, &()),
+        40 => roundtrip::<Vote>(bytes, &()),
+        41 => roundtrip::<WithdrawalAction>(bytes, &()),
         _ => unreachable!(),
     }
 

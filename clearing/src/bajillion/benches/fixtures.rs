@@ -5,8 +5,8 @@ use commonware_clearing::bajillion::{
     payment::{Payment, PaymentContext, SignedReceipt, SignedSend},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, Header, PreparedClose, RootBundle,
-        StateCache, prepare_close_with_strategy,
+        Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, PreparedClose,
+        RootBundle, StateCache, prepare_close_with_strategy,
     },
 };
 use commonware_cryptography::{Hasher, Sha256, Signer as _, sha256::Digest};
@@ -292,18 +292,19 @@ where
     let operator = SigningKey::from_seed(OPERATOR_SEED);
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
-    let context = CloseContext::new::<Sha256>(
+    let context = EpochContext::new::<Sha256>(
         Sha256::hash(&[b"clearing-benchmark-deployment"]),
         EPOCH,
         operator.public_key(),
-        &cache,
         &deposits,
         &withdrawals,
+        cache.liability(),
         ADMISSION_DEADLINE,
         CHALLENGE_DEADLINE,
         CloseLimits::protocol_maximum(),
         assignment,
     )
+    .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
     .expect("benchmark close context is valid");
     let payment_context = context.payment().clone();
 

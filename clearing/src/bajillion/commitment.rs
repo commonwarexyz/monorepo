@@ -472,7 +472,6 @@ impl<D: Digest> Tree<D> {
             proof: self.inner.range_proof(start, end - 1)?,
         })
     }
-
 }
 
 /// A bounded BMT proof for one contiguous range of encoded vector values.
@@ -939,5 +938,4 @@ mod tests {
             .verify::<Sha256, &[u8]>(VectorKind::Change, &empty.root(), &[])
             .unwrap();
     }
-
 }

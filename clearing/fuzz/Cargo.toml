@@ -14,7 +14,7 @@ bytes.workspace = true
 commonware-clearing = { workspace = true, features = ["arbitrary", "std"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
-commonware-cryptography-curve25519.workspace = true
+commonware-cryptography-curve25519 = { workspace = true, features = ["arbitrary", "std"] }
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
 libfuzzer-sys.workspace = true

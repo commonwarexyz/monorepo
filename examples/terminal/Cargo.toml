@@ -1,0 +1,48 @@
+[package]
+name = "commonware-terminal"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Clear actions through a SQLite operator, settlement, and wallet agent."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/terminal"
+documentation = "https://docs.rs/commonware-terminal"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap = { workspace = true, features = ["derive"] }
+commonware-clearing = { workspace = true, features = ["std"] }
+commonware-codec = { workspace = true, features = ["std"] }
+commonware-cryptography = { workspace = true, features = ["bls12381", "std"] }
+commonware-cryptography-curve25519 = { workspace = true, features = ["std"] }
+commonware-parallel = { workspace = true, features = ["std"] }
+commonware-runtime.workspace = true
+commonware-stream.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
+crossterm.workspace = true
+rand = { workspace = true, features = ["thread_rng"] }
+rand_core.workspace = true
+ratatui.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[[bin]]
+name = "terminal-settlement"
+path = "src/bin/settlement.rs"
+bench = false
+
+[[bin]]
+name = "terminal-operator"
+path = "src/bin/operator.rs"
+bench = false
+
+[[bin]]
+name = "terminal-agent"
+path = "src/bin/agent.rs"
+bench = false

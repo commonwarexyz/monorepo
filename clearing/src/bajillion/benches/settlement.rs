@@ -2,14 +2,14 @@ use super::fixtures::strategy;
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     admission::{Committee, bls12381},
-    boundary::{DepositBatch, SignedWithdrawal, WithdrawalBatch},
+    boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::StateOpening,
     credit::ShardSet,
     settlement::{SettlementChain, SettlementConfig},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, Header, PayoutProof, RootBundle, StateCache,
-        prepare_close_with_strategy,
+        Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, RootBundle, StateCache,
+        TerminalProof, prepare_close_with_strategy,
     },
 };
 use commonware_cryptography::{
@@ -61,7 +61,7 @@ type TestChain = SettlementChain<Sha256, VerifyingKey>;
 type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
 type TestHeader = Header<Digest>;
-type TestPayoutProof = PayoutProof<VerifyingKey, Digest>;
+type TestTerminalProof = TerminalProof<Digest>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
 
 struct Account {
@@ -115,7 +115,7 @@ struct AdmissionFixture {
     withdrawals: TestWithdrawals,
     header: TestHeader,
     roots: RootBundle<Digest>,
-    payout_proof: TestPayoutProof,
+    terminal_proof: TestTerminalProof,
     certificate: bls12381::Certificate,
 }
 
@@ -129,7 +129,7 @@ struct AdmitInput {
     chain: TestChain,
     header: TestHeader,
     roots: RootBundle<Digest>,
-    payout_proof: TestPayoutProof,
+    terminal_proof: TestTerminalProof,
     certificate: bls12381::Certificate,
 }
 
@@ -144,6 +144,7 @@ fn settlement_config(max_pending_epochs: usize, live_accounts: usize) -> Settlem
         NonZeroU64::new(MAXIMUM_WITHDRAWAL_NOTICE).expect("benchmark maximum notice is positive"),
         nonzero_usize(live_accounts),
         64,
+        nonzero_usize(live_accounts),
         nonzero_usize(live_accounts),
     )
 }
@@ -198,19 +199,20 @@ fn context(
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &TestWithdrawals,
 ) -> TestContext {
-    CloseContext::new::<Sha256>(
+    EpochContext::new::<Sha256>(
         deployment(),
         epoch,
         SigningKey::from_seed(OPERATOR_SEED).public_key(),
-        cache,
         deposits,
         withdrawals,
+        cache.liability(),
         ADMISSION_DEADLINE,
         CHALLENGE_DEADLINE,
         CloseLimits::protocol_maximum(),
         Assignment::new(validators.committee.commitment::<Sha256>(), 0)
             .expect("benchmark assignment is valid"),
     )
+    .and_then(|epoch| epoch.bind::<Sha256>(cache, deposits, withdrawals))
     .expect("benchmark close context is valid")
 }
 
@@ -219,7 +221,7 @@ fn withdrawal_close(
     context: &TestContext,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &TestWithdrawals,
-) -> (TestClose, TestPayoutProof) {
+) -> (TestClose, TestTerminalProof) {
     let mut prefix = Prefix::default();
     let mut rows = Vec::with_capacity(withdrawals.len());
     let mut shard_sets = Vec::with_capacity(withdrawals.len());
@@ -231,17 +233,16 @@ fn withdrawal_close(
             .find(|leaf| leaf.account == account)
             .expect("benchmark withdrawal account is registered")
             .state;
-        let applied = if request.body().full_close() {
-            opening.balance
-        } else {
-            request.body().amount()
+        let (applied, closes_account) = match request.body().action() {
+            WithdrawalAction::Amount(amount) => (amount.get(), false),
+            WithdrawalAction::Close => (opening.balance, true),
         };
         let mut closing = opening;
         closing.balance = closing
             .balance
             .checked_sub(applied)
             .expect("benchmark withdrawal is affordable");
-        closing.active = opening.active && !request.body().full_close();
+        closing.active = opening.active && !closes_account;
         let shards = ShardSet::empty(context.payment().epoch(), account.clone());
         prefix = prefix
             .checked_extend(Prefix {
@@ -275,10 +276,10 @@ fn withdrawal_close(
     prepared
         .validate::<Sha256>(context, deposits, withdrawals)
         .expect("benchmark close is valid");
-    let payout_proof = prepared
-        .payout_proof(deposits, withdrawals)
-        .expect("benchmark payout proof is valid");
-    (prepared.into_close(), payout_proof)
+    let terminal_proof = prepared
+        .terminal_proof()
+        .expect("benchmark terminal proof is valid");
+    (prepared.into_close(), terminal_proof)
 }
 
 fn admission_fixture(
@@ -289,7 +290,7 @@ fn admission_fixture(
 ) -> AdmissionFixture {
     let deposits = DepositBatch::empty();
     let context = context(cache, validators, epoch, &deposits, &withdrawals);
-    let (close, payout_proof) = withdrawal_close(cache, &context, &deposits, &withdrawals);
+    let (close, terminal_proof) = withdrawal_close(cache, &context, &deposits, &withdrawals);
     let certificate = validators.certificate(&close.header);
     AdmissionFixture {
         context,
@@ -297,7 +298,7 @@ fn admission_fixture(
         withdrawals,
         header: close.header,
         roots: close.roots,
-        payout_proof,
+        terminal_proof,
         certificate,
     }
 }
@@ -309,14 +310,14 @@ fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
         withdrawals,
         header,
         roots,
-        payout_proof,
+        terminal_proof,
         certificate,
     } = admission;
     chain
         .register(0, context, deposits, withdrawals)
         .expect("benchmark close can be registered");
     chain
-        .admit(0, header, roots, payout_proof, certificate)
+        .admit(0, header, roots, terminal_proof, certificate)
         .expect("benchmark close can be admitted");
 }
 
@@ -329,12 +330,10 @@ fn signed_withdrawal(
         deployment(),
         cache.root().digest,
         Bytes::from_static(b"benchmark-destination"),
-        1,
-        false,
+        WithdrawalAction::Amount(NonZeroU64::MIN),
         deadline,
         &account.private,
     )
-    .expect("benchmark withdrawal is valid")
 }
 
 fn queue_input(depth: usize) -> QueueInput {
@@ -386,7 +385,7 @@ fn admit_input() -> AdmitInput {
         chain,
         header: admission.header,
         roots: admission.roots,
-        payout_proof: admission.payout_proof,
+        terminal_proof: admission.terminal_proof,
         certificate: admission.certificate,
     }
 }
@@ -483,7 +482,7 @@ fn bench_admit(c: &mut Criterion) {
                                 black_box(0),
                                 input.header,
                                 input.roots,
-                                input.payout_proof,
+                                input.terminal_proof,
                                 input.certificate,
                             )
                             .expect("benchmark close can be admitted"),

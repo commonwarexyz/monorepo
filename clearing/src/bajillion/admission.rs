@@ -2,6 +2,8 @@
 
 mod certificate;
 
+#[cfg(test)]
+use crate::bajillion::transition::EpochContext;
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     payment::{
@@ -545,18 +547,19 @@ mod tests {
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
         let assignment = Assignment::new(committee.commitment::<Sha256>(), 3).unwrap();
-        let context = CloseContext::new::<Sha256>(
+        let context = EpochContext::new::<Sha256>(
             Sha256::hash(&[b"deployment"]),
             7,
             operator.public_key(),
-            &cache,
             &deposits,
             &withdrawals,
+            cache.liability(),
             49,
             50,
             CloseLimits::protocol_maximum(),
             assignment,
         )
+        .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
         .unwrap();
         let close = build_close::<Sha256, _, _>(
             &cache,
@@ -762,18 +765,19 @@ mod tests {
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
         let assignment = Assignment::new(committee.commitment::<Sha256>(), 0).unwrap();
-        let context = CloseContext::new::<Sha256>(
+        let context = EpochContext::new::<Sha256>(
             Sha256::hash(&[b"batch-deployment"]),
             7,
             operator.public_key(),
-            &cache,
             &deposits,
             &withdrawals,
+            cache.liability(),
             49,
             50,
             CloseLimits::protocol_maximum(),
             assignment,
         )
+        .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
         .unwrap();
         let send = SignedSend::sign_next(context.payment(), &payer, recipient.public_key(), 20, 0)
             .unwrap();

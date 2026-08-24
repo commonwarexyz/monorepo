@@ -31,12 +31,11 @@ pub struct PaymentContext<P: PublicKey, D: Digest> {
 }
 
 impl<P: PublicKey, D: Digest> PaymentContext<P, D> {
-    /// Creates an epoch context from its chain-registered anchor and operator key.
+    /// Creates a payment context from its chain-recognized anchor and operator key.
     ///
-    /// The anchor must uniquely identify the exact opening state, sealed deposit and withdrawal
-    /// boundaries, validator committee, deadlines, deployment, and operator authorization for
-    /// this epoch. Reusing an anchor across different registrations invalidates payment replay
-    /// protection.
+    /// The anchor must uniquely identify one immutable, one-shot epoch registration. Linear
+    /// settlement ancestry may bind the exact opening root later, but the anchor must never be
+    /// reused after that ancestry is invalidated.
     pub const fn new(anchor: D, epoch: Epoch, operator: P) -> Self {
         Self {
             anchor,

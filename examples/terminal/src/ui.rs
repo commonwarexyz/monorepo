@@ -1,0 +1,484 @@
+//! Ratatui presentation for one independently owned agent wallet.
+
+use crate::{
+    agent::Agent,
+    operator::DEFAULT_AMOUNT,
+    operator_rpc::{PollCloseResponse, StatusResponse as OperatorStatus},
+    settlement_rpc::StatusResponse as SettlementStatus,
+};
+use anyhow::{Context, Result};
+use commonware_clearing::bajillion::boundary::WithdrawalAction;
+use commonware_runtime::Network;
+use crossterm::{
+    cursor::Show,
+    event::{self, Event, KeyCode, KeyEventKind},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Wrap},
+};
+use std::{
+    collections::VecDeque, io::Stdout, net::SocketAddr, num::NonZeroU64, thread, time::Duration,
+};
+
+const MAX_ACTIVITY: usize = 100;
+
+struct TerminalSession {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    _mode: TerminalMode,
+}
+
+struct TerminalMode {
+    alternate_screen: bool,
+}
+
+impl TerminalMode {
+    fn enter() -> Result<Self> {
+        enable_raw_mode().context("enable terminal raw mode")?;
+        let mut mode = Self {
+            alternate_screen: false,
+        };
+        execute!(std::io::stdout(), EnterAlternateScreen).context("enter alternate screen")?;
+        mode.alternate_screen = true;
+        Ok(mode)
+    }
+}
+
+impl Drop for TerminalMode {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        if self.alternate_screen {
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+        }
+    }
+}
+
+fn initialize_while_guarded<T, G, E>(
+    guard: G,
+    initialize: impl FnOnce() -> Result<T, E>,
+) -> Result<(T, G), E> {
+    let value = initialize()?;
+    Ok((value, guard))
+}
+
+impl TerminalSession {
+    fn enter() -> Result<Self> {
+        // Arm restoration before the final fallible constructor so setup errors also restore the
+        // terminal.
+        let mode = TerminalMode::enter()?;
+        let backend = CrosstermBackend::new(std::io::stdout());
+        let (terminal, mode) = initialize_while_guarded(mode, || {
+            Terminal::new(backend).context("initialize terminal")
+        })?;
+        Ok(Self {
+            terminal,
+            _mode: mode,
+        })
+    }
+}
+
+struct UiState {
+    recipient: usize,
+    amount: u64,
+    balance: Option<u64>,
+    operator: Option<OperatorStatus>,
+    settlement: Option<SettlementStatus>,
+    pending_closes: VecDeque<u64>,
+    activity: VecDeque<String>,
+}
+
+impl UiState {
+    fn new() -> Self {
+        let mut activity = VecDeque::new();
+        activity.push_back(
+            "Ready: deposit or withdraw before paying, then close without pausing the next epoch."
+                .to_string(),
+        );
+        Self {
+            recipient: 1,
+            amount: DEFAULT_AMOUNT,
+            balance: None,
+            operator: None,
+            settlement: None,
+            pending_closes: VecDeque::new(),
+            activity,
+        }
+    }
+
+    fn log(&mut self, message: impl Into<String>) {
+        self.activity.push_back(message.into());
+        while self.activity.len() > MAX_ACTIVITY {
+            self.activity.pop_front();
+        }
+    }
+}
+
+pub(crate) async fn run<E: Network>(
+    network: &E,
+    operator: SocketAddr,
+    settlement: SocketAddr,
+    mut agent: Agent,
+) -> Result<()> {
+    let mut terminal = TerminalSession::enter()?;
+    let mut state = UiState::new();
+    loop {
+        refresh(network, operator, settlement, &agent, &mut state).await?;
+        terminal
+            .terminal
+            .draw(|frame| render(frame, &agent, &state))
+            .context("draw clearing agent")?;
+        if !event::poll(Duration::from_millis(100)).context("poll terminal input")? {
+            continue;
+        }
+        let Event::Key(key) = event::read().context("read terminal input")? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => break,
+            KeyCode::Left => state.recipient = state.recipient.saturating_sub(1),
+            KeyCode::Right => {
+                state.recipient = (state.recipient + 1) % agent.recipient_count();
+            }
+            KeyCode::Char('-') => state.amount = state.amount.saturating_sub(1).max(1),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                state.amount = state.amount.saturating_add(1);
+            }
+            KeyCode::PageDown => state.amount = state.amount.saturating_sub(10).max(1),
+            KeyCode::PageUp => state.amount = state.amount.saturating_add(10),
+            KeyCode::Char('p') => {
+                let recipient = agent.recipient_name(state.recipient);
+                match agent
+                    .pay(network, operator, state.recipient, state.amount)
+                    .await
+                {
+                    Ok(payment) => state.log(format!(
+                        "epoch {} payment #{} to {recipient}: {}",
+                        payment.epoch, payment.sequence, payment.amount
+                    )),
+                    Err(error) => state.log(format!("payment rejected: {error:#}")),
+                }
+            }
+            KeyCode::Char('d') => match agent
+                .deposit(network, settlement, operator, state.amount)
+                .await
+            {
+                Ok(deposit) => state.log(format!(
+                    "epoch {} deposit credited: {}",
+                    deposit.epoch, deposit.amount
+                )),
+                Err(error) => state.log(format!("deposit rejected: {error:#}")),
+            },
+            KeyCode::Char('w') | KeyCode::Char('f') => {
+                let action = if key.code == KeyCode::Char('f') {
+                    WithdrawalAction::Close
+                } else {
+                    WithdrawalAction::Amount(
+                        NonZeroU64::new(state.amount).expect("UI amount is positive"),
+                    )
+                };
+                match agent.withdraw(network, settlement, operator, action).await {
+                    Ok(withdrawal) => match withdrawal.action {
+                        WithdrawalAction::Amount(amount) => state.log(format!(
+                            "epoch {} withdrawal queued: {}",
+                            withdrawal.epoch, amount
+                        )),
+                        WithdrawalAction::Close => state.log(format!(
+                            "epoch {} Close queued; payout is finalized at epoch close",
+                            withdrawal.epoch
+                        )),
+                    },
+                    Err(error) => state.log(format!("withdrawal rejected: {error:#}")),
+                }
+            }
+            KeyCode::Char('c') => match agent.claim_withdrawal(network, settlement, operator).await
+            {
+                Ok(release) => state.log(format!(
+                    "withdrawal claimed: {} to {}",
+                    release.amount,
+                    String::from_utf8_lossy(&release.destination)
+                )),
+                Err(error) => state.log(format!("claim rejected: {error:#}")),
+            },
+            KeyCode::Char('e') => {
+                match agent
+                    .claim_external_payout(network, settlement, operator)
+                    .await
+                {
+                    Ok(payout) => state.log(format!(
+                        "external payout claimed for {}: {}",
+                        agent.name(),
+                        payout.amount
+                    )),
+                    Err(error) => state.log(format!("external claim rejected: {error:#}")),
+                }
+            }
+            KeyCode::Char('s') => match agent.start_close(network, operator).await {
+                Ok(close) => {
+                    if !state.pending_closes.contains(&close.epoch) {
+                        state.pending_closes.push_back(close.epoch);
+                    }
+                    state.log(format!(
+                        "epoch {} cut{}; its successor is accepting payments",
+                        close.epoch,
+                        if close.queued { " and queued" } else { "" }
+                    ));
+                }
+                Err(error) => state.log(format!("close rejected: {error:#}")),
+            },
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn refresh<E: Network>(
+    network: &E,
+    operator: SocketAddr,
+    settlement: SocketAddr,
+    agent: &Agent,
+    state: &mut UiState,
+) -> Result<()> {
+    if let Some(epoch) = state.pending_closes.front().copied() {
+        match agent.poll_close(network, operator, epoch).await? {
+            PollCloseResponse::NoEvent => {}
+            PollCloseResponse::Finished(close) => {
+                state.pending_closes.pop_front();
+                state.log(format!(
+                    "epoch {} finalized {}: {} rows, {} slices, prepare {}us, deal {}us, seal {}us",
+                    close.epoch,
+                    String::from_utf8_lossy(&close.header),
+                    close.rows,
+                    close.slices,
+                    close.prepare_micros,
+                    close.deal_micros,
+                    close.seal_micros
+                ));
+            }
+            PollCloseResponse::Failed { epoch, error } => {
+                state.pending_closes.pop_front();
+                state.log(format!(
+                    "epoch {epoch} close failed: {}",
+                    String::from_utf8_lossy(&error)
+                ));
+            }
+        }
+    }
+    state.operator = Some(agent.operator_status(network, operator).await?);
+    state.settlement = Some(agent.settlement_status(network, settlement).await?);
+    state.balance = agent.balance(network, operator).await.ok();
+    Ok(())
+}
+
+fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(7),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(
+            " Commonware Clearing Agent ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            "{}  balance {}  {} retained receipt(s)",
+            agent.name(),
+            state
+                .balance
+                .map_or_else(|| "?".to_string(), |value| value.to_string()),
+            agent.receipt_count()
+        )),
+    ]))
+    .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(title, sections[0]);
+
+    let operator = state.operator.map_or_else(
+        || "operator unavailable".to_string(),
+        |status| {
+            format!(
+                "Operator epoch {} | {}/{} live accounts | {} recent payments | close {} | reserved payouts {}{}",
+                status.epoch,
+                status.present_accounts,
+                status.accounts,
+                status.recent_payments,
+                if status.close_in_progress { "active" } else { "idle" },
+                status.reserved_payout_value,
+                if status.faulted { " | FENCED" } else { "" }
+            )
+        },
+    );
+    let settlement = state.settlement.map_or_else(
+        || "settlement unavailable".to_string(),
+        |status| {
+            format!(
+                "Settlement custody {} | claimable {} | time {} | state {}...",
+                status.custody_balance,
+                status.claimable_balance,
+                status.now,
+                status
+                    .state_root
+                    .digest
+                    .as_ref()
+                    .iter()
+                    .take(4)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        },
+    );
+    let controls = Paragraph::new(vec![
+        Line::raw(operator),
+        Line::raw(settlement),
+        Line::raw(format!(
+            "Recipient: {} | amount {}",
+            agent.recipient_name(state.recipient),
+            state.amount
+        )),
+        Line::raw(
+            "p pay  d deposit  w withdraw  f Close account  c claim withdrawal  e claim external  s close",
+        ),
+        Line::raw("Left/Right recipient  +/- amount  PgUp/PgDn +/-10"),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Roles and actions"),
+    );
+    frame.render_widget(controls, sections[1]);
+
+    let activity = Paragraph::new(
+        state
+            .activity
+            .iter()
+            .rev()
+            .map(|message| Line::raw(message.clone()))
+            .collect::<Vec<_>>(),
+    )
+    .wrap(Wrap { trim: true })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Activity (newest first)"),
+    );
+    frame.render_widget(activity, sections[2]);
+
+    let footer = Paragraph::new(
+        "The agent signs locally; the SQLite operator issues receipts; settlement owns custody and claims. q or Esc quits.",
+    )
+    .style(Style::default().fg(Color::DarkGray))
+    .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(footer, sections[3]);
+}
+
+pub(crate) async fn scripted<E: Network>(
+    network: &E,
+    operator: SocketAddr,
+    settlement: SocketAddr,
+    mut agent: Agent,
+) -> Result<()> {
+    let deposit = agent.deposit(network, settlement, operator, 10).await?;
+    println!("epoch {} deposited {}", deposit.epoch, deposit.amount);
+    let withdrawal = agent
+        .withdraw(
+            network,
+            settlement,
+            operator,
+            WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()),
+        )
+        .await?;
+    println!("epoch {} queued withdrawal 3", withdrawal.epoch);
+    let payment = agent.pay(network, operator, 1, 5).await?;
+    println!(
+        "epoch {} accepted payment #{}",
+        payment.epoch, payment.sequence
+    );
+    let external = agent
+        .pay(network, operator, agent.recipient_count() - 1, 2)
+        .await?;
+    println!(
+        "epoch {} accepted external payment #{}",
+        external.epoch, external.sequence
+    );
+    let close = agent.start_close(network, operator).await?;
+    println!("epoch {} cut and closing asynchronously", close.epoch);
+    let successor = agent.pay(network, operator, 1, 1).await?;
+    println!(
+        "epoch {} accepted successor payment #{} before epoch {} completed",
+        successor.epoch, successor.sequence, close.epoch
+    );
+    loop {
+        match agent.poll_close(network, operator, close.epoch).await? {
+            PollCloseResponse::NoEvent => thread::sleep(Duration::from_millis(10)),
+            PollCloseResponse::Finished(finished) => {
+                println!(
+                    "epoch {} finalized {} rows in prepare={}us deal={}us seal={}us",
+                    finished.epoch,
+                    finished.rows,
+                    finished.prepare_micros,
+                    finished.deal_micros,
+                    finished.seal_micros
+                );
+                break;
+            }
+            PollCloseResponse::Failed { epoch, error } => {
+                anyhow::bail!(
+                    "epoch {epoch} close failed: {}",
+                    String::from_utf8_lossy(&error)
+                );
+            }
+        }
+    }
+    let release = agent
+        .claim_withdrawal(network, settlement, operator)
+        .await?;
+    println!("claimed withdrawal {}", release.amount);
+    let mut external = Agent::new(4)?;
+    let payout = external
+        .claim_external_payout(network, settlement, operator)
+        .await?;
+    println!("claimed external payout {}", payout.amount);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initialize_while_guarded;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn failed_terminal_initialization_drops_the_active_guard() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let result: Result<((), DropProbe), ()> =
+            initialize_while_guarded(DropProbe(Arc::clone(&dropped)), || Err(()));
+
+        assert!(result.is_err());
+        assert!(dropped.load(Ordering::Relaxed));
+    }
+}

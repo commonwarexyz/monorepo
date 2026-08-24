@@ -965,7 +965,7 @@ where
 {
     assemble_slice_material(
         cache,
-        prepared.slice_bits,
+        prepared.slice_bits(),
         SliceMaterial {
             close: &prepared.close,
             changes: &prepared.changes,
@@ -1002,18 +1002,6 @@ where
         || layout.root() != close.roots.layout
     {
         return Err(TransitionError::OpeningRoot);
-    }
-    let (opening, derived_closing) = derive_state_vectors(
-        &close.unchanged,
-        &close.rows,
-        commitment::MAX_VECTOR_LENGTH.into(),
-    )?;
-    if opening != cache.leaves || derived_closing != closing_leaves {
-        return Err(TransitionError::OpeningLinkage);
-    }
-    let expected_layout = derive_layout(&close.rows, &opening, closing_leaves, slice_bits)?;
-    if layout_boundaries != expected_layout {
-        return Err(TransitionError::SliceLayout);
     }
 
     let unchanged_boundaries = state_boundaries(&close.unchanged, slice_bits)?;

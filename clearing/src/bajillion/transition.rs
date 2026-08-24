@@ -1,14 +1,16 @@
 //! Stateless close assembly and validation.
 
 use crate::bajillion::{
-    boundary::{BoundaryError, Deadline, DepositBatch, WithdrawalBatch},
+    boundary::{
+        BoundaryError, Deadline, DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
+    },
     challenge::{AccountLookup, RowOpening, StateLookup, StateOpening},
     commitment::{self, Tree, VectorKind, VectorRoot},
     credit::{self, ShardHead, ShardSet},
     payment::{PaymentContext, PaymentError},
     state::{AccountRow, Prefix, StateLeaf},
 };
-use alloc::{boxed::Box, collections::BTreeSet, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeSet, vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -28,7 +30,7 @@ pub(crate) use slice::{validate_slice_header, validate_slice_structure_after_hea
 pub const BATCH_ID_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BATCH_ID";
 /// Hash namespace for contextual commitments to the close roots.
 pub const HEADER_ROOT_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_HEADER_ROOT";
-/// Hash namespace for canonical epoch payment anchors.
+/// Hash namespace for canonical root-independent epoch payment anchors.
 pub const EPOCH_ANCHOR_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_EPOCH_ANCHOR";
 /// Maximum number of high-order account-key bits used for deterministic proof slices.
 pub const MAX_SLICE_BITS: u8 = 8;
@@ -405,14 +407,16 @@ impl Read for CloseLimits {
     }
 }
 
-/// Chain-known values against which a public close is validated.
+/// Root-independent registration shared by every payment in one epoch.
+///
+/// The settlement chain binds this registration to exactly one opening state when the close is
+/// registered. An embedding must never reuse the registration after its ancestry is invalidated.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloseContext<P: PublicKey, D: Digest> {
+pub struct EpochContext<P: PublicKey, D: Digest> {
     payment: PaymentContext<P, D>,
     deployment: D,
     deposit_root: VectorRoot<D>,
     withdrawal_root: VectorRoot<D>,
-    opening_root: VectorRoot<D>,
     opening_liability: u64,
     admission_deadline: Deadline,
     challenge_deadline: Deadline,
@@ -420,19 +424,21 @@ pub struct CloseContext<P: PublicKey, D: Digest> {
     assignment: Assignment<D>,
 }
 
-impl<P: PublicKey, D: Digest> CloseContext<P, D> {
-    /// Authenticates the complete opening and sealed boundary for one epoch.
+impl<P: PublicKey, D: Digest> EpochContext<P, D> {
+    /// Authenticates the immutable payment, boundary, and validation parameters for one epoch.
     ///
     /// Admission must precede the challenge deadline, and the challenge deadline must leave one
-    /// representable later timestamp for finalization or expiry.
+    /// representable later timestamp for finalization or expiry. The opening liability remains
+    /// authenticated, but the exact opening root is excluded so successor payments can begin while
+    /// the predecessor state root is constructed.
     #[allow(clippy::too_many_arguments)]
     pub fn new<H: Hasher<Digest = D>>(
         deployment: D,
         epoch: u64,
         operator: P,
-        cache: &StateCache<P, D>,
         deposits: &DepositBatch<P>,
         withdrawals: &WithdrawalBatch<P, D>,
+        opening_liability: u64,
         admission_deadline: Deadline,
         challenge_deadline: Deadline,
         limits: CloseLimits,
@@ -441,15 +447,12 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
         if admission_deadline >= challenge_deadline || challenge_deadline == u64::MAX {
             return Err(TransitionError::DeadlineOrder);
         }
-        validate_sealed_boundaries(cache, &deployment, deposits, withdrawals, &limits)?;
+        validated_boundary_accounts(&deployment, deposits, withdrawals, &limits)?;
 
         let deposit_root = deposits.root::<H>()?;
         let withdrawal_root = withdrawals.root::<H>()?;
-        let opening_root = cache.root();
-        let opening_liability = cache.liability();
         let deposit_root_encoded = deposit_root.encode();
         let withdrawal_root_encoded = withdrawal_root.encode();
-        let opening_root_encoded = opening_root.encode();
         let opening_liability_encoded = opening_liability.to_be_bytes();
         let epoch_encoded = epoch.to_be_bytes();
         let admission_deadline_encoded = admission_deadline.to_be_bytes();
@@ -461,7 +464,6 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
             deployment.as_ref(),
             deposit_root_encoded.as_ref(),
             withdrawal_root_encoded.as_ref(),
-            opening_root_encoded.as_ref(),
             &opening_liability_encoded,
             &epoch_encoded,
             operator.as_ref(),
@@ -476,13 +478,48 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
             deployment,
             deposit_root,
             withdrawal_root,
-            opening_root,
             opening_liability,
             admission_deadline,
             challenge_deadline,
             limits,
             assignment,
         })
+    }
+
+    /// Binds this epoch registration to one exact opening state.
+    pub fn bind<H: Hasher<Digest = D>>(
+        self,
+        cache: &StateCache<P, D>,
+        deposits: &DepositBatch<P>,
+        withdrawals: &WithdrawalBatch<P, D>,
+    ) -> Result<CloseContext<P, D>, TransitionError> {
+        if deposits.root::<H>()? != self.deposit_root
+            || withdrawals.root::<H>()? != self.withdrawal_root
+        {
+            return Err(TransitionError::BoundaryRoot);
+        }
+        if cache.liability() != self.opening_liability {
+            return Err(TransitionError::OpeningLiability);
+        }
+        validate_sealed_boundaries(cache, &self.deployment, deposits, withdrawals, &self.limits)?;
+        Ok(CloseContext {
+            epoch: self,
+            opening_root: cache.root(),
+        })
+    }
+
+    /// Binds the root already owned by the settlement state machine.
+    ///
+    /// Boundary affordability is established when deposits and withdrawals enter settlement
+    /// state. Callers outside that owner must use [`Self::bind`] with the complete state cache.
+    pub(crate) const fn bind_settlement_root(
+        self,
+        opening_root: VectorRoot<D>,
+    ) -> CloseContext<P, D> {
+        CloseContext {
+            epoch: self,
+            opening_root,
+        }
     }
 
     /// Returns the anchored payment context.
@@ -505,12 +542,7 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
         &self.withdrawal_root
     }
 
-    /// Returns the trusted opening state root.
-    pub const fn opening_root(&self) -> &VectorRoot<D> {
-        &self.opening_root
-    }
-
-    /// Returns the trusted opening liability.
+    /// Returns the authenticated opening liability.
     pub const fn opening_liability(&self) -> u64 {
         self.opening_liability
     }
@@ -533,6 +565,70 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
     /// Returns the authenticated committee and deterministic slice partition.
     pub const fn assignment(&self) -> &Assignment<D> {
         &self.assignment
+    }
+}
+
+/// Chain-known epoch registration bound to one exact opening state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseContext<P: PublicKey, D: Digest> {
+    epoch: EpochContext<P, D>,
+    opening_root: VectorRoot<D>,
+}
+
+impl<P: PublicKey, D: Digest> CloseContext<P, D> {
+    /// Returns the root-independent epoch registration.
+    pub const fn epoch_context(&self) -> &EpochContext<P, D> {
+        &self.epoch
+    }
+
+    /// Returns the anchored payment context.
+    pub const fn payment(&self) -> &PaymentContext<P, D> {
+        self.epoch.payment()
+    }
+
+    /// Returns the settlement deployment identifier.
+    pub const fn deployment(&self) -> &D {
+        self.epoch.deployment()
+    }
+
+    /// Returns the exact sealed deposit-vector root.
+    pub const fn deposit_root(&self) -> &VectorRoot<D> {
+        self.epoch.deposit_root()
+    }
+
+    /// Returns the exact sealed withdrawal-vector root.
+    pub const fn withdrawal_root(&self) -> &VectorRoot<D> {
+        self.epoch.withdrawal_root()
+    }
+
+    /// Returns the bound opening state root.
+    pub const fn opening_root(&self) -> &VectorRoot<D> {
+        &self.opening_root
+    }
+
+    /// Returns the authenticated opening liability.
+    pub const fn opening_liability(&self) -> u64 {
+        self.epoch.opening_liability()
+    }
+
+    /// Returns the last time at which this close may be admitted.
+    pub const fn admission_deadline(&self) -> Deadline {
+        self.epoch.admission_deadline()
+    }
+
+    /// Returns the exact challenge deadline.
+    pub const fn challenge_deadline(&self) -> Deadline {
+        self.epoch.challenge_deadline()
+    }
+
+    /// Returns the resource limits authenticated by the epoch anchor.
+    pub const fn limits(&self) -> &CloseLimits {
+        self.epoch.limits()
+    }
+
+    /// Returns the authenticated committee and deterministic slice partition.
+    pub const fn assignment(&self) -> &Assignment<D> {
+        self.epoch.assignment()
     }
 }
 
@@ -560,134 +656,369 @@ pub struct ExternalPayout<P: PublicKey> {
     pub amount: u64,
 }
 
-/// Compact extraction proof for every external payout in one certified close.
+/// Constant-size settlement witness for the terminal counts and aggregate flows.
 ///
-/// The terminal layout boundary authenticates the aggregate payout total. When that total is
-/// nonzero, `rows` and `opening` authenticate every contributing absent-account row against the
-/// change root. Equality between the positive row amounts and the terminal total proves that no
-/// payout row was omitted.
+/// Individual external payouts and withdrawals are claimed later with bounded Merkle witnesses.
+/// The operator therefore never publishes a recipient-sized payout list during admission or
+/// finalization.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PayoutProof<P: PublicKey, D: Digest> {
+pub struct TerminalProof<D: Digest> {
     terminal: SliceBoundary,
     terminal_opening: commitment::Opening<D>,
-    rows: Vec<AccountRow<P, D>>,
-    opening: Option<commitment::MultiOpening<D>>,
 }
 
-impl<P: PublicKey, D: Digest> PayoutProof<P, D> {
+impl<D: Digest> TerminalProof<D> {
     /// Returns the authenticated terminal layout boundary.
     #[must_use]
     pub const fn terminal(&self) -> &SliceBoundary {
         &self.terminal
     }
 
-    /// Returns the exact payout rows in change-vector order.
-    #[must_use]
-    pub fn rows(&self) -> &[AccountRow<P, D>] {
-        &self.rows
-    }
-
-    /// Authenticates and derives every external payout against a complete root bundle.
+    /// Authenticates the terminal counts and aggregate flows against a complete root bundle.
     ///
     /// # Security
     ///
     /// The caller must establish that the header was certified by the epoch committee. This
-    /// method verifies the header binding and payout extraction, not the certificate itself.
-    pub fn verify<H>(
+    /// method verifies the header binding and terminal opening, not the certificate itself.
+    pub fn verify<H, P>(
         &self,
         context: &CloseContext<P, D>,
         deposits: &DepositBatch<P>,
         withdrawals: &WithdrawalBatch<P, D>,
         header: &Header<D>,
         roots: &RootBundle<D>,
-    ) -> Result<Vec<ExternalPayout<P>>, TransitionError>
+    ) -> Result<Prefix, TransitionError>
     where
         H: Hasher<Digest = D>,
+        P: PublicKey,
     {
         validate_header::<H, P, D>(context, header, roots)?;
         validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
-        verify_payout_proof_after_header::<H, P, D>(context, deposits, withdrawals, roots, self)
-            .map(|(payouts, _)| payouts)
+        verify_terminal_proof_after_header::<H, P, D>(context, deposits, withdrawals, roots, self)
     }
 }
 
-impl<P: PublicKey, D: Digest> Write for PayoutProof<P, D> {
+impl<D: Digest> Write for TerminalProof<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.terminal.write(writer);
         self.terminal_opening.write(writer);
-        self.rows.write(writer);
-        match &self.opening {
-            None => 0_u8.write(writer),
-            Some(opening) => {
-                1_u8.write(writer);
-                opening.write(writer);
-            }
-        }
     }
 }
 
-impl<P: PublicKey, D: Digest> EncodeSize for PayoutProof<P, D> {
+impl<D: Digest> EncodeSize for TerminalProof<D> {
     fn encode_size(&self) -> usize {
-        self.terminal.encode_size()
-            + self.terminal_opening.encode_size()
-            + self.rows.encode_size()
-            + u8::SIZE
-            + self.opening.as_ref().map_or(0, EncodeSize::encode_size)
+        self.terminal.encode_size() + self.terminal_opening.encode_size()
     }
 }
 
-impl<P: PublicKey, D: Digest> Read for PayoutProof<P, D> {
-    /// Anchor-bound close limits.
-    type Cfg = CloseLimits;
+impl<D: Digest> Read for TerminalProof<D> {
+    type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, limits: &Self::Cfg) -> Result<Self, CodecError> {
-        let maximum = usize::try_from(
-            limits
-                .max_rows()
-                .min(u64::from(commitment::MAX_VECTOR_LENGTH)),
-        )
-        .map_err(|_| CodecError::Invalid("PayoutProof", "row limit is not representable"))?;
-        let terminal = SliceBoundary::read(reader)?;
-        let terminal_opening = commitment::Opening::read(reader)?;
-        let rows = Vec::<AccountRow<P, D>>::read_cfg(reader, &(RangeCfg::new(..=maximum), ()))?;
-        let opening = match u8::read(reader)? {
-            0 if rows.is_empty() => None,
-            1 if !rows.is_empty() => {
-                Some(commitment::MultiOpening::read_bounded(reader, rows.len())?)
-            }
-            0 | 1 => {
-                return Err(CodecError::Invalid(
-                    "PayoutProof",
-                    "row multiproof presence is not canonical",
-                ));
-            }
-            tag => return Err(CodecError::InvalidEnum(tag)),
-        };
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            terminal,
-            terminal_opening,
-            rows,
-            opening,
+            terminal: SliceBoundary::read(reader)?,
+            terminal_opening: commitment::Opening::read(reader)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for PayoutProof<P, D>
+impl<D> arbitrary::Arbitrary<'_> for TerminalProof<D>
 where
-    P: PublicKey,
     D: Digest,
     SliceBoundary: for<'a> arbitrary::Arbitrary<'a>,
     commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
-    AccountRow<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    commitment::MultiOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             terminal: u.arbitrary()?,
             terminal_opening: u.arbitrary()?,
-            rows: u.arbitrary()?,
-            opening: u.arbitrary()?,
+        })
+    }
+}
+
+/// One claim for net credit classified as an external payout by adjacent cumulative prefixes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalPayoutClaim<P: PublicKey, D: Digest> {
+    predecessor: Option<AccountRow<P, D>>,
+    row: AccountRow<P, D>,
+    change_opening: commitment::MultiOpening<D>,
+}
+
+impl<P: PublicKey, D: Digest> ExternalPayoutClaim<P, D> {
+    /// Returns the claimed change-vector position.
+    #[must_use]
+    pub fn position(&self) -> u32 {
+        self.change_opening
+            .positions
+            .last()
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Returns the authenticated changed-account row.
+    #[must_use]
+    pub const fn row(&self) -> &AccountRow<P, D> {
+        &self.row
+    }
+
+    /// Verifies this claim against an already authenticated finalized change root.
+    ///
+    /// The row and its predecessor, when present, must authenticate an exact positive payout
+    /// prefix delta. Credit assigned to a deposit or withdrawal cannot satisfy this claim.
+    ///
+    /// The embedding must bind `change_root` to the finalized batch and consume the tuple of that
+    /// batch identifier and [`Self::position`] atomically with the payout.
+    pub fn verify<H>(
+        &self,
+        change_root: &VectorRoot<D>,
+    ) -> Result<ExternalPayout<P>, TransitionError>
+    where
+        H: Hasher<Digest = D>,
+    {
+        let previous_prefix = adjacent_change_prefix(
+            self.predecessor.as_ref(),
+            &self.row,
+            &self.change_opening.positions,
+        )
+        .ok_or(TransitionError::PayoutClaim)?;
+        match &self.predecessor {
+            Some(predecessor) => {
+                let predecessor_encoded = predecessor.encode();
+                let row_encoded = self.row.encode();
+                self.change_opening.verify::<H, _>(
+                    VectorKind::Change,
+                    change_root,
+                    &[predecessor_encoded.as_ref(), row_encoded.as_ref()],
+                )?;
+            }
+            None => self.change_opening.verify::<H, _>(
+                VectorKind::Change,
+                change_root,
+                &[self.row.encode()],
+            )?,
+        }
+
+        validate_row_state_sides(&self.row)?;
+        let amount = external_payout_amount(&self.row, previous_prefix)
+            .ok_or(TransitionError::PayoutClaim)?;
+        Ok(ExternalPayout {
+            recipient: self.row.account.clone(),
+            amount,
+        })
+    }
+}
+
+impl<P: PublicKey, D: Digest> Write for ExternalPayoutClaim<P, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.predecessor.write(writer);
+        self.row.write(writer);
+        self.change_opening.write(writer);
+    }
+}
+
+impl<P: PublicKey, D: Digest> EncodeSize for ExternalPayoutClaim<P, D> {
+    fn encode_size(&self) -> usize {
+        self.predecessor.encode_size() + self.row.encode_size() + self.change_opening.encode_size()
+    }
+}
+
+impl<P: PublicKey, D: Digest> Read for ExternalPayoutClaim<P, D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        let claim = Self {
+            predecessor: Option::<AccountRow<P, D>>::read(reader)?,
+            row: AccountRow::read(reader)?,
+            change_opening: commitment::MultiOpening::read_bounded(reader, 2)?,
+        };
+        adjacent_change_prefix(
+            claim.predecessor.as_ref(),
+            &claim.row,
+            &claim.change_opening.positions,
+        )
+        .ok_or(CodecError::Invalid(
+            "ExternalPayoutClaim",
+            "change rows and positions are not adjacent",
+        ))?;
+        Ok(claim)
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P, D> arbitrary::Arbitrary<'_> for ExternalPayoutClaim<P, D>
+where
+    P: PublicKey,
+    D: Digest,
+    AccountRow<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    commitment::MultiOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            predecessor: u.arbitrary()?,
+            row: u.arbitrary()?,
+            change_opening: u.arbitrary()?,
+        })
+    }
+}
+
+/// One claim for a signed withdrawal included in a finalized close.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalClaim<P: PublicKey, D: Digest> {
+    request: SignedWithdrawal<P, D>,
+    withdrawal_opening: commitment::Opening<D>,
+    predecessor: Option<AccountRow<P, D>>,
+    row: AccountRow<P, D>,
+    change_opening: commitment::MultiOpening<D>,
+}
+
+impl<P: PublicKey, D: Digest> WithdrawalClaim<P, D> {
+    /// Returns the signed withdrawal authorization.
+    #[must_use]
+    pub const fn request(&self) -> &SignedWithdrawal<P, D> {
+        &self.request
+    }
+
+    /// Returns the request's canonical withdrawal-vector position.
+    #[must_use]
+    pub const fn position(&self) -> u32 {
+        self.withdrawal_opening.position
+    }
+
+    /// Verifies the request and derives its exact release from finalized vector openings.
+    pub fn verify<H>(
+        &self,
+        deployment: &D,
+        withdrawal_root: &VectorRoot<D>,
+        change_root: &VectorRoot<D>,
+    ) -> Result<u64, TransitionError>
+    where
+        H: Hasher<Digest = D>,
+    {
+        self.request.verify_deployment(deployment)?;
+        if self.request.account() != &self.row.account {
+            return Err(TransitionError::WithdrawalClaim);
+        }
+        self.withdrawal_opening.verify::<H>(
+            VectorKind::Withdrawal,
+            withdrawal_root,
+            self.request.encode().as_ref(),
+        )?;
+
+        let previous_prefix = adjacent_change_prefix(
+            self.predecessor.as_ref(),
+            &self.row,
+            &self.change_opening.positions,
+        )
+        .ok_or(TransitionError::WithdrawalClaim)?;
+        match &self.predecessor {
+            Some(predecessor) => {
+                let predecessor_encoded = predecessor.encode();
+                let row_encoded = self.row.encode();
+                self.change_opening.verify::<H, _>(
+                    VectorKind::Change,
+                    change_root,
+                    &[predecessor_encoded.as_ref(), row_encoded.as_ref()],
+                )?;
+            }
+            None => {
+                self.change_opening.verify::<H, _>(
+                    VectorKind::Change,
+                    change_root,
+                    &[self.row.encode()],
+                )?;
+            }
+        }
+
+        validate_row_state_sides(&self.row)?;
+        let delta = checked_prefix_delta(self.row.prefix, previous_prefix)
+            .ok_or(TransitionError::WithdrawalClaim)?;
+        let (debit, credit, receipts) = self
+            .row
+            .checked_deltas()
+            .ok_or(TransitionError::WithdrawalClaim)?;
+        let amount = delta.withdrawal;
+        if (!self.row.opening.active && delta.deposit == 0)
+            || delta.debit != debit
+            || delta.credit != credit
+            || delta.payout != 0
+            || delta.withdrawals != 1
+            || delta.shards != u64::from(self.row.credit_root.len)
+            || self.row.credit_root.total_credit != credit
+            || self.row.credit_root.total_receipts != receipts
+        {
+            return Err(TransitionError::WithdrawalClaim);
+        }
+        match self.request.body().action() {
+            WithdrawalAction::Amount(expected) if amount != expected.get() => {
+                return Err(TransitionError::WithdrawalClaim);
+            }
+            WithdrawalAction::Close if self.row.closing.active || self.row.closing.balance != 0 => {
+                return Err(TransitionError::WithdrawalClaim);
+            }
+            WithdrawalAction::Amount(_) | WithdrawalAction::Close => {}
+        }
+        if u128::from(self.row.closing.balance) + u128::from(debit) + u128::from(amount)
+            != u128::from(self.row.opening.balance) + u128::from(credit) + u128::from(delta.deposit)
+        {
+            return Err(TransitionError::WithdrawalClaim);
+        }
+        Ok(amount)
+    }
+}
+
+impl<P: PublicKey, D: Digest> Write for WithdrawalClaim<P, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.request.write(writer);
+        self.withdrawal_opening.write(writer);
+        self.predecessor.write(writer);
+        self.row.write(writer);
+        self.change_opening.write(writer);
+    }
+}
+
+impl<P: PublicKey, D: Digest> EncodeSize for WithdrawalClaim<P, D> {
+    fn encode_size(&self) -> usize {
+        self.request.encode_size()
+            + self.withdrawal_opening.encode_size()
+            + self.predecessor.encode_size()
+            + self.row.encode_size()
+            + self.change_opening.encode_size()
+    }
+}
+
+impl<P: PublicKey, D: Digest> Read for WithdrawalClaim<P, D> {
+    /// Maximum encoded destination length.
+    type Cfg = RangeCfg<usize>;
+
+    fn read_cfg(reader: &mut impl Buf, destination_cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            request: SignedWithdrawal::read_cfg(reader, destination_cfg)?,
+            withdrawal_opening: commitment::Opening::read(reader)?,
+            predecessor: Option::<AccountRow<P, D>>::read(reader)?,
+            row: AccountRow::read(reader)?,
+            change_opening: commitment::MultiOpening::read_bounded(reader, 2)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P, D> arbitrary::Arbitrary<'_> for WithdrawalClaim<P, D>
+where
+    P: PublicKey,
+    D: Digest,
+    SignedWithdrawal<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    AccountRow<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
+    commitment::MultiOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            request: u.arbitrary()?,
+            withdrawal_opening: u.arbitrary()?,
+            predecessor: u.arbitrary()?,
+            row: u.arbitrary()?,
+            change_opening: u.arbitrary()?,
         })
     }
 }
@@ -699,7 +1030,6 @@ where
 #[derive(Debug)]
 pub struct PreparedClose<P: PublicKey, D: Digest> {
     close: Close<P, D>,
-    slice_bits: u8,
     changes: Tree<D>,
     closing_leaves: Vec<StateLeaf<P>>,
     closing: Tree<D>,
@@ -708,6 +1038,12 @@ pub struct PreparedClose<P: PublicKey, D: Digest> {
 }
 
 impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
+    pub(super) fn slice_bits(&self) -> u8 {
+        let slice_count = self.layout_boundaries.len() - 1;
+        debug_assert!(slice_count.is_power_of_two());
+        u8::try_from(slice_count.ilog2()).expect("prepared slice count fits the supported width")
+    }
+
     /// Returns the canonical prepared close.
     #[must_use]
     pub const fn close(&self) -> &Close<P, D> {
@@ -756,52 +1092,127 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         })
     }
 
-    /// Extracts every external payout using retained change and layout trees.
-    pub fn payout_proof(
+    /// Opens the terminal counts and aggregate flows needed for settlement admission.
+    pub fn terminal_proof(&self) -> Result<TerminalProof<D>, TransitionError> {
+        build_terminal_proof(&self.layout_boundaries, &self.layout)
+    }
+
+    /// Opens one external payout by recipient for later claiming.
+    pub fn external_payout_claim(
         &self,
-        deposits: &DepositBatch<P>,
+        recipient: &P,
+    ) -> Result<ExternalPayoutClaim<P, D>, TransitionError> {
+        build_external_payout_claim(&self.close, &self.changes, recipient)
+    }
+
+    /// Opens one finalized withdrawal request and its changed row for later claiming.
+    pub fn withdrawal_claim<H>(
+        &self,
         withdrawals: &WithdrawalBatch<P, D>,
-    ) -> Result<PayoutProof<P, D>, TransitionError> {
-        build_payout_proof(
-            &self.close.rows,
+        account: &P,
+    ) -> Result<WithdrawalClaim<P, D>, TransitionError>
+    where
+        H: Hasher<Digest = D>,
+    {
+        let withdrawal_tree = withdrawal_tree::<H, P, D>(withdrawals)?;
+        build_withdrawal_claim(
+            &self.close,
             &self.changes,
-            &self.layout_boundaries,
-            &self.layout,
-            deposits,
             withdrawals,
+            &withdrawal_tree,
+            account,
         )
     }
 }
 
-fn build_payout_proof<P: PublicKey, D: Digest>(
-    close_rows: &[AccountRow<P, D>],
-    changes: &Tree<D>,
+fn build_terminal_proof<D: Digest>(
     layout_boundaries: &[SliceBoundary],
     layout: &Tree<D>,
-    deposits: &DepositBatch<P>,
-    withdrawals: &WithdrawalBatch<P, D>,
-) -> Result<PayoutProof<P, D>, TransitionError> {
-    let mut positions = Vec::new();
-    let mut rows = Vec::new();
-    for (position, row) in close_rows.iter().enumerate() {
-        if external_payout_amount(row, deposits, withdrawals).is_some() {
-            positions.push(u32::try_from(position).map_err(|_| TransitionError::TooManyRows)?);
-            rows.push(row.clone());
-        }
-    }
-    let opening = if positions.is_empty() {
-        None
-    } else {
-        Some(changes.multi_opening(&positions)?)
-    };
+) -> Result<TerminalProof<D>, TransitionError> {
     let position =
         u32::try_from(layout_boundaries.len() - 1).map_err(|_| TransitionError::SliceLayout)?;
-    Ok(PayoutProof {
+    Ok(TerminalProof {
         terminal: layout_boundaries[position as usize],
         terminal_opening: layout.opening(position)?,
-        rows,
-        opening,
     })
+}
+
+fn build_external_payout_claim<P: PublicKey, D: Digest>(
+    close: &Close<P, D>,
+    changes: &Tree<D>,
+    recipient: &P,
+) -> Result<ExternalPayoutClaim<P, D>, TransitionError> {
+    let position = close
+        .rows
+        .binary_search_by(|row| row.account.cmp(recipient))
+        .map_err(|_| TransitionError::PayoutClaim)?;
+    let position = u32::try_from(position).map_err(|_| TransitionError::TooManyRows)?;
+    let change_positions = if position == 0 {
+        vec![position]
+    } else {
+        vec![position - 1, position]
+    };
+    let predecessor = position
+        .checked_sub(1)
+        .map(|position| close.rows[position as usize].clone());
+    let row = close.rows[position as usize].clone();
+    let previous_prefix = adjacent_change_prefix(predecessor.as_ref(), &row, &change_positions)
+        .ok_or(TransitionError::PayoutClaim)?;
+    external_payout_amount(&row, previous_prefix).ok_or(TransitionError::PayoutClaim)?;
+    Ok(ExternalPayoutClaim {
+        predecessor,
+        row,
+        change_opening: changes.multi_opening(&change_positions)?,
+    })
+}
+
+fn build_withdrawal_claim<P: PublicKey, D: Digest>(
+    close: &Close<P, D>,
+    changes: &Tree<D>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    withdrawal_tree: &Tree<D>,
+    account: &P,
+) -> Result<WithdrawalClaim<P, D>, TransitionError> {
+    let withdrawal_position = withdrawals
+        .requests()
+        .binary_search_by(|request| request.account().cmp(account))
+        .map_err(|_| TransitionError::WithdrawalClaim)?;
+    let change_position = close
+        .rows
+        .binary_search_by(|row| row.account.cmp(account))
+        .map_err(|_| TransitionError::WithdrawalClaim)?;
+    let change_position =
+        u32::try_from(change_position).map_err(|_| TransitionError::TooManyRows)?;
+    let change_positions = if change_position == 0 {
+        vec![change_position]
+    } else {
+        vec![change_position - 1, change_position]
+    };
+    Ok(WithdrawalClaim {
+        request: withdrawals.requests()[withdrawal_position].clone(),
+        withdrawal_opening: withdrawal_tree.opening(
+            u32::try_from(withdrawal_position).map_err(|_| TransitionError::WithdrawalClaim)?,
+        )?,
+        predecessor: change_position
+            .checked_sub(1)
+            .map(|position| close.rows[position as usize].clone()),
+        row: close.rows[change_position as usize].clone(),
+        change_opening: changes.multi_opening(&change_positions)?,
+    })
+}
+
+fn withdrawal_tree<H, P, D>(withdrawals: &WithdrawalBatch<P, D>) -> Result<Tree<D>, TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    let len = u32::try_from(withdrawals.len()).map_err(|_| TransitionError::CloseLimit)?;
+    let mut builder = commitment::Builder::<H>::new(VectorKind::Withdrawal, len)?;
+    for request in withdrawals.requests() {
+        builder.add_encoded(request.encode().as_ref())?;
+    }
+    Ok(builder.build(&Sequential)?)
 }
 
 #[cfg(feature = "arbitrary")]
@@ -1238,18 +1649,13 @@ fn derive_state_vectors<P: PublicKey, D: Digest>(
     Ok((opening, closing))
 }
 
-fn validate_sealed_boundaries<P: PublicKey, D: Digest>(
-    cache: &StateCache<P, D>,
+fn validated_boundary_accounts<'a, P: PublicKey, D: Digest>(
     deployment: &D,
-    deposits: &DepositBatch<P>,
-    withdrawals: &WithdrawalBatch<P, D>,
+    deposits: &'a DepositBatch<P>,
+    withdrawals: &'a WithdrawalBatch<P, D>,
     limits: &CloseLimits,
-) -> Result<(), TransitionError> {
+) -> Result<BTreeSet<&'a P>, TransitionError> {
     withdrawals.verify_deployment(deployment)?;
-    if u64::try_from(cache.len()).map_err(|_| TransitionError::CloseLimit)? > limits.max_states {
-        return Err(TransitionError::CloseLimit);
-    }
-
     let mut accounts = BTreeSet::new();
     accounts.extend(deposits.records().iter().map(|record| record.account()));
     accounts.extend(
@@ -1267,8 +1673,21 @@ fn validate_sealed_boundaries<P: PublicKey, D: Digest>(
     {
         return Err(TransitionError::CloseLimit);
     }
+    Ok(accounts)
+}
 
-    let mut applied_withdrawal = 0_u64;
+fn validate_sealed_boundaries<P: PublicKey, D: Digest>(
+    cache: &StateCache<P, D>,
+    deployment: &D,
+    deposits: &DepositBatch<P>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    limits: &CloseLimits,
+) -> Result<(), TransitionError> {
+    let accounts = validated_boundary_accounts(deployment, deposits, withdrawals, limits)?;
+    if u64::try_from(cache.len()).map_err(|_| TransitionError::CloseLimit)? > limits.max_states {
+        return Err(TransitionError::CloseLimit);
+    }
+
     for account in accounts {
         let opening = cache.locate(account).map_or_else(
             crate::bajillion::state::AccountState::default,
@@ -1279,29 +1698,22 @@ fn validate_sealed_boundaries<P: PublicKey, D: Digest>(
             continue;
         };
         let body = withdrawal.body();
-        let available = u128::from(opening.balance) + u128::from(deposit);
-        if u128::from(body.amount()) > available {
-            return Err(TransitionError::WithdrawalCoverage);
+        match body.action() {
+            WithdrawalAction::Amount(amount) => {
+                let amount = amount.get();
+                let available = u128::from(opening.balance) + u128::from(deposit);
+                if u128::from(amount) > available {
+                    return Err(TransitionError::WithdrawalCoverage);
+                }
+                if opening.active && deposit != 0 && deposit == amount {
+                    return Err(TransitionError::BoundaryNoStateChange);
+                }
+            }
+            WithdrawalAction::Close if !(opening.active || deposit != 0) => {
+                return Err(TransitionError::BoundaryNoStateChange);
+            }
+            WithdrawalAction::Close => {}
         }
-        if (body.full_close() && !(opening.active || deposit != 0))
-            || (!body.full_close() && opening.active && deposit != 0 && deposit == body.amount())
-        {
-            return Err(TransitionError::BoundaryNoStateChange);
-        }
-        let applied = if body.full_close() {
-            opening
-                .balance
-                .checked_add(deposit)
-                .ok_or(TransitionError::BoundaryTotals)?
-        } else {
-            body.amount()
-        };
-        applied_withdrawal = applied_withdrawal
-            .checked_add(applied)
-            .ok_or(TransitionError::BoundaryTotals)?;
-    }
-    if applied_withdrawal > limits.max_withdrawal_total {
-        return Err(TransitionError::CloseLimit);
     }
     Ok(())
 }
@@ -1312,7 +1724,7 @@ fn validate_corpus_limits<P: PublicKey, D: Digest>(
     shard_sets: &[ShardSet<P, D>],
     totals: Prefix,
 ) -> Result<(), TransitionError> {
-    let limits = context.limits;
+    let limits = context.limits();
     let row_count = u64::try_from(rows.len()).map_err(|_| TransitionError::CloseLimit)?;
     if row_count > limits.max_rows
         || totals.withdrawals > limits.max_withdrawals
@@ -1345,7 +1757,6 @@ fn validate_corpus_limits<P: PublicKey, D: Digest>(
 #[derive(Clone, Debug)]
 pub struct ChallengeIndex<P: PublicKey, D: Digest> {
     opening_root: VectorRoot<D>,
-    change_root: VectorRoot<D>,
     rows: Vec<AccountRow<P, D>>,
     tree: Tree<D>,
 }
@@ -1366,7 +1777,6 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
         }
         Ok(Self {
             opening_root: close.roots.opening,
-            change_root: close.roots.change,
             rows: close.rows.clone(),
             tree,
         })
@@ -1375,7 +1785,7 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
     /// Returns the authenticated change-vector root indexed by this cache.
     #[must_use]
     pub const fn root(&self) -> VectorRoot<D> {
-        self.change_root
+        self.tree.root()
     }
 
     /// Constructs membership or adjacent ordered-absence evidence for `account`.
@@ -1530,10 +1940,10 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if cache.root() != context.opening_root {
+    if cache.root() != *context.opening_root() {
         return Err(TransitionError::OpeningRoot);
     }
-    if cache.liability != context.opening_liability {
+    if cache.liability != context.opening_liability() {
         return Err(TransitionError::OpeningLiability);
     }
     if rows
@@ -1556,11 +1966,7 @@ where
         return Err(TransitionError::OpeningLinkage);
     }
 
-    let opening = state_tree_with_strategy::<H, P, D>(&opening_leaves, strategy)?;
     let closing = state_tree_with_strategy::<H, P, D>(&closing_leaves, strategy)?;
-    if opening.root() != cache.root() {
-        return Err(TransitionError::OpeningRoot);
-    }
     let changes = change_tree_with_strategy::<H, P, D>(&rows, strategy)?;
     let layout_boundaries = slice::derive_layout(
         &rows,
@@ -1579,13 +1985,13 @@ where
         return Err(TransitionError::LiabilityEquation);
     }
     let roots = RootBundle {
-        opening: opening.root(),
+        opening: cache.root(),
         change: changes.root(),
         closing: closing.root(),
         layout: layout.root(),
     };
     let close = Close {
-        header: Header::new::<H, P>(&context.payment, &roots),
+        header: Header::new::<H, P>(context.payment(), &roots),
         roots,
         unchanged,
         rows,
@@ -1593,7 +1999,6 @@ where
     };
     Ok(PreparedClose {
         close,
-        slice_bits: context.assignment().slice_bits(),
         changes,
         closing_leaves,
         closing,
@@ -1602,27 +2007,23 @@ where
     })
 }
 
-/// Assembles external-payout extraction evidence from a decoded close.
+/// Assembles the terminal settlement witness from a decoded close.
 ///
-/// Close producers should prefer [`PreparedClose::payout_proof`], which reuses the retained
-/// change and layout trees. This convenience path reconstructs those trees from the public corpus.
-pub fn assemble_payout_proof<H, P, D>(
+/// Close producers should prefer [`PreparedClose::terminal_proof`], which reuses the retained
+/// layout tree. This convenience path reconstructs that tree from the public corpus.
+pub fn assemble_terminal_proof<H, P, D>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     close: &Close<P, D>,
     strategy: &impl Strategy,
-) -> Result<PayoutProof<P, D>, TransitionError>
+) -> Result<TerminalProof<D>, TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
     D: Digest,
 {
     validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
-    let changes = change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?;
-    if changes.root() != close.roots.change {
-        return Err(TransitionError::ChangeRoot);
-    }
     let (opening, closing) =
         derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
     let layout_boundaries = slice::derive_layout(
@@ -1635,14 +2036,45 @@ where
     if layout.root() != close.roots.layout {
         return Err(TransitionError::SliceLayout);
     }
-    build_payout_proof(
-        &close.rows,
-        &changes,
-        &layout_boundaries,
-        &layout,
-        deposits,
-        withdrawals,
-    )
+    build_terminal_proof(&layout_boundaries, &layout)
+}
+
+/// Opens one external payout from a decoded close.
+pub fn assemble_external_payout_claim<H, P, D>(
+    close: &Close<P, D>,
+    recipient: &P,
+    strategy: &impl Strategy,
+) -> Result<ExternalPayoutClaim<P, D>, TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    let changes = change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?;
+    if changes.root() != close.roots.change {
+        return Err(TransitionError::ChangeRoot);
+    }
+    build_external_payout_claim(close, &changes, recipient)
+}
+
+/// Opens one withdrawal request and its changed row from a decoded close.
+pub fn assemble_withdrawal_claim<H, P, D>(
+    close: &Close<P, D>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    account: &P,
+    strategy: &impl Strategy,
+) -> Result<WithdrawalClaim<P, D>, TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    let changes = change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?;
+    if changes.root() != close.roots.change {
+        return Err(TransitionError::ChangeRoot);
+    }
+    let withdrawal_tree = withdrawal_tree::<H, P, D>(withdrawals)?;
+    build_withdrawal_claim(close, &changes, withdrawals, &withdrawal_tree, account)
 }
 
 /// Validates the contextual root commitment and opening-state ancestry.
@@ -1656,10 +2088,10 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if !header.verify::<H, P>(&context.payment, roots) {
+    if !header.verify::<H, P>(context.payment(), roots) {
         return Err(TransitionError::HeaderRoot);
     }
-    if roots.opening != context.opening_root {
+    if roots.opening != *context.opening_root() {
         return Err(TransitionError::OpeningRoot);
     }
     Ok(())
@@ -1690,7 +2122,7 @@ fn validate_boundaries<P: PublicKey, D: Digest>(
     withdrawals: &WithdrawalBatch<P, D>,
     close: &Close<P, D>,
 ) -> Result<(), TransitionError> {
-    withdrawals.verify_deployment(&context.deployment)?;
+    withdrawals.verify_deployment(context.deployment())?;
     for record in deposits.records() {
         if close
             .rows
@@ -1744,7 +2176,7 @@ pub(crate) fn validate_terminal_prefix<P: PublicKey, D: Digest>(
         return Err(TransitionError::PaymentConservation);
     }
     checked_closing_liability(
-        context.opening_liability,
+        context.opening_liability(),
         totals.deposit,
         totals.withdrawal,
         totals.payout,
@@ -1752,31 +2184,73 @@ pub(crate) fn validate_terminal_prefix<P: PublicKey, D: Digest>(
     Ok(())
 }
 
+fn adjacent_change_prefix<P: PublicKey, D: Digest>(
+    predecessor: Option<&AccountRow<P, D>>,
+    row: &AccountRow<P, D>,
+    positions: &[u32],
+) -> Option<Prefix> {
+    match predecessor {
+        Some(predecessor) => {
+            let position = positions.last().copied()?;
+            if predecessor.account >= row.account
+                || positions != [position.checked_sub(1)?, position]
+            {
+                return None;
+            }
+            Some(predecessor.prefix)
+        }
+        None => (positions == [0]).then_some(Prefix::default()),
+    }
+}
+
 fn external_payout_amount<P: PublicKey, D: Digest>(
     row: &AccountRow<P, D>,
-    deposits: &DepositBatch<P>,
-    withdrawals: &WithdrawalBatch<P, D>,
+    previous_prefix: Prefix,
 ) -> Option<u64> {
     if row.opening != crate::bajillion::state::AccountState::default()
         || row.closing.active
         || row.closing.balance != 0
         || row.outgoing.is_some()
-        || deposits.amount_for(&row.account) != 0
-        || withdrawals.request_for(&row.account).is_some()
     {
         return None;
     }
-    let (debit, credit, _) = row.checked_deltas()?;
-    (debit == 0 && credit > 0).then_some(credit)
+    let (debit, credit, receipts) = row.checked_deltas()?;
+    let delta = checked_prefix_delta(row.prefix, previous_prefix)?;
+    (debit == 0
+        && credit > 0
+        && receipts > 0
+        && row.credit_root.len > 0
+        && row.credit_root.total_credit == credit
+        && row.credit_root.total_receipts == receipts
+        && delta.debit == debit
+        && delta.credit == credit
+        && delta.payout == credit
+        && delta.deposit == 0
+        && delta.withdrawal == 0
+        && delta.withdrawals == 0
+        && delta.shards == u64::from(row.credit_root.len))
+    .then_some(credit)
 }
 
-pub(crate) fn verify_payout_proof_after_header<H, P, D>(
+fn checked_prefix_delta(current: Prefix, previous: Prefix) -> Option<Prefix> {
+    Some(Prefix {
+        debit: current.debit.checked_sub(previous.debit)?,
+        credit: current.credit.checked_sub(previous.credit)?,
+        payout: current.payout.checked_sub(previous.payout)?,
+        deposit: current.deposit.checked_sub(previous.deposit)?,
+        withdrawal: current.withdrawal.checked_sub(previous.withdrawal)?,
+        withdrawals: current.withdrawals.checked_sub(previous.withdrawals)?,
+        shards: current.shards.checked_sub(previous.shards)?,
+    })
+}
+
+pub(crate) fn verify_terminal_proof_after_header<H, P, D>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     roots: &RootBundle<D>,
-    proof: &PayoutProof<P, D>,
-) -> Result<(Vec<ExternalPayout<P>>, Prefix), TransitionError>
+    proof: &TerminalProof<D>,
+) -> Result<Prefix, TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
@@ -1785,14 +2259,14 @@ where
     let terminal_position = u32::from(context.assignment().slice_count());
     let layout_len = terminal_position
         .checked_add(1)
-        .ok_or(TransitionError::PayoutProof)?;
+        .ok_or(TransitionError::TerminalProof)?;
     if proof.terminal_opening.position != terminal_position
         || proof.terminal_opening.proof.leaf_count != layout_len
         || u64::from(proof.terminal.opening) > context.limits().max_states()
         || u64::from(proof.terminal.change) > context.limits().max_rows()
         || u64::from(proof.terminal.closing) > context.limits().max_states()
     {
-        return Err(TransitionError::PayoutProof);
+        return Err(TransitionError::TerminalProof);
     }
     proof.terminal_opening.verify::<H>(
         VectorKind::Layout,
@@ -1806,40 +2280,7 @@ where
         proof.terminal.change,
         proof.terminal.prefix,
     )?;
-
-    if proof
-        .rows
-        .windows(2)
-        .any(|pair| pair[0].account >= pair[1].account)
-    {
-        return Err(TransitionError::PayoutProof);
-    }
-    match (&proof.opening, proof.rows.is_empty()) {
-        (None, true) => {}
-        (Some(opening), false) if opening.proof.leaf_count == proof.terminal.change => {
-            let encoded = proof.rows.iter().map(Encode::encode).collect::<Vec<_>>();
-            opening.verify::<H, _>(VectorKind::Change, &roots.change, &encoded)?;
-        }
-        _ => return Err(TransitionError::PayoutProof),
-    }
-
-    let mut total = 0_u64;
-    let mut payouts = Vec::with_capacity(proof.rows.len());
-    for row in &proof.rows {
-        let amount = external_payout_amount(row, deposits, withdrawals)
-            .ok_or(TransitionError::PayoutProof)?;
-        total = total
-            .checked_add(amount)
-            .ok_or(TransitionError::PrefixOverflow)?;
-        payouts.push(ExternalPayout {
-            recipient: row.account.clone(),
-            amount,
-        });
-    }
-    if total != proof.terminal.prefix.payout {
-        return Err(TransitionError::PayoutTotal);
-    }
-    Ok((payouts, proof.terminal.prefix))
+    Ok(proof.terminal.prefix)
 }
 
 fn validate_boundary_roots<H, P, D>(
@@ -1852,8 +2293,8 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if deposits.root::<H>()? != context.deposit_root
-        || withdrawals.root::<H>()? != context.withdrawal_root
+    if deposits.root::<H>()? != *context.deposit_root()
+        || withdrawals.root::<H>()? != *context.withdrawal_root()
     {
         return Err(TransitionError::BoundaryRoot);
     }
@@ -1879,20 +2320,18 @@ where
         .ok_or(TransitionError::CounterRegression)?;
     let deposit = deposits.amount_for(&row.account);
     let withdrawal = withdrawals.request_for(&row.account);
-    let full_close = withdrawal.is_some_and(|request| request.body().full_close());
     let withdrawal_amount = match withdrawal {
-        Some(request) if full_close => {
-            let actual = row
-                .opening
-                .balance
-                .checked_add(deposit)
-                .ok_or(TransitionError::PrefixOverflow)?;
-            if actual < request.body().amount() {
-                return Err(TransitionError::WithdrawalCoverage);
+        Some(request) => match request.body().action() {
+            WithdrawalAction::Amount(amount) => amount.get(),
+            WithdrawalAction::Close => {
+                let available =
+                    u128::from(row.opening.balance) + u128::from(deposit) + u128::from(credit);
+                let tail = available
+                    .checked_sub(u128::from(debit))
+                    .ok_or(TransitionError::BalanceEquation)?;
+                u64::try_from(tail).map_err(|_| TransitionError::PrefixOverflow)?
             }
-            actual
-        }
-        Some(request) => request.body().amount(),
+        },
         None => 0,
     };
 
@@ -1908,8 +2347,10 @@ where
     {
         return Err(TransitionError::UnchangedRow);
     }
-    if full_close && (row.closing.balance != 0 || debit != 0 || credit != 0 || receipts != 0) {
-        return Err(TransitionError::FullCloseActivity);
+    if withdrawal.is_some_and(|request| matches!(request.body().action(), WithdrawalAction::Close))
+        && (row.closing.balance != 0 || row.closing.active)
+    {
+        return Err(TransitionError::AccountActivity);
     }
     if u128::from(row.closing.balance)
         + u128::from(debit)
@@ -1930,15 +2371,15 @@ where
                 return Err(TransitionError::OutgoingEndpoint);
             }
             if verify_signatures {
-                payment.verify_terminal::<H>(&context.payment)?;
+                payment.verify_terminal::<H>(context.payment())?;
             } else {
-                payment.validate_terminal_structure::<H>(&context.payment)?;
+                payment.validate_terminal_structure::<H>(context.payment())?;
             }
         }
         _ => return Err(TransitionError::OutgoingPresence),
     }
 
-    if shards.epoch() != context.payment.epoch() || shards.recipient() != &row.account {
+    if shards.epoch() != context.payment().epoch() || shards.recipient() != &row.account {
         return Err(TransitionError::ShardAlignment);
     }
     shards.verify_root::<H>(&row.credit_root)?;
@@ -1950,10 +2391,10 @@ where
     }
     for head in shards.heads() {
         if verify_signatures {
-            head.payment.verify_terminal::<H>(&context.payment)?;
+            head.payment.verify_terminal::<H>(context.payment())?;
         } else {
             head.payment
-                .validate_terminal_structure::<H>(&context.payment)?;
+                .validate_terminal_structure::<H>(context.payment())?;
         }
     }
 
@@ -2065,7 +2506,8 @@ where
 {
     let close = prepared.close();
     validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
-    if prepared.slice_bits != context.assignment().slice_bits() {
+    let slice_bits = prepared.slice_bits();
+    if slice_bits != context.assignment().slice_bits() {
         return Err(TransitionError::SliceBits);
     }
     if prepared.changes.root() != close.roots.change {
@@ -2076,7 +2518,7 @@ where
     if prepared.closing_leaves != closing || prepared.closing.root() != close.roots.closing {
         return Err(TransitionError::ClosingRoot);
     }
-    let layout = slice::derive_layout(&close.rows, &opening, &closing, prepared.slice_bits)?;
+    let layout = slice::derive_layout(&close.rows, &opening, &closing, slice_bits)?;
     if prepared.layout_boundaries != layout || prepared.layout.root() != close.roots.layout {
         return Err(TransitionError::SliceLayout);
     }
@@ -2135,7 +2577,7 @@ where
         return Err(TransitionError::SliceLayout);
     }
     let expected_liability = checked_closing_liability(
-        context.opening_liability,
+        context.opening_liability(),
         deposits.total(),
         close
             .rows
@@ -2178,12 +2620,15 @@ pub enum TransitionError {
     /// A slice does not authenticate its exact gap-free vector boundaries.
     #[error("proof-slice layout boundaries are not canonical")]
     SliceLayout,
-    /// External payout extraction evidence is malformed or incomplete.
-    #[error("external payout proof is not canonical")]
-    PayoutProof,
-    /// Authenticated external payout rows do not equal the terminal payout total.
-    #[error("external payout rows do not equal the terminal payout total")]
-    PayoutTotal,
+    /// The terminal settlement opening is malformed or out of bounds.
+    #[error("terminal settlement proof is not canonical")]
+    TerminalProof,
+    /// A changed row is not a valid external payout claim.
+    #[error("changed row is not a valid external payout claim")]
+    PayoutClaim,
+    /// A signed withdrawal and changed row do not form one finalized claim.
+    #[error("withdrawal claim is not canonical")]
+    WithdrawalClaim,
     /// The opening state vector exceeds the protocol bound.
     #[error("opening state vector exceeds the protocol bound")]
     TooManyStates,
@@ -2262,9 +2707,6 @@ pub enum TransitionError {
     /// An inactive account changed without activation, or activity closed incorrectly.
     #[error("account activity transition is invalid")]
     AccountActivity,
-    /// A full close contains payment activity or a nonzero closing balance.
-    #[error("full close must have no payment activity and no closing balance")]
-    FullCloseActivity,
     /// An account does not satisfy the exact widened balance equation.
     #[error("account balance equation is invalid")]
     BalanceEquation,
@@ -2324,6 +2766,7 @@ mod tests {
     use commonware_parallel::{Rayon, Sequential};
     use core::{
         fmt,
+        num::NonZeroU64,
         ops::Deref,
         sync::atomic::{AtomicUsize, Ordering},
     };
@@ -2337,6 +2780,39 @@ mod tests {
         AccountRow<VerifyingKey, ShaDigest>,
         ShardSet<VerifyingKey, ShaDigest>,
     );
+
+    #[allow(clippy::too_many_arguments)]
+    fn close_context<H, P, D>(
+        deployment: D,
+        epoch: u64,
+        operator: P,
+        cache: &StateCache<P, D>,
+        deposits: &DepositBatch<P>,
+        withdrawals: &WithdrawalBatch<P, D>,
+        admission_deadline: Deadline,
+        challenge_deadline: Deadline,
+        limits: CloseLimits,
+        assignment: Assignment<D>,
+    ) -> Result<CloseContext<P, D>, TransitionError>
+    where
+        H: Hasher<Digest = D>,
+        P: PublicKey,
+        D: Digest,
+    {
+        EpochContext::new::<H>(
+            deployment,
+            epoch,
+            operator,
+            deposits,
+            withdrawals,
+            cache.liability(),
+            admission_deadline,
+            challenge_deadline,
+            limits,
+            assignment,
+        )
+        .and_then(|epoch| epoch.bind::<H>(cache, deposits, withdrawals))
+    }
 
     static HASH_CALLS: AtomicUsize = AtomicUsize::new(0);
     static KEY_DECODES: AtomicUsize = AtomicUsize::new(0);
@@ -2443,6 +2919,10 @@ mod tests {
         }
     }
 
+    fn amount(value: u64) -> WithdrawalAction {
+        WithdrawalAction::Amount(NonZeroU64::new(value).unwrap())
+    }
+
     const fn limits(rows: u64, per_account_shards: u64, total_shards: u64) -> CloseLimits {
         CloseLimits::new(
             commitment::MAX_VECTOR_LENGTH as u64,
@@ -2516,11 +2996,12 @@ mod tests {
             let (debit, credit, _) = row.checked_deltas().unwrap();
             let deposit = deposits.amount_for(&row.account);
             let withdrawal = withdrawals.request_for(&row.account);
-            let amount = withdrawal.map_or(0, |request| {
-                if request.body().full_close() {
-                    row.opening.balance.checked_add(deposit).unwrap()
-                } else {
-                    request.body().amount()
+            let amount = withdrawal.map_or(0, |request| match request.body().action() {
+                WithdrawalAction::Amount(amount) => amount.get(),
+                WithdrawalAction::Close => {
+                    let available =
+                        u128::from(row.opening.balance) + u128::from(deposit) + u128::from(credit);
+                    u64::try_from(available.checked_sub(u128::from(debit)).unwrap()).unwrap()
                 }
             });
             prefix = prefix
@@ -2562,7 +3043,7 @@ mod tests {
         let cache = StateCache::new::<Sha256>(leaves).unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"deployment"]),
             7,
             operator.public_key(),
@@ -2656,7 +3137,7 @@ mod tests {
         .unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"deployment"]),
             8,
             operator.public_key(),
@@ -2858,7 +3339,7 @@ mod tests {
         .unwrap();
         let deposits = DepositBatch::new(vec![DepositRecord::new(account, 1).unwrap()]).unwrap();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"deployment"]),
             15,
             operator.public_key(),
@@ -2948,7 +3429,7 @@ mod tests {
         let cache = StateCache::<VerifyingKey, ShaDigest>::new::<Sha256>(Vec::new()).unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"maximum-layout-partition"]),
             1,
             operator.public_key(),
@@ -3061,8 +3542,10 @@ mod tests {
     #[test]
     fn absent_recipient_credit_is_committed_as_external_payout() {
         let operator = SigningKey::from_seed(189);
-        let payer = SigningKey::from_seed(190);
-        let recipient = SigningKey::from_seed(191);
+        let mut accounts = [SigningKey::from_seed(190), SigningKey::from_seed(191)];
+        accounts.sort_by_key(SigningKey::public_key);
+        let recipient = &accounts[0];
+        let payer = &accounts[1];
         let payer_opening = state(100);
         let cache = StateCache::new::<Sha256>(vec![StateLeaf {
             account: payer.public_key(),
@@ -3071,7 +3554,7 @@ mod tests {
         .unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"external-payout"]),
             4,
             operator.public_key(),
@@ -3084,7 +3567,20 @@ mod tests {
             assignment(0),
         )
         .unwrap();
-        let payment = payment(context.payment(), &operator, &payer, &recipient, 20);
+        let empty_terminal_size = prepare_close_with_strategy::<Sha256, _, _>(
+            &cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            Vec::new(),
+            Vec::new(),
+            &Sequential,
+        )
+        .unwrap()
+        .terminal_proof()
+        .unwrap()
+        .encode_size();
+        let payment = payment(context.payment(), &operator, payer, recipient, 20);
         let payer_shards = ShardSet::empty(context.payment().epoch(), payer.public_key());
         let recipient_shards = ShardSet::new(
             context.payment().epoch(),
@@ -3140,43 +3636,55 @@ mod tests {
         prepared
             .validate::<Sha256>(&context, &deposits, &withdrawals)
             .unwrap();
-        let proof = prepared.payout_proof(&deposits, &withdrawals).unwrap();
+        let terminal = prepared.terminal_proof().unwrap();
+        assert_eq!(terminal.encode_size(), empty_terminal_size);
         assert_eq!(
-            proof
-                .verify::<Sha256>(
+            terminal
+                .verify::<Sha256, _>(
                     &context,
                     &deposits,
                     &withdrawals,
                     &prepared.close().header,
                     &prepared.close().roots,
                 )
+                .unwrap()
+                .payout,
+            20
+        );
+        let decoded = TerminalProof::<ShaDigest>::decode_cfg(terminal.encode(), &()).unwrap();
+        assert_eq!(decoded, terminal);
+
+        let claim = prepared
+            .external_payout_claim(&recipient.public_key())
+            .unwrap();
+        assert_eq!(claim.position(), 0);
+        assert!(claim.predecessor.is_none());
+        assert_eq!(
+            claim
+                .verify::<Sha256>(&prepared.close().roots.change)
                 .unwrap(),
-            vec![ExternalPayout {
+            ExternalPayout {
                 recipient: recipient.public_key(),
                 amount: 20,
-            }]
+            }
         );
-        let encoded = proof.encode();
-        let decoded = PayoutProof::<VerifyingKey, ShaDigest>::decode_cfg(
-            encoded,
-            &CloseLimits::protocol_maximum(),
-        )
-        .unwrap();
-        assert_eq!(decoded, proof);
-
-        let mut omitted = proof;
-        omitted.rows.clear();
-        omitted.opening = None;
+        let decoded =
+            ExternalPayoutClaim::<VerifyingKey, ShaDigest>::decode_cfg(claim.encode(), &())
+                .unwrap();
+        assert_eq!(decoded, claim);
+        let mut unexpected_predecessor = claim.clone();
+        unexpected_predecessor.predecessor = Some(claim.row);
         assert!(matches!(
-            omitted.verify::<Sha256>(
-                &context,
-                &deposits,
-                &withdrawals,
-                &prepared.close().header,
-                &prepared.close().roots,
-            ),
-            Err(TransitionError::PayoutTotal)
+            unexpected_predecessor.verify::<Sha256>(&prepared.close().roots.change),
+            Err(TransitionError::PayoutClaim)
         ));
+        assert!(
+            ExternalPayoutClaim::<VerifyingKey, ShaDigest>::decode_cfg(
+                unexpected_predecessor.encode(),
+                &(),
+            )
+            .is_err()
+        );
 
         let close = prepared.close();
 
@@ -3191,6 +3699,251 @@ mod tests {
         assert_eq!(closing[0].account, payer.public_key());
         assert_eq!(closing[0].state.balance, 80);
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close).unwrap();
+    }
+
+    #[test]
+    fn external_payout_claim_rejects_credit_classified_as_close_withdrawal() {
+        let operator = SigningKey::from_seed(192);
+        let mut accounts = [
+            SigningKey::from_seed(193),
+            SigningKey::from_seed(194),
+            SigningKey::from_seed(195),
+            SigningKey::from_seed(196),
+        ];
+        accounts.sort_by_key(SigningKey::public_key);
+        let closing_payer = &accounts[0];
+        let closing_recipient = &accounts[1];
+        let external_payer = &accounts[2];
+        let external_recipient = &accounts[3];
+        let opening = state(100);
+        let mut leaves = vec![
+            StateLeaf {
+                account: closing_payer.public_key(),
+                state: opening,
+            },
+            StateLeaf {
+                account: external_payer.public_key(),
+                state: opening,
+            },
+        ];
+        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let cache = StateCache::new::<Sha256>(leaves).unwrap();
+        let deployment = Sha256::hash(&[b"close-withdrawal-is-not-payout"]);
+        let deposits = DepositBatch::new(vec![
+            DepositRecord::new(closing_recipient.public_key(), 5).unwrap(),
+        ])
+        .unwrap();
+        let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            deployment,
+            cache.root().digest,
+            Bytes::from_static(b"destination"),
+            WithdrawalAction::Close,
+            100,
+            closing_recipient,
+        )])
+        .unwrap();
+        let context = close_context::<Sha256, _, _>(
+            deployment,
+            4,
+            operator.public_key(),
+            &cache,
+            &deposits,
+            &withdrawals,
+            8,
+            9,
+            CloseLimits::protocol_maximum(),
+            assignment(0),
+        )
+        .unwrap();
+        let closing_payment = payment(
+            context.payment(),
+            &operator,
+            closing_payer,
+            closing_recipient,
+            7,
+        );
+        let external_payment = payment(
+            context.payment(),
+            &operator,
+            external_payer,
+            external_recipient,
+            7,
+        );
+        let closing_payer_shards =
+            ShardSet::empty(context.payment().epoch(), closing_payer.public_key());
+        let closing_recipient_shards = ShardSet::new(
+            context.payment().epoch(),
+            closing_recipient.public_key(),
+            vec![ShardHead::new(0, closing_payment.clone())],
+        )
+        .unwrap();
+        let external_payer_shards =
+            ShardSet::empty(context.payment().epoch(), external_payer.public_key());
+        let external_recipient_shards = ShardSet::new(
+            context.payment().epoch(),
+            external_recipient.public_key(),
+            vec![ShardHead::new(0, external_payment.clone())],
+        )
+        .unwrap();
+        let mut pairs = vec![
+            (
+                AccountRow {
+                    account: closing_payer.public_key(),
+                    opening,
+                    closing: AccountState {
+                        balance: 93,
+                        cumulative_debit: 7,
+                        ..opening
+                    },
+                    outgoing: Some(closing_payment),
+                    credit_root: closing_payer_shards.root::<Sha256>().unwrap(),
+                    prefix: Prefix::default(),
+                },
+                closing_payer_shards,
+            ),
+            (
+                AccountRow {
+                    account: closing_recipient.public_key(),
+                    opening: AccountState::default(),
+                    closing: AccountState {
+                        cumulative_credit: 7,
+                        receipt_count: 1,
+                        ..AccountState::default()
+                    },
+                    outgoing: None,
+                    credit_root: closing_recipient_shards.root::<Sha256>().unwrap(),
+                    prefix: Prefix::default(),
+                },
+                closing_recipient_shards,
+            ),
+            (
+                AccountRow {
+                    account: external_payer.public_key(),
+                    opening,
+                    closing: AccountState {
+                        balance: 93,
+                        cumulative_debit: 7,
+                        ..opening
+                    },
+                    outgoing: Some(external_payment),
+                    credit_root: external_payer_shards.root::<Sha256>().unwrap(),
+                    prefix: Prefix::default(),
+                },
+                external_payer_shards,
+            ),
+            (
+                AccountRow {
+                    account: external_recipient.public_key(),
+                    opening: AccountState::default(),
+                    closing: AccountState {
+                        cumulative_credit: 7,
+                        receipt_count: 1,
+                        ..AccountState::default()
+                    },
+                    outgoing: None,
+                    credit_root: external_recipient_shards.root::<Sha256>().unwrap(),
+                    prefix: Prefix::default(),
+                },
+                external_recipient_shards,
+            ),
+        ];
+        pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
+        assign_prefixes(&mut pairs, &deposits, &withdrawals);
+        let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        let prepared = prepare_close_with_strategy::<Sha256, _, _>(
+            &cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            rows,
+            shard_sets,
+            &Sequential,
+        )
+        .unwrap();
+        let terminal = prepared
+            .terminal_proof()
+            .unwrap()
+            .verify::<Sha256, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &prepared.close().header,
+                &prepared.close().roots,
+            )
+            .unwrap();
+        assert_eq!(terminal.deposit, 5);
+        assert_eq!(terminal.withdrawal, 12);
+        assert_eq!(terminal.payout, 7);
+        assert_eq!(
+            prepared
+                .withdrawal_claim::<Sha256>(&withdrawals, &closing_recipient.public_key())
+                .unwrap()
+                .verify::<Sha256>(
+                    context.deployment(),
+                    context.withdrawal_root(),
+                    &prepared.close().roots.change,
+                )
+                .unwrap(),
+            12
+        );
+        assert!(matches!(
+            prepared.external_payout_claim(&closing_recipient.public_key()),
+            Err(TransitionError::PayoutClaim)
+        ));
+
+        let position = prepared
+            .close()
+            .rows
+            .binary_search_by(|row| row.account.cmp(&closing_recipient.public_key()))
+            .unwrap() as u32;
+        let positions = if position == 0 {
+            vec![position]
+        } else {
+            vec![position - 1, position]
+        };
+        let forged = ExternalPayoutClaim {
+            predecessor: position
+                .checked_sub(1)
+                .map(|position| prepared.close().rows[position as usize].clone()),
+            row: prepared.close().rows[position as usize].clone(),
+            change_opening: prepared.changes.multi_opening(&positions).unwrap(),
+        };
+        assert!(matches!(
+            forged.verify::<Sha256>(&prepared.close().roots.change),
+            Err(TransitionError::PayoutClaim)
+        ));
+        assert_eq!(
+            ExternalPayoutClaim::<VerifyingKey, ShaDigest>::decode_cfg(forged.encode(), &())
+                .unwrap(),
+            forged
+        );
+
+        let genuine = prepared
+            .external_payout_claim(&external_recipient.public_key())
+            .unwrap();
+        assert!(genuine.predecessor.is_some());
+        assert_eq!(
+            genuine
+                .verify::<Sha256>(&prepared.close().roots.change)
+                .unwrap(),
+            ExternalPayout {
+                recipient: external_recipient.public_key(),
+                amount: 7,
+            }
+        );
+        let mut missing_predecessor = genuine;
+        missing_predecessor.predecessor = None;
+        assert!(matches!(
+            missing_predecessor.verify::<Sha256>(&prepared.close().roots.change),
+            Err(TransitionError::PayoutClaim)
+        ));
+        assert!(
+            ExternalPayoutClaim::<VerifyingKey, ShaDigest>::decode_cfg(
+                missing_predecessor.encode(),
+                &(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3361,7 +4114,7 @@ mod tests {
         let cache = StateCache::<VerifyingKey, ShaDigest>::new::<Sha256>(Vec::new()).unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"deployment"]),
             1,
             operator.public_key(),
@@ -3414,7 +4167,7 @@ mod tests {
         let fixture = payment_fixture();
         let caps = limits(1, 0, 0);
         assert!(TestClose::decode_cfg(fixture.close.encode(), &caps).is_err());
-        let restricted = CloseContext::new::<Sha256>(
+        let restricted = close_context::<Sha256, _, _>(
             *fixture.context.deployment(),
             fixture.context.payment().epoch(),
             fixture.operator.public_key(),
@@ -3447,7 +4200,7 @@ mod tests {
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
         let deployment = Sha256::hash(&[b"assignment-deployment"]);
-        let first = CloseContext::new::<Sha256>(
+        let first = close_context::<Sha256, _, _>(
             deployment,
             12,
             operator.public_key(),
@@ -3460,7 +4213,7 @@ mod tests {
             Assignment::new(Sha256::hash(&[b"committee-a"]), 8).unwrap(),
         )
         .unwrap();
-        let different_committee = CloseContext::new::<Sha256>(
+        let different_committee = close_context::<Sha256, _, _>(
             deployment,
             12,
             operator.public_key(),
@@ -3473,7 +4226,7 @@ mod tests {
             Assignment::new(Sha256::hash(&[b"committee-b"]), 8).unwrap(),
         )
         .unwrap();
-        let different_partition = CloseContext::new::<Sha256>(
+        let different_partition = close_context::<Sha256, _, _>(
             deployment,
             12,
             operator.public_key(),
@@ -3486,7 +4239,7 @@ mod tests {
             Assignment::new(Sha256::hash(&[b"committee-a"]), 7).unwrap(),
         )
         .unwrap();
-        let different_admission = CloseContext::new::<Sha256>(
+        let different_admission = close_context::<Sha256, _, _>(
             deployment,
             12,
             operator.public_key(),
@@ -3513,7 +4266,7 @@ mod tests {
             different_admission.payment().anchor()
         );
         assert!(matches!(
-            CloseContext::new::<Sha256>(
+            close_context::<Sha256, _, _>(
                 deployment,
                 12,
                 operator.public_key(),
@@ -3528,7 +4281,7 @@ mod tests {
             Err(TransitionError::DeadlineOrder)
         ));
         assert!(matches!(
-            CloseContext::new::<Sha256>(
+            close_context::<Sha256, _, _>(
                 deployment,
                 12,
                 operator.public_key(),
@@ -3542,6 +4295,73 @@ mod tests {
             ),
             Err(TransitionError::DeadlineOrder)
         ));
+    }
+
+    #[test]
+    fn epoch_anchor_binds_liability_but_not_opening_root() {
+        let operator = SigningKey::from_seed(70);
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let epoch = EpochContext::new::<Sha256>(
+            Sha256::hash(&[b"root-independent-anchor"]),
+            12,
+            operator.public_key(),
+            &deposits,
+            &withdrawals,
+            10,
+            99,
+            100,
+            CloseLimits::protocol_maximum(),
+            Assignment::new(Sha256::hash(&[b"committee"]), 8).unwrap(),
+        )
+        .unwrap();
+        let payment = epoch.payment().clone();
+        let wrong_liability = EpochContext::new::<Sha256>(
+            Sha256::hash(&[b"root-independent-anchor"]),
+            12,
+            operator.public_key(),
+            &deposits,
+            &withdrawals,
+            11,
+            99,
+            100,
+            CloseLimits::protocol_maximum(),
+            Assignment::new(Sha256::hash(&[b"committee"]), 8).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(wrong_liability.payment().anchor(), payment.anchor());
+        let first_account = SigningKey::from_seed(71).public_key();
+        let second_account = SigningKey::from_seed(72).public_key();
+        let state = AccountState {
+            balance: 10,
+            active: true,
+            ..AccountState::default()
+        };
+        let first_cache = StateCache::<VerifyingKey, ShaDigest>::new::<Sha256>(vec![StateLeaf {
+            account: first_account,
+            state,
+        }])
+        .unwrap();
+        let second_cache = StateCache::<VerifyingKey, ShaDigest>::new::<Sha256>(vec![StateLeaf {
+            account: second_account,
+            state,
+        }])
+        .unwrap();
+        assert!(matches!(
+            wrong_liability.bind::<Sha256>(&first_cache, &deposits, &withdrawals),
+            Err(TransitionError::OpeningLiability)
+        ));
+        let first = epoch
+            .clone()
+            .bind::<Sha256>(&first_cache, &deposits, &withdrawals)
+            .unwrap();
+        let second = epoch
+            .bind::<Sha256>(&second_cache, &deposits, &withdrawals)
+            .unwrap();
+
+        assert_ne!(first.opening_root(), second.opening_root());
+        assert_eq!(first.payment(), &payment);
+        assert_eq!(second.payment(), &payment);
     }
 
     #[test]
@@ -3586,18 +4406,14 @@ mod tests {
             crate::bajillion::boundary::DepositRecord::new(account.public_key(), 7).unwrap(),
         ])
         .unwrap();
-        let sealed_withdrawals = WithdrawalBatch::new(vec![
-            SignedWithdrawal::sign(
-                deployment,
-                authorization_root,
-                Bytes::from_static(b"sealed-destination"),
-                2,
-                false,
-                100,
-                &account,
-            )
-            .unwrap(),
-        ])
+        let sealed_withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            deployment,
+            authorization_root,
+            Bytes::from_static(b"sealed-destination"),
+            amount(2),
+            100,
+            &account,
+        )])
         .unwrap();
         let sealed_deposit_root = sealed_deposits.root::<Sha256>().unwrap();
         let sealed_withdrawal_root = sealed_withdrawals.root::<Sha256>().unwrap();
@@ -3605,18 +4421,14 @@ mod tests {
             crate::bajillion::boundary::DepositRecord::new(account.public_key(), 9).unwrap(),
         ])
         .unwrap();
-        let withdrawals = WithdrawalBatch::new(vec![
-            SignedWithdrawal::sign(
-                deployment,
-                authorization_root,
-                Bytes::from_static(b"substituted-destination"),
-                4,
-                false,
-                100,
-                &account,
-            )
-            .unwrap(),
-        ])
+        let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            deployment,
+            authorization_root,
+            Bytes::from_static(b"substituted-destination"),
+            amount(4),
+            100,
+            &account,
+        )])
         .unwrap();
         assert_ne!(deposits.root::<Sha256>().unwrap(), sealed_deposit_root);
         assert_ne!(
@@ -3630,7 +4442,7 @@ mod tests {
             state: opening,
         }])
         .unwrap();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             deployment,
             13,
             operator.public_key(),
@@ -3694,25 +4506,21 @@ mod tests {
                 deployment,
                 Sha256::hash(&[b"first-finalized-root"]),
                 Bytes::from_static(b"first"),
-                1,
-                false,
+                amount(1),
                 100,
                 &first,
-            )
-            .unwrap(),
+            ),
             SignedWithdrawal::sign(
                 deployment,
                 Sha256::hash(&[b"second-finalized-root"]),
                 Bytes::from_static(b"second"),
-                1,
-                false,
+                amount(1),
                 100,
                 &second,
-            )
-            .unwrap(),
+            ),
         ])
         .unwrap();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             deployment,
             16,
             operator.public_key(),
@@ -3748,21 +4556,17 @@ mod tests {
             crate::bajillion::boundary::DepositRecord::new(account.public_key(), 5).unwrap(),
         ])
         .unwrap();
-        let withdrawals = WithdrawalBatch::new(vec![
-            SignedWithdrawal::sign(
-                deployment,
-                authorization_root,
-                Bytes::new(),
-                5,
-                false,
-                100,
-                &account,
-            )
-            .unwrap(),
-        ])
+        let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            deployment,
+            authorization_root,
+            Bytes::new(),
+            amount(5),
+            100,
+            &account,
+        )])
         .unwrap();
         assert!(matches!(
-            CloseContext::new::<Sha256>(
+            close_context::<Sha256, _, _>(
                 deployment,
                 14,
                 operator.public_key(),
@@ -3775,6 +4579,44 @@ mod tests {
                 assignment(0),
             ),
             Err(TransitionError::BoundaryNoStateChange)
+        ));
+    }
+
+    #[test]
+    fn sealing_checks_exact_withdrawal_coverage() {
+        let operator = SigningKey::from_seed(77);
+        let account = SigningKey::from_seed(78);
+        let cache = StateCache::new::<Sha256>(vec![StateLeaf {
+            account: account.public_key(),
+            state: state(10),
+        }])
+        .unwrap();
+        let deployment = Sha256::hash(&[b"exact-withdrawal-coverage"]);
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            deployment,
+            cache.root().digest,
+            Bytes::new(),
+            amount(11),
+            100,
+            &account,
+        )])
+        .unwrap();
+
+        assert!(matches!(
+            close_context::<Sha256, _, _>(
+                deployment,
+                17,
+                operator.public_key(),
+                &cache,
+                &deposits,
+                &withdrawals,
+                99,
+                100,
+                CloseLimits::protocol_maximum(),
+                assignment(0),
+            ),
+            Err(TransitionError::WithdrawalCoverage)
         ));
     }
 
@@ -3803,7 +4645,7 @@ mod tests {
         .unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"deployment"]),
             3,
             operator.public_key(),
@@ -3864,7 +4706,7 @@ mod tests {
         let cache = StateCache::<VerifyingKey, ShaDigest>::new::<Sha256>(Vec::new()).unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"deployment"]),
             1,
             operator.public_key(),
@@ -3919,7 +4761,7 @@ mod tests {
         ])
         .unwrap();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<CountingHasher>(
+        let context = close_context::<CountingHasher, _, _>(
             deployment,
             8,
             operator.public_key(),
@@ -4006,7 +4848,7 @@ mod tests {
         let cache = StateCache::new::<Sha256>(leaves).unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             Sha256::hash(&[b"zero-balance-payment"]),
             8,
             operator.public_key(),
@@ -4090,7 +4932,7 @@ mod tests {
     }
 
     #[test]
-    fn full_close_pays_balance_above_signed_floor_and_deactivates() {
+    fn close_sweeps_opening_balance_and_deactivates() {
         let operator = SigningKey::from_seed(30);
         let account = SigningKey::from_seed(31);
         let opening = state(10);
@@ -4106,14 +4948,12 @@ mod tests {
             deployment,
             withdrawal_root,
             Bytes::from_static(b"destination"),
-            0,
-            true,
+            WithdrawalAction::Close,
             100,
             &account,
-        )
-        .unwrap();
+        );
         let withdrawals = WithdrawalBatch::new(vec![request]).unwrap();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             deployment,
             9,
             operator.public_key(),
@@ -4153,6 +4993,34 @@ mod tests {
             shard_sets,
         )
         .unwrap();
+
+        let mut restricted_limits = CloseLimits::protocol_maximum();
+        restricted_limits.max_withdrawal_total = 9;
+        let restricted_context = close_context::<Sha256, _, _>(
+            deployment,
+            9,
+            operator.public_key(),
+            &cache,
+            &deposits,
+            &withdrawals,
+            79,
+            80,
+            restricted_limits,
+            assignment(0),
+        )
+        .unwrap();
+        assert!(matches!(
+            build_close::<Sha256, _, _>(
+                &cache,
+                &restricted_context,
+                &deposits,
+                &withdrawals,
+                close.rows.clone(),
+                close.shard_sets.clone(),
+            ),
+            Err(TransitionError::CloseLimit)
+        ));
+
         assert_eq!(withdrawals.total(), 0);
         assert_eq!(close.rows.last().unwrap().prefix.withdrawal, 10);
         assert_eq!(
@@ -4160,10 +5028,262 @@ mod tests {
             0
         );
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
+            &close,
+            &withdrawals,
+            &account.public_key(),
+            &Sequential,
+        )
+        .unwrap();
+        assert_eq!(
+            claim
+                .verify::<Sha256>(
+                    context.deployment(),
+                    context.withdrawal_root(),
+                    &close.roots.change,
+                )
+                .unwrap(),
+            10
+        );
+
+        let mut wrong_prefix = claim.clone();
+        wrong_prefix.row.prefix.withdrawal = 9;
+        let wrong_prefix_tree = change_tree::<Sha256, _, _>(&[wrong_prefix.row.clone()]).unwrap();
+        wrong_prefix.change_opening = wrong_prefix_tree.multi_opening(&[0]).unwrap();
+        assert!(matches!(
+            wrong_prefix.verify::<Sha256>(
+                context.deployment(),
+                context.withdrawal_root(),
+                &wrong_prefix_tree.root(),
+            ),
+            Err(TransitionError::WithdrawalClaim)
+        ));
+
+        let mut wrong_tail = claim.clone();
+        wrong_tail.row.closing.balance = 1;
+        wrong_tail.row.closing.active = true;
+        wrong_tail.row.prefix.withdrawal = 9;
+        let wrong_tail_tree = change_tree::<Sha256, _, _>(&[wrong_tail.row.clone()]).unwrap();
+        wrong_tail.change_opening = wrong_tail_tree.multi_opening(&[0]).unwrap();
+        assert!(matches!(
+            wrong_tail.verify::<Sha256>(
+                context.deployment(),
+                context.withdrawal_root(),
+                &wrong_tail_tree.root(),
+            ),
+            Err(TransitionError::WithdrawalClaim)
+        ));
+
+        let decoded = WithdrawalClaim::<VerifyingKey, ShaDigest>::decode_cfg(
+            claim.encode(),
+            &(..=usize::MAX).into(),
+        )
+        .unwrap();
+        assert_eq!(decoded, claim);
     }
 
     #[test]
-    fn deposit_activation_and_zero_balance_full_close_are_exact_changes() {
+    fn withdrawal_claim_derives_epoch_tail_balance_from_adjacent_prefixes() {
+        let operator = SigningKey::from_seed(34);
+        let mut accounts = [SigningKey::from_seed(35), SigningKey::from_seed(36)];
+        accounts.sort_by_key(SigningKey::public_key);
+        let cache = StateCache::new::<Sha256>(
+            accounts
+                .iter()
+                .enumerate()
+                .map(|(index, account)| StateLeaf {
+                    account: account.public_key(),
+                    state: state(10 + index as u64),
+                })
+                .collect(),
+        )
+        .unwrap();
+        let deployment = Sha256::hash(&[b"withdrawal-claim-adjacent-prefix"]);
+        let deposits = DepositBatch::new(vec![
+            DepositRecord::new(accounts[1].public_key(), 7).unwrap(),
+        ])
+        .unwrap();
+        let withdrawals = WithdrawalBatch::new(
+            accounts
+                .iter()
+                .map(|account| {
+                    SignedWithdrawal::sign(
+                        deployment,
+                        cache.root().digest,
+                        Bytes::from_static(b"destination"),
+                        WithdrawalAction::Close,
+                        100,
+                        account,
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+        let context = close_context::<Sha256, _, _>(
+            deployment,
+            10,
+            operator.public_key(),
+            &cache,
+            &deposits,
+            &withdrawals,
+            79,
+            80,
+            CloseLimits::protocol_maximum(),
+            assignment(0),
+        )
+        .unwrap();
+        let mut pairs = cache
+            .leaves()
+            .iter()
+            .map(|leaf| {
+                let shards = ShardSet::empty(context.payment().epoch(), leaf.account.clone());
+                (
+                    AccountRow {
+                        account: leaf.account.clone(),
+                        opening: leaf.state,
+                        closing: AccountState {
+                            balance: 0,
+                            active: false,
+                            ..leaf.state
+                        },
+                        outgoing: None,
+                        credit_root: shards.root::<Sha256>().unwrap(),
+                        prefix: Prefix::default(),
+                    },
+                    shards,
+                )
+            })
+            .collect::<Vec<_>>();
+        assign_prefixes(&mut pairs, &deposits, &withdrawals);
+        let (rows, shard_sets) = pairs.into_iter().unzip();
+        let close = build_close::<Sha256, _, _>(
+            &cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            rows,
+            shard_sets,
+        )
+        .unwrap();
+
+        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
+            &close,
+            &withdrawals,
+            &accounts[1].public_key(),
+            &Sequential,
+        )
+        .unwrap();
+        assert!(claim.predecessor.is_some());
+        assert_eq!(
+            claim
+                .verify::<Sha256>(
+                    context.deployment(),
+                    context.withdrawal_root(),
+                    &close.roots.change,
+                )
+                .unwrap(),
+            18
+        );
+
+        let mut missing_predecessor = claim;
+        missing_predecessor.predecessor = None;
+        assert!(matches!(
+            missing_predecessor.verify::<Sha256>(
+                context.deployment(),
+                context.withdrawal_root(),
+                &close.roots.change,
+            ),
+            Err(TransitionError::WithdrawalClaim)
+        ));
+    }
+
+    #[test]
+    fn withdrawal_claim_supports_deposit_funded_absent_account() {
+        let operator = SigningKey::from_seed(37);
+        let account = SigningKey::from_seed(38);
+        let cache = StateCache::<VerifyingKey, ShaDigest>::new::<Sha256>(Vec::new()).unwrap();
+        let deployment = Sha256::hash(&[b"deposit-funded-withdrawal-claim"]);
+        let deposits =
+            DepositBatch::new(vec![DepositRecord::new(account.public_key(), 9).unwrap()]).unwrap();
+        let request = SignedWithdrawal::sign(
+            deployment,
+            cache.root().digest,
+            Bytes::from_static(b"destination"),
+            amount(4),
+            100,
+            &account,
+        );
+        let withdrawals = WithdrawalBatch::new(vec![request]).unwrap();
+        let context = close_context::<Sha256, _, _>(
+            deployment,
+            11,
+            operator.public_key(),
+            &cache,
+            &deposits,
+            &withdrawals,
+            79,
+            80,
+            CloseLimits::protocol_maximum(),
+            assignment(0),
+        )
+        .unwrap();
+        let shards = ShardSet::empty(context.payment().epoch(), account.public_key());
+        let close = build_close::<Sha256, _, _>(
+            &cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            vec![AccountRow {
+                account: account.public_key(),
+                opening: AccountState::default(),
+                closing: state(5),
+                outgoing: None,
+                credit_root: shards.root::<Sha256>().unwrap(),
+                prefix: Prefix {
+                    deposit: 9,
+                    withdrawal: 4,
+                    withdrawals: 1,
+                    ..Prefix::default()
+                },
+            }],
+            vec![shards],
+        )
+        .unwrap();
+        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
+            &close,
+            &withdrawals,
+            &account.public_key(),
+            &Sequential,
+        )
+        .unwrap();
+        assert_eq!(
+            claim
+                .verify::<Sha256>(
+                    context.deployment(),
+                    context.withdrawal_root(),
+                    &close.roots.change,
+                )
+                .unwrap(),
+            4
+        );
+
+        let mut inexact = claim;
+        inexact.row.closing.balance = 4;
+        inexact.row.prefix.withdrawal = 5;
+        let inexact_tree = change_tree::<Sha256, _, _>(&[inexact.row.clone()]).unwrap();
+        inexact.change_opening = inexact_tree.multi_opening(&[0]).unwrap();
+        assert!(matches!(
+            inexact.verify::<Sha256>(
+                context.deployment(),
+                context.withdrawal_root(),
+                &inexact_tree.root(),
+            ),
+            Err(TransitionError::WithdrawalClaim)
+        ));
+    }
+
+    #[test]
+    fn deposit_activation_and_zero_balance_close_are_exact_changes() {
         let operator = SigningKey::from_seed(32);
         let account = SigningKey::from_seed(33);
         let cache = StateCache::<VerifyingKey, ShaDigest>::new::<Sha256>(Vec::new()).unwrap();
@@ -4173,7 +5293,7 @@ mod tests {
         ])
         .unwrap();
         let withdrawals = WithdrawalBatch::empty();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             deployment,
             12,
             operator.public_key(),
@@ -4227,20 +5347,16 @@ mod tests {
         .unwrap();
         let authorization_root = Sha256::hash(&[b"finalized"]);
         let deposits = DepositBatch::empty();
-        let withdrawals = WithdrawalBatch::new(vec![
-            SignedWithdrawal::sign(
-                deployment,
-                authorization_root,
-                Bytes::new(),
-                0,
-                true,
-                100,
-                &account,
-            )
-            .unwrap(),
-        ])
+        let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            deployment,
+            authorization_root,
+            Bytes::new(),
+            WithdrawalAction::Close,
+            100,
+            &account,
+        )])
         .unwrap();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             deployment,
             12,
             operator.public_key(),
@@ -4285,21 +5401,27 @@ mod tests {
     }
 
     #[test]
-    fn full_close_cannot_carry_payment_activity() {
+    fn close_sweeps_the_tail_after_payment_activity() {
         let mut fixture = payment_fixture();
-        let authorization_root = Sha256::hash(&[b"full-close-authorization"]);
-        let request = SignedWithdrawal::sign(
-            *fixture.context.deployment(),
-            authorization_root,
-            Bytes::from_static(b"destination"),
-            0,
-            true,
-            100,
-            &fixture.payer,
+        let authorization_root = Sha256::hash(&[b"close-authorization"]);
+        let recipient_account = SigningKey::from_seed(3);
+        let withdrawals = WithdrawalBatch::new(
+            [&fixture.payer, &recipient_account]
+                .into_iter()
+                .map(|account| {
+                    SignedWithdrawal::sign(
+                        *fixture.context.deployment(),
+                        authorization_root,
+                        Bytes::from_static(b"destination"),
+                        WithdrawalAction::Close,
+                        100,
+                        account,
+                    )
+                })
+                .collect(),
         )
         .unwrap();
-        let withdrawals = WithdrawalBatch::new(vec![request]).unwrap();
-        let context = CloseContext::new::<Sha256>(
+        let context = close_context::<Sha256, _, _>(
             *fixture.context.deployment(),
             7,
             fixture.operator.public_key(),
@@ -4312,36 +5434,38 @@ mod tests {
             *fixture.context.assignment(),
         )
         .unwrap();
-        let recipient = SigningKey::from_seed(3);
         let payment = payment(
             context.payment(),
             &fixture.operator,
             &fixture.payer,
-            &recipient,
+            &recipient_account,
             20,
         );
-        let payer = fixture
+        let payer_position = fixture
             .close
             .rows
             .binary_search_by(|row| row.account.cmp(&fixture.payer.public_key()))
             .unwrap();
-        fixture.close.rows[payer].outgoing = Some(payment.clone());
-        fixture.close.rows[payer].closing.balance = 0;
-        fixture.close.rows[payer].closing.active = false;
-        let recipient = fixture
+        fixture.close.rows[payer_position].outgoing = Some(payment.clone());
+        fixture.close.rows[payer_position].closing.balance = 0;
+        fixture.close.rows[payer_position].closing.active = false;
+        let recipient_position = fixture
             .close
             .rows
-            .binary_search_by(|row| row.account.cmp(&recipient.public_key()))
+            .binary_search_by(|row| row.account.cmp(&recipient_account.public_key()))
             .unwrap();
-        fixture.close.shard_sets[recipient] = ShardSet::new(
+        fixture.close.shard_sets[recipient_position] = ShardSet::new(
             context.payment().epoch(),
-            fixture.close.rows[recipient].account.clone(),
+            fixture.close.rows[recipient_position].account.clone(),
             vec![ShardHead::new(0, payment)],
         )
         .unwrap();
-        fixture.close.rows[recipient].credit_root = fixture.close.shard_sets[recipient]
+        fixture.close.rows[recipient_position].credit_root = fixture.close.shard_sets
+            [recipient_position]
             .root::<Sha256>()
             .unwrap();
+        fixture.close.rows[recipient_position].closing.balance = 0;
+        fixture.close.rows[recipient_position].closing.active = false;
         let mut pairs = fixture
             .close
             .rows
@@ -4352,26 +5476,157 @@ mod tests {
         assign_prefixes(&mut pairs, &fixture.deposits, &withdrawals);
         let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
 
-        assert!(matches!(
-            validate_row::<Sha256, _, _>(
-                &context,
-                &fixture.deposits,
-                &withdrawals,
-                &rows[payer],
-                &shard_sets[payer],
-            ),
-            Err(TransitionError::FullCloseActivity)
-        ));
-        assert!(
-            build_close::<Sha256, _, _>(
-                &fixture.cache,
-                &context,
-                &fixture.deposits,
-                &withdrawals,
-                rows,
-                shard_sets,
-            )
-            .is_err()
+        let close = build_close::<Sha256, _, _>(
+            &fixture.cache,
+            &context,
+            &fixture.deposits,
+            &withdrawals,
+            rows,
+            shard_sets,
+        )
+        .unwrap();
+        assert_eq!(close.rows.last().unwrap().prefix.withdrawal, 140);
+        assert_eq!(close.rows.last().unwrap().prefix.debit, 20);
+        assert_eq!(close.rows.last().unwrap().prefix.credit, 20);
+        assert_eq!(
+            close.roots.closing,
+            commitment::empty_root::<Sha256>(VectorKind::State)
+        );
+
+        let payer_claim = assemble_withdrawal_claim::<Sha256, _, _>(
+            &close,
+            &withdrawals,
+            &fixture.payer.public_key(),
+            &Sequential,
+        )
+        .unwrap();
+        assert_eq!(
+            payer_claim
+                .verify::<Sha256>(
+                    context.deployment(),
+                    context.withdrawal_root(),
+                    &close.roots.change,
+                )
+                .unwrap(),
+            80
+        );
+        let recipient_claim = assemble_withdrawal_claim::<Sha256, _, _>(
+            &close,
+            &withdrawals,
+            &recipient_account.public_key(),
+            &Sequential,
+        )
+        .unwrap();
+        assert_eq!(
+            recipient_claim
+                .verify::<Sha256>(
+                    context.deployment(),
+                    context.withdrawal_root(),
+                    &close.roots.change,
+                )
+                .unwrap(),
+            60
+        );
+    }
+
+    #[test]
+    fn close_may_release_zero_after_exact_debit() {
+        let mut fixture = payment_fixture();
+        let recipient = SigningKey::from_seed(3);
+        let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            *fixture.context.deployment(),
+            Sha256::hash(&[b"zero-tail-authorization"]),
+            Bytes::from_static(b"destination"),
+            WithdrawalAction::Close,
+            100,
+            &fixture.payer,
+        )])
+        .unwrap();
+        let context = close_context::<Sha256, _, _>(
+            *fixture.context.deployment(),
+            7,
+            fixture.operator.public_key(),
+            &fixture.cache,
+            &fixture.deposits,
+            &withdrawals,
+            98,
+            99,
+            CloseLimits::protocol_maximum(),
+            *fixture.context.assignment(),
+        )
+        .unwrap();
+        let payment = payment(
+            context.payment(),
+            &fixture.operator,
+            &fixture.payer,
+            &recipient,
+            100,
+        );
+        let payer_position = fixture
+            .close
+            .rows
+            .binary_search_by(|row| row.account.cmp(&fixture.payer.public_key()))
+            .unwrap();
+        fixture.close.rows[payer_position].closing.balance = 0;
+        fixture.close.rows[payer_position].closing.cumulative_debit = 100;
+        fixture.close.rows[payer_position].closing.active = false;
+        fixture.close.rows[payer_position].outgoing = Some(payment.clone());
+        let recipient_position = fixture
+            .close
+            .rows
+            .binary_search_by(|row| row.account.cmp(&recipient.public_key()))
+            .unwrap();
+        fixture.close.rows[recipient_position].closing.balance = 140;
+        fixture.close.rows[recipient_position]
+            .closing
+            .cumulative_credit = 100;
+        fixture.close.rows[recipient_position].closing.receipt_count = 1;
+        fixture.close.shard_sets[recipient_position] = ShardSet::new(
+            context.payment().epoch(),
+            recipient.public_key(),
+            vec![ShardHead::new(0, payment)],
+        )
+        .unwrap();
+        fixture.close.rows[recipient_position].credit_root = fixture.close.shard_sets
+            [recipient_position]
+            .root::<Sha256>()
+            .unwrap();
+        let mut pairs = fixture
+            .close
+            .rows
+            .into_iter()
+            .zip(fixture.close.shard_sets)
+            .collect::<Vec<_>>();
+        assign_prefixes(&mut pairs, &fixture.deposits, &withdrawals);
+        let (rows, shard_sets) = pairs.into_iter().unzip();
+        let close = build_close::<Sha256, _, _>(
+            &fixture.cache,
+            &context,
+            &fixture.deposits,
+            &withdrawals,
+            rows,
+            shard_sets,
+        )
+        .unwrap();
+
+        assert_eq!(close.rows.last().unwrap().prefix.withdrawal, 0);
+        assert_eq!(close.rows.last().unwrap().prefix.withdrawals, 1);
+        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
+            &close,
+            &withdrawals,
+            &fixture.payer.public_key(),
+            &Sequential,
+        )
+        .unwrap();
+        assert_eq!(
+            claim
+                .verify::<Sha256>(
+                    context.deployment(),
+                    context.withdrawal_root(),
+                    &close.roots.change,
+                )
+                .unwrap(),
+            0
         );
     }
 
