@@ -24,31 +24,28 @@
 //!
 //! # How verification races finalization
 //!
-//! Finalization never waits for verification. When a block finalizes, the
-//! actor applies it immediately. Verification jobs keep running through the
-//! apply and are never cancelled, so a job can race any number of applies,
-//! and the pieces here make that race safe:
+//! Finalization never waits for verification. The actor applies a finalized
+//! block immediately, and verification jobs keep running through the apply.
 //!
-//! - Jobs share an [`Execution`]: readers over the databases plus, under one
-//!   lock, the speculative world-view -- the pending map of verified blocks,
-//!   the applied anchor, and the finalizing window below.
+//! Jobs share an [`Execution`], which holds readers over the databases and,
+//! under one lock, the pending map of verified blocks, the applied anchor,
+//! and the finalizing flag.
 //!
-//! - A job whose branch an apply invalidated is refused at its next read
-//!   ([`ExecutionError::Stale`], enforced by storage). The job waits for the
-//!   anchor to move past what it saw ([`Execution::anchor_past`]), then
-//!   re-classifies the candidate against the new canonical chain: the
-//!   candidate itself finalized means true, swept away means false, and still
-//!   open means execute again (the loop in `verifier::Verifier::run`).
+//! A job on the losing side of an apply is refused at its next database read
+//! ([`ExecutionError::Stale`]). It waits out the anchor move
+//! ([`Execution::anchor_past`]) and re-checks the candidate against the new
+//! canonical chain. A candidate that itself finalized is true, one that was
+//! swept away is false, and one still undecided executes again (the loop in
+//! `verifier::Verifier::run`).
 //!
-//! - An apply mutates the databases before the anchor moves. A fork taken
-//!   from the anchor in that window could mix pre- and post-apply databases,
-//!   so forks refuse while a finalization is mid-flight (the `finalizing`
-//!   flag), and the sweep, the anchor move, and the window close happen under
-//!   one lock ([`Execution::advance_to_finalized`]).
+//! An apply changes the databases before the anchor moves. A fork taken from
+//! the anchor in between could mix the two states, so forks refuse while the
+//! flag is set, and the sweep, the anchor move, and the flag clear happen
+//! under one lock ([`Execution::advance_to_finalized`]).
 //!
-//! - The finalized block stays in the pending map until that sweep, so a job
-//!   forking from it mid-apply finds it instead of rebuilding it on top of
-//!   itself.
+//! The finalized block stays in the pending map until that sweep, so a job
+//! forking from it mid-apply finds it instead of rebuilding it on top of
+//! itself.
 
 use crate::stateful::{
     Application, ExecutionError, Input, Proposed, PruneConfig,

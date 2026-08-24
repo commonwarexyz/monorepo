@@ -20,8 +20,8 @@ use tracing::{Instrument as _, Span, info_span};
 
 /// A verification request handed to a job.
 ///
-/// The request carries a non-owning ancestry handle; scheduling upgrades it to
-/// an independent cursor, so caller cancellation releases the backing blocks
+/// The request carries an ancestry handle. Scheduling upgrades it to an
+/// independent cursor, allowing caller cancellation to release the backing blocks
 /// even while the request waits in the mailbox.
 pub(super) struct Request<E, A>
 where

@@ -121,8 +121,6 @@ where
     }
 
     pub async fn run(mut self) {
-        // A stop during this await tears the task down as a crash would.
-        // The durable InProgress metadata makes that recoverable.
         let (marshal, floor) = &self.marshal;
         let resolved_floor =
             resolve_state_sync_floor::<E, A, S, V>(marshal, *floor, &self.finalization).await;
