@@ -856,10 +856,10 @@ impl Pending {
     /// denominator.
     #[inline(always)]
     fn push(&mut self, slot: u32, second: u32, denominator: blst_fp) {
-        let product = match self.prefix.last() {
-            Some(running) => fp_mul(running, &denominator),
-            None => denominator,
-        };
+        let product = self
+            .prefix
+            .last()
+            .map_or(denominator, |running| fp_mul(running, &denominator));
         self.prefix.push(product);
         self.jobs.push((slot, second));
         self.denominators.push(denominator);

@@ -1076,6 +1076,11 @@ impl G1 {
     }
 
     /// Borrows the underlying `blst_p1`.
+    ///
+    /// Only the batched subgroup check reads this, so it carries that module's
+    /// stability level and leaves with it; without the annotation a build above
+    /// ALPHA compiles the module out and fails on the dead method.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) const fn as_blst_p1(&self) -> &blst_p1 {
         &self.0
     }
