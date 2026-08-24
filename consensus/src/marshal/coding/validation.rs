@@ -6,7 +6,7 @@
 use crate::{
     CertifiableBlock, Epochable,
     marshal::{
-        application::validation::{has_contiguous_height, is_block_in_expected_epoch},
+        ancestry::has_contiguous_height, application::validation::is_block_in_expected_epoch,
         coding::types::hash_context,
     },
     types::{Epocher, coding::Commitment},

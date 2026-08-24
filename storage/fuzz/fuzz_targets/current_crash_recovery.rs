@@ -20,7 +20,7 @@ use commonware_storage::{
     qmdb::current::{VariableConfig, unordered::variable::Db as Current},
     translator::TwoCap,
 };
-use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
+use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -53,9 +53,9 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
 }
 
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
+fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
     let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(f64::from(percent) / 100.0)
+    Ok(Probability!(u64::from(percent), 100))
 }
 
 /// State-changing operations that exercise disk writes.
@@ -82,9 +82,9 @@ struct FuzzInput {
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
     #[arbitrary(with = bounded_nonzero_rate)]
-    sync_failure_rate: f64,
+    sync_failure_rate: Probability,
     #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: f64,
+    write_failure_rate: Probability,
     operations: Vec<CurrentOperation>,
 }
 
@@ -229,7 +229,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let fault_cfg = ctx.storage_fault_config();
             *fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(write_failure_rate),
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: write_failure_rate,
+                    retention_rate: Probability!(0.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
                 ..Default::default()
             };
 

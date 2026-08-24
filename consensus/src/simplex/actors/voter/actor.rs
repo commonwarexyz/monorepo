@@ -24,7 +24,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::{
@@ -410,6 +410,41 @@ impl<
         .instrument(span.clone())
         .await;
         Some(Request(context, span, receiver))
+    }
+
+    /// Drops pending application requests for exited views and dispatches
+    /// eligible new ones.
+    async fn reconcile_application_requests(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+        pending_propose: &mut Option<Request<Context<D, S::PublicKey>, D>>,
+        pending_verify: &mut Option<Request<Context<D, S::PublicKey>, bool>>,
+    ) {
+        // Keep requests for optimistic future views and clear requests for
+        // exited views. Certification for an exited view can continue after
+        // its verification receiver is dropped.
+        let current_view = self.state.current_view();
+        if pending_propose
+            .as_ref()
+            .is_some_and(|request| request.view() < current_view)
+        {
+            *pending_propose = None;
+        }
+        if pending_verify
+            .as_ref()
+            .is_some_and(|request| request.view() < current_view)
+        {
+            *pending_verify = None;
+        }
+
+        // State and Round prevent duplicate requests when both checkpoints
+        // observe the same view.
+        if pending_propose.is_none() {
+            *pending_propose = self.try_propose().await;
+        }
+        if pending_verify.is_none() {
+            *pending_verify = self.try_verify(resolver).await;
+        }
     }
 
     /// Persists our nullify vote to the journal for crash recovery.
@@ -981,10 +1016,12 @@ impl<
         });
 
         // Rebuild from journal, nested under the startup span.
+        // Replayed artifacts become in-memory state, so journal pages need not
+        // remain in the OS page cache.
         let replayed;
         (self, replayed) = async {
             let mut replay = journal
-                .replay(0, 0, self.replay_buffer)
+                .replay(0, 0, self.replay_buffer, ReadOptions::DONT_CACHE)
                 .await
                 .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {
@@ -1081,34 +1118,13 @@ impl<
         select_loop! {
             self.context,
             on_start => {
-                // Drop any pending items if we have moved past their view (work
-                // for optimistic future views is kept). This runs before the
-                // waiters are rebuilt, so a verification completion cannot be
-                // polled after another branch exits its view. A view is exited
-                // only on successful certification, nullification, or finalization.
-                // Nullification does not cancel certification work for the
-                // exited view, so the automaton must tolerate a dropped verify
-                // receiver while certify still wants the result.
-                if let Some(ref pp) = pending_propose
-                    && pp.view() < self.state.current_view()
-                {
-                    pending_propose = None;
-                }
-                if let Some(ref pv) = pending_verify
-                    && pv.view() < self.state.current_view()
-                {
-                    pending_verify = None;
-                }
-
-                // If needed, propose a container
-                if pending_propose.is_none() {
-                    pending_propose = self.try_propose().await;
-                }
-
-                // If needed, verify current view
-                if pending_verify.is_none() {
-                    pending_verify = self.try_verify(&mut resolver).await;
-                }
+                // Reconcile application requests before building this iteration's
+                // response waiters.
+                self.reconcile_application_requests(
+                    &mut resolver,
+                    &mut pending_propose,
+                    &mut pending_verify,
+                ).await;
 
                 // Attempt to certify any views that we have notarizations for.
                 //
@@ -1246,6 +1262,16 @@ impl<
                         .await;
                     staged.nullify = nullify;
                     staged.certification = certification;
+
+                    // A constructed notarize advances the optimistic frontier and
+                    // can make child requests eligible. Start those requests before
+                    // journal sync and publication. The next iteration polls their
+                    // responses.
+                    self.reconcile_application_requests(
+                        &mut resolver,
+                        &mut pending_propose,
+                        &mut pending_verify,
+                    ).await;
 
                     // Sync everything appended this iteration (during message
                     // processing and construction) in a single coalesced sync.

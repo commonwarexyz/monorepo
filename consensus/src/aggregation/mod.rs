@@ -8,9 +8,6 @@
 //! data but not the output of said transactions during consensus, agreement must be achieved asynchronously
 //! over the output of consensus to support state sync and client balance proofs.
 //!
-//! _For applications that want to collect quorum certificates over concurrent, sequencer-driven broadcast,
-//! check out [crate::ordered_broadcast]._
-//!
 //! # Pluggable Cryptography
 //!
 //! The aggregation module is generic over the signing scheme, allowing users to choose the
@@ -120,7 +117,7 @@ mod tests {
         deterministic::{self, Context},
     };
     use commonware_utils::{
-        NZU16, NZUsize, NonZeroDuration, TestRng,
+        NZU16, NZUsize, NonZeroDuration, Probability, TestRng,
         channel::{fallible::OneshotExt, oneshot},
         test_rng,
     };
@@ -177,7 +174,7 @@ mod tests {
     const RELIABLE_LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     };
 
     /// Register all participants with the network oracle.
@@ -812,7 +809,7 @@ mod tests {
             let degraded_link = Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
-                success_rate: 0.5,
+                success_rate: Probability!(0.5),
             };
 
             let (mut oracle, mut registrations) =
@@ -1119,7 +1116,7 @@ mod tests {
             let delayed_link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
-                success_rate: 0.98,
+                success_rate: Probability!(0.98),
             };
 
             // Initialize the simulated network

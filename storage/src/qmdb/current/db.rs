@@ -44,7 +44,6 @@ use commonware_utils::{
     sequence::prefixed_u64::U64,
 };
 use core::{num::NonZeroU64, ops::Range};
-use futures::future::try_join_all;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
 
@@ -788,9 +787,9 @@ where
     /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
     /// more details).
     ///
-    /// This publishes the batch to the in-memory Current view and appends it to the journal, but
-    /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
-    /// returned by [`Db::start_sync`], to guarantee durability.
+    /// This publishes the batch to the in-memory Current view and appends it to the journal. Call
+    /// [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to make
+    /// the applied state durable.
     #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
     #[boxed]
     pub async fn apply_batch(
@@ -1111,17 +1110,24 @@ pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: 
     let grafting_height = grafting::height::<N>();
 
     // Each graftable chunk has a single h=G ancestor at the deterministic
-    // `subtree_root_position(chunk_idx << G, G)`. Look it up directly.
-    try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
-        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
-        let pos = F::subtree_root_position(leaf_start, grafting_height);
-        let chunk_ops_digest = ops_tree
-            .get_node(pos)
-            .await?
-            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
-        Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest, chunk))
-    }))
-    .await
+    // `subtree_root_position(chunk_idx << G, G)`.
+    let chunks: Vec<(usize, [u8; N])> = chunks.into_iter().collect();
+    let positions: Vec<Position<F>> = chunks
+        .iter()
+        .map(|&(chunk_idx, _)| {
+            let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
+            F::subtree_root_position(leaf_start, grafting_height)
+        })
+        .collect();
+
+    // Chunk indices ascend and subtree roots ascend with their leaf ranges, satisfying
+    // `get_nodes`'s ordering requirement.
+    let nodes = ops_tree.get_nodes(&positions).await?;
+    Ok(chunks
+        .into_iter()
+        .zip(nodes)
+        .map(|((chunk_idx, chunk), chunk_ops_digest)| (chunk_idx, chunk_ops_digest, chunk))
+        .collect())
 }
 
 /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.

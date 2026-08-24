@@ -101,7 +101,7 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        Acknowledgement as _, NZU16, NZU64, NZUsize,
+        Acknowledgement as _, NZU16, NZU64, NZUsize, Probability,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
         ordered::{Quorum as _, Set},
@@ -3546,7 +3546,7 @@ mod tests {
 
             // Sync failures are fatal to the local storage state. They must not be
             // converted into a `false` certification/verification verdict.
-            context.storage_fault_config().write().sync_rate = Some(1.0);
+            context.storage_fault_config().write().sync_rate = Some(Probability!(1.0));
 
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -3600,7 +3600,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
             context.sleep(Duration::from_millis(10)).await;
 
-            context.storage_fault_config().write().sync_rate = Some(1.0);
+            context.storage_fault_config().write().sync_rate = Some(Probability!(1.0));
 
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -3653,7 +3653,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
             context.sleep(Duration::from_millis(10)).await;
 
-            context.storage_fault_config().write().sync_rate = Some(1.0);
+            context.storage_fault_config().write().sync_rate = Some(Probability!(1.0));
 
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
