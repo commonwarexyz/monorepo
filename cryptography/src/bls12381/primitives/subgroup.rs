@@ -1422,6 +1422,49 @@ mod tests {
         // An all-identity batch converts to nothing.
         assert!(to_affine(&[G1::zero()]).is_empty());
         assert!(to_affine(&[]).is_empty());
+
+        // Decoded points are already normalized and take the fast path; mixing
+        // them with projective ones must keep the shared inversion in step.
+        let mixed: Vec<G1> = points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                // The wire format has no infinity that decodes back, so the
+                // identities in the batch stay as they are.
+                if index % 3 == 0 && point != &G1::zero() {
+                    G1::read_unchecked(&mut point.encode().as_ref()).expect("decodes")
+                } else {
+                    *point
+                }
+            })
+            .collect();
+        let expected: Vec<blst_p1_affine> = G1::batch_to_affine(&mixed)
+            .into_iter()
+            .filter(|point| !affine_is_inf(point))
+            .collect();
+        let got = to_affine(&mixed);
+        assert_eq!(got.len(), expected.len());
+        for (got, expected) in got.iter().zip(&expected) {
+            assert_eq!(got.x.l, expected.x.l);
+            assert_eq!(got.y.l, expected.y.l);
+        }
+    }
+
+    #[test]
+    fn decoded_points_are_accepted() {
+        // The batch a caller actually has: points decoded from the wire, which
+        // arrive normalized and so skip the affine conversion's inversion.
+        let mut rng = test_rng();
+        let mut points: Vec<G1> = (0..LARGE)
+            .map(|_| {
+                let point = in_subgroup_point(&mut rng);
+                G1::read_unchecked(&mut point.encode().as_ref()).expect("decodes")
+            })
+            .collect();
+        assert!(points.iter().all(|point| fp_is_one(&point.as_blst_p1().z)));
+        assert!(batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
+        points[LARGE / 4] = off_subgroup_point(&mut rng);
+        assert!(!batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
     }
 
     #[test]
