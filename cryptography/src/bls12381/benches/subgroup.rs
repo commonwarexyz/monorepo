@@ -10,10 +10,14 @@ use std::{hint::black_box, num::NonZeroUsize, thread::available_parallelism};
 
 /// Compare batched subgroup verification (serial and parallel) against
 /// per-point checking.
+///
+/// The batched check's advantage grows with the batch, so the sizes span from
+/// below the per-point fallback threshold to a batch large enough for the cost
+/// model to pick its widest round.
 fn bench_subgroup(c: &mut Criterion) {
     let threads = available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap());
     let rayon = Rayon::new(threads).unwrap();
-    for n in [100usize, 1000, 6000] {
+    for n in [100usize, 1000, 6000, 100_000] {
         let make = || {
             let mut rng = test_rng();
             (0..n)
