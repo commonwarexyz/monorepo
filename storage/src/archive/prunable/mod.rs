@@ -1039,10 +1039,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(value_size, 0, "startup must finish the value truncation");
+            context.remove(&cfg.metadata_partition, None).await.unwrap();
 
-            // Once both halves of the rewind are empty, a clean restart has no durability work:
+            // Once both halves of the rewind are empty, missing derived metadata does not require
+            // durability work:
             //
-            //     index [ ]    values [ ]    -> no rewind, no sync
+            //     index [ ]    values [ ]    metadata [ ] -> no rewind, no sync
             //
             // This keeps the recovery write bounded to the restart that actually finds the
             // orphaned value bytes.

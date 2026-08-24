@@ -341,6 +341,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let mut validated_sections = Vec::new();
         for (&section, &items) in &section_lengths {
             let key = SectionKey::new(section);
+            if items == 0 && metadata.get(&key).is_none() {
+                continue;
+            }
             if metadata.get(&key) != Some(&items) {
                 metadata.put(key, items);
                 metadata_dirty = true;

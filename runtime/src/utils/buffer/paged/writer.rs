@@ -909,6 +909,8 @@ impl<B: Blob> Writer<B> {
     /// Unlike [`Self::new`], this does not resize the blob. `physical_size` is the size reported
     /// when `blob` was opened, and `logical_page_size` is the page size used to write it. Validation
     /// stops once the requested prefix is covered or the first short or invalid page is reached.
+    /// Returns [`Error::OffsetOverflow`] if `logical_page_size` is outside the page format's
+    /// non-zero `u16` domain.
     pub async fn has_recoverable_prefix(
         blob: &B,
         physical_size: u64,
@@ -916,6 +918,10 @@ impl<B: Blob> Writer<B> {
         minimum_len: u64,
         read_options: ReadOptions,
     ) -> Result<bool, Error> {
+        let logical_page_size =
+            NonZeroU16::new(u16::try_from(logical_page_size).map_err(|_| Error::OffsetOverflow)?)
+                .ok_or(Error::OffsetOverflow)?;
+        let logical_page_size = u64::from(logical_page_size.get());
         if minimum_len == 0 {
             return Ok(true);
         }
@@ -1185,6 +1191,55 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
 
+    #[derive(Clone)]
+    struct RejectingReadBlob {
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl Blob for RejectingReadBlob {
+        async fn read_at(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Err(Error::BlobInsufficientLength)
+        }
+
+        async fn read_at_buf(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Err(Error::BlobInsufficientLength)
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<IoBufs> + Send,
+            _options: WriteOptions,
+        ) -> Result<(), Error> {
+            unreachable!("prefix validation must not write")
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            unreachable!("prefix validation must not resize")
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            unreachable!("prefix validation must not sync")
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            unreachable!("prefix validation must not sync")
+        }
+    }
+
     #[test_traced("DEBUG")]
     fn test_writes_use_uncached_hint() {
         let executor = deterministic::Runner::default();
@@ -1257,6 +1312,45 @@ mod tests {
                     .iter()
                     .all(|options| *options == ReadOptions::default())
             );
+        });
+    }
+
+    /// Raw validation rejects page sizes outside the format's `NonZeroU16` domain before issuing
+    /// a blob read, where narrowing or allocation would otherwise be backend-dependent.
+    #[test_traced("DEBUG")]
+    fn test_has_recoverable_prefix_validates_page_size_domain() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let blob = RejectingReadBlob {
+                reads: reads.clone(),
+            };
+
+            for logical_page_size in [0, u16::MAX as u64 + 1, u64::MAX - CHECKSUM_SIZE] {
+                let err = Writer::<RejectingReadBlob>::has_recoverable_prefix(
+                    &blob,
+                    u64::MAX,
+                    logical_page_size,
+                    1,
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap_err();
+                assert!(matches!(err, Error::OffsetOverflow));
+            }
+
+            assert!(
+                !Writer::<RejectingReadBlob>::has_recoverable_prefix(
+                    &blob,
+                    0,
+                    u16::MAX as u64,
+                    1,
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
         });
     }
 

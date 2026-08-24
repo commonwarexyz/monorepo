@@ -1629,7 +1629,7 @@ mod tests {
     #[test_traced]
     fn test_segmented_fixed_validates_pages_before_trailing_bytes() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             const LOGICAL_PAGE_SIZE: u64 = 5;
             const SECTION: u64 = 0;
 
@@ -1671,7 +1671,7 @@ mod tests {
             // Backward sizing stops at valid page 5 and reports 30 logical bytes. Item alignment
             // alone selects 24, inside torn page 4, which `Writer::resize` cannot preserve.
             // Forward page validation finds 20 contiguous bytes and selects safe item boundary 16.
-            corrupt_page(&mut context, &cfg.partition, SECTION, 4, LOGICAL_PAGE_SIZE).await;
+            corrupt_page(&context, &cfg.partition, SECTION, 4, LOGICAL_PAGE_SIZE).await;
 
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
                 .await

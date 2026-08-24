@@ -4632,7 +4632,7 @@ mod tests {
     #[test_traced]
     fn test_variable_recovery_truncates_torn_interior_page() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let cfg = Config::<()> {
                 partition: "variable-torn-interior".into(),
                 items_per_section: NZU64!(30),
@@ -4650,7 +4650,7 @@ mod tests {
             journal.commit().await.unwrap();
 
             // Data blob 0 holds 30 9-byte frames (270 bytes) across 5 pages; tear page 2.
-            corrupt_page(&mut context, &cfg.data_partition(), 0, 2, 64).await;
+            corrupt_page(&context, &cfg.data_partition(), 0, 2, 64).await;
 
             // Pages 0-1 hold 128 bytes = 14 whole frames; the 2 leftover bytes are torn junk
             // and the gap makes blob 1 unreachable.
@@ -4673,7 +4673,7 @@ mod tests {
     #[test_traced]
     fn test_variable_recovery_truncates_torn_interior_page_in_tail() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let cfg = Config::<()> {
                 partition: "variable-torn-interior-tail".into(),
                 items_per_section: NZU64!(30),
@@ -4691,7 +4691,7 @@ mod tests {
             journal.commit().await.unwrap();
 
             // Data blob 1 holds 20 9-byte frames (180 bytes) across 3 pages; tear page 1.
-            corrupt_page(&mut context, &cfg.data_partition(), 1, 1, 64).await;
+            corrupt_page(&context, &cfg.data_partition(), 1, 1, 64).await;
 
             // Blob 1 keeps page 0 only: 64 bytes = 7 whole frames after blob 0's 30.
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
@@ -4715,7 +4715,7 @@ mod tests {
     #[test_traced]
     fn test_variable_recovery_rejects_torn_page_below_watermark() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let cfg = Config::<()> {
                 partition: "variable-torn-below-watermark".into(),
                 items_per_section: NZU64!(30),
@@ -4734,7 +4734,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Data blob 0 holds 30 9-byte frames (270 bytes) across 5 pages; tear page 2.
-            corrupt_page(&mut context, &cfg.data_partition(), 0, 2, 64).await;
+            corrupt_page(&context, &cfg.data_partition(), 0, 2, 64).await;
             let (_, size_before) = context
                 .open(&cfg.data_partition(), &0u64.to_be_bytes())
                 .await
@@ -4843,7 +4843,7 @@ mod tests {
     #[test_traced]
     fn test_variable_recovery_rejects_torn_page_below_mid_blob_watermark() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let cfg = Config::<()> {
                 partition: "variable-torn-mid-blob-watermark".into(),
                 items_per_section: NZU64!(30),
@@ -4862,7 +4862,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Tear page 1 (bytes 64..128), beneath the acknowledged frames ending at byte 180.
-            corrupt_page(&mut context, &cfg.data_partition(), 0, 1, 64).await;
+            corrupt_page(&context, &cfg.data_partition(), 0, 1, 64).await;
             let (_, size_before) = context
                 .open(&cfg.data_partition(), &0u64.to_be_bytes())
                 .await

@@ -3932,7 +3932,7 @@ mod tests {
     #[test_traced]
     fn test_fixed_recovery_validates_pages_before_trailing_bytes() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             const LOGICAL_PAGE_SIZE: u64 = 5;
 
             let cfg = Config {
@@ -3971,7 +3971,7 @@ mod tests {
             // page 4 to preserve bytes 20..24 and rewrite its partial-page checksum, so it cannot
             // perform that truncation. Forward validation instead stops at 20, rounds down to 16,
             // and safely resizes within valid page 3.
-            corrupt_page(&mut context, &partition, 0, 4, LOGICAL_PAGE_SIZE).await;
+            corrupt_page(&context, &partition, 0, 4, LOGICAL_PAGE_SIZE).await;
 
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
                 .await
@@ -4029,7 +4029,7 @@ mod tests {
     #[test_traced]
     fn test_fixed_recovery_truncates_torn_interior_page() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -4041,7 +4041,7 @@ mod tests {
 
             // Blob 0 holds 10 items (320 bytes) across 8 pages; tear page 3.
             corrupt_page(
-                &mut context,
+                &context,
                 &blob_partition(&cfg),
                 0,
                 3,
@@ -4069,7 +4069,7 @@ mod tests {
     #[test_traced]
     fn test_fixed_recovery_truncates_torn_interior_page_in_tail() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -4081,7 +4081,7 @@ mod tests {
 
             // Blob 1 holds 5 items (160 bytes) across 4 pages; tear page 1.
             corrupt_page(
-                &mut context,
+                &context,
                 &blob_partition(&cfg),
                 1,
                 1,
@@ -4111,7 +4111,7 @@ mod tests {
     #[test_traced]
     fn test_fixed_recovery_rejects_torn_page_below_watermark() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -4122,7 +4122,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             corrupt_page(
-                &mut context,
+                &context,
                 &blob_partition(&cfg),
                 0,
                 3,
@@ -4156,7 +4156,7 @@ mod tests {
     #[test_traced]
     fn test_fixed_recovery_rejects_torn_page_below_mid_blob_watermark() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -4169,7 +4169,7 @@ mod tests {
 
             // Tear page 1 of blob 1, beneath the acknowledged bytes ending at 160.
             corrupt_page(
-                &mut context,
+                &context,
                 &blob_partition(&cfg),
                 1,
                 1,

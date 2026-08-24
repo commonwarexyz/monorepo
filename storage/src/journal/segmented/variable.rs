@@ -910,7 +910,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     async fn journal_with_torn_interior_page(
-        context: &mut deterministic::Context,
+        context: &deterministic::Context,
         partition: &str,
         later_section: bool,
     ) -> (Journal<deterministic::Context, u64>, Config<()>) {
@@ -1960,7 +1960,7 @@ mod tests {
     #[test_traced]
     fn test_segmented_variable_replay_repairs_torn_interior_page_when_reached() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             const FIRST_SECTION: u64 = 0;
             const PARTITION: &str = "segmented-variable-torn-interior";
             const TORN_SECTION: u64 = 1;
@@ -1973,8 +1973,7 @@ mod tests {
             // a prefetched later page fails validation. FIRST_SECTION establishes the ordered
             // lifecycle boundary: replay setup and consumption of an earlier section must not
             // read or repair this later section.
-            let (journal, _) =
-                journal_with_torn_interior_page(&mut context, PARTITION, false).await;
+            let (journal, _) = journal_with_torn_interior_page(&context, PARTITION, false).await;
             let original_size = context
                 .open(PARTITION, &TORN_SECTION.to_be_bytes())
                 .await
@@ -2025,9 +2024,9 @@ mod tests {
     #[test_traced]
     fn test_segmented_variable_replay_stops_after_failed_interior_repair() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
+        executor.start(|context| async move {
             let (journal, _) = journal_with_torn_interior_page(
-                &mut context,
+                &context,
                 "segmented-variable-failed-interior-repair",
                 true,
             )
