@@ -266,10 +266,20 @@ Strategy C is implemented in `subgroup::batch_in_g1` with:
 - soundness-bearing details in the module docs (odd-cofactor proof, exact-trit
   requirement, deterministic-combine clarification, and why a pass cannot beat
   `3^-m`);
+- a differential fuzz of the whole round against a direct computation: every
+  combination is rebuilt from the round's marginals and compared value for
+  value with a direct sum over the coefficient digits, across 400 seeds of
+  adversarial point and id distributions and every width up to 9;
 - an accumulator oracle test (fuzz vs naive G1 addition over mixed
   good/bad/identity/negated/duplicated points) plus deterministic tests for
   every special-case branch (cancelling pairs, doubling chains, identity
-  inputs, wide plans, empty buckets);
+  inputs, single-bucket contention, wide plans, empty buckets);
+- a chi-square bound on the drawn coefficients — overall, per digit position,
+  per adjacent pair, and per slot in the word that produced them; both
+  mutations it is meant to catch (one id too many per word, a widened rejection
+  bound) do fail it;
+- the bounded round-plan search pinned against the exhaustive one it replaces,
+  and against absurd soundness targets;
 - an oracle test for the inlined field arithmetic against `blst_fp_add` /
   `blst_fp_sub`, and for the affine conversion against `blst_p1s_to_affine`;
 - adversarial batch tests (cancelling bad pair, repeated bad point, identity
