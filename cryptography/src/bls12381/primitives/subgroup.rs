@@ -140,10 +140,14 @@ const MAX_WIDTH: u32 = 11;
 /// Largest bucket-slot footprint a round should ask for, in bytes.
 ///
 /// Points arrive in random bucket order, so the accumulator's working set is
-/// the whole slot array. A wider round needs fewer passes over the points, but
-/// once its slots outgrow the cache every point pays a miss that the saved
-/// passes do not repay — measured here as a 20-35% jump in cost per addition
-/// one step past the budget. Two MiB holds `3^9` slots.
+/// the whole slot array, and a round's collapse workspace is half as large
+/// again. A wider round needs fewer passes over the points, but its slots pay
+/// for a deeper level of the memory hierarchy on every point — measured here as
+/// 8% more per addition one step past the budget and 15% two steps past — and
+/// its workspace grows threefold per step, per thread. Two MiB holds `3^9`
+/// slots, which is where the two stop trading well: at a million points, the
+/// widest plan the next step up allows measures within noise of the one chosen
+/// here while asking for an order of magnitude more memory.
 const SLOT_BUDGET: usize = 2 << 20;
 
 /// Approximate cost of one [`G1::in_subgroup`] check, in units of one
@@ -206,16 +210,26 @@ fn round_cost(n: usize, m: u32) -> usize {
     (n - occupied) + 2 * occupied + (m as usize) * CHECK_COST
 }
 
-/// Plan the rounds: one width per round, summing to at least `combinations`.
+/// Plan the rounds: one width per round, together covering `combinations`.
 ///
-/// Returns `None` if checking each point individually is cheaper. The widths of
-/// a plan differ by at most one, so a round count that does not divide
-/// `combinations` wastes no more than one combination — which matters, since
-/// the round count is what the batch pays for.
+/// Returns `None` if checking each point individually is cheaper.
 ///
 /// Soundness holds for every plan (a round of width `m` has error `3^-m`, and
 /// the widths sum to at least `combinations`), so the cost model's constants
 /// only affect performance.
+/// Spread `combinations` over `rounds` rounds as evenly as possible.
+///
+/// The widths differ by at most one, so a round count that does not divide the
+/// combinations wastes none of them — which matters, since the round count is
+/// what the batch pays for.
+fn spread(combinations: usize, rounds: usize) -> Vec<u32> {
+    let width = (combinations / rounds) as u32;
+    let wide = combinations % rounds;
+    (0..rounds)
+        .map(|round| if round < wide { width + 1 } else { width })
+        .collect()
+}
+
 fn plan(n: usize, combinations: usize) -> Option<Vec<u32>> {
     if combinations == 0 {
         return Some(Vec::new());
@@ -235,20 +249,17 @@ fn plan(n: usize, combinations: usize) -> Option<Vec<u32>> {
     let mut best_cost = n.saturating_mul(CHECK_COST);
     let mut best = None;
     for rounds in combinations.div_ceil(widest as usize)..=combinations {
-        let width = (combinations / rounds) as u32;
-        let wide = combinations % rounds;
-        // Spreading combinations evenly cannot push a round past `widest`: a
-        // round count that leaves a remainder also leaves `width < widest`.
-        debug_assert!(width < widest || wide == 0);
-        let cost = wide.saturating_mul(round_cost(n, width + 1))
-            + (rounds - wide).saturating_mul(round_cost(n, width));
+        let widths = spread(combinations, rounds);
+        // Spreading evenly cannot push a round past `widest`: a round count that
+        // leaves a remainder also leaves the base width below it.
+        debug_assert!(widths.iter().all(|&m| m <= widest));
+        let cost = widths
+            .iter()
+            .map(|&m| round_cost(n, m))
+            .fold(0usize, |total, cost| total.saturating_add(cost));
         if cost < best_cost {
             best_cost = cost;
-            best = Some(
-                (0..rounds)
-                    .map(|round| if round < wide { width + 1 } else { width })
-                    .collect(),
-            );
+            best = Some(widths);
         }
     }
     best
@@ -1295,6 +1306,28 @@ mod tests {
     }
 
     #[test]
+    fn spread_is_even_and_complete() {
+        for combinations in [1usize, 2, 7, 81, 128, 255] {
+            for rounds in 1..=combinations {
+                let widths = spread(combinations, rounds);
+                assert_eq!(widths.len(), rounds);
+                // Every combination is placed, and none is wasted.
+                assert_eq!(
+                    widths.iter().map(|&m| m as usize).sum::<usize>(),
+                    combinations
+                );
+                // Widths differ by at most one, widest first.
+                let (&first, &last) = (
+                    widths.first().expect("nonempty"),
+                    widths.last().expect("nonempty"),
+                );
+                assert!(first - last <= 1);
+                assert!(widths.windows(2).all(|pair| pair[0] >= pair[1]));
+            }
+        }
+    }
+
+    #[test]
     fn bucket_ids_are_in_range() {
         let mut rng = test_rng();
         let mut trits = Trits::new(&mut rng);
@@ -1540,6 +1573,286 @@ mod tests {
         }
     }
 
+
+    /// Stress the accumulator where collisions dominate: few buckets, many
+    /// points, and heavy duplication/cancellation.
+    #[test]
+    fn accumulator_stress_collisions() {
+        let mut rng = test_rng();
+        for &(n, m) in &[
+            (3000usize, 1u32),
+            (3000, 2),
+            (5000, 3),
+            (4000, 5),
+            (1, 1),
+            (2, 1),
+        ] {
+            // Pool of distinct points, reused heavily so doublings abound.
+            let pool: Vec<G1> = (0..8).map(|_| in_subgroup_point(&mut rng)).collect();
+            let bad: Vec<G1> = (0..3).map(|_| off_subgroup_point(&mut rng)).collect();
+            let mut points: Vec<G1> = Vec::with_capacity(n);
+            for i in 0..n {
+                let point = match i % 11 {
+                    0 => G1::zero(),
+                    1 => pool[i % pool.len()],
+                    2 => -pool[i % pool.len()],
+                    3 => bad[i % bad.len()],
+                    4 => -bad[i % bad.len()],
+                    5 => pool[0],
+                    6 => -pool[0],
+                    _ => in_subgroup_point(&mut rng),
+                };
+                points.push(point);
+            }
+            let ids = Trits::new(&mut rng).fill(m, n);
+            assert_sums_match(&points, &ids, m);
+        }
+    }
+
+    /// All points land in one bucket, so every pass but the first is pure
+    /// carry: the worst case for termination and for the doubling chain.
+    #[test]
+    fn accumulator_single_bucket() {
+        let mut rng = test_rng();
+        for &n in &[1usize, 2, 3, 7, 64, 1000, 3000] {
+            for m in [1u32, 2, 5] {
+                let p = in_subgroup_point(&mut rng);
+                // Same point repeated: every addition after the first is a
+                // doubling or a chord against a running multiple.
+                let points = vec![p; n];
+                let ids = vec![1u32; n];
+                assert_sums_match(&points, &ids, m);
+            }
+        }
+    }
+
+    /// A wide round with enough points to fill whole inversion chunks, so the
+    /// `is_full` flush path and the collapse chain both run at scale.
+    #[test]
+    fn accumulator_wide_round_chunks() {
+        let mut rng = test_rng();
+        for m in [4u32, 6, 7] {
+            let n = 6 * 3usize.pow(m);
+            let base: Vec<G1> = (0..64).map(|_| in_subgroup_point(&mut rng)).collect();
+            let points: Vec<G1> = (0..n)
+                .map(|i| match i % 5 {
+                    0 => base[i % base.len()],
+                    1 => -base[i % base.len()],
+                    2 => G1::zero(),
+                    _ => in_subgroup_point(&mut rng),
+                })
+                .collect();
+            let ids = Trits::new(&mut rng).fill(m, n);
+            assert_sums_match(&points, &ids, m);
+        }
+    }
+
+    /// Reuse one `Round` across widths, as the strategy does, and check the
+    /// combines still agree with a direct computation of each combination.
+    #[test]
+    fn combinations_match_direct() {
+        let mut rng = test_rng();
+        let widest = 4u32;
+        let mut round = Round::new(widest);
+        for m in [1u32, 3, 4, 2, 4, 1] {
+            let n = 400usize;
+            let points: Vec<G1> = (0..n)
+                .map(|i| match i % 6 {
+                    0 => G1::zero(),
+                    1 => off_subgroup_point(&mut rng),
+                    _ => in_subgroup_point(&mut rng),
+                })
+                .collect();
+            let ids = Trits::new(&mut rng).fill(m, n);
+            let (affine, affine_ids) = affine_with_ids(&points, &ids);
+            // Direct per-combination computation over the surviving points.
+            let mut expected_ok = true;
+            for j in 0..m {
+                let mut acc = G1::zero();
+                for (point, &id) in points.iter().zip(&ids) {
+                    let digit = (id / 3u32.pow(j)) % 3;
+                    for _ in 0..digit {
+                        acc += point;
+                    }
+                }
+                if !acc.in_subgroup() {
+                    expected_ok = false;
+                }
+            }
+            assert_eq!(
+                round.run(&affine, &affine_ids, m),
+                expected_ok,
+                "m={m} mismatch"
+            );
+        }
+    }
+
+
+    /// Randomized differential fuzz: every combination's exact value against a
+    /// direct computation, over adversarial id and point distributions.
+    #[test]
+    fn round_fuzz_against_direct() {
+        use commonware_utils::TestRng;
+        let mut round: Option<(u32, Round)> = None;
+        for seed in 0..400u64 {
+            let mut rng = TestRng::new(seed);
+            let m = 1 + (seed % 9) as u32;
+            let widest = 9u32;
+            let n = match seed % 7 {
+                0 => 1,
+                1 => 2,
+                2 => 17,
+                3 => 300,
+                4 => 3000,
+                5 => 9000,
+                _ => 1 + (seed as usize * 137) % 4000,
+            };
+            let pool: Vec<G1> = (0..4).map(|_| in_subgroup_point(&mut rng)).collect();
+            let points: Vec<G1> = (0..n)
+                .map(|i| match (i as u64 + seed) % 8 {
+                    0 => G1::zero(),
+                    1 => pool[i % pool.len()],
+                    2 => -pool[i % pool.len()],
+                    3 => pool[0],
+                    4 => -pool[0],
+                    _ => in_subgroup_point(&mut rng),
+                })
+                .collect();
+            // Id distributions: uniform, all-equal, and a tiny support.
+            let ids: Vec<u32> = match seed % 4 {
+                0 => Trits::new(&mut rng).fill(m, n),
+                1 => vec![(seed as u32) % 3u32.pow(m); n],
+                2 => (0..n).map(|i| (i as u32) % 3u32.min(3u32.pow(m))).collect(),
+                _ => Trits::new(&mut rng).fill(m, n),
+            };
+            let (affine, affine_ids) = affine_with_ids(&points, &ids);
+            let round = &mut round.get_or_insert_with(|| (widest, Round::new(widest))).1;
+            assert!(round.run(&affine, &affine_ids, m), "seed={seed} rejected");
+            let kept: Vec<G1> = points.iter().copied().filter(|p| p != &G1::zero()).collect();
+            assert_eq!(kept.len(), affine_ids.len());
+            for j in 0..m {
+                let mut expected = G1::zero();
+                for (point, &id) in kept.iter().zip(&affine_ids) {
+                    let digit = (id / 3u32.pow(j)) % 3;
+                    for _ in 0..digit {
+                        expected += point;
+                    }
+                }
+                let mut got = blst_p1::default();
+                if let Some(&twos) = round.marginals[2 * j as usize + 1].first() {
+                    let mut point = blst_p1::default();
+                    unsafe {
+                        blst_p1_from_affine(&mut point, &round.sums[twos as usize]);
+                        blst_p1_double(&mut got, &point);
+                    }
+                }
+                if let Some(&ones) = round.marginals[2 * j as usize].first() {
+                    unsafe {
+                        blst_p1_add_or_double_affine(&mut got, &got, &round.sums[ones as usize]);
+                    }
+                }
+                let mut got_affine = blst_p1_affine::default();
+                unsafe { blst::blst_p1_to_affine(&mut got_affine, &got) };
+                let expected_affine = G1::batch_to_affine(&[expected])[0];
+                assert_eq!(
+                    affine_is_inf(&got_affine),
+                    affine_is_inf(&expected_affine),
+                    "seed={seed} m={m} n={n} j={j} identity mismatch"
+                );
+                if !affine_is_inf(&got_affine) {
+                    assert_eq!(got_affine.x.l, expected_affine.x.l, "seed={seed} m={m} j={j}");
+                    assert_eq!(got_affine.y.l, expected_affine.y.l, "seed={seed} m={m} j={j}");
+                }
+            }
+        }
+    }
+
+    /// Chi-square-ish uniformity of drawn ids, per width and per position in
+    /// the word that produced them.
+    #[test]
+    fn trit_ids_are_uniform_per_position() {
+        let mut rng = test_rng();
+        for m in 1..=MAX_WIDTH {
+            let buckets = 3usize.pow(m) as usize;
+            if buckets > 6561 {
+                continue;
+            }
+            let per_word = (20 / m) as usize;
+            let target = 400usize;
+            let count = buckets * target;
+            let ids = Trits::new(&mut rng).fill(m, count);
+            let mut counts = vec![0usize; buckets];
+            let mut per_pos = vec![vec![0usize; buckets]; per_word];
+            for (i, &id) in ids.iter().enumerate() {
+                counts[id as usize] += 1;
+                per_pos[i % per_word][id as usize] += 1;
+            }
+            let chi: f64 = counts
+                .iter()
+                .map(|&c| {
+                    let d = c as f64 - target as f64;
+                    d * d / target as f64
+                })
+                .sum();
+            let df = (buckets - 1) as f64;
+            assert!(chi < df + 8.0 * (2.0 * df).sqrt(), "m={m} chi={chi} df={df}");
+            for (pos, counts) in per_pos.iter().enumerate() {
+                let expect = count as f64 / per_word as f64 / buckets as f64;
+                let chi: f64 = counts
+                    .iter()
+                    .map(|&c| {
+                        let d = c as f64 - expect;
+                        d * d / expect
+                    })
+                    .sum();
+                assert!(
+                    chi < df + 8.0 * (2.0 * df).sqrt(),
+                    "m={m} pos={pos} chi={chi} df={df}"
+                );
+            }
+        }
+    }
+
+
+    #[test]
+    fn accumulate_large_widths_match_naive() {
+        for seed in 0..3u64 {
+            let mut rng = commonware_utils::TestRng::new(seed);
+            for m in [8u32, 9] {
+                let n = 5 * 3usize.pow(m);
+                let pool: Vec<G1> = (0..16).map(|_| in_subgroup_point(&mut rng)).collect();
+                let points: Vec<G1> = (0..n)
+                    .map(|i| match i % 7 {
+                        0 => G1::zero(),
+                        1 => pool[i % pool.len()],
+                        2 => -pool[i % pool.len()],
+                        3 => pool[0],
+                        _ => in_subgroup_point(&mut rng),
+                    })
+                    .collect();
+                let ids = Trits::new(&mut rng).fill(m, n);
+                // Naive: one running G1 sum per bucket.
+                let mut expected = vec![G1::zero(); 3usize.pow(m)];
+                for (point, &id) in points.iter().zip(&ids) {
+                    expected[id as usize] += point;
+                }
+                let expected = G1::batch_to_affine(&expected);
+                let (affine, affine_ids) = affine_with_ids(&points, &ids);
+                let mut round = Round::new(m);
+                round.widen(m);
+                round.accumulate(&affine, &affine_ids);
+                for bucket in 0..3usize.pow(m) {
+                    let want_inf = affine_is_inf(&expected[bucket]);
+                    assert_eq!(round.live[bucket], !want_inf, "seed {seed} m {m} bucket {bucket} liveness");
+                    if !want_inf {
+                        assert_eq!(round.sums[bucket].x.l, expected[bucket].x.l, "seed {seed} m {m} bucket {bucket} x");
+                        assert_eq!(round.sums[bucket].y.l, expected[bucket].y.l, "seed {seed} m {m} bucket {bucket} y");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn empty_batch_is_accepted() {
         assert!(batch_in_g1(&[], SECURITY, &Sequential, &mut test_rng()));
@@ -1735,6 +2048,58 @@ mod tests {
         println!("chord         {chord_cost:.1} ns/addition");
     }
 
+    /// Whether the cost model picks the cheapest plan. Run with:
+    /// `cargo test -p commonware-cryptography --release --features bls12381 \
+    ///   subgroup::tests::measure_plans -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn measure_plans() {
+        use std::time::Instant;
+
+        /// Time the rounds of a forced plan, best of three.
+        fn timed(affine: &[blst_p1_affine], widths: &[u32], rng: &mut impl CryptoRng) -> f64 {
+            let widest = *widths.iter().max().expect("nonempty");
+            let mut round = Round::new(widest);
+            let best = (0..3)
+                .map(|_| {
+                    let mut trits = Trits::new(rng);
+                    let id_sets: Vec<(u32, Vec<u32>)> = widths
+                        .iter()
+                        .map(|&m| (m, trits.fill(m, affine.len())))
+                        .collect();
+                    let start = Instant::now();
+                    let ok = id_sets.iter().all(|(m, ids)| round.run(affine, ids, *m));
+                    assert!(ok);
+                    start.elapsed().as_micros()
+                })
+                .min()
+                .expect("three runs");
+            best as f64 / 1000.0
+        }
+
+        let mut rng = test_rng();
+        for n in [100_000usize, 1_000_000] {
+            let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+            let affine = to_affine(&points);
+            let chosen = plan(n, 81).expect("batched");
+            // Compare the model's choice against its neighbours: the same
+            // combinations spread over one fewer and a few more rounds.
+            for rounds in chosen.len().saturating_sub(1)..=chosen.len() + 3 {
+                let widths = spread(81, rounds);
+                if widths.iter().any(|&m| m > MAX_WIDTH) {
+                    continue;
+                }
+                let mut distinct = widths.clone();
+                distinct.dedup();
+                println!(
+                    "n={n} rounds={rounds} widths={distinct:?} rounds_time={:.1} ms{}",
+                    timed(&affine, &widths, &mut rng),
+                    if widths == chosen { "  <- chosen by the model" } else { "" }
+                );
+            }
+        }
+    }
+
     /// Where a large batch's time goes, phase by phase. Run with:
     /// `cargo test -p commonware-cryptography --release --features bls12381 \
     ///   subgroup::tests::measure_phases -- --ignored --nocapture`
@@ -1796,7 +2161,7 @@ mod tests {
                 start.elapsed().as_nanos() as f64 / (passes * n) as f64
             );
             let affine = G1::batch_to_affine(&points);
-            for m in [6u32, 7, 8, 9] {
+            for m in [8u32, 9, 10, 11] {
                 let ids = Trits::new(&mut rng).fill(m, n);
                 if 3usize.pow(m) > 4 * n {
                     continue;

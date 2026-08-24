@@ -154,10 +154,14 @@ Three implementation choices carry most of the constant:
   inverse where the inversion's backward walk produces it, so no inverse is
   ever written to memory.
 
-A round's bucket slots are the accumulator's working set, so the cost model
-caps the width at what fits a 2 MiB budget (`3^9` slots). Measured one step
-past it, cost per addition rises 20% at `m = 10` and 34% at `m = 11` — more
-than the extra combinations repay.
+A round's bucket slots are the accumulator's working set (and its collapse
+workspace is half as large again), so the cost model caps the width at what fits
+a 2 MiB budget — `3^9` slots. Past it, cost per addition rises about 8% at
+`m = 10` and 15% at `m = 11`, while the workspace grows threefold per step, per
+thread: `m = 9` asks for 2.8 MB, `m = 11` for 25 MB. At a million points the
+best plan `m = 11` allows (eight rounds, widths 11/10) measures within run-to-run
+noise of the nine-round plan chosen here; at a hundred thousand it is 36% worse.
+The budget buys the memory bound for no measurable speed.
 
 ## Measured results
 
