@@ -8,7 +8,7 @@ use crate::{
         Application, Config as StatefulConfig, ExecutionError, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, Publisher, Single, SyncEngineConfig,
+            DatabaseSet, Merkleized as _, MerkleizedOf, Single, SyncEngineConfig,
             Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
@@ -491,7 +491,8 @@ impl EngineDefinition for SingleDbEngine {
 
         // Snapshot publication channel and the QMDB state-sync resolver serving from it.
         let publication_context = context.child("publication");
-        let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
+        let (snapshot_publisher, snapshot_subscriber) =
+            crate::stateful::db::Publisher::new(&publication_context);
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
             context.child("qmdb_resolver"),
             qmdb_resolver::Config {

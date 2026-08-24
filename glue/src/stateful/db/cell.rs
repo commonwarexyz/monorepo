@@ -1,4 +1,4 @@
-//! Splits access to a live database: a unique [`Writer`] runs consuming
+//! Splits access to a live database. A unique [`Writer`] runs consuming
 //! mutations, and cloneable [`Reader`]s hand out short read guards, one per
 //! storage call.
 //!

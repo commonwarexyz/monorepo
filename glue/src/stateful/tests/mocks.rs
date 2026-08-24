@@ -388,9 +388,6 @@ pub(crate) fn test_databases() -> TestDatabases {
 }
 
 /// Finalize `batch` through the cell, returning the snapshot and flush handle.
-///
-/// Tests that drive [`ManagedDb`] directly split their database and use this
-/// instead of the set layer.
 pub(crate) async fn apply_and_finalize<D: ManagedDb<deterministic::Context>>(
     writer: Writer<D>,
     batch: D::Merkleized,

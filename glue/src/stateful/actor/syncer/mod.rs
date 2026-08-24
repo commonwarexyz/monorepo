@@ -363,10 +363,7 @@ where
 ///
 /// If the databases are found to be inconsistent with the marshal floor, this
 /// function will attempt to repair by rewinding the databases which are ahead. If the
-/// databases are entirely inconsistent, this function panics. That covers a crash
-/// between marshal installing a sync floor and the sync metadata recording it. The
-/// operator's sync request must survive that restart, so startup re-enters the sync
-/// path instead of asking a fresh database set to reach the installed floor.
+/// databases are entirely inconsistent, this function will panic.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
@@ -411,12 +408,17 @@ where
     let mut databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
 
-    // Applied targets off the marshal floor mean a crash left the set
-    // inconsistent. Rewinding to the floor repairs it or panics.
-    if databases.committed_targets().await != processed_targets {
+    // In the case that the committed targets do not match the marshal floor, we may
+    // have suffered a crash that left the set in an inconsistent state. In this case,
+    // we attempt to repair by rewinding the databases back to the marshal floor. If
+    // the rewind fails to produce a consistent state, we must crash. This can occur
+    // if the databases were corrupted or pruned too aggressively.
+    let committed = databases.committed_targets().await;
+    if committed != processed_targets {
         databases = databases.rewind_to_targets(processed_targets.clone()).await;
+        let rewound_targets = databases.committed_targets().await;
         assert!(
-            databases.committed_targets().await == processed_targets,
+            rewound_targets == processed_targets,
             "databases must be consistent with marshal floor after rewind"
         );
     }

@@ -8,8 +8,8 @@ use crate::{
         Application, Config as StatefulConfig, ExecutionError, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, Publisher, Single, SnapshotsOf,
-            SyncEngineConfig, Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            DatabaseSet, Merkleized as _, MerkleizedOf, Single, SnapshotsOf, SyncEngineConfig,
+            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -587,7 +587,7 @@ impl EngineDefinition for MultiDbEngine {
         // database), each serving from its own reader.
         let publication_context = context.child("publication");
         let (snapshot_publisher, snapshot_subscriber) =
-            Publisher::<MultiSnapshot<_>>::new(&publication_context);
+            crate::stateful::db::Publisher::<MultiSnapshot<_>>::new(&publication_context);
         let snapshot_subscriber_a = snapshot_subscriber.view(|snapshots| &snapshots.0);
         let snapshot_subscriber_b = snapshot_subscriber.view(|snapshots| &snapshots.1);
         let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) = qmdb_resolver::Actor::new(
