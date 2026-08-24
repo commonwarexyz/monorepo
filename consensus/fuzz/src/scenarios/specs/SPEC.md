@@ -234,6 +234,10 @@ This section states how a scenario reproduces its source test.
   start, and the defining state MUST remain present at handoff. Construction-time
   assertions MUST demonstrate that the handoff state corresponds to the source
   test; source traceability by name or comment alone is insufficient.
+  A handoff assertion MUST read the same state the source operation reads. An
+  assertion that could pass while the state the source asserts is absent — because
+  it queries a different index, or is answered from a cache — does not discharge
+  this clause.
 - **S4 — Oracle boundary.** A scenario stops at the source test's interesting
   handoff state. It need not repeat the source test's post-handoff behavioural
   assertions, which remain in the source tests.
@@ -261,6 +265,15 @@ This section states how a scenario reproduces its source test.
   surface MUST be documented at the scenario. Each scenario MUST carry a
   machine-readable reference to its source, precise enough to diff against:
   `/// Source: <path>::<test fn name>`.
+- **S7 — Incidental construction.** A source test's construction contains choices
+  that do not bear on what the test establishes: an arbitrary parent for its
+  first block, a leader identity no assertion depends on, a timestamp. Where the
+  fuzz crate's ground truth constrains such a choice — a delivered chain must be
+  rooted at the cluster genesis, a leader must be a cluster participant — the
+  scenario MUST adopt the constrained value and document the departure at the
+  scenario. This is not a substitution of state. The test for substitution is
+  whether any assertion the source makes, or any property its state exhibits,
+  would change; if none would, the choice was incidental.
 
 ## 8. Invariants (must hold at the measurement point)
 

@@ -687,4 +687,8 @@ mod tests {
         verify_missing_candidate_waits,
         StandardVerifyMissingCandidateWaitsWithoutFetching
     );
+    scenario_smoke!(
+        get_block_by_height_and_latest,
+        StandardGetBlockByHeightAndLatest
+    );
 }

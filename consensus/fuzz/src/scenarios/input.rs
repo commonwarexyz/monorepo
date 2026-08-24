@@ -59,6 +59,11 @@ pub enum ScenarioKind {
     /// converting it into a fetch; the engines start bare from the genesis
     /// floor with the fetch multiset explicitly empty (see `scenarios.rs`).
     StandardVerifyMissingCandidateWaitsWithoutFetching,
+    /// `test_standard_get_block_by_height_and_latest`: the victim finalizes
+    /// three blocks through the proposed-then-finalized flow, each height and
+    /// the latest query map to its block, and the engines start from the
+    /// height-3 finalized floor with no fetch issued (see `scenarios.rs`).
+    StandardGetBlockByHeightAndLatest,
 }
 
 /// How the byzantine leader disseminates its attack-view block on channels 2 + 3.

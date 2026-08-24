@@ -71,6 +71,18 @@
 //! start bare from the genesis floor, the first attackable live view is
 //! view 1 over genesis, and the handoff fetch multiset is explicitly empty
 //! on every node.
+//!
+//! [`StandardGetBlockByHeightAndLatest`] reproduces
+//! `test_standard_get_block_by_height_and_latest`
+//! (consensus/src/marshal/standard/mod.rs:382) through its handoff point:
+//! the victim finalizes three blocks through the source's per-height
+//! proposed-then-finalized flow (a durable `verified`, then a reported
+//! quorum finalization), each finalized height and the latest query map to
+//! its block, an unfinalized height stays absent, and no fetch of any kind
+//! is issued. The fabricated finalizations all sit at or below the
+//! height-3 finalized floor the engines start from, so nothing is seeded
+//! into any voter journal and the first attackable live view is view 4 over
+//! the finalized tip.
 
 use super::{
     environment::{
@@ -87,6 +99,7 @@ use crate::{
 use commonware_codec::Encode as _;
 use commonware_consensus::{
     Heightable as _,
+    marshal::Identifier,
     simplex::Floor,
     types::{Epoch, Height, Round, View},
 };
@@ -137,6 +150,9 @@ where
             StandardVerifyMissingCandidateWaitsWithoutFetching
                 .drive(harness)
                 .await
+        }
+        ScenarioKind::StandardGetBlockByHeightAndLatest => {
+            StandardGetBlockByHeightAndLatest.drive(harness).await
         }
     }
 }
@@ -764,6 +780,199 @@ impl Scenario for StandardVerifyMissingCandidateWaitsWithoutFetching {
                 NodeExpectation::new(Node::B).lacks(missing),
                 NodeExpectation::new(Node::C).lacks(missing),
                 NodeExpectation::new(Node::D).lacks(missing),
+            ],
+            expectation: Expectation::genesis_rooted(),
+        }
+    }
+}
+
+/// Source: consensus/src/marshal/standard/mod.rs::test_standard_get_block_by_height_and_latest
+///
+/// The source test's body is the shared BLS-typed helper
+/// `get_block_by_height_and_latest` in `consensus/src/marshal/mocks/harness.rs`,
+/// which cannot be instantiated with the mock certificate scheme, so its
+/// state-producing loop is copied here (S2): starting from nothing finalized,
+/// three chained blocks are each persisted through the leader's propose
+/// durability handshake and then finalized through a reported quorum
+/// finalization over `(round i, parent view i - 1, commitment)`.
+///
+/// Handoff: after the third finalization, each finalized height and the
+/// latest query map to its block, an unfinalized height (10) stays absent,
+/// and no fetch of any kind was issued.
+///
+/// Node mapping (the node-addressing divergence S6 permits): the same uniform
+/// permutation as [`StandardCertifyMissingCandidateFetchesByRound`], source
+/// participant `i` -> {0: B, 1: C, 2: D, 3: A}. The source's
+/// `me = participants[0]` maps wholly to [`Node::B`]: the marshal actor under
+/// test, its scheme provider, and the first quorum signer.
+///
+/// Incidental-construction departures (S7): no source assertion, and no
+/// property of the source state, depends on either value below; the fuzz
+/// crate's ground truth constrains both, so the copy adopts the constrained
+/// values.
+/// - The source stamps `default_leader()` on every block (`make_test_block`
+///   -> `make_raw_block`), a fixed key that is not a fixture participant; the
+///   scenario API addresses cluster participants only, so the copy stamps
+///   [`Node::B`], the actor under test.
+/// - The source anchors block 1 at the raw `Sha256::hash(&[b""])` seed, which
+///   is the genesis block's own parent (the source marshal neither checks nor
+///   asserts that linkage); the ground-truth delivered-chain invariants
+///   require rooting at the cluster genesis, so the copy anchors the same
+///   chain at the genesis block itself, with identical heights, views, parent
+///   views, timestamps, and certificate shape.
+///
+/// Harness divergences (S6 plumbing):
+/// - The source's `H::propose` is the `TestHarness` durability handshake over
+///   `mailbox.verified` without broadcast; the harness `verified` is that same
+///   awaited, durability-asserting mailbox verb.
+/// - The source sleeps `LINK.latency` between propose and the finalization
+///   report; the deterministic mailbox barrier is the harness equivalent.
+/// - The source's `make_test_block` derives view `i`, parent view `i - 1`, and
+///   timestamp `i` from the height; the canonical-chain `block` helper derives
+///   the same values from the chain tip.
+///
+/// Composition soundness (I5): every fabricated certificate is one of the
+/// three chained finalizations at views 1..=3, all at or below the engine
+/// floor (the view-3 finalization the engines start from), so the ledger
+/// check admits them without journal seeding and no engine can ever produce a
+/// certificate at those views. The live chain extends the finalized tip: the
+/// attack anchor is the first live view above the floor (view 4, height 4,
+/// over the height-3 block). Only the victim holds the three blocks at
+/// handoff, as in the source (a single validator with no peers holding
+/// anything); the other honest marshals receive the floor finalization at
+/// engine startup and backfill the chain over the live network from the
+/// victim, so every honest node still delivers from genesis.
+pub(crate) struct StandardGetBlockByHeightAndLatest;
+
+impl Scenario for StandardGetBlockByHeightAndLatest {
+    async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
+        &self,
+        harness: &mut FuzzScenarioStandardHarness<P, M>,
+    ) -> ScenarioHandoff<P>
+    where
+        M::Wrapper: Clone,
+    {
+        harness.begin("test_standard_get_block_by_height_and_latest");
+        // Initially, no blocks.
+        assert!(
+            harness.get_block(Node::B, Height::new(1)).await.is_none(),
+            "fresh marshal must have no block at height 1"
+        );
+        assert!(
+            harness
+                .get_block(Node::B, Identifier::Latest)
+                .await
+                .is_none(),
+            "fresh marshal must have no latest block"
+        );
+
+        let mut blocks = Vec::new();
+        let mut floor_finalization = None;
+        for i in 1..=3u64 {
+            // Block i: height i at view i on the previous block (genesis for
+            // the first), led by the source's `me` (Node::B under the
+            // participant permutation), with the source's derived parent view
+            // (i - 1) and timestamp (i).
+            let block = harness.block(Node::B, i);
+            let digest = block.digest();
+
+            // Source `H::propose`: the leader's durability handshake over
+            // `mailbox.verified`, without broadcast.
+            harness.verified(Node::B, i, &block).await;
+            // The source sleeps `LINK.latency` before reporting; the
+            // deterministic mailbox barrier is the harness equivalent (an S6
+            // plumbing divergence).
+            let _ = harness.barrier(Node::B).await;
+
+            // The source proposal: `(round i, parent view i - 1, payload =
+            // commitment)`, signed by `schemes[0..QUORUM]`.
+            let finalization = harness.finalization_of(&block, &QUORUM_SIGNERS);
+            harness.report_finalization(Node::B, finalization.clone());
+
+            blocks.push((digest, block));
+            floor_finalization = Some(finalization);
+        }
+
+        // S3 handoff checks, mirroring the source's trailing queries (the
+        // FIFO mailbox orders them behind the finalization reports above).
+        // Verify each block by height: retrieval reads the finalized block
+        // archive itself, so an indexed finalization with a missing block
+        // fails here.
+        for (i, (digest, _block)) in blocks.iter().enumerate() {
+            let height = Height::new(i as u64 + 1);
+            let fetched = harness
+                .get_block(Node::B, height)
+                .await
+                .expect("finalized height must retrieve its block");
+            assert_eq!(fetched.digest(), *digest, "wrong block at {height}");
+            assert_eq!(fetched.height(), height, "wrong height at {height}");
+        }
+        // Latest should be the last block.
+        let latest = harness
+            .get_block(Node::B, Identifier::Latest)
+            .await
+            .expect("latest must retrieve the last finalized block");
+        assert_eq!(latest.digest(), blocks[2].0, "latest must be block 3");
+        assert_eq!(latest.height(), Height::new(3), "latest must be height 3");
+        // Missing height.
+        assert!(
+            harness.get_block(Node::B, Height::new(10)).await.is_none(),
+            "an unfinalized height must have no block"
+        );
+        // The finalized flow is purely local: no local wait registered and no
+        // targeted fetch issued (the empty handoff multisets below cover the
+        // backfill fetches).
+        assert_eq!(
+            harness.buffer_subscription_count(Node::B),
+            0,
+            "finalizing local blocks must not register a local wait"
+        );
+        assert!(
+            harness.targeted_is_empty(Node::B),
+            "finalizing local blocks must not issue targeted fetches"
+        );
+
+        let floor_finalization =
+            floor_finalization.expect("three finalized blocks produce a floor");
+        ScenarioHandoff {
+            engine_floor: Floor::Finalized(floor_finalization),
+            engine_journal: Vec::new(),
+            attack_anchor: attack_above::<P>(&blocks[2].1),
+            reference_chain: blocks.iter().map(|(_, block)| block.clone()).collect(),
+            // Explicitly empty multisets: the whole chain is local to the
+            // victim, so no fetch of any kind is issued.
+            node_fetches: vec![
+                (Node::A, Vec::new()),
+                (Node::B, Vec::new()),
+                (Node::C, Vec::new()),
+                (Node::D, Vec::new()),
+            ],
+            node_active_fetches: vec![
+                (Node::A, Vec::new()),
+                (Node::B, Vec::new()),
+                (Node::C, Vec::new()),
+                (Node::D, Vec::new()),
+            ],
+            // Only the victim holds the three finalized blocks at handoff, as
+            // in the source (a single validator with no peers holding
+            // anything).
+            expected_nodes: vec![
+                NodeExpectation::new(Node::A)
+                    .lacks(blocks[0].0)
+                    .lacks(blocks[1].0)
+                    .lacks(blocks[2].0),
+                NodeExpectation::new(Node::B)
+                    .holds(blocks[0].0)
+                    .holds(blocks[1].0)
+                    .holds(blocks[2].0),
+                NodeExpectation::new(Node::C)
+                    .lacks(blocks[0].0)
+                    .lacks(blocks[1].0)
+                    .lacks(blocks[2].0),
+                NodeExpectation::new(Node::D)
+                    .lacks(blocks[0].0)
+                    .lacks(blocks[1].0)
+                    .lacks(blocks[2].0),
             ],
             expectation: Expectation::genesis_rooted(),
         }

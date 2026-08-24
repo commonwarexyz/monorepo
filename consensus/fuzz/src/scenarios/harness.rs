@@ -577,9 +577,14 @@ where
         }
     }
 
-    /// Best-effort local block lookup by digest.
-    pub(crate) async fn get_block(&self, node: Node, digest: Sha256Digest) -> Option<B<P>> {
-        self.mailbox(node).get_block(&digest).await
+    /// Best-effort local block lookup by height, digest, or latest: the
+    /// source mailbox verb's full [`Identifier`] surface.
+    pub(crate) async fn get_block(
+        &self,
+        node: Node,
+        identifier: impl Into<Identifier<Sha256Digest>>,
+    ) -> Option<B<P>> {
+        self.mailbox(node).get_block(identifier).await
     }
 
     /// Best-effort local finalization lookup by height.
@@ -777,14 +782,14 @@ where
             }
             for digest in &expectation.present {
                 assert!(
-                    self.get_block(expectation.node, *digest).await.is_some(),
+                    self.get_block(expectation.node, digest).await.is_some(),
                     "node {:?} must hold block {digest} at handoff",
                     expectation.node,
                 );
             }
             for digest in &expectation.absent {
                 assert!(
-                    self.get_block(expectation.node, *digest).await.is_none(),
+                    self.get_block(expectation.node, digest).await.is_none(),
                     "node {:?} must lack block {digest} at handoff",
                     expectation.node,
                 );
