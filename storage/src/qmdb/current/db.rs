@@ -1030,6 +1030,50 @@ where
     let grafted_tree =
         build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
             .await?;
+    grafted_root::<F, H, N>(bitmap, ops_tree, inactivity_floor, ops_root, grafted_tree).await
+}
+
+/// [rebuild_grafted_tree] with the graftable chunks' ops-tree node digests already read (in
+/// chunk order), so callers can overlap those reads with other init work. See
+/// [assemble_grafted_tree] for the digest requirements.
+pub(super) async fn assemble_grafted_tree_and_root<F, H, S, const N: usize>(
+    bitmap: &impl bitmap::Readable<N>,
+    pinned_nodes: &[H::Digest],
+    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    inactivity_floor: Location<F>,
+    ops_root: H::Digest,
+    node_digests: Vec<H::Digest>,
+    strategy: &S,
+) -> Result<(Mem<F, H::Digest>, H::Digest), Error<F>>
+where
+    F: merkle::Graftable,
+    H: Hasher,
+    S: Strategy,
+{
+    let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
+    let grafted_tree = assemble_grafted_tree::<F, H, S, N>(
+        bitmap,
+        pinned_nodes,
+        ops_leaves,
+        node_digests,
+        strategy,
+    )?;
+    grafted_root::<F, H, N>(bitmap, ops_tree, inactivity_floor, ops_root, grafted_tree).await
+}
+
+/// Compute the canonical database root over a rebuilt `grafted_tree`, returning both.
+async fn grafted_root<F, H, const N: usize>(
+    bitmap: &impl bitmap::Readable<N>,
+    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    inactivity_floor: Location<F>,
+    ops_root: H::Digest,
+    grafted_tree: Mem<F, H::Digest>,
+) -> Result<(Mem<F, H::Digest>, H::Digest), Error<F>>
+where
+    F: merkle::Graftable,
+    H: Hasher,
+{
+    let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
     let storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
     let partial_chunk = partial_chunk(bitmap);
@@ -1103,6 +1147,34 @@ pub(super) async fn compute_grafted_root<
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
 /// [`merkle::Graftable::subtree_root_position`].
+/// The graftable, unpruned bitmap-chunk range for a database of `ops` operations: chunk
+/// indices `pruned_chunks..graftable`, where `graftable` counts the chunks whose h=G ops-tree
+/// ancestor has been born, capped at complete chunks (one bit per operation, so the count of
+/// complete chunks is `ops / CHUNK_SIZE_BITS`). The pending (incomplete or unborn) chunk is
+/// excluded; its digest is hashed directly into the canonical root.
+pub(super) fn graft_chunk_range<F: merkle::Graftable, const N: usize>(
+    pruned_chunks: usize,
+    ops: u64,
+) -> core::ops::Range<usize> {
+    let grafting_height = grafting::height::<N>();
+    let complete_chunks = ops / bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+    let graftable = grafting::graftable_chunks::<F>(ops, grafting_height).min(complete_chunks);
+    pruned_chunks..(graftable as usize)
+}
+
+/// Ops-tree node positions backing the grafted leaves of `chunks`, in ascending order.
+pub(super) fn graft_node_positions<F: merkle::Graftable, const N: usize>(
+    chunks: core::ops::Range<usize>,
+) -> Vec<Position<F>> {
+    let grafting_height = grafting::height::<N>();
+    chunks
+        .map(|chunk_idx| {
+            let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
+            F::subtree_root_position(leaf_start, grafting_height)
+        })
+        .collect()
+}
+
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
     ops_tree: &impl MerkleStorage<F, Digest = D>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
@@ -1137,6 +1209,7 @@ pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: 
 /// identity).
 ///
 /// The provided strategy determines if or how to parallelize merkleization.
+#[cfg(test)]
 pub(super) async fn compute_grafted_leaves<
     F: merkle::Graftable,
     H: Hasher,
@@ -1177,6 +1250,32 @@ pub(super) async fn build_grafted_tree<
     ops_leaves: Location<F>,
     strategy: &S,
 ) -> Result<Mem<F, H::Digest>, Error<F>> {
+    let chunks = graft_chunk_range::<F, N>(bitmap.pruned_chunks(), bitmap.len());
+    let node_digests = ops_tree
+        .get_nodes(&graft_node_positions::<F, N>(chunks))
+        .await?;
+    assemble_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_leaves, node_digests, strategy)
+}
+
+/// [build_grafted_tree] with the graftable chunks' ops-tree node digests already read (in
+/// chunk order), so callers can overlap those reads with other init work.
+///
+/// # Panics
+///
+/// Panics if `node_digests` does not hold exactly one digest per chunk of the bitmap's
+/// graftable range (see [graft_chunk_range]).
+pub(super) fn assemble_grafted_tree<
+    F: merkle::Graftable,
+    H: Hasher,
+    S: Strategy,
+    const N: usize,
+>(
+    bitmap: &impl bitmap::Readable<N>,
+    pinned_nodes: &[H::Digest],
+    ops_leaves: Location<F>,
+    node_digests: Vec<H::Digest>,
+    strategy: &S,
+) -> Result<Mem<F, H::Digest>, Error<F>> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
@@ -1186,16 +1285,20 @@ pub(super) async fn build_grafted_tree<
         pruned_chunks <= graftable_chunks && graftable_chunks <= complete_chunks,
         "invariant violated: pruned={pruned_chunks} graftable={graftable_chunks} complete={complete_chunks}"
     );
+    assert_eq!(
+        node_digests.len(),
+        graftable_chunks - pruned_chunks,
+        "one ops-tree node digest per graftable chunk"
+    );
 
     // Compute grafted leaves for each unpruned graftable chunk. The pending chunk (if any)
     // sits at index `graftable_chunks` and is excluded; its digest is hashed directly into
     // the canonical root.
-    let leaves = compute_grafted_leaves::<F, H, S, N>(
-        ops_tree,
-        (pruned_chunks..graftable_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
-        strategy,
-    )
-    .await?;
+    let inputs = (pruned_chunks..graftable_chunks)
+        .zip(node_digests)
+        .map(|(chunk_idx, digest)| (chunk_idx, digest, bitmap.get_chunk(chunk_idx)))
+        .collect();
+    let leaves = grafting::graft_chunk_digests::<H, S, N>(strategy, inputs);
 
     // Build the base grafted tree: either from pruned components or empty.
     let mut grafted_tree = if pruned_chunks > 0 {
