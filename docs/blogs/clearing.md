@@ -3,13 +3,15 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-08-20T00:00:00Z"
+modified-time: "2026-08-23T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
 image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
+
+*Updated (8/23/26): Clearing now rebuilds a compact BMT from the live accounts at every close, creates and removes accounts as their balances enter and leave the state, and nets sends to absent recipients into external payouts. Storage now provides a known-size streaming BMT builder for embeddings that need root-only construction. Finalization reserves only aggregate withdrawal and external-payout value; each recipient later claims with a bounded Merkle witness, so even a flood of outputs leaves the certified settlement constant-size. The 32-byte commitment and BLS12-381 multisignature certificate are unchanged.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -23,7 +25,7 @@ For a given set of accounts, one payment or a bajillion costs the same to settle
 
 ## Payments as Fast as Browsing the Web
 
-A Bajillion epoch starts from an authenticated account vector and an onchain anchor $\mathcal A_e$. Deposits and user-signed withdrawals are fixed before online payments begin. Let's suppose account $a$ opens with 100 and wants to pay account $b$ 20.
+A Bajillion deployment starts from an authenticated account vector, and each epoch uses an onchain anchor $\mathcal A_e$. A pipelined successor can begin serving from its projected opening vector while the preceding epoch closes, then bind that exact opening root before settlement. Deposits and user-signed withdrawals are fixed before online payments begin. Let's suppose account $a$ opens with 100 and wants to pay account $b$ 20.
 
 $a$'s persistent state $X_a$ is a balance $B_a$, cumulative debit $D_a$, operator-promised credit $C_a$, a receipt count, and an activity flag. To send $x>0$ from $a$ to $b$, the payer signs the exact next debit, and the operator accepts by advancing the recipient's receive shard $\kappa$ from its current tip $(G,J)$ (which may or may not have been registered with the operator at the start of the epoch):
 
@@ -104,19 +106,21 @@ A hot recipient can end an epoch with many shards, but proving one tip does not 
 
 ## One Row per Changed Account
 
-Netting each account's debits and credits gives exact closing balances $(85,58,26,31)$, and gross payment debit equals gross payment credit at 54 (i.e. the changes net to zero). That is all settlement has to publish: not the six payments, but the four accounts they changed, one row each.
+Netting each account's debits and credits gives exact closing balances $(85,58,26,31)$, and gross payment debit equals gross payment credit at 54 (i.e. the changes net to zero). That is all the payment activity adds to the close: not the six payments, but the four accounts they changed, one row each.
 
-Write the opening and closing states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$. If the chain-sealed boundary assigns deposit $f_a$ and withdrawal $w_a$, the exact balance relation is
+Write the opening and closing states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$. If the chain-sealed boundary assigns deposit $f_a$ and withdrawal $w_a$, and $p_a$ is credit paid externally because the recipient is absent from the live state, the exact balance relation is
 
 $$
-\boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
+\boxed{B_a^1+d_a+w_a+p_a=B_a^0+c_a+f_a.}
 $$
+
+For an account already in the state, $p_a=0$. For a recipient absent from the opening state with no deposit, $B_a^0=B_a^1=0$ and $p_a=c_a$: the accepted sends become one net external-payout claim when the close finalizes, without creating a zero-balance account. This includes payments made after a close removes an account at the cut: the identity is absent from the successor state, so those sends become claimable external payouts rather than recreating the account.
 
 Each row binds both account states, the terminal outgoing pair $\mathsf{Out}_a$ when the account sent, its $\mathsf{CreditRoot}$, and a running total $\mathsf{prefix}_a$ over the sorted rows so far, where $\chi$ flags a withdrawal record and $h$ counts shard heads:
 
 $$
 \begin{aligned}
-\mathsf{prefix}_a&=\sum_{a'\le a}\bigl(d_{a'},\;c_{a'},\;f_{a'},\;w_{a'},\;\chi_{a'},\;h_{a'}\bigr),\\[0.3em]
+\mathsf{prefix}_a&=\sum_{a'\le a}\bigl(d_{a'},\;c_{a'},\;p_{a'},\;f_{a'},\;w_{a'},\;\chi_{a'},\;h_{a'}\bigr),\\[0.3em]
 \mathsf{Row}_a&=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{CreditRoot}_e(a),\;\mathsf{prefix}_a\bigr).
 \end{aligned}
 $$
@@ -128,7 +132,7 @@ $$
 \qquad a<b<c<d.
 $$
 
-## Proving Exact Change
+## Rebuild the Live State
 
 Commit $\mathbf A_e$ under $\mathsf{ChangeRoot}_e$, a Merkle root that binds the exact row count and every row in order:
 
@@ -138,28 +142,38 @@ $$
 \mathsf{ChangeRoot}_e.
 $$
 
-A $\mathsf{StateRoot}$ commits every field in the complete account-state vector $X$. Suppose the registry holds eight accounts, our four changed ones scattered among four untouched:
+A $\mathsf{StateRoot}$ commits every field and the exact length of the strictly sorted vector of live accounts. A live leaf has a positive balance; a deposit can insert a new account, a close removes its account from the successor, and any other net balance of zero also leaves no live leaf. There are no permanent zero-balance tombstones.
 
 $$
-X^0=\bigl(X_a^0,\;X_b^0,\;\cdot,\;X_c^0,\;\cdot,\;\cdot,\;X_d^0,\;\cdot\bigr)
-\xrightarrow{\ \mathsf{Merkle}\ }
-\mathsf{StateRoot}_e.
+\mathbf X_e=\bigl((a,X_a^0):B_a^0>0\bigr)_{\text{sorted by }a},
+\qquad
+\mathbf X_e\xrightarrow{\ \mathsf{BMT}\ }\mathsf{StateRoot}_e.
 $$
 
-Recomputing that root from scratch would touch all eight accounts, and a real registry holds a million. The paired sparse witness instead collapses each untouched subtree into one digest $\Phi_i$, its Merkle root, no matter how many accounts it covers. The witness then reconstructs both roots in one pass: every changed account supplies its opening and closing leaf while the shared frontier $\Phi_e=(\Phi_1,\Phi_2,\Phi_3)$ fills everything else:
+At a close, the operator merges the changed rows with the unchanged live leaves and rebuilds both state BMTs from the resulting ordered streams:
 
 $$
 \begin{aligned}
-\mathsf{StateRoot}_e&\xleftarrow{\ \mathsf{Merkle}\ }\bigl(X_a^0,\;X_b^0,\;\Phi_1,\;X_c^0,\;\Phi_2,\;X_d^0,\;\Phi_3\bigr),\\[0.3em]
-\mathsf{StateRoot}_{e+1}&\xleftarrow{\ \mathsf{Merkle}\ }\bigl(X_a^1,\;X_b^1,\;\Phi_1,\;X_c^1,\;\Phi_2,\;X_d^1,\;\Phi_3\bigr).
+\mathbf X_e&=\mathsf{merge}\bigl(\mathsf{unchanged}_e,\;(a,X_a^0)_{a\in\mathbf A_e,\ B_a^0>0}\bigr),\\[0.3em]
+\mathbf X_{e+1}&=\mathsf{merge}\bigl(\mathsf{unchanged}_e,\;(a,X_a^1)_{a\in\mathbf A_e,\ B_a^1>0}\bigr).
 \end{aligned}
 $$
 
+This deliberately favors a simple bolt-on to an existing ordered database over maintaining a versioned authenticated trie. When only the root is needed, a known leaf count lets construction stream bounded subtrees through parallel hashing workers while retaining one subtree's working buffers plus a logarithmic frontier. Choosing the subtree size bounds that builder's memory independently of the total account count. Producing the proof slices still requires proof-capable Merkle material for the close.
+
+The evidence is divided into deterministic account-key slices and dealt among validators. Each slice authenticates its exact opening-state, changed-row, and closing-state ranges; one validator's assigned slices form its dealing. A fourth BMT commits the gap-free positions and cumulative prefix at every slice boundary, so insertion or deletion cannot shift a hidden leaf across dealings:
+
+$$
+\mathsf{Layout}_e=\bigl((o_j,r_j,c_j,\mathsf{prefix}_j)\bigr)_{j=0}^{s}
+\xrightarrow{\ \mathsf{BMT}\ }
+\mathsf{LayoutRoot}_e.
+$$
+
 ::: {.image-caption}
-Figure 2: One witness recomputes both roots from the same material. Each changed account supplies its paired leaves, $X^0$ on the opening side and $X^1$ on the closing side, while each untouched subtree contributes one shared digest ($\Phi_2$ covers two accounts at once). Identical frontiers on both sides prove every omitted account unchanged.
+Figure 2: Opening and closing state are rebuilt from sorted live accounts. The layout root binds each slice's exact positions in both state vectors and the change vector, so account insertion and deletion cannot create a gap or overlap between validator dealings.
 :::
 
-Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row. The settlement chain retains only a hash composed of its three ordered roots:
+The settlement commitment is a context-bound hash of the four ordered roots:
 
 $$
 \mathsf{Commitment}_e
@@ -167,16 +181,17 @@ $$
 \mathsf{StateRoot}_e
 \parallel \mathsf{ChangeRoot}_e
 \parallel \mathsf{StateRoot}_{e+1}
+\parallel \mathsf{LayoutRoot}_e
 \right).
 $$
 
-The totals are the terminal row's prefix: gross debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and shard counts alongside. The three roots, shard vectors, changed rows, and paired witness stay offchain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$.
+The totals are the terminal boundary's prefix: gross debit $D_e$, credit $C_e$, external payouts $P_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and shard counts alongside. One terminal layout opening authenticates those totals without listing their recipients. Admission also consumes the 128-byte root bundle and this terminal opening as witness data. The roots, live leaves, shard vectors, changed rows, and remaining Merkle openings stay offchain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$.
 
-## Validate Everything Up Front
+## Seal Every Dealing Up Front
 
-Before the chain queues a close for finalization, someone must check all of it. A validator committee verifies the complete public close, every row, every prefix, and the exact state transition, and signs the commitment only when all of it holds. Exhaustive validation keeps malformed or inexact closes out of the finalization queue and reduces any remaining private-receipt dispute to one tagged, non-interactive submission.
+Before the chain queues a close for finalization, the operator disseminates each validator's dealing. A validator authenticates every assigned slice, checks every local row and prefix transition, batch-verifies every distinct send and receipt signature in that dealing, retains the evidence through the challenge deadline, and only then seals the shared commitment. No validator needs the complete corpus, but the assignments cover it exactly.
 
-Prefix continuity ties the epoch totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
+Prefix continuity ties the epoch totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary. Every ordinary withdrawal equals its authorized positive amount, while every close sweeps its authenticated epoch tail. The totals must respect the close caps and conserve payments:
 
 $$
 \boxed{D_e=C_e.}
@@ -185,10 +200,10 @@ $$
 Writing $L_e=\sum_a B_a^0$ and $L_{e+1}=\sum_a B_a^1$, summing the per-account balance equation cancels payments but not boundary flows:
 
 $$
-\boxed{L_{e+1}=L_e+F_e-W_e.}
+\boxed{L_{e+1}=L_e+F_e-W_e-P_e.}
 $$
 
-The public corpus is partitioned into deterministic, exhaustive account intervals. Every certificate signer signs the same commitment. Each evidence piece is assigned to a quorum of validators who check and retain it. Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. With $n$ validators, $f$ tolerated faults, and quorum $q$, every piece $j$'s holders share more than $f$ validators with the certificate's signers:
+Every certificate signer signs the same commitment. Each slice is assigned to a quorum of validators who authenticate and retain it. Quorum intersection guarantees that an honest signer authenticated and retains each slice, though that signer may differ by slice. With $n$ validators, $f$ tolerated faults, and quorum $q$, every slice $j$'s holders share more than $f$ validators with the certificate's signers:
 
 $$
 \begin{aligned}
@@ -223,28 +238,40 @@ A successful receipt challenge blocks the challenged slot and every pending desc
 
 ## A Deadline to Exit
 
-A successful challenge stops a contested close from finalizing, but stopping it is not enough: users must still be able to get their funds out. So every account holds a unilateral exit, a signed withdrawal queued directly onchain.
+A successful challenge stops a contested close from finalizing, but stopping it is not enough: users must still be able to get their funds out. So every account can queue a unilateral signed authorization directly onchain, either to withdraw an exact amount or to close the account.
 
 $$
-Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr).
+Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;\omega,\;\tau\bigr),
+\qquad
+\omega\in\bigl\{\mathsf{withdraw}(x)\mid x>0\bigr\}\cup\bigl\{\mathsf{close}\bigr\}.
 $$
 
-$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, a destination $v$, an amount $x$, a full-close flag $\gamma$, and an absolute deadline $\tau$. The operator neither submits nor approves it, and its cooperation decides only whether the withdrawal settles through a clean close or through terminal unwind. Since $v$ may be any destination the asset adapter accepts, paying an unregistered recipient is just a withdrawal to its address.
+$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, a destination $v$, an operation $\omega$, and an absolute deadline $\tau$. An ordinary withdrawal authorizes exactly the positive amount $x$; a close carries no amount. The operator neither submits nor approves it, and its cooperation decides only whether the authorization settles through a clean close or through terminal unwind.
 
-Queueing proves the withdrawal affordable at every pending root, and each later queued close re-proves it, so whichever root survives can pay it. Deposits need no deadline at all: an unconsumed deposit simply returns in the terminal payout.
+There is also a fast path for paying someone who is not registered with the operator. The operator accepts the sends normally and records one absent-recipient row whose account and credit delta identify the recipient and exact net amount. The terminal layout opening authenticates only the aggregate $P_e$. If the close survives its challenge window, each recipient presents that row and, unless it is first, the immediately preceding row under one shared $\mathsf{ChangeRoot}_e$ multiproof. Their cumulative-prefix difference proves that this row contributed the claimed payout. The chain keys replay protection by the finalized batch and row position, so no recipient list or all-payout multiproof enters settlement and no post-deadline crank must fan payments out. From custody's perspective, this is a netted withdrawal; from the sender's perspective, it is an ordinary preconfirmed payment.
 
-What makes the exit credible is that custody never leaves the chain. With finalized liability $L_z$, pending slots $z+1,\ldots,\ell$ carrying boundary flows $(F_i,W_i)$, and deposits not yet included in a pending close $F_\star$:
+Queueing authenticates $Q$ against the finalized root, and every admitted descendant that can survive a cut must carry it forward. The next close commits both its already-onchain signed authorization and its changed account row.
+
+A close does not freeze the account inside that epoch: it can keep sending and receiving until the cut. The cut sweeps its authenticated epoch-tail balance and omits the account from the successor state:
+
+$$
+\boxed{w_a=B_a^0+f_a+c_a-d_a,\qquad B_a^1=0.}
+$$
+
+After clean finalization, any positive payout is claimed with the authorization's withdrawal-boundary opening and one change-root multiproof over its row and, unless it is first, the immediately preceding row. The difference between adjacent cumulative prefixes gives the exact withdrawal value without retaining a recipient list: an ordinary withdrawal must equal its authorized amount, while a close must equal the authenticated tail above. A zero tail is a valid close and needs no payout claim. No later descendant can outlive that close, so whichever root survives can pay it. Deposits need no deadline at all: an unconsumed deposit simply returns in the terminal payout.
+
+What makes the exit credible is that custody never leaves the chain early. Let $R_z$ be the reserve for finalized but unclaimed withdrawals and external payouts. With finalized liability $L_z$, pending slots $z+1,\ldots,\ell$ carrying boundary flows $(F_i,W_i,P_i)$, and deposits not yet included in a pending close $F_\star$:
 
 $$
 \boxed{
-E=L_z+\sum_{i=z+1}^{\ell}F_i+F_\star
-=L_\ell+\sum_{i=z+1}^{\ell}W_i+F_\star.
+E=L_z+R_z+\sum_{i=z+1}^{\ell}F_i+F_\star
+=L_\ell+R_z+\sum_{i=z+1}^{\ell}(W_i+P_i)+F_\star.
 }
 $$
 
-Withdrawals stay inside custody until their own slot finalizes at the queue front, so a speculative descendant can never spend assets out from under an ancestor. The operator can stop serving payments, but it cannot take funds or send them without authorization.
+Withdrawals and external payouts stay in active custody until their slot finalizes at the queue front, then their aggregate value moves into $R_z$. Individual claims reduce that reserve and the chain's assets together. This finalization step touches only totals and roots; its work does not grow with the number of recipients. A challenged or invalidated suffix creates no reserve. The operator can stop serving payments, but it cannot take funds or send them without authorization.
 
-If $Q$ is still unreleased at $t\ge\tau$, the first time-aware onchain call to observe the deadline permanently freezes new work. The pending slots then resolve from the front, each finalizing once its challenge window closes or falling to a challenge, and terminal unwind opens against the last root standing. Queued withdrawals pay to their signed destinations, and every account uses one Merkle proof against that root to claim its remaining balance and any unconsumed deposit.
+If $Q$ is still unfinalized at $t\ge\tau$, the first time-aware onchain call to observe the deadline permanently freezes new work. The pending slots then resolve from the front, each finalizing once its challenge window closes or falling to a challenge, and terminal unwind opens against the last root standing. Already-finalized claim reserves remain claimable and are excluded from unwind. Outstanding queued authorizations pay any amount due to their signed destinations, while terminal unwind authenticates and scans the complete surviving state and returns every residual balance and unconsumed deposit in one exceptional custody-exhausting payout list.
 
 ## Streamlined Epoch Transitions
 
@@ -280,9 +307,9 @@ Rollover changes only live serving state, without changing the evidence required
 
 ## The Close Never Grows (with Payments)
 
-Every profile below runs one fixture: a registry of $N=1{,}000{,}000$ accounts, a 100-validator committee, the evidence divided into 256 slices and dealt among validators, and an eight-thread worker pool (M5 Pro). Every changed account sends, and the same 512 credited accounts receive, spaced evenly among the senders.
+Every profile below uses a 100-validator committee, divides the evidence into 256 slices, and runs construction and verification on one shared eight-thread worker pool (M5 Pro). The matrix varies $N$, the number of live accounts. Every account sends, the same 512 accounts receive, and each recipient uses one receive shard. The fixture therefore holds $A=N$, $B=512$, and $h=1$ while $N$ grows from 1,024 to one million.
 
-The matrix independently varies $A$, the number of changed accounts, and $h$, the number of receive shards on each credited account. No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$.
+No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. Each stage is measured independently. The fixture constructs the opening-state proof cache before measurement. Prepare builds the closing-state, change, and layout roots from the owned close inputs while reusing that cache; deal derives all proof slices from the prepared close; seal checks and retains the busiest validator's dealing, batch-verifies every distinct payment signature in it, and signs the commitment.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -290,53 +317,52 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
   <thead>
     <tr>
       <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
-      <th colspan="2" style="text-align:center;"><em>A</em> = 1,024</th>
-      <th colspan="2" style="text-align:center;"><em>A</em> = 1,000,000</th>
+      <th colspan="4" style="text-align:center;">Live accounts (<em>N</em>)</th>
     </tr>
     <tr>
-      <th style="text-align:right;"><em>h</em> = 1</th>
-      <th style="text-align:right;"><em>h</em> = 512</th>
-      <th style="text-align:right;"><em>h</em> = 1</th>
-      <th style="text-align:right;"><em>h</em> = 512</th>
+      <th style="text-align:right;">1,024</th>
+      <th style="text-align:right;">10,000</th>
+      <th style="text-align:right;">100,000</th>
+      <th style="text-align:right;">1,000,000</th>
     </tr>
   </thead>
   <tbody>
     <tr><th colspan="5" style="text-align:left;">Construction</th></tr>
     <tr>
       <td style="padding-left:20px;">evidence</td>
-      <td style="text-align:right;">2.27 MB</td>
-      <td style="text-align:right;">105 MB</td>
-      <td style="text-align:right;">629 MB</td>
-      <td style="text-align:right;">732 MB</td>
+      <td style="text-align:right;">1.58 MB</td>
+      <td style="text-align:right;">7.34 MB</td>
+      <td style="text-align:right;">64.3 MB</td>
+      <td style="text-align:right;">633 MB</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">0.783 ms</td>
-      <td style="text-align:right;">1.08 ms</td>
-      <td style="text-align:right;">244 ms</td>
-      <td style="text-align:right;">250 ms</td>
+      <td style="text-align:right;">0.422 ms</td>
+      <td style="text-align:right;">2.03 ms</td>
+      <td style="text-align:right;">21.2 ms</td>
+      <td style="text-align:right;">215 ms</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">deal</td>
-      <td style="text-align:right;">0.373 ms</td>
-      <td style="text-align:right;">3.37 ms</td>
-      <td style="text-align:right;">49.6 ms</td>
-      <td style="text-align:right;">58.7 ms</td>
+      <td style="text-align:right;">0.164 ms</td>
+      <td style="text-align:right;">0.318 ms</td>
+      <td style="text-align:right;">1.81 ms</td>
+      <td style="text-align:right;">24.9 ms</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
       <td style="padding-left:20px;">dealing</td>
-      <td style="text-align:right;">1.53 MB <span style="color:#666;">(-33%)</span></td>
-      <td style="text-align:right;">71.0 MB <span style="color:#666;">(-32%)</span></td>
-      <td style="text-align:right;">423 MB <span style="color:#666;">(-33%)</span></td>
-      <td style="text-align:right;">492 MB <span style="color:#666;">(-33%)</span></td>
+      <td style="text-align:right;">1.08 MB <span style="color:#666;">(-32%)</span></td>
+      <td style="text-align:right;">4.98 MB <span style="color:#666;">(-32%)</span></td>
+      <td style="text-align:right;">43.3 MB <span style="color:#666;">(-33%)</span></td>
+      <td style="text-align:right;">426 MB <span style="color:#666;">(-33%)</span></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">2.78 ms</td>
-      <td style="text-align:right;">246 ms</td>
-      <td style="text-align:right;">1.33 s</td>
-      <td style="text-align:right;">1.51 s</td>
+      <td style="text-align:right;">2.62 ms</td>
+      <td style="text-align:right;">14.3 ms</td>
+      <td style="text-align:right;">126 ms</td>
+      <td style="text-align:right;">1.29 s</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
     <tr>
@@ -355,25 +381,25 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
     </tr>
     <tr>
       <td style="padding-left:20px;">check certified commitment</td>
-      <td style="text-align:right;"><strong>0.481 ms</strong></td>
-      <td style="text-align:right;"><strong>0.483 ms</strong></td>
-      <td style="text-align:right;"><strong>0.487 ms</strong></td>
-      <td style="text-align:right;"><strong>0.487 ms</strong></td>
+      <td style="text-align:right;"><strong>0.463 ms</strong></td>
+      <td style="text-align:right;"><strong>0.468 ms</strong></td>
+      <td style="text-align:right;"><strong>0.459 ms</strong></td>
+      <td style="text-align:right;"><strong>0.462 ms</strong></td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
     <tr>
       <td style="padding-left:20px;">challenge</td>
-      <td style="text-align:right;"><strong>1.73 KB</strong></td>
-      <td style="text-align:right;"><strong>2.02 KB</strong></td>
-      <td style="text-align:right;"><strong>2.05 KB</strong></td>
-      <td style="text-align:right;"><strong>2.34 KB</strong></td>
+      <td style="text-align:right;"><strong>1.74 KB</strong></td>
+      <td style="text-align:right;"><strong>1.87 KB</strong></td>
+      <td style="text-align:right;"><strong>1.96 KB</strong></td>
+      <td style="text-align:right;"><strong>2.06 KB</strong></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">check challenge</td>
-      <td style="text-align:right;"><strong>0.454 ms</strong></td>
-      <td style="text-align:right;"><strong>0.447 ms</strong></td>
-      <td style="text-align:right;"><strong>0.481 ms</strong></td>
-      <td style="text-align:right;"><strong>0.471 ms</strong></td>
+      <td style="text-align:right;"><strong>0.469 ms</strong></td>
+      <td style="text-align:right;"><strong>0.458 ms</strong></td>
+      <td style="text-align:right;"><strong>0.465 ms</strong></td>
+      <td style="text-align:right;"><strong>0.461 ms</strong></td>
     </tr>
   </tbody>
 </table>
@@ -381,45 +407,43 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
 ```
 
 ::: {.image-caption}
-Figure 4: The operator prepares the roots, then deals the evidence into validator-specific pieces. Each validator seals its dealing by checking and retaining those pieces before signing the commitment. A receipt holder with evidence of fraud can dispute the certified commitment with a challenge that the chain checks.
+Figure 4: The operator prepares the roots, then deals the evidence into slices. Each validator seals its dealing by checking and retaining its assigned slices before signing the commitment. A receipt holder with evidence of fraud can dispute the certified commitment with a challenge that the chain checks.
 :::
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show benchmark latency for preparing the roots, dealing the evidence into pieces, and sealing the largest of the 100 validator dealings. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three log-scale plots show measured latency for preparing roots, dealing all evidence slices, and sealing the busiest validator dealing as live accounts increase from 1,024 to one million.">
 ```
 
 ::: {.image-caption}
-Figure 5: These are four measured profiles, not an interpolation. Each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the receive shards on each credited account from $h=1$ to $h=512$.
+Figure 5: These are four measured profiles, not an interpolation. Both axes are logarithmic, and each point is labeled with its measured latency. Construction and sealing scale approximately linearly once the fixed costs are amortized.
 :::
 
-Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated shard leaves and signatures behind each credited row.
+Even the largest validator dealing is 32–33% smaller than the full evidence because it contains only that validator's assigned slices. At one million live accounts it checks 426 MB rather than the complete 633 MB corpus. This is the explicit cost of the simpler fresh-BMT design: evidence distribution grows with live state, while settlement and disputes remain bounded.
 
-Even the largest validator dealing is 32–33% smaller than the full evidence because it contains only that validator's pieces. At $A=1{,}024$ and $h=1$, it is 1.53 MB despite a registry of one million accounts. Distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments.
+The offchain evidence is constant for a profile, so accepted payments only divide it. Ten million payments spread the one-million-account profile's 633 MB to about 63 offchain bytes per payment; a billion spread it to 0.63 offchain bytes per payment. The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap; proofs of possession were checked when the committee registered. With the 32-byte commitment and this encoding's eight-byte bitmap-length prefix, the 100-validator header-plus-certificate package is 101 bytes total. If the clearing validators are also the settlement chain's validators, inclusion itself supplies the attestation and only the 32-byte commitment need be retained. The admission witnesses described above are not included in that figure. It likewise shrinks as $1/T$.
 
-The offchain evidence is constant for a profile, so accepted payments only divide it. Ten million payments spread the sparse profile's 2.27 MB to about 0.23 offchain bytes per payment; a billion spread it to 0.0023 offchain bytes per payment. The certified commitment includes the 32-byte commitment, signer bitmap, and aggregate signature, for 101 bytes total; it likewise shrinks as $1/T$.
-
-This fixture queues no withdrawals and no full closes, whose re-check and row openings would otherwise add to it. The challenge measurements use one proven higher-tip challenge: its payload grows only with the two lookup depths, and its check verifies two signatures and two openings.
+This fixture queues no withdrawals or closes, whose re-check and row openings would otherwise add to it. Individual payout claims are not part of the certified settlement: both an external-payout claim and a withdrawal claim carry their row and at most one adjacent row under a shared $O(\log A)$ BMT multiproof; the withdrawal also carries its signed request and boundary opening. Both remain a few kilobytes or less in these profiles. The challenge measurements use one proven higher-tip challenge: its 1.74–2.06 KB payload grows only with the two lookup depths, and its check verifies two signatures and two openings. Clean closes submit no fraud challenge at all, so average challenge traffic is smaller still. A challenge targets a commitment whose certificate was already checked at admission, so adjudication does not verify that certificate again.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows offchain evidence bytes per payment for the four A-by-h profiles; the right shows the 101-byte certified commitment. Every line falls as 1/T.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows offchain evidence bytes per payment for four live-account counts; the right shows the 101-byte certified commitment. Every line falls as one over T.">
 ```
 
 ::: {.image-caption}
-Figure 6: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The offchain evidence (left) depends on $A$ and $h$: shards move the million-account evidence by only $1.2\times$ but the sparse evidence by $46\times$. The certified commitment (right) stays 101 bytes across profiles.
+Figure 6: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The offchain evidence (left) grows with the live-account count $N$. The certified commitment (right) stays 101 bytes across profiles.
 :::
 
 ## A Bajillion Payments, One Settlement
 
-The operator's work scales with payments: it verifies, durably commits, and signs every one of the $T$ payments it accepts. The public close has no per-payment term. It carries one row per changed account ($A$), one terminal pair per receive shard ($H$), and one frontier digest per untouched subtree ($|\Phi_e|$):
+The operator's online work scales with payments: it verifies, durably commits, and signs every one of the $T$ payments it accepts. The close has no per-payment term. Writing $U$ for unchanged live leaves, $A$ for changed rows, $H$ for total shard tips, and $M$ for the largest committed vector length, its authenticated corpus carries one state leaf per unchanged account, one larger row per changed account, one terminal pair per receive shard, and the bounded openings needed to divide those vectors into $s$ slices:
 
 $$
 \text{payments }T
 \quad\longrightarrow\quad
-\text{rows }A+\text{shards }H+\text{frontier digests }|\Phi_e|.
+U\text{ state leaves}+A\text{ rows}+H\text{ shard tips}+O(s\log M)\text{ openings}.
 $$
 
-For repeated activity over a fixed set of accounts and shards, $(A+H+|\Phi_e|)/T\to 0$. Account-level clearing compresses repetition, not change: every changed account still pays for its row and every shard for its terminal pair, but additional payments between them add nothing. No traffic pattern adds a per-payment term to the close either, because acceptance reserves room per account and per shard, never per payment.
+For the benchmark's fixed live set, $U=N-A$; account creation, deletion, and external-payout rows need not preserve that identity in general. For repeated activity over a fixed set of accounts and shards, this fixed corpus divided by $T$ tends to zero. Account-level clearing compresses repetition, not state: every unchanged live account contributes a leaf, every changed account contributes a row, and every shard contributes its terminal pair, but additional payments between them add nothing. No traffic pattern adds a per-payment term to the close either, because acceptance reserves room per account and per shard, never per payment.
 
-And this is as good as the trust model allows. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault. Settlement cannot make less than the changed state available to users who recover from public data alone, and this close adds only the terminal pairs and the frontier needed to reconstruct the registry around those changes.
+The fresh tree is intentionally conventional. Root-only construction can stream an existing ordered account database through bounded subtree builders; proof-producing close assembly retains the Merkle levels needed for slice openings. Neither requires maintaining durable authenticated paths for every pending root. In exchange, validators receive evidence for the complete live state rather than only a sparse update. A preconfirmation still cannot arrive in less than one round trip to the operator that serializes spending, and a close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault.
 
 When the close is clean, those involved keep the receipts. The settlement chain only keeps the change.

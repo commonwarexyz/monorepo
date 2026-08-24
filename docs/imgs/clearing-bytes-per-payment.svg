@@ -10,29 +10,33 @@
     .grid { stroke: #dedede; stroke-width: 1; }
     .frame { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
     .blue { stroke: #2424d4; fill: none; }
+    .purple { stroke: #7a3db8; fill: none; }
+    .orange { stroke: #b45f06; fill: none; }
     .green { stroke: #2f7d3d; fill: none; }
     .neutral { stroke: #555; fill: none; }
     .blue-text { fill: #2424d4; }
+    .purple-text { fill: #7a3db8; }
+    .orange-text { fill: #b45f06; }
     .green-text { fill: #2f7d3d; }
     .neutral-text { fill: #555; }
     .series { stroke-width: 3; }
-    .dashed { stroke-dasharray: 8 6; }
   </style>
 
   <text class="title" x="34" y="39">The Vanishing Cost of a Payment</text>
 
-  <line class="blue series" x1="720" y1="26" x2="760" y2="26"/>
-  <circle cx="740" cy="26" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <text class="axis-strong blue-text" x="770" y="31">A = 1,024 • h = 1</text>
-  <line class="green series" x1="1000" y1="26" x2="1040" y2="26"/>
-  <rect x="1015" y="21" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="axis-strong green-text" x="1050" y="31">A = 1,000,000 • h = 1</text>
-  <line class="blue series dashed" x1="720" y1="50" x2="760" y2="50"/>
-  <text class="axis-strong blue-text" x="770" y="55">A = 1,024 • h = 512</text>
-  <line class="green series dashed" x1="1000" y1="50" x2="1040" y2="50"/>
-  <text class="axis-strong green-text" x="1050" y="55">A = 1,000,000 • h = 512</text>
+  <line class="blue series" x1="550" y1="34" x2="585" y2="34"/>
+  <circle cx="567.5" cy="34" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <text class="axis-strong blue-text" x="593" y="39">N = 1,024</text>
+  <line class="purple series" x1="735" y1="34" x2="770" y2="34"/>
+  <circle cx="752.5" cy="34" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <text class="axis-strong purple-text" x="778" y="39">N = 10,000</text>
+  <line class="orange series" x1="930" y1="34" x2="965" y2="34"/>
+  <circle cx="947.5" cy="34" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <text class="axis-strong orange-text" x="973" y="39">N = 100,000</text>
+  <line class="green series" x1="1135" y1="34" x2="1170" y2="34"/>
+  <circle cx="1152.5" cy="34" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="axis-strong green-text" x="1178" y="39">N = 1,000,000</text>
 
-  <!-- Offchain evidence. -->
   <rect class="frame" x="30" y="90" width="610" height="360" rx="3"/>
   <text class="panel-title" x="335" y="122">Evidence (Offchain)</text>
   <text class="axis" x="95" y="138" text-anchor="end">bytes</text>
@@ -60,28 +64,35 @@
   <text class="axis-strong" x="600" y="402" text-anchor="middle">1B</text>
   <text class="axis" x="360" y="428" text-anchor="middle">payments accepted (T)</text>
 
-  <path class="green series" d="M150 157.37 L300 194.04 L450 230.70 L600 267.37"/>
-  <path class="green series dashed" d="M150 154.97 L300 191.64 L450 228.30 L600 264.97"/>
-  <path class="blue series" d="M150 246.95 L300 283.62 L450 320.28 L600 356.95"/>
-  <path class="blue series dashed" d="M150 185.92 L300 222.59 L450 259.25 L600 295.92"/>
-  <circle cx="150" cy="246.95" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="300" cy="283.62" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="450" cy="320.28" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="600" cy="356.95" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <rect x="145" y="152.37" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="295" y="189.04" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="445" y="225.70" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="595" y="262.37" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value green-text" x="162" y="143">732</text>
-  <text class="value green-text" x="162" y="175">629</text>
-  <text class="value blue-text" x="162" y="205">105</text>
-  <text class="value blue-text" x="162" y="235">2.27</text>
-  <text class="value green-text" x="588" y="254" text-anchor="end">0.732</text>
-  <text class="value green-text" x="588" y="283" text-anchor="end">0.629</text>
-  <text class="value blue-text" x="588" y="312" text-anchor="end">0.105</text>
-  <text class="value blue-text" x="588" y="346" text-anchor="end">0.00227</text>
+  <path class="blue series" d="M150 252.7 L300 289.4 L450 326.1 L600 362.7"/>
+  <path class="purple series" d="M150 228.3 L300 264.9 L450 301.6 L600 338.3"/>
+  <path class="orange series" d="M150 193.7 L300 230.4 L450 267.0 L600 303.7"/>
+  <path class="green series" d="M150 157.3 L300 194.0 L450 230.6 L600 267.3"/>
+  <circle cx="150" cy="252.7" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="300" cy="289.4" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="450" cy="326.1" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="600" cy="362.7" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="150" cy="228.3" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="300" cy="264.9" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="450" cy="301.6" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="600" cy="338.3" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="150" cy="193.7" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="300" cy="230.4" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="450" cy="267.0" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="600" cy="303.7" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="150" cy="157.3" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="300" cy="194.0" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="450" cy="230.6" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="600" cy="267.3" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value green-text" x="162" y="146">633</text>
+  <text class="value orange-text" x="162" y="183">64.3</text>
+  <text class="value purple-text" x="162" y="217">7.34</text>
+  <text class="value blue-text" x="162" y="242">1.58</text>
+  <text class="value green-text" x="588" y="256" text-anchor="end">0.633</text>
+  <text class="value orange-text" x="588" y="293" text-anchor="end">0.0643</text>
+  <text class="value purple-text" x="588" y="327" text-anchor="end">0.00734</text>
+  <text class="value blue-text" x="588" y="352" text-anchor="end">0.00158</text>
 
-  <!-- Onchain certified commitment. -->
   <rect class="frame" x="670" y="90" width="620" height="360" rx="3"/>
   <text class="panel-title" x="980" y="122">Certified Commitment (Onchain)</text>
   <text class="axis" x="760" y="138" text-anchor="end">bytes</text>
