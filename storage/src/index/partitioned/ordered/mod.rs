@@ -156,6 +156,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
     }
 
+    /// Hint that partition `i` is about to be searched (see `Partition::prefetch`). Spilled
+    /// partitions are left to their side-table.
+    fn prefetch_slot(&self, i: usize) {
+        if let Some(partition) = self.partitions.get(i) {
+            partition.prefetch();
+        }
+    }
+
     /// Spill partition `i` to the side-table if its sorted array has reached the threshold.
     fn maybe_spill(&mut self, i: usize) {
         if self.partitions[i].len() < self.threshold {
@@ -437,6 +445,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
 
     fn for_each_value(&self, f: impl FnMut(&V)) {
         self.index.for_each_value(f);
+    }
+
+    fn prefetch(&self, key: &[u8]) {
+        let (i, _) = partition_index_and_sub_key::<P>(key);
+        self.index.prefetch_slot(i - self.offset);
     }
 }
 
