@@ -1,7 +1,6 @@
 use super::{
     Error, Relation,
     circuit::SparseRow,
-    poly::Domain,
     types::{
         CommitmentKey, ProvingKey, PublicColumn, Trapdoor, VerifyingKey, commitment_keys_digest,
     },
@@ -72,7 +71,7 @@ pub fn setup_with_trapdoor(
             }
         };
 
-        let lagrange = domain.lagrange_coefficients(&tau)?;
+        let lagrange = domain.lagrange_basis(&tau);
         let (a_at_tau, b_at_tau) = evaluate_columns(relation.rows(), &lagrange, num_vars);
         let vanishing_at_tau = domain.evaluate_vanishing(&tau);
         let delta_witness_inv = delta_witness.inv();

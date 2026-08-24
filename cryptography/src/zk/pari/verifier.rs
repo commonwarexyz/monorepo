@@ -1,12 +1,15 @@
 use super::{
-    Claim, Proof, VerifyingKey, poly::Domain, transcript_challenge, transcript_challenge_prebound,
+    Claim, Proof, VerifyingKey, transcript_challenge, transcript_challenge_prebound,
 };
 use crate::{
     bls12381::primitives::group::{G1, G2, Scalar, SmallScalar},
     transcript::Transcript,
 };
 use commonware_codec::Encode;
-use commonware_math::algebra::{Additive, CryptoGroup, Multiplicative, Ring, Space};
+use commonware_math::{
+    algebra::{Additive, CryptoGroup, Multiplicative, Ring, Space},
+    ntt::Domain,
+};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRng;
 
@@ -273,7 +276,7 @@ pub fn batch_verify_prebound(
     G1::multi_pairing_check(&points, &generators, &final_term, &G2::generator())
 }
 
-fn verification_domain(verifying_key: &VerifyingKey) -> Result<Domain, ()> {
+fn verification_domain(verifying_key: &VerifyingKey) -> Result<Domain<Scalar>, ()> {
     // Domain::new rounds up to a power of two, so reject sizes it would
     // silently alter.
     if !verifying_key.domain_size.is_power_of_two() {
@@ -287,7 +290,7 @@ fn verification_domain(verifying_key: &VerifyingKey) -> Result<Domain, ()> {
 pub(super) fn evaluate_public_columns(
     verifying_key: &VerifyingKey,
     public_inputs: &[Scalar],
-    domain: &Domain,
+    domain: &Domain<Scalar>,
     point: &Scalar,
 ) -> Option<(Scalar, Scalar)> {
     let mut values = Vec::with_capacity(1 + public_inputs.len());
@@ -306,7 +309,7 @@ pub(super) fn evaluate_public_columns(
         .collect::<Vec<_>>();
     rows.sort_unstable();
     rows.dedup();
-    let lagrange = domain.lagrange_coefficients_at(point, &rows).ok()?;
+    let lagrange = domain.lagrange_basis_at(point, &rows).ok()?;
     let coefficient_at = |row: u32| rows.binary_search(&row).ok().map(|slot| &lagrange[slot]);
 
     let mut x_a = Scalar::zero();
@@ -326,7 +329,7 @@ pub(super) fn evaluate_public_columns(
 fn public_evaluation(
     verifying_key: &VerifyingKey,
     public_inputs: &[Scalar],
-    domain: &Domain,
+    domain: &Domain<Scalar>,
     challenge: &Scalar,
     v_a: &Scalar,
 ) -> Option<Scalar> {

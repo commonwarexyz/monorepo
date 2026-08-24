@@ -10,6 +10,7 @@ use core::{
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::vec::Vec;
+use thiserror::Error;
 
 /// Determines the size of polynomials we compute naively in [`EvaluationColumn::vanishing`].
 ///
@@ -1280,6 +1281,294 @@ pub fn lagrange_coefficients<F: FieldNTT>(
     out
 }
 
+/// Errors returned by evaluation-domain operations.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum Error {
+    /// A radix-2 domain cannot be constructed for an empty input.
+    #[error("domain size cannot be zero")]
+    EmptyDomain,
+    /// Rounding the requested domain size to a power of two overflowed.
+    #[error("domain size overflow for requested size {requested}")]
+    DomainSizeOverflow { requested: usize },
+    /// The field does not support a root of unity of the requested order.
+    #[error("domain size {size} exceeds maximum radix-2 log size {max_log_size}")]
+    UnsupportedDomainSize { size: usize, max_log_size: u8 },
+    /// The provided evaluation vector has the wrong length.
+    #[error("expected {expected} evaluations, got {actual}")]
+    EvaluationCount { expected: usize, actual: usize },
+    /// A coefficient vector longer than the domain cannot be evaluated on it.
+    #[error("polynomial has {coefficients} coefficients but domain size is {domain_size}")]
+    PolynomialTooLarge {
+        coefficients: usize,
+        domain_size: usize,
+    },
+    /// The requested domain element does not exist.
+    #[error("domain index {index} is out of range for size {size}")]
+    DomainIndex { index: usize, size: usize },
+    /// Polynomial size arithmetic overflowed.
+    #[error("polynomial size arithmetic overflow")]
+    PolynomialSizeOverflow,
+}
+
+/// A multiplicative radix-2 evaluation domain.
+///
+/// The domain is the set of `size` powers `g^0, g^1, ..., g^(size - 1)` of a
+/// primitive `size`-th root of unity `g`. Coefficient and evaluation vectors
+/// exchanged with this type are always in that natural order; the bit-reversed
+/// layout [`ntt`] works in stays internal to this type.
+///
+/// # Examples
+///
+/// ```
+/// # use commonware_math::{algebra::Ring, fields::goldilocks::F, ntt::Domain};
+/// let domain = Domain::<F>::new(3).unwrap();
+/// assert_eq!(domain.size(), 4);
+///
+/// // Round-trip a polynomial through its evaluations on the domain.
+/// let coefficients = [F::from(3u64), F::from(1u64), F::from(4u64), F::from(1u64)];
+/// let evaluations = domain.evaluate(&coefficients).unwrap();
+/// assert_eq!(domain.interpolate(&evaluations).unwrap(), coefficients);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Domain<F> {
+    size: usize,
+    lg_size: u8,
+    generator: F,
+    generator_inverse: F,
+    size_inverse: F,
+}
+
+impl<F: FieldNTT> Domain<F> {
+    /// Construct the smallest radix-2 domain containing `minimum_size` points.
+    pub fn new(minimum_size: usize) -> Result<Self, Error> {
+        if minimum_size == 0 {
+            return Err(Error::EmptyDomain);
+        }
+        let size = minimum_size
+            .checked_next_power_of_two()
+            .ok_or(Error::DomainSizeOverflow {
+                requested: minimum_size,
+            })?;
+        let lg_size =
+            u8::try_from(size.trailing_zeros()).map_err(|_| Error::UnsupportedDomainSize {
+                size,
+                max_log_size: F::MAX_LG_ROOT_ORDER,
+            })?;
+        let generator = F::root_of_unity(lg_size).ok_or(Error::UnsupportedDomainSize {
+            size,
+            max_log_size: F::MAX_LG_ROOT_ORDER,
+        })?;
+        let size_u64 = u64::try_from(size).map_err(|_| Error::UnsupportedDomainSize {
+            size,
+            max_log_size: F::MAX_LG_ROOT_ORDER,
+        })?;
+        let generator_inverse = generator.inv();
+        Ok(Self {
+            size,
+            lg_size,
+            generator,
+            generator_inverse,
+            size_inverse: F::one().scale(&[size_u64]).inv(),
+        })
+    }
+
+    /// Return the number of points in this domain.
+    pub const fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Return the base-2 logarithm of the domain size.
+    pub const fn lg_size(&self) -> u8 {
+        self.lg_size
+    }
+
+    /// Return the generator of this domain.
+    pub const fn generator(&self) -> &F {
+        &self.generator
+    }
+
+    /// Return the domain point `generator^index`.
+    pub fn element(&self, index: usize) -> Result<F, Error> {
+        if index >= self.size {
+            return Err(Error::DomainIndex {
+                index,
+                size: self.size,
+            });
+        }
+        let exponent = u64::try_from(index).map_err(|_| Error::DomainIndex {
+            index,
+            size: self.size,
+        })?;
+        Ok(self.generator.exp(&[exponent]))
+    }
+
+    /// Evaluate the vanishing polynomial `X^m - 1` at `point`, where `m` is the
+    /// domain size.
+    pub fn evaluate_vanishing(&self, point: &F) -> F {
+        point.exp(&[self.size as u64]) - &F::one()
+    }
+
+    /// Return whether `point` is one of the domain's points.
+    pub fn contains(&self, point: &F) -> bool {
+        self.evaluate_vanishing(point) == F::zero()
+    }
+
+    /// Evaluate the polynomial with these `coefficients` at every point in the
+    /// domain, using a radix-2 NTT.
+    ///
+    /// Coefficients are in ascending degree order and may be shorter than the
+    /// domain, in which case they are zero-padded.
+    pub fn evaluate(&self, coefficients: &[F]) -> Result<Vec<F>, Error> {
+        if coefficients.len() > self.size {
+            return Err(Error::PolynomialTooLarge {
+                coefficients: coefficients.len(),
+                domain_size: self.size,
+            });
+        }
+        let mut values = vec![F::zero(); self.size];
+        values[..coefficients.len()].clone_from_slice(coefficients);
+        // The transform consumes coefficients in bit-reversed order and yields
+        // evaluations in natural order.
+        reverse_slice(u32::from(self.lg_size), &mut values);
+        ntt::<true, _, _>(
+            self.size,
+            1,
+            &mut Columns {
+                data: [values.as_mut_slice()],
+            },
+        );
+        Ok(values)
+    }
+
+    /// Interpolate the coefficients of the polynomial taking one value at every
+    /// point in the domain.
+    ///
+    /// This is the inverse of [`Self::evaluate`]; the returned coefficients are
+    /// in ascending degree order and have exactly the domain's length.
+    pub fn interpolate(&self, evaluations: &[F]) -> Result<Vec<F>, Error> {
+        if evaluations.len() != self.size {
+            return Err(Error::EvaluationCount {
+                expected: self.size,
+                actual: evaluations.len(),
+            });
+        }
+        let mut values = evaluations.to_vec();
+        ntt::<false, _, _>(
+            self.size,
+            1,
+            &mut Columns {
+                data: [values.as_mut_slice()],
+            },
+        );
+        // The inverse transform yields coefficients in bit-reversed order.
+        reverse_slice(u32::from(self.lg_size), &mut values);
+        Ok(values)
+    }
+
+    /// Return every Lagrange basis polynomial of this domain evaluated at
+    /// `point`.
+    ///
+    /// The result is indexed by domain point, so entry `i` is `L_i(point)`
+    /// where `L_i` is one at `generator^i` and zero at every other domain
+    /// point. Use [`Self::lagrange_basis_at`] when only a few entries are
+    /// needed.
+    pub fn lagrange_basis(&self, point: &F) -> Vec<F> {
+        // The domain contains every m-th root of unity, so a vanishing point
+        // is a domain element and its coefficients form an elementary basis.
+        let vanishing = self.evaluate_vanishing(point);
+        if vanishing == F::zero() {
+            let mut coefficients = vec![F::zero(); self.size];
+            let mut root = F::one();
+            for coefficient in &mut coefficients {
+                if &root == point {
+                    *coefficient = F::one();
+                    break;
+                }
+                root *= &self.generator;
+            }
+            return coefficients;
+        }
+
+        // Store prefix products, then use one inversion to invert every denominator.
+        let mut coefficients = vec![F::zero(); self.size];
+        let mut product = F::one();
+        let mut root = F::one();
+        for coefficient in &mut coefficients {
+            *coefficient = product.clone();
+            let denominator = point.clone() - &root;
+            product *= &denominator;
+            root *= &self.generator;
+        }
+
+        let mut product_inverse = product.inv();
+        root = self.generator_inverse.clone();
+        for coefficient in coefficients.iter_mut().rev() {
+            let denominator = point.clone() - &root;
+            let prefix = coefficient.clone();
+            *coefficient = prefix * &product_inverse;
+            product_inverse *= &denominator;
+            root *= &self.generator_inverse;
+        }
+
+        let scale = vanishing * &self.size_inverse;
+        root = F::one();
+        for coefficient in &mut coefficients {
+            let factor = scale.clone() * &root;
+            *coefficient *= &factor;
+            root *= &self.generator;
+        }
+        coefficients
+    }
+
+    /// Return the Lagrange basis polynomials for `indices` evaluated at `point`.
+    ///
+    /// The output is aligned with `indices`. Uses the closed form
+    /// `L_i(X) = Z_H(X) g^i / (m (X - g^i))` with one batched inversion, so the
+    /// cost is `O(|indices| log m)` rather than the `O(m)` of
+    /// [`Self::lagrange_basis`].
+    pub fn lagrange_basis_at(&self, point: &F, indices: &[u32]) -> Result<Vec<F>, Error> {
+        let mut roots = Vec::with_capacity(indices.len());
+        for &index in indices {
+            if (index as usize) >= self.size {
+                return Err(Error::DomainIndex {
+                    index: index as usize,
+                    size: self.size,
+                });
+            }
+            roots.push(self.generator.exp(&[u64::from(index)]));
+        }
+
+        let vanishing = self.evaluate_vanishing(point);
+        let mut coefficients = vec![F::zero(); indices.len()];
+        if vanishing == F::zero() {
+            // The point is a domain element: the basis is elementary.
+            for (coefficient, root) in coefficients.iter_mut().zip(&roots) {
+                if root == point {
+                    *coefficient = F::one();
+                }
+            }
+            return Ok(coefficients);
+        }
+
+        // Store prefix products, then use one inversion to invert every denominator.
+        let scale = vanishing * &self.size_inverse;
+        let mut product = F::one();
+        for (coefficient, root) in coefficients.iter_mut().zip(&roots) {
+            *coefficient = product.clone();
+            let denominator = point.clone() - root;
+            product *= &denominator;
+        }
+        let mut product_inverse = product.inv();
+        for (coefficient, root) in coefficients.iter_mut().zip(&roots).rev() {
+            let prefix = coefficient.clone();
+            *coefficient = ((scale.clone() * root) * &prefix) * &product_inverse;
+            let denominator = point.clone() - root;
+            product_inverse *= &denominator;
+        }
+        Ok(coefficients)
+    }
+}
+
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
@@ -1466,6 +1755,138 @@ pub mod fuzz {
 mod test {
     use super::*;
     use crate::{algebra::Ring, fields::goldilocks::F};
+
+    fn naive_evaluate(coefficients: &[F], point: &F) -> F {
+        let mut power = F::one();
+        let mut result = F::zero();
+        for coefficient in coefficients {
+            result += &(*coefficient * &power);
+            power *= point;
+        }
+        result
+    }
+
+    #[test]
+    fn domain_evaluation_and_interpolation_match_naive() {
+        let domain = Domain::<F>::new(3).unwrap();
+        assert_eq!(domain.size(), 4);
+        assert_eq!(domain.lg_size(), 2);
+
+        let coefficients = [3u64, 1, 4, 1].map(F::from);
+        let evaluations = domain.evaluate(&coefficients).unwrap();
+        for (index, evaluation) in evaluations.iter().enumerate() {
+            let point = domain.element(index).unwrap();
+            assert!(domain.contains(&point));
+            assert_eq!(domain.evaluate_vanishing(&point), F::zero());
+            assert_eq!(*evaluation, naive_evaluate(&coefficients, &point));
+        }
+        assert!(!domain.contains(&F::zero()));
+        assert_eq!(domain.interpolate(&evaluations).unwrap(), coefficients);
+    }
+
+    #[test]
+    fn domain_evaluation_zero_pads_short_coefficients() {
+        let domain = Domain::<F>::new(8).unwrap();
+        let short = [7u64, 8, 9].map(F::from);
+        let evaluations = domain.evaluate(&short).unwrap();
+        for (index, evaluation) in evaluations.iter().enumerate() {
+            let point = domain.element(index).unwrap();
+            assert_eq!(*evaluation, naive_evaluate(&short, &point));
+        }
+    }
+
+    #[test]
+    fn domain_of_size_one_round_trips() {
+        let domain = Domain::<F>::new(1).unwrap();
+        assert_eq!(domain.size(), 1);
+        let coefficients = [F::from(5u64)];
+        let evaluations = domain.evaluate(&coefficients).unwrap();
+        assert_eq!(evaluations, coefficients);
+        assert_eq!(domain.interpolate(&evaluations).unwrap(), coefficients);
+    }
+
+    #[test]
+    fn lagrange_basis_matches_interpolated_polynomial() {
+        let domain = Domain::<F>::new(4).unwrap();
+        let evaluations = [2u64, 5, 7, 11].map(F::from);
+        let interpolated = domain.interpolate(&evaluations).unwrap();
+
+        let point = F::from(9u64);
+        let basis = domain.lagrange_basis(&point);
+        let combined = evaluations
+            .iter()
+            .zip(&basis)
+            .fold(F::zero(), |acc, (value, coefficient)| {
+                acc + &(*value * coefficient)
+            });
+        assert_eq!(combined, naive_evaluate(&interpolated, &point));
+
+        // At a domain point the basis is elementary.
+        for index in 0..domain.size() {
+            let basis = domain.lagrange_basis(&domain.element(index).unwrap());
+            for (slot, coefficient) in basis.iter().enumerate() {
+                let expected = if slot == index { F::one() } else { F::zero() };
+                assert_eq!(*coefficient, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn targeted_lagrange_basis_matches_full_basis() {
+        let domain = Domain::<F>::new(8).unwrap();
+        let indices = [0u32, 3, 5, 7];
+
+        let point = F::from(23u64);
+        let full = domain.lagrange_basis(&point);
+        let targeted = domain.lagrange_basis_at(&point, &indices).unwrap();
+        for (slot, &index) in indices.iter().enumerate() {
+            assert_eq!(targeted[slot], full[index as usize]);
+        }
+
+        let inside = domain.element(5).unwrap();
+        let targeted = domain.lagrange_basis_at(&inside, &indices).unwrap();
+        for (slot, &index) in indices.iter().enumerate() {
+            let expected = if index == 5 { F::one() } else { F::zero() };
+            assert_eq!(targeted[slot], expected);
+        }
+
+        assert!(domain.lagrange_basis_at(&point, &[]).unwrap().is_empty());
+        assert_eq!(
+            domain.lagrange_basis_at(&point, &[8]),
+            Err(Error::DomainIndex { index: 8, size: 8 })
+        );
+    }
+
+    #[test]
+    fn domain_malformed_sizes_return_errors() {
+        assert_eq!(Domain::<F>::new(0), Err(Error::EmptyDomain));
+        assert_eq!(
+            Domain::<F>::new(usize::MAX),
+            Err(Error::DomainSizeOverflow {
+                requested: usize::MAX
+            })
+        );
+
+        let domain = Domain::<F>::new(4).unwrap();
+        assert_eq!(
+            domain.interpolate(&[F::one()]),
+            Err(Error::EvaluationCount {
+                expected: 4,
+                actual: 1
+            })
+        );
+        assert_eq!(
+            domain.element(4),
+            Err(Error::DomainIndex { index: 4, size: 4 })
+        );
+        assert_eq!(
+            domain.evaluate(&[F::one(); 5]),
+            Err(Error::PolynomialTooLarge {
+                coefficients: 5,
+                domain_size: 4
+            })
+        );
+    }
 
     #[test]
     fn test_reverse_bits() {

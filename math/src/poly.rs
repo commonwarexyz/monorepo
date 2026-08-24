@@ -1,5 +1,6 @@
-use crate::algebra::{
-    Additive, CryptoGroup, Field, Object, Random, Ring, Space, msm_naive, powers,
+use crate::{
+    algebra::{Additive, CryptoGroup, Field, FieldNTT, Object, Random, Ring, Space, msm_naive, powers},
+    ntt::{Domain, Error},
 };
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
@@ -48,6 +49,30 @@ impl<K> Poly<K> {
             .try_collect::<NonEmptyVec<_>>()
             .expect("polynomial must have a least 1 coefficient");
         Self { coeffs }
+    }
+
+    /// Construct a polynomial from coefficients in ascending degree order.
+    ///
+    /// Returns `None` if the iterator is empty: a polynomial always has at
+    /// least its constant coefficient. Trailing zero coefficients are kept;
+    /// see [`Self::trim`].
+    pub fn from_coefficients(coeffs: impl IntoIterator<Item = K>) -> Option<Self> {
+        Some(Self {
+            coeffs: coeffs.into_iter().try_collect::<NonEmptyVec<_>>().ok()?,
+        })
+    }
+
+    /// Construct a polynomial from a vector known to be non-empty.
+    ///
+    /// Panics if `coeffs` is empty, so only pass vectors whose length the
+    /// caller has already established.
+    fn from_vec_unchecked(coeffs: Vec<K>) -> Self {
+        Self::from_coefficients(coeffs).expect("polynomial must have at least 1 coefficient")
+    }
+
+    /// Return the coefficients in ascending degree order.
+    pub fn coefficients(&self) -> &[K] {
+        &self.coeffs
     }
 
     /// The degree of this polynomial.
@@ -385,6 +410,169 @@ impl<G: CryptoGroup> Poly<G> {
     }
 }
 
+// SECTION: dense polynomial arithmetic.
+
+/// Multiplying two polynomials whose product has at most this many
+/// coefficients is cheaper naively than through an NTT.
+const NAIVE_MUL_MAX_OUTPUT: usize = 32;
+
+#[commonware_macros::stability(ALPHA)]
+impl<K: Additive> Poly<K> {
+    /// Drop trailing zero coefficients, leaving at least the constant.
+    ///
+    /// [`Poly`] does not maintain a canonical representation, so a polynomial
+    /// produced by arithmetic may carry high zero coefficients. Equality and
+    /// [`Self::degree_exact`] already ignore them; trim when the coefficient
+    /// slice itself is consumed, for example as the scalars of a
+    /// multi-scalar multiplication.
+    pub fn trim(&mut self) {
+        let zero = K::zero();
+        while self.coeffs.len().get() > 1 && self.coeffs.last() == &zero {
+            self.coeffs.pop();
+        }
+    }
+
+    /// Divide by the vanishing polynomial `X^m - 1` of a domain of size `m`.
+    ///
+    /// Returns `(quotient, remainder)`, where the remainder has `m`
+    /// coefficients.
+    pub fn divide_by_vanishing(&self, m: usize) -> Result<(Self, Self), Error> {
+        if m == 0 {
+            return Err(Error::EmptyDomain);
+        }
+        let len = self.len_usize();
+        if len <= m {
+            return Ok((Self::zero(), self.clone()));
+        }
+
+        // Reduce from the top: X^(m + i) = X^i modulo the vanishing polynomial,
+        // so each high coefficient folds into the coefficient m places below it
+        // and becomes a quotient coefficient.
+        let mut work = self.coeffs.to_vec();
+        let mut quotient = vec![K::zero(); len - m];
+        for high in (m..len).rev() {
+            let factor = work[high].clone();
+            work[high] = K::zero();
+            work[high - m] += &factor;
+            quotient[high - m] = factor;
+        }
+        work.truncate(m);
+
+        Ok((Self::from_vec_unchecked(quotient), Self::from_vec_unchecked(work)))
+    }
+
+    /// Multiply by the vanishing polynomial `X^m - 1` of a domain of size `m`.
+    pub fn mul_vanishing(&self, m: usize) -> Result<Self, Error> {
+        if m == 0 {
+            return Err(Error::EmptyDomain);
+        }
+        let len = self
+            .len_usize()
+            .checked_add(m)
+            .ok_or(Error::PolynomialSizeOverflow)?;
+        let mut coefficients = vec![K::zero(); len];
+        for (index, coefficient) in self.coeffs.iter().enumerate() {
+            coefficients[index] -= coefficient;
+            coefficients[index + m] += coefficient;
+        }
+        Ok(Self::from_vec_unchecked(coefficients))
+    }
+
+    /// Add a multiple of the vanishing polynomial `X^m - 1`.
+    ///
+    /// Returns `self + mask * (X^m - 1)`, which agrees with `self` at every
+    /// point of a domain of size `m`.
+    pub fn mask_vanishing(&self, mask: &Self, m: usize) -> Result<Self, Error> {
+        if m == 0 {
+            return Err(Error::EmptyDomain);
+        }
+        let shifted = mask
+            .len_usize()
+            .checked_add(m)
+            .ok_or(Error::PolynomialSizeOverflow)?;
+        let len = self.len_usize().max(shifted);
+        let mut coefficients = vec![K::zero(); len];
+        for (output, coefficient) in coefficients.iter_mut().zip(&self.coeffs) {
+            *output += coefficient;
+        }
+        for (index, coefficient) in mask.coeffs.iter().enumerate() {
+            coefficients[index] -= coefficient;
+            coefficients[index + m] += coefficient;
+        }
+        Ok(Self::from_vec_unchecked(coefficients))
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<K: Ring> Poly<K> {
+    /// Divide by `X - root` using synthetic division.
+    ///
+    /// Returns `(quotient, remainder)`, where the remainder equals
+    /// `self.eval(&root)`.
+    pub fn divide_by_linear(&self, root: &K) -> (Self, K) {
+        let len = self.len_usize();
+        if len == 1 {
+            return (Self::zero(), self.constant().clone());
+        }
+
+        let mut quotient = vec![K::zero(); len - 1];
+        quotient[len - 2] = self.coeffs[len - 1].clone();
+        for index in (1..len - 1).rev() {
+            quotient[index - 1] = self.coeffs[index].clone() + &(quotient[index].clone() * root);
+        }
+        let remainder = self.coeffs[0].clone() + &(quotient[0].clone() * root);
+        (Self::from_vec_unchecked(quotient), remainder)
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<F: FieldNTT> Poly<F> {
+    /// Multiply two polynomials.
+    ///
+    /// Small products are computed naively; larger ones go through an NTT over
+    /// a radix-2 domain, which costs `O(n log n)` instead of `O(n^2)`.
+    pub fn multiply(&self, other: &Self) -> Result<Self, Error> {
+        let len = self
+            .len_usize()
+            .checked_add(other.len_usize())
+            .and_then(|len| len.checked_sub(1))
+            .ok_or(Error::PolynomialSizeOverflow)?;
+
+        if len <= NAIVE_MUL_MAX_OUTPUT {
+            let mut coefficients = vec![F::zero(); len];
+            for (i, left) in self.coeffs.iter().enumerate() {
+                for (j, right) in other.coeffs.iter().enumerate() {
+                    coefficients[i + j] += &(left.clone() * right);
+                }
+            }
+            return Ok(Self::from_vec_unchecked(coefficients));
+        }
+
+        let domain = Domain::new(len)?;
+        let mut evaluations = domain.evaluate(&self.coeffs)?;
+        for (product, value) in evaluations.iter_mut().zip(domain.evaluate(&other.coeffs)?) {
+            *product *= &value;
+        }
+        let mut coefficients = domain.interpolate(&evaluations)?;
+        coefficients.truncate(len);
+        Ok(Self::from_vec_unchecked(coefficients))
+    }
+
+    /// Evaluate this polynomial at every point of `domain`.
+    ///
+    /// The polynomial must fit in the domain; see [`Domain::evaluate`].
+    pub fn evaluate_over(&self, domain: &Domain<F>) -> Result<Vec<F>, Error> {
+        domain.evaluate(&self.coeffs)
+    }
+
+    /// Interpolate the polynomial taking one value at every point of `domain`.
+    ///
+    /// This is the inverse of [`Self::evaluate_over`].
+    pub fn interpolate(domain: &Domain<F>, evaluations: &[F]) -> Result<Self, Error> {
+        Ok(Self::from_vec_unchecked(domain.interpolate(evaluations)?))
+    }
+}
+
 /// An interpolator allows recovering a polynomial's constant from values.
 ///
 /// This is useful for polynomial secret sharing. There, a secret is stored
@@ -601,8 +789,37 @@ pub mod fuzz {
         TranslateScale(Poly<F>, F),
         CommitEval(Poly<F>, F),
         RootsOfUnityEqNaive(u16),
+        MulMatchesNaive(Poly<GF>, Poly<GF>),
+        DivideByVanishingRoundTrip(Poly<GF>, u8),
+        DivideByLinearRoundTrip(Poly<GF>, GF),
+        MaskVanishingPreservesDomain(Poly<GF>, Poly<GF>, u8),
+        EvaluateInterpolateRoundTrip(Poly<GF>, u8),
+        TrimPreservesPolynomial(Poly<GF>),
         FuzzAdditive,
         FuzzSpaceRing,
+    }
+
+    /// The NTT-capable field the polynomial-arithmetic plans run over.
+    ///
+    /// [`crate::test::F`] does not implement [`crate::algebra::FieldNTT`], so
+    /// these plans use the goldilocks field instead.
+    type GF = crate::fields::goldilocks::F;
+
+    /// Multiply two polynomials by definition, for comparison against
+    /// [`Poly::multiply`].
+    fn naive_multiply(left: &[GF], right: &[GF]) -> Vec<GF> {
+        let mut out = vec![GF::zero(); left.len() + right.len() - 1];
+        for (i, a) in left.iter().enumerate() {
+            for (j, b) in right.iter().enumerate() {
+                out[i + j] += &(*a * b);
+            }
+        }
+        out
+    }
+
+    /// Round `size` up to a radix-2 domain that can hold `minimum` points.
+    fn domain_for(minimum: usize, size: u8) -> Domain<GF> {
+        Domain::new(minimum.max(1 + usize::from(size % 8))).expect("domain is small")
     }
 
     impl Plan {
@@ -708,6 +925,56 @@ pub mod fuzz {
                         );
                     assert_eq!(fast.weights, naive.weights);
                 }
+                Self::MulMatchesNaive(f, g) => {
+                    let expected =
+                        Poly::from_coefficients(naive_multiply(f.coefficients(), g.coefficients()))
+                            .expect("product has at least 1 coefficient");
+                    assert_eq!(f.multiply(&g).unwrap(), expected);
+                }
+                Self::DivideByVanishingRoundTrip(f, size) => {
+                    let m = 1 + usize::from(size % 16);
+                    let (quotient, remainder) = f.divide_by_vanishing(m).unwrap();
+                    assert!(remainder.coefficients().len() <= m);
+                    assert_eq!(quotient.mul_vanishing(m).unwrap() + &remainder, f);
+                }
+                Self::DivideByLinearRoundTrip(f, root) => {
+                    let (quotient, remainder) = f.divide_by_linear(&root);
+                    assert_eq!(remainder, f.eval(&root));
+                    // quotient * (X - root) + remainder == f
+                    let shifted = Poly::from_coefficients(
+                        core::iter::once(GF::zero()).chain(quotient.coefficients().iter().copied()),
+                    )
+                    .expect("shift keeps at least 1 coefficient");
+                    let scaled = quotient * &-root;
+                    let constant =
+                        Poly::from_coefficients([remainder]).expect("constant is non-empty");
+                    assert_eq!(shifted + &scaled + &constant, f);
+                }
+                Self::MaskVanishingPreservesDomain(f, mask, size) => {
+                    let domain = domain_for(f.coefficients().len(), size);
+                    let masked = f.mask_vanishing(&mask, domain.size()).unwrap();
+                    for index in 0..domain.size() {
+                        let point = domain.element(index).unwrap();
+                        assert_eq!(f.eval(&point), masked.eval(&point));
+                    }
+                }
+                Self::EvaluateInterpolateRoundTrip(f, size) => {
+                    let domain = domain_for(f.coefficients().len(), size);
+                    let evaluations = f.evaluate_over(&domain).unwrap();
+                    for (index, evaluation) in evaluations.iter().enumerate() {
+                        assert_eq!(*evaluation, f.eval(&domain.element(index).unwrap()));
+                    }
+                    assert_eq!(Poly::interpolate(&domain, &evaluations).unwrap(), f);
+                }
+                Self::TrimPreservesPolynomial(f) => {
+                    let mut trimmed = f.clone();
+                    trimmed.trim();
+                    assert_eq!(trimmed, f);
+                    assert_eq!(
+                        trimmed.coefficients().len(),
+                        f.degree_exact() as usize + 1
+                    );
+                }
                 Self::FuzzAdditive => {
                     test_suites::fuzz_additive::<Poly<F>>(u)?;
                 }
@@ -793,6 +1060,128 @@ mod test {
             Plan::InterpolateWithZeroPointMiddle,
         ] {
             make_plan(poly.clone()).run(&mut u).unwrap();
+        }
+    }
+
+    /// Concrete worked examples for the dense-arithmetic operations, over an
+    /// NTT-capable field so [`Poly::multiply`] can use both of its paths.
+    mod arithmetic {
+        use super::*;
+        use crate::{fields::goldilocks::F as GF, ntt::Domain};
+
+        fn poly(coeffs: &[u64]) -> Poly<GF> {
+            Poly::from_coefficients(coeffs.iter().copied().map(GF::from)).unwrap()
+        }
+
+        #[test]
+        fn add_sub_multiply_match_worked_examples() {
+            let left = poly(&[1, 2, 3]);
+            let right = poly(&[4, 5]);
+
+            assert_eq!(left.clone() + &right, poly(&[5, 7, 3]));
+            assert_eq!(left.clone() - &right, poly(&[1, 2, 3]) - &poly(&[4, 5]));
+            assert_eq!(left.multiply(&right).unwrap(), poly(&[4, 13, 22, 15]));
+
+            let point = GF::from(7u64);
+            assert_eq!(
+                left.multiply(&right).unwrap().eval(&point),
+                left.eval(&point) * &right.eval(&point)
+            );
+        }
+
+        #[test]
+        fn ntt_multiplication_matches_naive_convolution() {
+            let left = poly(&(1..=20).collect::<Vec<_>>());
+            let right = poly(&(21..=39).collect::<Vec<_>>());
+            assert!(
+                left.coefficients().len() + right.coefficients().len() - 1 > NAIVE_MUL_MAX_OUTPUT,
+                "inputs must be large enough to take the NTT path"
+            );
+
+            let mut expected = vec![GF::zero(); 38];
+            for (i, a) in left.coefficients().iter().enumerate() {
+                for (j, b) in right.coefficients().iter().enumerate() {
+                    expected[i + j] += &(*a * b);
+                }
+            }
+            assert_eq!(
+                left.multiply(&right).unwrap(),
+                Poly::from_coefficients(expected).unwrap()
+            );
+        }
+
+        #[test]
+        fn division_by_vanishing_returns_quotient_and_remainder() {
+            let input = poly(&[3, 4, 0, 0, 2, 3]);
+            let (quotient, remainder) = input.divide_by_vanishing(4).unwrap();
+            assert_eq!(quotient, poly(&[2, 3]));
+            assert_eq!(remainder, poly(&[5, 7]));
+            assert_eq!(quotient.mul_vanishing(4).unwrap() + &remainder, input);
+
+            // A polynomial below the domain degree passes through unchanged.
+            let small = poly(&[1, 2]);
+            let (quotient, remainder) = small.divide_by_vanishing(4).unwrap();
+            assert_eq!(quotient, Poly::zero());
+            assert_eq!(remainder, small);
+
+            assert_eq!(small.divide_by_vanishing(0), Err(Error::EmptyDomain));
+            assert_eq!(small.mul_vanishing(0), Err(Error::EmptyDomain));
+            assert_eq!(small.mask_vanishing(&small, 0), Err(Error::EmptyDomain));
+        }
+
+        #[test]
+        fn synthetic_division_returns_evaluation_remainder() {
+            let root = GF::from(2u64);
+            // 5X^3 - 6X^2 - 5X + 1
+            let input = Poly::from_coefficients([
+                GF::from(1u64),
+                -GF::from(5u64),
+                -GF::from(6u64),
+                GF::from(5u64),
+            ])
+            .unwrap();
+
+            let (quotient, remainder) = input.divide_by_linear(&root);
+            assert_eq!(quotient, poly(&[3, 4, 5]));
+            assert_eq!(remainder, GF::from(7u64));
+            assert_eq!(remainder, input.eval(&root));
+
+            // A constant divides to zero with itself as the remainder.
+            let constant = poly(&[9]);
+            let (quotient, remainder) = constant.divide_by_linear(&root);
+            assert_eq!(quotient, Poly::zero());
+            assert_eq!(remainder, GF::from(9u64));
+        }
+
+        #[test]
+        fn vanishing_mask_preserves_domain_evaluations() {
+            let domain = Domain::<GF>::new(4).unwrap();
+            let input = poly(&[7, 8, 9]);
+            let mask = poly(&[2, 3]);
+            let masked = input.mask_vanishing(&mask, domain.size()).unwrap();
+
+            assert_eq!(masked, poly(&[5, 5, 9, 0, 2, 3]));
+            for index in 0..domain.size() {
+                let point = domain.element(index).unwrap();
+                assert_eq!(input.eval(&point), masked.eval(&point));
+            }
+        }
+
+        #[test]
+        fn trim_drops_trailing_zeroes_but_keeps_the_constant() {
+            let mut padded = poly(&[1, 2, 0, 0]);
+            padded.trim();
+            assert_eq!(padded.coefficients(), poly(&[1, 2]).coefficients());
+
+            let mut zero = poly(&[0, 0, 0]);
+            zero.trim();
+            assert_eq!(zero.coefficients(), &[GF::zero()]);
+            assert_eq!(zero, Poly::zero());
+        }
+
+        #[test]
+        fn from_coefficients_rejects_an_empty_iterator() {
+            assert!(Poly::<GF>::from_coefficients([]).is_none());
         }
     }
 

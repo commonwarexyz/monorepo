@@ -8,7 +8,7 @@
 //! prover pipeline).
 
 use super::{
-    Claim, Error, Proof, Trapdoor, VerifyingKey, poly::Domain, sample_scalar, transcript_challenge,
+    Claim, Error, Proof, Trapdoor, VerifyingKey, sample_scalar, transcript_challenge,
     transcript_challenge_prebound, verifier::evaluate_public_columns,
 };
 use crate::{

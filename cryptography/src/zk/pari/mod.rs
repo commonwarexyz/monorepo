@@ -8,7 +8,6 @@
 mod circuit;
 #[cfg(any(test, feature = "fuzz"))]
 commonware_macros::stability_mod!(ALPHA, pub mod fuzz);
-mod poly;
 mod prover;
 mod setup;
 mod simulator;
@@ -20,7 +19,7 @@ mod verifier;
 use crate::bls12381::primitives::group::{Scalar, ScalarReadCfg};
 pub use circuit::{InputLayout, Relation};
 use commonware_codec::{Encode, Read};
-use commonware_math::algebra::Additive;
+use commonware_math::{algebra::Additive, ntt};
 pub use prover::{prove, prove_prebound};
 use rand_core::CryptoRng;
 pub use setup::{setup, setup_with_trapdoor};
@@ -42,9 +41,9 @@ pub enum Error {
     /// The generic arithmetic circuit could not be converted to Square R1CS.
     #[error("invalid circuit: {0}")]
     Circuit(String),
-    /// A polynomial operation violated a required degree or divisibility bound.
+    /// An evaluation-domain or polynomial operation failed.
     #[error("invalid polynomial: {0}")]
-    Polynomial(String),
+    Polynomial(#[from] ntt::Error),
     /// The supplied object was generated for a different relation.
     #[error("relation does not match the key or witness")]
     RelationMismatch,
@@ -80,12 +79,6 @@ impl From<circuit::Error> for Error {
     }
 }
 
-impl From<poly::Error> for Error {
-    fn from(error: poly::Error) -> Self {
-        Self::Polynomial(error.to_string())
-    }
-}
-
 fn sample_scalar(rng: &mut impl CryptoRng) -> Scalar {
     loop {
         let mut bytes = Zeroizing::new([0u8; 32]);
@@ -104,7 +97,7 @@ fn sample_scalar(rng: &mut impl CryptoRng) -> Scalar {
 /// binds the challenge to the full verification context.
 fn transcript_challenge_prebound(
     transcript: &mut crate::transcript::Transcript,
-    domain: &poly::Domain,
+    domain: &ntt::Domain<Scalar>,
     verifying_key: &VerifyingKey,
     t: &crate::bls12381::primitives::group::G1,
 ) -> Scalar {
@@ -123,7 +116,7 @@ fn transcript_challenge_prebound(
 
 fn transcript_challenge(
     transcript: &mut crate::transcript::Transcript,
-    domain: &poly::Domain,
+    domain: &ntt::Domain<Scalar>,
     verifying_key: &VerifyingKey,
     claim: &Claim,
     t: &crate::bls12381::primitives::group::G1,
