@@ -51,7 +51,9 @@ Verified footguns:
   insufficient. The code divides by a strict lower bound on `log₂3`.
 - **Coefficient uniformity.** The margin is 0.38 bits. A biased `byte % 3`
   (max probability 86/256) yields 127.5 bits — below target. The implementation
-  rejection-samples (bytes < 243 → five exact trits); this is load-bearing.
+  draws whole bucket ids with Lemire multiply-shift rejection on 32-bit words
+  (each id receives exactly `⌊2^32/3^m⌋` accepted words, so ids — and hence
+  the m trits they encode — are exactly uniform); this is load-bearing.
 - **Odd cofactor required.** An order-2 part `T` has `2T = 0`: escape
   probability 2/3 per combination. BLS12-377 G1 (`2^92 | h`) cannot use this
   scheme as-is.
@@ -110,8 +112,9 @@ through the strategy, so they still parallelize).
 ### Why C dominates B
 
 At equal per-round soundness (`B = 3^m` buckets), B checks all `3^m` bucket
-sums where C checks only `m` combinations — C's total check count stays at
-`r·m ≈ 81–85` for any m (the same as A), while B's grows as `rounds × B`. And
+sums where C checks only `m` combinations — C's total check count is exactly
+81 for any m (the round widths sum to 81; the same as A), while B's grows as
+`rounds × B`. And
 C's shared-inversion accumulation removes B's per-bucket inversion chains.
 
 ## Single-threaded engineering
@@ -154,11 +157,11 @@ consisted of:
 
 Per point at n=100k this leaves ~10.8 batch-affine additions
 (9 passes × (1 − nonempty/n + 2·3^9/n)), i.e. ~65 field multiplications,
-against ~1130 multiplications for one exact check — a machine-independent
-ceiling of ~15-17× once per-pass bookkeeping is amortized, approached as n
-grows (the additions per point fall toward 9 and the bookkeeping amortizes).
-The measured gap to that ceiling is per-addition overhead (memory system and
-scheduling), which is why large batches on cache-rich machines get closest.
+against ~1130 multiplications for one exact check — a multiplication-count
+ceiling of ~17× at that size, rising toward ~21× as n grows (the additions
+per point fall toward 9, ~54 multiplications). Measured speedups sit below
+the ceiling by the per-addition memory-system and scheduling overhead, which
+is machine-dependent — large batches on cache-rich machines get closest.
 
 ## Cost accounting (128-bit security)
 
@@ -215,8 +218,14 @@ isolates the strategy — blst's MSM engine runs A's passes ~15% faster):
 | 6 000   | 126.5 ms  | 74.9 / 8.86 ms  | 40.1 / 4.49 (B=16)    | **22.4 / 3.62 ms**    |
 | 100 000 | 2 126 ms  | 1 249 / 138 ms  | 353 / 47.8 (B=256)    | **298 / 49.6 ms**     |
 
+(serial / parallel per cell; original implementation, Apple machine.) C wins
+serially at every size — 7.1× over per-point and 4.2× over A at n=100 000
+(42.8× parallel), with B=256 tying C at n=100 000 parallel because the old
+width cap (`m ≤ 5`, u8 bucket ids) bound there.
+
 Same comparison on the reworked engine (Cascade Lake VM, single-shot; A and B
-emulated on the shipped accumulation engine as before):
+emulated on the shipped accumulation engine as before; serial / parallel per
+cell):
 
 | n       | per-point | A (81 passes)   | B (best of 16/64/256) | C (shipping)          |
 |---------|-----------|-----------------|-----------------------|-----------------------|
@@ -224,12 +233,9 @@ emulated on the shipped accumulation engine as before):
 | 6 000   | 311.9 ms  | 171.9 / 46.6 ms | 91.5 / 23.6 (B=16)    | **41.9 / 13.6 ms**    |
 | 100 000 | 5 159 ms  | 3 027 / 805 ms  | 862 / 239 (B=256)     | **492 / 177 ms**      |
 
-(serial / parallel per cell; original implementation, Apple machine.) C wins
-serially at every size — 7.1× over per-point and 4.2× over A at n=100 000
-(42.8× parallel), with B=256 tying C at n=100 000 parallel because the old
-width cap (`m ≤ 5`, u8 bucket ids) bound there. The rework lifted the cap to
-`m ≤ 10`; at n=100 000 the plan now runs m=9 (9 passes), which is what breaks
-the tie (see the tables above).
+The rework lifted the width cap to `m ≤ 10`; at n=100 000 the plan now runs
+m=9 (9 passes), which is what breaks the old B-tie: C leads B-best by 1.75×
+serial (492 vs 862 ms) and 1.35× parallel (177 vs 239 ms).
 
 External reference: zexe's own batched check (Strategy B with shared
 inversions, arkworks field arithmetic, pre-2021 `[r]P` per-bucket check)
@@ -268,8 +274,9 @@ makes the no-prefilter multi-combination route cost `⌈81/m⌉` passes instead 
 81 MSMs, which is what turns batch SMT on **unmodified BLS12-381** from "slower
 than naive" (their result) into 10.9× serial at n=10⁵ and 12.3× at n=10⁶
 (28.8× / 33× on four cores), at a stronger 2⁻¹²⁸ target — approaching the
-~15-17× serial ceiling set by ~65 field multiplications per point against
-~1130 per exact check. Their binary-coefficient variant also shows how C
+serial multiplication-count ceiling of ~17× at n=10⁵ (~65 field
+multiplications per point against ~1130 per exact check, rising toward ~21×
+as n grows). Their binary-coefficient variant also shows how C
 extends to even-cofactor curves (e.g. BLS12-377): use `{0,1}` coefficient
 vectors (2^m buckets, 1 bit per combination, 128 total) instead of trits.
 

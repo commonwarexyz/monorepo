@@ -22,11 +22,20 @@ explicitly marked TODO. Written 2026-08-19.
 > parallel on 4 cores: 28.8× at n=100k, 33× at n=10⁶. Old-implementation
 > serial on the same VM was 4.4× at n=100k, so the rework is ~2.5× serially.
 > Per point at n=100k the scheme now spends ~10.8 batch-affine additions
-> (~65 field muls) against ~1130 muls per exact check — a machine-independent
-> serial ceiling of ~15-17× that is approached from below as n grows and
-> per-pass bookkeeping amortizes. Current numbers and the engineering
-> breakdown live in `cryptography/BATCHED_SUBGROUP.md`; re-run the
-> `measure_*` harnesses for paper-grade figures on the paper machine.
+> (~65 field muls) against ~1130 muls per exact check — a multiplication-count
+> ceiling of ~17× at that size, rising toward ~21× as n grows; measured
+> results sit below it by the machine-dependent per-addition memory and
+> scheduling overhead. Note the disclaimer scope: besides §2, the cost-model
+> specifics in §4 (its w=3 combine constant, derived optima m=3@1k / m=4@6k /
+> m=5@100k, fallback n≈140, and one-inversion-per-pass count), §7 item 9's
+> memory estimate, and §10's plan/cheat-sheet lines also describe the OLD
+> implementation. Shipped values: plan m=5@1k (r=17), m=7@6k (r=12),
+> m=9@100k and @10⁶ (r=9); fallback below n≈114; exactly 81 checks (short
+> final round); inversions chunked per 2048 operations; combine charged as
+> 2·3^m with CHECK_COST=150 and PASS_OVERHEAD_PERCENT=35. Current numbers and
+> the engineering breakdown live in `cryptography/BATCHED_SUBGROUP.md`;
+> re-run the `measure_*` harnesses for paper-grade figures on the paper
+> machine.
 
 ## 0. Thesis and framing
 

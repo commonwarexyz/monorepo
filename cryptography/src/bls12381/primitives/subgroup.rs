@@ -152,9 +152,9 @@ fn expected_nonempty(n: usize, buckets: usize) -> usize {
 fn round_cost(n: usize, width: u32) -> usize {
     let buckets = 3usize.pow(width);
     n.saturating_sub(expected_nonempty(n, buckets))
-        + n * PASS_OVERHEAD_PERCENT / 100
-        + 2 * buckets
-        + (width as usize) * CHECK_COST
+        .saturating_add(n.saturating_mul(PASS_OVERHEAD_PERCENT) / 100)
+        .saturating_add(2 * buckets)
+        .saturating_add((width as usize) * CHECK_COST)
 }
 
 /// Pick the number of parallel combinations per round, or `None` if checking
@@ -639,6 +639,7 @@ fn digit_marginals(
     batch: &mut AddBatch,
 ) -> Vec<(blst_p1_affine, blst_p1_affine)> {
     let total = 3usize.pow(m);
+    debug_assert!(m >= 1);
     debug_assert_eq!(arena.len(), 2 * total);
     let (front, back) = arena.split_at_mut(total);
     let mut groups = total / 3;
@@ -1123,6 +1124,55 @@ mod tests {
                 .map(|_| (rng.next_u32() as usize % num_buckets) as u16)
                 .collect();
             assert_sums_match(&points, &ids, num_buckets);
+        }
+    }
+
+    #[test]
+    fn chunked_flush_matches_naive() {
+        // Cross the INVERSION_CHUNK mid-pass flush in both call sites, which
+        // the smaller oracle tests never reach: a single 6001-point bucket
+        // makes the first halving pass schedule ~3000 additions with an odd
+        // carry pending, and a fully occupied m=8 bucket space makes each
+        // marginal-merge step schedule 2187 additions (including the
+        // accumulating second step, whose operations read slots the same
+        // pass's flushed chunks completed).
+        let mut rng = test_rng();
+        let mut points = chain_points(6001, &mut rng);
+        // A cancelling pair and an identity land copies among the flushed
+        // arithmetic.
+        points[100] = -points[99];
+        points[200] = G1::zero();
+        let ids = vec![0u16; points.len()];
+        assert_sums_match(&points, &ids, 1);
+
+        const M: u32 = 8;
+        let buckets = 3usize.pow(M);
+        let points = chain_points(buckets, &mut rng);
+        let ids: Vec<u16> = (0..buckets).map(|b| b as u16).collect();
+        let affine = G1::batch_to_affine(&points);
+        let mut batch = AddBatch::default();
+        let mut scratch = SumScratch::default();
+        let mut arena = vec![blst_p1_affine::default(); 2 * buckets];
+        sum_buckets(
+            &affine,
+            &ids,
+            &mut batch,
+            &mut scratch,
+            &mut arena[..buckets],
+        );
+        let marginals = digit_marginals(&mut arena, M, &mut batch);
+        for (j, (ones, twos)) in marginals.iter().enumerate() {
+            let mut expected_ones = G1::zero();
+            let mut expected_twos = G1::zero();
+            for (point, &id) in points.iter().zip(&ids) {
+                match (id as usize / 3usize.pow(j as u32)) % 3 {
+                    1 => expected_ones += point,
+                    2 => expected_twos += point,
+                    _ => {}
+                }
+            }
+            assert_affine_eq(ones, &expected_ones, &format!("flush ones_{j}"));
+            assert_affine_eq(twos, &expected_twos, &format!("flush twos_{j}"));
         }
     }
 
