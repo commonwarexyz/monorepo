@@ -1333,6 +1333,91 @@ mod tests {
         });
     }
 
+    /// The scan advances across multiple read batches on a clean blob longer than the
+    /// per-batch page count.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_multi_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_batches")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Eight full pages plus a partial tail spans three SCAN_PAGES = 3 batches.
+            let total = PAGE_SIZE.get() as usize * 8 + 10;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), total as u64);
+        });
+    }
+
+    /// A batch read that extends past the physical end of the blob falls back to per-page
+    /// reads, which find the stale-short page that ends the prefix before reaching the
+    /// missing region.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_short_tail_fallback() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_short_tail")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
+
+            // Persist three full pages plus a partial fourth and capture the partial
+            // page's physical bytes.
+            let data: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize * 6)
+                .collect();
+            writer
+                .append(&data[..PAGE_SIZE.get() as usize * 3 + 20])
+                .await
+                .unwrap();
+            writer.sync().await.unwrap();
+            let stale = blob
+                .read_at(
+                    physical_page_size * 3,
+                    physical_page_size as usize,
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap()
+                .coalesce();
+            let stale = stale.as_ref().to_vec();
+
+            // Extend to six full pages, persist, then restore page 3 to its stale partial
+            // state and cut the blob mid page 4, as if the extension mostly never reached
+            // disk. The second scan batch (pages 3..6) now extends past the physical end.
+            writer
+                .append(&data[PAGE_SIZE.get() as usize * 3 + 20..])
+                .await
+                .unwrap();
+            writer.sync().await.unwrap();
+            blob.write_at(physical_page_size * 3, stale, WriteOptions::default())
+                .await
+                .unwrap();
+            blob.resize(physical_page_size * 4 + 10).await.unwrap();
+            blob.sync().await.unwrap();
+
+            assert_eq!(
+                writer.recoverable_prefix_len().await.unwrap(),
+                PAGE_SIZE.get() as u64 * 3 + 20
+            );
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_read_many_into_empty() {
         let executor = deterministic::Runner::default();
