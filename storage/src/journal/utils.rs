@@ -12,8 +12,8 @@ pub(crate) async fn corrupt_page(
     page: u64,
     logical_page_size: u64,
 ) {
-    let physical_page_size = logical_page_size + CHECKSUM_RECORD_SIZE;
     // Every valid checksum slot covers byte zero, including a shorter fallback slot.
+    let physical_page_size = logical_page_size + CHECKSUM_RECORD_SIZE;
     let offset = page * physical_page_size;
     let (blob, size) = context.open(partition, &blob.to_be_bytes()).await.unwrap();
     assert!(
