@@ -984,7 +984,7 @@ fn prefetch(slots: &[blst_p1_affine], index: usize) {
         // the address, and changes nothing a program can observe apart from
         // the cache; the index is in range for the slice regardless. The
         // intrinsic wrapping this instruction is still unstable, so it is
-        // written out — `readonly` matches the memory clobber the x86 arm's
+        // written out; `readonly` matches the memory clobber the x86 arm's
         // intrinsic carries.
         unsafe {
             core::arch::asm!(
