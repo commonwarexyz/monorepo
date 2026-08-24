@@ -85,7 +85,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use core::num::NonZeroUsize;
+use core::{future::Future, num::NonZeroUsize};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -170,20 +170,29 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None, max_size, None)
-        .await
+    let (db, ()) = init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES, _, _, _>(
+        context,
+        cfg,
+        None,
+        max_size,
+        None,
+        |_| async { Ok(()) },
+    )
+    .await?;
+    Ok(db)
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
 #[boxed]
-pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
+pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize, O, X, XF>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
-) -> Result<db::Db<F, E, J, I, H, U, N, S>, QmdbError<F>>
+    overlap: X,
+) -> Result<(db::Db<F, E, J, I, H, U, N, S>, O), QmdbError<F>>
 where
     F: Family,
     E: Context + Spawner,
@@ -193,6 +202,9 @@ where
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
+    O: Send + 'static,
+    X: FnOnce(Arc<db::AuthenticatedLog<F, E, J, H, S>>) -> XF,
+    XF: Future<Output = Result<O, crate::qmdb::Error<F>>> + Send + 'static,
 {
     // Keep the selected commit unpublished until every variant-owned reconstruction constraint has
     // been checked against the same retained prefix.
@@ -237,7 +249,7 @@ where
     let index = I::new(context.child("index"), cfg.translator);
     let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
-    db::Db::init_from_log(
+    db::Db::init_from_log_with_overlap(
         snapshot_context,
         index,
         log,
@@ -246,6 +258,7 @@ where
         cfg.init_buffer,
         cfg.init_cache,
         metrics,
+        overlap,
     )
     .await
 }
