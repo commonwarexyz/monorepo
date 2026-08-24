@@ -258,12 +258,13 @@ where
         batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, handle) = db.start_sync().await?;
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        let (db, handle) = self.start_sync().await?;
         let snapshot = Self::snapshot(&db);
         Ok((db, snapshot, handle))
     }
@@ -340,12 +341,13 @@ where
         batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, handle) = db.start_sync().await?;
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        let (db, handle) = self.start_sync().await?;
         let snapshot = Self::snapshot(&db);
         Ok((db, snapshot, handle))
     }
@@ -454,7 +456,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::{DatabaseSet, Single, SyncEngineConfig};
+    use crate::stateful::{
+        db::{DatabaseSet, Single, SyncEngineConfig, split},
+        tests::mocks::apply_and_finalize,
+    };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
@@ -585,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_finalize_commits_fixed_immutable_unjournaled_batches() {
+    fn managed_db_apply_and_finalize_persists_fixed_immutable_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
@@ -604,8 +609,9 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let (db, snapshot, barrier) = DatabaseSet::finalize(db, merkleized).await;
-            assert!(barrier.durable().await, "finalize flush failed");
+            let db = DatabaseSet::apply(db, merkleized).await;
+            let (db, snapshot, barrier) = DatabaseSet::finalize(db).await;
+            assert!(barrier.durable().await, "database sync failed");
 
             let db = db.reader();
             let db = db.read().await;
@@ -625,6 +631,90 @@ mod tests {
     }
 
     #[test]
+    fn managed_db_apply_retains_each_immutable_rewind_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "apply-checkpoints");
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let (writer, reader) = split(db);
+
+            let first = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
+                .await
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .with_metadata(Sha256::hash(&[&[11]]));
+            let first = crate::stateful::db::Unmerkleized::merkleize(first)
+                .await
+                .unwrap();
+            let first_target = sync::CompactTarget {
+                root: first.root(),
+                size: first.bounds().tip.size,
+            };
+            let (writer, ()) = writer
+                .mutate(|db| async move {
+                    let db = <FixedDb as ManagedDb<_>>::apply(db, first).await.unwrap();
+                    (db, ())
+                })
+                .await;
+
+            let second = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
+                .await
+                .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
+                .with_metadata(Sha256::hash(&[&[22]]));
+            let second = crate::stateful::db::Unmerkleized::merkleize(second)
+                .await
+                .unwrap();
+            let (writer, _snapshot, sync) = apply_and_finalize(writer, second).await;
+            sync.await.expect("database sync failed");
+            drop(writer);
+            drop(reader);
+
+            let database = FixedDb::init(
+                context.child("reopen"),
+                fixed_config(&context, "apply-checkpoints"),
+            )
+            .await
+            .unwrap();
+            let database =
+                <FixedDb as ManagedDb<_>>::rewind_to_target(database, first_target.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(
+                <FixedDb as ManagedDb<_>>::sync_target(&database),
+                first_target,
+            );
+        });
+    }
+
+    #[test]
+    fn database_set_rewind_persists_aligned_immutable_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "aligned-rewind");
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = Single::from(db);
+
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(DatabaseSet::readers(&db))
+                .await
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .with_metadata(Sha256::hash(&[&[3]]));
+            let batch = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+            let db = DatabaseSet::<deterministic::Context>::apply(db, batch).await;
+            let target = DatabaseSet::<deterministic::Context>::committed_targets(&db).await;
+            let db =
+                DatabaseSet::<deterministic::Context>::rewind_to_targets(db, target.clone()).await;
+            drop(db);
+
+            let database = FixedDb::init(
+                context.child("reopen"),
+                fixed_config(&context, "aligned-rewind"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&database), target,);
+        });
+    }
+
+    #[test]
     fn state_sync_fetches_fixed_immutable_compact_state() {
         deterministic::Runner::default().start(|context| async move {
             let source = FixedDb::init(context.child("source"), fixed_config(&context, "source"))
@@ -638,7 +728,7 @@ mod tests {
                 .merkleize(&source, Some(metadata), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
 
             let target = source.target();
@@ -844,7 +934,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
             let mut db = db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
@@ -857,7 +947,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
             let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
@@ -891,7 +981,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }

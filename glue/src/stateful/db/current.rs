@@ -544,13 +544,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -657,13 +661,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -852,13 +860,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -974,13 +986,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -1239,15 +1255,16 @@ mod tests {
         <Single<D> as DatabaseSet<deterministic::Context>>::new_batches(&db.readers()).await
     }
 
-    /// Finalize `batch` into `set` and wait for the deferred flush, boxing the future
-    /// ([`ManagedDb::finalize`] embeds the database in its state machine).
+    /// Apply `batch` into `set`, start durability, and wait for the deferred flush, boxing
+    /// the future ([`ManagedDb::finalize`] embeds the database in its state machine).
     #[boxed]
-    async fn finalize<D: ManagedDb<deterministic::Context> + 'static>(
+    async fn apply_and_finalize<D: ManagedDb<deterministic::Context> + 'static>(
         db: Single<D>,
         batch: D::Merkleized,
     ) -> Single<D> {
-        let (db, _, barrier) = DatabaseSet::finalize(db, batch).await;
-        assert!(barrier.durable().await, "finalize flush failed");
+        let db = DatabaseSet::apply(db, batch).await;
+        let (db, _, barrier) = DatabaseSet::finalize(db).await;
+        assert!(barrier.durable().await, "database sync failed");
         db
     }
 
@@ -1361,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_fixed_managed_db_finalizes_batch_and_proves_exclusion() {
+    fn ordered_fixed_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-fixed-managed-db", &context);
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
@@ -1382,8 +1399,9 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let (db, snapshot, barrier) = DatabaseSet::finalize(db, merkleized).await;
-            assert!(barrier.durable().await, "finalize flush failed");
+            let db = DatabaseSet::apply(db, merkleized).await;
+            let (db, snapshot, barrier) = DatabaseSet::finalize(db).await;
+            assert!(barrier.durable().await, "database sync failed");
 
             let db = db.reader();
             assert_eq!(db.read().await.root(), expected_root);
@@ -1430,7 +1448,7 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
                 .await
                 .unwrap();
-            let db = finalize::<OrderedFixedDb>(db, merkleized).await;
+            let db = apply_and_finalize::<OrderedFixedDb>(db, merkleized).await;
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
             let read_keys = [key(1), key(2), key(999)];
@@ -1484,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_variable_managed_db_finalizes_batch_and_proves_exclusion() {
+    fn ordered_variable_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
             let config = variable_config("ordered-variable-managed-db", &context);
             let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config)
@@ -1505,7 +1523,7 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let db = finalize::<OrderedVariableDb>(db, merkleized).await;
+            let db = apply_and_finalize::<OrderedVariableDb>(db, merkleized).await;
 
             let db = db.reader();
             assert_eq!(db.read().await.root(), expected_root);
@@ -1594,7 +1612,7 @@ mod tests {
             let merkleized1 = crate::stateful::db::Unmerkleized::merkleize(batch1)
                 .await
                 .unwrap();
-            let db = finalize::<OrderedFixedDb>(db, merkleized1).await;
+            let db = apply_and_finalize::<OrderedFixedDb>(db, merkleized1).await;
             let target_after_first = db.committed_targets().await;
 
             let key2 = Sha256::hash(&[b"key2"]);
@@ -1607,7 +1625,7 @@ mod tests {
             let merkleized2 = crate::stateful::db::Unmerkleized::merkleize(batch2)
                 .await
                 .unwrap();
-            let db = finalize::<OrderedFixedDb>(db, merkleized2).await;
+            let db = apply_and_finalize::<OrderedFixedDb>(db, merkleized2).await;
 
             let db = db.rewind_to_targets(target_after_first.clone()).await;
             let target_after_rewind = db.committed_targets().await;

@@ -28,10 +28,11 @@ fn parked_set() -> (Single<TestDb>, FlushControl) {
     (Single::from(TestDb::gated(control.clone())), control)
 }
 
-/// Finalize an empty batch, pinning the set's environment to the
-/// deterministic runtime ([`TestDb`] works in any environment).
+/// Apply an empty batch and start its durability, pinning the set's environment
+/// to the deterministic runtime ([`TestDb`] works in any environment).
 async fn finalize(set: Single<TestDb>) -> (Single<TestDb>, u64, Barrier) {
-    DatabaseSet::<deterministic::Context>::finalize(set, TestMerkleized).await
+    let set = DatabaseSet::<deterministic::Context>::apply(set, TestMerkleized).await;
+    DatabaseSet::<deterministic::Context>::finalize(set).await
 }
 
 /// Await `future` against a deterministic timeout, `Ok` if it completed and

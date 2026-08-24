@@ -347,6 +347,7 @@ where
         processor = processor.publish_snapshot(&mut snapshot_publisher).await;
 
         let mut pending_prune = None;
+        let mut pending_acknowledgements = Vec::new();
 
         // One signal for the whole handoff. Re-creating it per block would
         // record an extra auditor event on the deterministic runtime each time.
@@ -373,39 +374,54 @@ where
                             );
                             return;
                         },
-                        driven = processor.finalize(context.as_present(), block.as_ref()) => {
+                        driven = processor.finalize(context.as_present(), block.as_ref(), false) => {
                             (processor, applied) = driven;
                         },
                     }
-                    let Some(Applied {
-                        snapshots,
-                        barrier,
-                        prune,
-                    }) = applied
-                    else {
+                    let Some(Applied { prune, .. }) = applied else {
                         panic!("sync handoff block cannot be a duplicate")
                     };
-
-                    // The processing loop's flush pool does not exist yet, so observe the
-                    // deferred flush inline. Keep state-sync metadata in progress until every
-                    // handoff block is durable.
-                    if !barrier.durable().await {
-                        return;
-                    }
-                    snapshot_publisher.publish(block.height(), snapshots);
-                    acknowledgement.acknowledge();
+                    pending_acknowledgements.push(acknowledgement);
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
-                    debug!(
-                        height = block.height().get(),
-                        "persisted finalized database batch during sync handoff"
-                    );
                 }
             }
         }
 
-        // Every applied handoff is durable, so completion can advance through the last one before
-        // pruning.
+        // Applied handoffs extend beyond the state-sync artifact. Release their acknowledgements
+        // only after one barrier makes the entire suffix durable.
+        if !pending_acknowledgements.is_empty() {
+            let (snapshots, barrier);
+            select! {
+                _ = &mut shutdown => {
+                    warn!(
+                        height = completed_height.get(),
+                        "exiting mid-handoff on shutdown"
+                    );
+                    return;
+                },
+                driven = processor.sync() => {
+                    (processor, snapshots, barrier) = driven;
+                },
+            }
+
+            // The snapshots serve immediately; peers verify what they fetch
+            // against a finalized root, so serving safely runs ahead of disk.
+            snapshot_publisher.publish(completed_height, snapshots);
+            if !barrier.durable().await {
+                return;
+            }
+            for acknowledgement in pending_acknowledgements {
+                acknowledgement.acknowledge();
+            }
+            debug!(
+                height = completed_height.get(),
+                "persisted finalized database batches during sync handoff"
+            );
+        }
+
+        // Completion is an irreversible startup floor. Persist it only after every handoff through
+        // `completed_height` is durable and before pruning or exposing the databases.
         let _ = sync_metadata.set_complete(completed_height).await;
         // Defensive only. The handoff applies at most a full ack window, one short of
         // what the prune cadence needs, so this fires only in tests that feed
@@ -744,9 +760,9 @@ mod tests {
     }
 
     #[test]
-    fn transition_marks_complete_after_handoff_is_durable() {
+    fn transition_coalesces_handoff_durability_before_completion() {
         deterministic::Runner::default().start(|context| async move {
-            // Gate the sync-complete metadata write and the handoff batch's flush independently.
+            // Gate the sync-complete metadata write and the handoff flush independently.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
                 inner: context.child("delayed"),
@@ -805,27 +821,22 @@ mod tests {
             );
             assert_eq!(
                 subscriber.latest(),
-                Some(0),
-                "the synced state must serve first, before any handoff flush",
+                Some(2),
+                "the captured handoff suffix must serve ahead of its flush",
             );
             let first_flush = control.flushes.lock().remove(0);
             first_flush
                 .send(Ok(()))
-                .expect("first handoff must be waiting on its database flush");
-            while control.flushes.lock().is_empty() {
+                .expect("handoff must be waiting on its database flush");
+            while control.flushes.lock().is_empty() && poll!(&mut second_waiter).is_pending() {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert!(poll!(&mut first_waiter).is_ready());
-            assert!(poll!(&mut second_waiter).is_pending());
-            assert_eq!(
-                subscriber.latest(),
-                Some(1),
-                "each handoff block's snapshots must serve once its flush is durable",
+            assert!(poll!(&mut second_waiter).is_ready());
+            assert!(
+                control.flushes.lock().is_empty(),
+                "one database flush must cover the complete handoff prefix",
             );
-            let second_flush = control.flushes.lock().remove(0);
-            second_flush
-                .send(Ok(()))
-                .expect("second handoff must be waiting on its database flush");
 
             gate.blocked
                 .await
@@ -852,9 +863,8 @@ mod tests {
     fn aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
-            let databases = Single::from(TestDb::with_finalize(Handle::ready(Err(
-                RuntimeError::Aborted,
-            ))));
+            let databases =
+                Single::from(TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))));
             harness
                 .syncing
                 .artifact

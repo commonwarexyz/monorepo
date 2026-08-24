@@ -296,13 +296,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -395,13 +399,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -508,7 +516,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::{db::split, tests::mocks::finalize};
+    use crate::stateful::{db::split, tests::mocks::apply_and_finalize};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -567,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_finalize_commits_fixed_keyless_batches() {
+    fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
@@ -582,8 +590,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (_writer, snapshot, durability) = finalize(writer, merkleized).await;
-            durability.await.expect("finalize flush failed");
+            let (_writer, snapshot, durability) = apply_and_finalize(writer, merkleized).await;
+            durability.await.expect("database sync failed");
 
             let db = reader.read().await;
             assert_eq!(
@@ -671,8 +679,8 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            let (writer, _, durability) = finalize(writer, merkleized).await;
-            durability.await.expect("finalize flush failed");
+            let (writer, _, durability) = apply_and_finalize(writer, merkleized).await;
+            durability.await.expect("database sync failed");
 
             // A fresh batch without an explicit floor must commit at the raised
             // floor instead of regressing it to zero.
@@ -683,8 +691,8 @@ mod tests {
                 .await
                 .unwrap();
             let fork = MerkleizedTrait::new_batch(&merkleized);
-            let (writer, _, durability) = finalize(writer, merkleized).await;
-            durability.await.expect("finalize flush failed");
+            let (writer, _, durability) = apply_and_finalize(writer, merkleized).await;
+            durability.await.expect("database sync failed");
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*reader.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
 
@@ -693,8 +701,8 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(fork)
                 .await
                 .unwrap();
-            let (_writer, _, durability) = finalize(writer, merkleized).await;
-            durability.await.expect("finalize flush failed");
+            let (_writer, _, durability) = apply_and_finalize(writer, merkleized).await;
+            durability.await.expect("database sync failed");
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*reader.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
         });

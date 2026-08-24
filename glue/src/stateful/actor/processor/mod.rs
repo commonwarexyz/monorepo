@@ -13,10 +13,11 @@
 //!   inserting each intermediate result into the pending map.
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
-//!   databases, start flushing them (durability is reported via [`Barrier`]),
-//!   capture a snapshot of the database set for publication (returned in
+//!   databases (durability is reported via [`Barrier`]), capture a snapshot
+//!   of the database set for publication when durability starts (returned in
 //!   [`Applied`]), then retain only pending descendants of the finalized
-//!   winner.
+//!   winner. The actor coordinates durability separately so multiple
+//!   finalizations can be covered by one storage sync.
 //!
 //! - Maintenance -- [`Processor::prune`] runs due prunes and
 //!   [`Processor::publish_snapshot`] publishes fresh snapshots afterwards.
@@ -391,11 +392,12 @@ impl Cancellation for Verification {
 
 /// State applied for a newly finalized block.
 pub(super) struct Applied<T, S> {
-    /// A snapshot of the database set, captured at the apply boundary.
-    pub(super) snapshots: S,
+    /// A snapshot of the database set, captured when this block started durability.
+    /// `None` while an earlier sync is still active.
+    pub(super) snapshots: Option<S>,
 
-    /// Proves the snapshot durable. Resolves once every database flush completes.
-    pub(super) barrier: Barrier,
+    /// Durability started for this block, when no earlier sync was active.
+    pub(super) barrier: Option<Barrier>,
 
     /// Prune made due by this finalization.
     pub(super) prune: DeferredPrune<T>,
@@ -592,6 +594,14 @@ where
         self
     }
 
+    /// Capture snapshots of every applied batch and start one durability
+    /// barrier covering them.
+    pub(super) async fn sync(mut self) -> (Self, SnapshotsOf<A::Databases, E>, Barrier) {
+        let (snapshots, barrier);
+        (self.databases, snapshots, barrier) = self.databases.finalize().await;
+        (self, snapshots, barrier)
+    }
+
     #[cfg(test)]
     fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
         self.execution.last_processed()
@@ -635,7 +645,7 @@ where
             .await
     }
 
-    /// Apply finalized state, start persisting it, and prune dead in-memory forks.
+    /// Apply finalized state and prune dead in-memory forks.
     ///
     /// Returns the processor, the snapshot to publish, the barrier proving that
     /// snapshot durable, and any prune now due. [`None`] means the block was
@@ -648,6 +658,7 @@ where
         mut self,
         context: &E,
         block: &A::Block,
+        start_sync: bool,
     ) -> (
         Self,
         Option<Applied<PendingSyncTargets<A, E>, SnapshotsOf<A::Databases, E>>>,
@@ -711,8 +722,14 @@ where
             }
         };
 
-        let (snapshots, barrier);
-        (self.databases, snapshots, barrier) = self.databases.finalize(batch).await;
+        self.databases = self.databases.apply(batch).await;
+        let (snapshots, barrier) = if start_sync {
+            let (snapshots, barrier);
+            (self.databases, snapshots, barrier) = self.databases.finalize().await;
+            (Some(snapshots), Some(barrier))
+        } else {
+            (None, None)
+        };
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -1401,8 +1418,8 @@ mod tests {
         Application, ExecutionError, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{
-            Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single, SyncTargetsOf,
-            UnmerkleizedOf,
+            Anchor, Barrier, DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single,
+            SyncTargetsOf, UnmerkleizedOf,
         },
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -1440,6 +1457,16 @@ mod tests {
         },
         time::Duration,
     };
+
+    async fn assert_durable(barrier: Option<Barrier>) {
+        assert!(
+            barrier
+                .expect("finalization must start durability")
+                .durable()
+                .await,
+            "database sync must complete",
+        );
+    }
 
     type TestContext = ConsensusContext<Digest, ed25519::PublicKey>;
 
@@ -1949,7 +1976,7 @@ mod tests {
             block
         }
 
-        /// Finalize `block` and wait for its deferred flush.
+        /// Finalize `block` and wait for its database sync.
         /// Returns whether the block was newly applied (`false` for a
         /// duplicate report).
         #[boxed]
@@ -1957,12 +1984,12 @@ mod tests {
             let applied;
             (self.processor, applied) = self
                 .processor
-                .finalize(self.context_cell.as_present(), &block)
+                .finalize(self.context_cell.as_present(), &block, true)
                 .await;
             let Some(Applied { barrier, .. }) = applied else {
                 return (self, false);
             };
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
             (self, true)
         }
 
@@ -1977,10 +2004,10 @@ mod tests {
             let applied;
             (self.processor, applied) = self
                 .processor
-                .finalize(self.context_cell.as_present(), &block)
+                .finalize(self.context_cell.as_present(), &block, true)
                 .await;
             let Applied { barrier, prune, .. } = applied.expect("finalized block must apply");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
             (self, prune)
         }
 
@@ -2237,7 +2264,7 @@ mod tests {
                 Some(ApplicationProbe::new(winner.digest(), [gate]));
             let verifier = harness.processor.verifier();
             let processor = harness.processor;
-            let finalize = processor.finalize(harness.context_cell.as_present(), &winner);
+            let finalize = processor.finalize(harness.context_cell.as_present(), &winner, true);
             futures::pin_mut!(finalize);
             select! {
                 _ = &mut finalize => panic!("finalize must park on the probe"),
@@ -2352,11 +2379,11 @@ mod tests {
             let (gate, mut started, release) = apply_gate();
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(winner.digest(), [gate]));
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &winner),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &winner,
+                true,
+            ));
             select! {
                 _ = &mut finalize => panic!("finalize completed before its finalized hook returned"),
                 result = &mut started => result.expect("finalized hook should start"),
@@ -2372,7 +2399,7 @@ mod tests {
                 .expect("finalized hook should remain active");
             let (_processor, applied) = finalize.await;
             let Applied { barrier, .. } = applied.expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
         });
     }
 
@@ -2386,11 +2413,11 @@ mod tests {
             let (gate, mut started, release) = apply_gate();
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(block.digest(), [gate]));
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &block),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &block,
+                true,
+            ));
             select! {
                 _ = &mut finalize => {
                     panic!("finalize completed before its finalized hook returned");
@@ -2405,7 +2432,7 @@ mod tests {
                 .expect("finalized hook should remain active");
             let (_processor, applied) = finalize.await;
             let Applied { barrier, .. } = applied.expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
         });
     }
 

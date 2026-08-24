@@ -1,12 +1,12 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::mailbox::Verification,
+        core::mailbox::{Verification, WeakAncestry},
         processor::{VerificationResult, Verifier},
     },
 };
 use commonware_consensus::marshal::{
-    ancestry::{BlockProvider, BoxedAncestry},
+    ancestry::BlockProvider,
     core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -19,6 +19,10 @@ use std::future::Future;
 use tracing::{Instrument as _, Span, info_span};
 
 /// A verification request handed to a job.
+///
+/// The request carries a non-owning ancestry handle; scheduling upgrades it to
+/// an independent cursor, so caller cancellation releases the backing blocks
+/// even while the request waits in the mailbox.
 pub(super) struct Request<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -26,7 +30,7 @@ where
 {
     pub(super) span: Span,
     pub(super) context: (E, A::Context),
-    pub(super) ancestry: BoxedAncestry<A::Block>,
+    pub(super) ancestry: WeakAncestry<A::Block>,
     pub(super) verification: Verification,
 }
 
@@ -60,6 +64,11 @@ where
         V: Variant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
+        // Upgrade to an independent cursor. A canceled caller cannot provide
+        // one, so the request is dropped and its response channel closes.
+        let Some(ancestry) = request.ancestry.upgrade() else {
+            return;
+        };
         let marshal = self.marshal.clone();
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
         self.jobs.push(
@@ -69,7 +78,7 @@ where
                         &request.context.0,
                         marshal,
                         request.context.1,
-                        request.ancestry,
+                        ancestry,
                         &mut request.verification,
                     )
                     .await;

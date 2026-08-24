@@ -472,8 +472,8 @@ where
 }
 
 /// Implement [`ManagedDb`] for unordered QMDB databases with fixed-size values.
-/// `finalize` applies the merkleized batch's changeset and starts
-/// persisting it, reporting durability on the returned handle.
+/// `apply` applies the merkleized batch's changeset; `finalize` starts
+/// persisting applied state, reporting durability on the returned handle.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -544,13 +544,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -664,13 +668,17 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(
-        self,
-        batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        let (db, snapshot) = db.snapshot().await?;
         Ok((db, Arc::new(snapshot), handle))
     }
 
@@ -880,8 +888,9 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
                 .await
                 .unwrap();
-            let (db, _, barrier) = DatabaseSet::finalize(db, merkleized).await;
-            assert!(barrier.durable().await, "finalize flush failed");
+            let db = DatabaseSet::apply(db, merkleized).await;
+            let (db, _, barrier) = DatabaseSet::finalize(db).await;
+            assert!(barrier.durable().await, "database sync failed");
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
             let read_keys = [key(1), key(2), key(999)];
@@ -946,12 +955,12 @@ mod tests {
         Sequential,
     >;
 
-    /// `finalize` must return, with the batch readable through the set's
-    /// readers, while its flush is still parked at the storage layer.
-    /// Durability is reported only on the returned barrier, and the captured
-    /// snapshot must already prove the post-apply state.
+    /// `apply` must expose the batch through the set's readers immediately.
+    /// `finalize` must return while its flush is still parked at the storage
+    /// layer, reporting durability only on the returned barrier, and the
+    /// captured snapshot must already prove the applied state.
     #[test]
-    fn finalize_defers_flush_to_returned_handle() {
+    fn apply_does_not_finalize() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -975,17 +984,26 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            let (db, snapshot, barrier) = DatabaseSet::finalize(db, merkleized).await;
+            let starts = pending.starts();
+            let db = DatabaseSet::apply(db, merkleized).await;
 
-            // The flush is parked, yet the batch is already readable.
+            // Applying starts no durability work, yet the batch is already readable.
+            assert_eq!(pending.starts(), starts, "apply must not start durability");
+            assert_eq!(
+                db.reader().read().await.get(&key).await.unwrap(),
+                Some(value)
+            );
+
+            let (db, snapshot, barrier) = DatabaseSet::finalize(db).await;
+
+            // The flush is parked; durability is reported only on the barrier.
             assert!(
                 pending.starts() > pending.completions(),
                 "finalize must leave its flush parked",
             );
             let db = db.reader();
-            assert_eq!(db.read().await.get(&key).await.unwrap(), Some(value));
 
-            // The snapshot freezes at the post-apply boundary and proves the
+            // The snapshot freezes at the applied boundary and proves the
             // just-applied state, independent of durability.
             let size = Location::new(snapshot.bounds().end);
             assert_eq!(
@@ -1011,7 +1029,7 @@ mod tests {
             assert_eq!(
                 root,
                 db.read().await.root(),
-                "snapshot must prove the post-apply root"
+                "snapshot must prove the applied root"
             );
 
             release_pending_syncs(&pending);
