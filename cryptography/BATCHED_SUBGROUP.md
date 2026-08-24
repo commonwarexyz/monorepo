@@ -169,25 +169,27 @@ Serial (single-threaded) and parallel (4 threads), against per-point checking:
 
 | n         | per-point | C serial          | C parallel         |
 |-----------|-----------|-------------------|--------------------|
-| 200       | 10.5 ms   | 7.2 ms (1.5×)     | 3.2 ms (3.3×)      |
-| 1 000     | 54.0 ms   | 12.7 ms (4.2×)    | 5.4 ms (10.0×)     |
-| 6 000     | 318 ms    | 39.2 ms (8.1×)    | 19.3 ms (16.5×)    |
-| 100 000   | 5.21 s    | 430 ms (12.1×)    | 174 ms (29.9×)     |
-| 300 000   | 15.6 s    | 1.11 s (14.1×)    | 465 ms (33.6×)     |
-| 1 000 000 | 53.0 s    | **3.52 s (15.1×)**| 1.56 s (34.0×)     |
-| 3 000 000 | 157 s     | 10.8 s (14.5×)    | 4.42 s (35.6×)     |
+| 200       | 10.5 ms   | 7.3 ms (1.4×)     | 2.4 ms (4.3×)      |
+| 1 000     | 52.0 ms   | 12.5 ms (4.2×)    | 4.4 ms (11.9×)     |
+| 6 000     | 321 ms    | 39.5 ms (8.1×)    | 14.3 ms (22.5×)    |
+| 100 000   | 5.24 s    | 429 ms (12.2×)    | 166 ms (31.6×)     |
+| 300 000   | 15.8 s    | 1.13 s (14.0×)    | 444 ms (35.5×)     |
+| 1 000 000 | 52.3 s    | **3.57 s (14.6×)**| 1.47 s (35.6×)     |
+| 3 000 000 | 163 s     | 10.5 s (15.5×)    | 4.35 s (37.4×)     |
 
-Run-to-run spread on this (shared, virtualized) machine is ±5% — the large
-sizes have measured anywhere from 14.5× to 15.3× serial across runs — so read
-them as "about 15× serial", not as a sharp figure. The `n = 200` row sits just
-above the per-point fallback threshold: below it the cost model declines to
-batch at all.
+Run-to-run spread on this (shared, virtualized) machine is ±5%: across runs the
+million- and three-million-point rows have measured anywhere from 14.5× to 16.4×
+serial, so read them as "about 15× serial", not as a sharp figure. The
+`n = 200` row sits just above the per-point fallback threshold; below it the
+cost model declines to batch at all.
 
 For reference, the previous implementation of this same strategy measured
 4.7× serial at n = 100 000 on this machine (1.15 s), against 430 ms now.
 
-Chosen plans: 14 rounds of width 6/5 at n = 200, 13 rounds of width 7/6 at
-n = 6 000, 9 rounds of width 9 from n = 100 000 up.
+Chosen plans: 14 rounds of width 6/5 at n = 200, 16 rounds of width 6/5 at
+n = 1 000, 13 rounds of width 7/6 at n = 6 000, and 9 rounds of width 9 from
+n = 100 000 up — nine being the floor, since the slot budget caps the width at
+nine and `ceil(81/9) = 9`.
 
 Phase breakdown at n = 10⁶ (3.5 s total): 3.2 s in the nine rounds, 0.38 s
 converting the batch to affine, 0.04 s drawing coefficients. The conversion is
