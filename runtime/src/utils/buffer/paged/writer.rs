@@ -883,32 +883,78 @@ impl<B: Blob> Writer<B> {
     /// Expects all appended bytes to have reached the blob (as after recovery): a partial page
     /// still buffered in this writer is unreadable from the blob and fails the scan.
     pub async fn recoverable_prefix_len(&self) -> Result<u64, Error> {
+        /// Physical pages fetched per blob read while scanning. Batched reads keep the
+        /// scan bounded by read throughput rather than per-page round trips. Small in
+        /// tests so ordinary blobs exercise batch boundaries.
+        #[cfg(not(test))]
+        const SCAN_PAGES: u64 = 256;
+        #[cfg(test)]
+        const SCAN_PAGES: u64 = 3;
         let logical_page_size = self.cache_ref.page_size();
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
         let mut valid_len = 0u64;
-        for page in 0..total_pages {
+        let mut page = 0u64;
+        while page < total_pages {
+            let batch = SCAN_PAGES.min(total_pages - page);
+            let start = page
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            let len = batch
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
             // Recovery may replay the validated prefix immediately, so use the
             // default cache policy.
-            match super::get_page_with_checksum_from_blob(
-                &self.blob,
-                page,
-                logical_page_size,
-                ReadOptions::default(),
-            )
-            .await
-            {
-                Ok((logical, _)) => {
-                    let len = logical.len() as u64;
-                    valid_len += len;
-                    // A partial page can only legitimately be the last one, so stop here.
-                    if len < logical_page_size {
-                        break;
+            let Ok(buf) = self
+                .blob
+                .read_at(start, len as usize, ReadOptions::default())
+                .await
+            else {
+                // A batch read can fail on a physically short tail that per-page
+                // validation would never reach (an earlier page in the batch may
+                // already end the prefix), so fall back to per-page reads.
+                for page in page..page + batch {
+                    match super::get_page_with_checksum_from_blob(
+                        &self.blob,
+                        page,
+                        logical_page_size,
+                        ReadOptions::default(),
+                    )
+                    .await
+                    {
+                        Ok((logical, _)) => {
+                            let len = logical.len() as u64;
+                            valid_len += len;
+                            // A partial page can only legitimately be the last one, so
+                            // stop here.
+                            if len < logical_page_size {
+                                return Ok(valid_len);
+                            }
+                        }
+                        // First torn/invalid page: the contiguous valid prefix ends here.
+                        Err(Error::InvalidChecksum) => return Ok(valid_len),
+                        Err(err) => return Err(err),
                     }
                 }
+                page += batch;
+                continue;
+            };
+            let buf = buf.coalesce();
+            for chunk in buf.as_ref().chunks(physical_page_size as usize) {
                 // First torn/invalid page: the contiguous valid prefix ends here.
-                Err(Error::InvalidChecksum) => break,
-                Err(err) => return Err(err),
+                let Some(checksum) = Checksum::validate_page(chunk) else {
+                    return Ok(valid_len);
+                };
+                let len = u64::from(checksum.len);
+                valid_len += len;
+                // A partial page can only legitimately be the last one, so stop here.
+                if len < logical_page_size {
+                    return Ok(valid_len);
+                }
             }
+            page += batch;
         }
         Ok(valid_len)
     }
