@@ -110,14 +110,14 @@ const fn combinations_for_security(security: usize) -> usize {
 /// Approximate cost of one [`G1::in_subgroup`] check, in units of one
 /// batch-affine point addition.
 ///
-/// Machine-rough (measured ~50us per check against ~280ns per addition on an
+/// Machine-rough (measured ~50us per check against ~330ns per addition on an
 /// x86 server); it only steers the cost model's choice of `m` and the
 /// per-point fallback, never soundness.
-const CHECK_COST: usize = 180;
+const CHECK_COST: usize = 150;
 
 /// Modeled per-point bookkeeping cost of one accumulation pass (bucket
 /// sorting and id handling), as a percentage of one batch-affine addition.
-const PASS_OVERHEAD_PERCENT: usize = 50;
+const PASS_OVERHEAD_PERCENT: usize = 35;
 
 /// Maximum combinations per round.
 ///
@@ -239,9 +239,9 @@ pub fn batch_in_g1(
     let id_sets: Vec<(u32, Vec<u16>)> = round_widths(m, rounds, combinations)
         .map(|width| {
             let buckets = 3u32.pow(width);
-            let threshold = rejection_threshold(buckets);
+            let cutoff = rejection_cutoff(buckets);
             let ids = (0..points.len())
-                .map(|_| source.next(buckets, threshold))
+                .map(|_| source.next(buckets, cutoff))
                 .collect();
             (width, ids)
         })
@@ -259,9 +259,10 @@ pub fn batch_in_g1(
 fn round_in_g1(affine: &[blst_p1_affine], ids: &[u16], m: u32) -> bool {
     let buckets = 3usize.pow(m);
     let mut batch = AddBatch::default();
+    let mut scratch = SumScratch::default();
     // Bucket sums land in the arena's front; the rest is marginal-tree space.
     let mut arena = vec![blst_p1_affine::default(); 2 * buckets];
-    sum_buckets(affine, ids, &mut batch, &mut arena[..buckets]);
+    sum_buckets(affine, ids, &mut batch, &mut scratch, &mut arena[..buckets]);
     for (ones, twos) in digit_marginals(&mut arena, m, &mut batch) {
         // Output j is (sum of buckets with digit_j = 1) + 2 * (digit_j = 2);
         // the add-or-double primitives handle identity-valued operands.
@@ -283,24 +284,29 @@ fn round_in_g1(affine: &[blst_p1_affine], ids: &[u16], m: u32) -> bool {
 /// stay cache-resident between scheduling and completion.
 const INVERSION_CHUNK: usize = 2048;
 
-/// One scheduled affine addition or doubling: operand and output slots of the
-/// pass's shared buffer.
+/// One scheduled affine addition or doubling: operand slots (`a` in the
+/// destination when accumulating, see [`AddBatch::push_onto`]) and an output
+/// slot in the destination.
 struct PendingAdd {
     a: u32,
     b: u32,
     out: u32,
     double: bool,
+    a_in_dst: bool,
 }
 
 /// Batches independent affine additions so the group operations of a pass
 /// share field inversions (Montgomery's trick), costing about six field
 /// multiplications per addition instead of an inversion.
 ///
-/// Operands are recorded by index and read in place both when an operation is
-/// [pushed](Self::push) (classification) and when the batch is
-/// [run](Self::run) (completion), so callers must guarantee that no operation
-/// writes a slot a later operation of the same pass reads — identity-involved
-/// cases are exempt, since they capture their result when pushed.
+/// Operations read from a source slice and write to a disjoint destination
+/// slice, so completion order is free: results are produced during the
+/// backward walk of the shared-inversion chain, whose forward half (the
+/// running product of denominators) is built during classification, hiding
+/// the serial multiplication chain under independent work. Callers must not
+/// schedule the same destination slot twice within one [`run`](Self::run),
+/// and an accumulating operation ([`push_onto`](Self::push_onto)) must only
+/// read destination slots completed by an earlier run.
 #[derive(Default)]
 struct AddBatch {
     ops: Vec<PendingAdd>,
@@ -310,143 +316,306 @@ struct AddBatch {
 }
 
 impl AddBatch {
-    /// Schedule `buf[a] + buf[b]` into `buf[out]`.
-    fn push(&mut self, buf: &[blst_p1_affine], a: usize, b: usize, out: usize) {
-        let pa = &buf[a];
-        let pb = &buf[b];
-        if affine_is_inf(pa) {
+    /// Schedule `src[a] + src[b]` into `dst[out]`.
+    fn push(&mut self, src: &[blst_p1_affine], a: usize, b: usize, out: usize) {
+        self.classify(&src[a], &src[b], a, b, out, false);
+    }
+
+    /// Schedule `dst[a] + src[b]` into `dst[out]`, accumulating onto a
+    /// destination slot completed by an earlier run.
+    fn push_onto(
+        &mut self,
+        dst: &[blst_p1_affine],
+        a: usize,
+        src: &[blst_p1_affine],
+        b: usize,
+        out: usize,
+    ) {
+        self.classify(&dst[a], &src[b], a, b, out, true);
+    }
+
+    /// Record `value` to be written to `dst[out]` when the batch runs.
+    fn push_copy(&mut self, value: blst_p1_affine, out: usize) {
+        self.copies.push((out as u32, value));
+    }
+
+    fn classify(
+        &mut self,
+        pa: &blst_p1_affine,
+        pb: &blst_p1_affine,
+        a: usize,
+        b: usize,
+        out: usize,
+        a_in_dst: bool,
+    ) {
+        let (den, double) = if affine_is_inf(pa) {
             self.copies.push((out as u32, *pb));
+            return;
         } else if affine_is_inf(pb) {
             self.copies.push((out as u32, *pa));
+            return;
         } else if pa.x.l == pb.x.l {
             // Same x: on the curve y is determined up to sign, so this is
             // either P + (-P) = identity or a doubling.
             let two_y = fp_add(&pa.y, &pb.y);
             if two_y.l == [0u64; 6] {
                 self.copies.push((out as u32, blst_p1_affine::default()));
-            } else {
-                // y_a == y_b != 0, so two_y = 2*y_a is the doubling
-                // denominator. (y == 0 cannot occur: the group order h * r is
-                // odd, so the curve has no 2-torsion.)
-                self.dens.push(two_y);
-                self.ops.push(PendingAdd {
-                    a: a as u32,
-                    b: b as u32,
-                    out: out as u32,
-                    double: true,
-                });
+                return;
             }
+            // y_a == y_b != 0, so two_y = 2*y_a is the doubling denominator.
+            // (y == 0 cannot occur: the group order h * r is odd, so the
+            // curve has no 2-torsion.)
+            (two_y, true)
         } else {
-            self.dens.push(fp_sub(&pb.x, &pa.x));
-            self.ops.push(PendingAdd {
-                a: a as u32,
-                b: b as u32,
-                out: out as u32,
-                double: false,
-            });
-        }
+            (fp_sub(&pb.x, &pa.x), false)
+        };
+        let product = self
+            .prefix
+            .last()
+            .map_or(den, |previous| fp_mul(previous, &den));
+        self.prefix.push(product);
+        self.dens.push(den);
+        self.ops.push(PendingAdd {
+            a: a as u32,
+            b: b as u32,
+            out: out as u32,
+            double,
+            a_in_dst,
+        });
     }
 
     /// Complete every scheduled operation with one shared inversion and write
     /// all results (deferred identity-case copies last).
-    fn run(&mut self, buf: &mut [blst_p1_affine]) {
-        batch_invert(&mut self.dens, &mut self.prefix);
-        for (op, inverse) in self.ops.iter().zip(&self.dens) {
-            let pa = buf[op.a as usize];
-            let pb = buf[op.b as usize];
-            // Affine chord/tangent formulas (curve coefficient a = 0):
-            //   add:    lambda = (y_b - y_a) / (x_b - x_a)
-            //   double: lambda = 3 * x_a^2 / (2 * y_a)
-            //   x_out = lambda^2 - x_a - x_b;  y_out = lambda*(x_a - x_out) - y_a
-            let lambda = if op.double {
-                let x_sq = fp_sqr(&pa.x);
-                fp_mul(&fp_add(&fp_add(&x_sq, &x_sq), &x_sq), inverse)
-            } else {
-                fp_mul(&fp_sub(&pb.y, &pa.y), inverse)
-            };
-            let x_out = fp_sub(&fp_sub(&fp_sqr(&lambda), &pa.x), &pb.x);
-            let y_out = fp_sub(&fp_mul(&lambda, &fp_sub(&pa.x, &x_out)), &pa.y);
-            buf[op.out as usize] = blst_p1_affine { x: x_out, y: y_out };
+    fn run(&mut self, src: &[blst_p1_affine], dst: &mut [blst_p1_affine]) {
+        if let Some(total) = self.prefix.last() {
+            // chain = (dens[0] * ... * dens[i])^-1, walking i down from the
+            // end; each operation completes as its inverse is peeled off.
+            let mut chain = blst_fp::default();
+            // Temporaries live outside the loop so every field operation
+            // writes in place instead of initializing and copying a return
+            // slot per call.
+            let mut inverse = blst_fp::default();
+            let mut num = blst_fp::default();
+            let mut t = blst_fp::default();
+            let mut lambda = blst_fp::default();
+            // SAFETY: all pointers reference valid blst_fp values (blst
+            // permits aliased operands). Every denominator is nonzero by
+            // classification, so their product is nonzero and the inversion
+            // cannot silently return zero.
+            unsafe {
+                blst_fp_inverse(&mut chain, total);
+                for i in (0..self.ops.len()).rev() {
+                    let op = &self.ops[i];
+                    if i > 0 {
+                        blst_fp_mul(&mut inverse, &chain, &self.prefix[i - 1]);
+                        blst_fp_mul(&mut chain, &chain, &self.dens[i]);
+                    } else {
+                        inverse = chain;
+                    }
+                    let pa = if op.a_in_dst {
+                        dst[op.a as usize]
+                    } else {
+                        src[op.a as usize]
+                    };
+                    let pb = src[op.b as usize];
+                    // Affine chord/tangent formulas (curve coefficient a = 0):
+                    //   add:    lambda = (y_b - y_a) / (x_b - x_a)
+                    //   double: lambda = 3 * x_a^2 / (2 * y_a)
+                    //   x_out = lambda^2 - x_a - x_b
+                    //   y_out = lambda * (x_a - x_out) - y_a
+                    if op.double {
+                        blst_fp_sqr(&mut num, &pa.x);
+                        blst_fp_add(&mut t, &num, &num);
+                        blst_fp_add(&mut num, &t, &num);
+                    } else {
+                        blst_fp_sub(&mut num, &pb.y, &pa.y);
+                    }
+                    blst_fp_mul(&mut lambda, &num, &inverse);
+                    let slot = &mut dst[op.out as usize];
+                    blst_fp_sqr(&mut slot.x, &lambda);
+                    blst_fp_sub(&mut slot.x, &slot.x, &pa.x);
+                    blst_fp_sub(&mut slot.x, &slot.x, &pb.x);
+                    blst_fp_sub(&mut t, &pa.x, &slot.x);
+                    blst_fp_mul(&mut slot.y, &lambda, &t);
+                    blst_fp_sub(&mut slot.y, &slot.y, &pa.y);
+                }
+            }
+            self.ops.clear();
+            self.dens.clear();
+            self.prefix.clear();
         }
         for &(out, value) in &self.copies {
-            buf[out as usize] = value;
+            dst[out as usize] = value;
         }
-        self.ops.clear();
-        self.dens.clear();
         self.copies.clear();
+    }
+}
+
+/// Points per accumulation tile: a tile's sorted copy and halving buffers
+/// stay cache-resident, and each tile leaves at most one survivor per bucket,
+/// so tiling reorders the additions without adding any.
+const SUM_TILE: usize = 1 << 17;
+
+/// Reusable buffers for [`sum_buckets`]: the counting-sort arrays and the
+/// ping-pong halving buffers, reused across tiles and rounds so large batches
+/// do not reallocate (and refault) tens of megabytes per tile.
+#[derive(Default)]
+struct SumScratch {
+    lens: Vec<u32>,
+    cursor: Vec<u32>,
+    active: Vec<(u32, u32)>,
+    sorted: Vec<blst_p1_affine>,
+    spare: Vec<blst_p1_affine>,
+}
+
+impl SumScratch {
+    /// Grow a point buffer to at least `len` slots and return it as a slice.
+    /// Slots are fully overwritten before use, so stale contents are fine.
+    fn buffer(buffer: &mut Vec<blst_p1_affine>, len: usize) -> &mut [blst_p1_affine] {
+        if buffer.len() < len {
+            buffer.resize(len, blst_p1_affine::default());
+        }
+        &mut buffer[..len]
     }
 }
 
 /// Sum `points` into buckets given by `ids` (each id below `out.len()`),
 /// writing one affine sum per bucket into `out` (the identity for empty
 /// buckets).
-///
-/// The points are counting-sorted into contiguous per-bucket runs, then every
-/// bucket is halved in place each pass: pairs are formed left to right (an
-/// odd bucket keeps its first element in place), so each result lands at or
-/// before the slots it read and strictly before every slot a later pair
-/// reads — the ordering [`AddBatch`] requires.
 fn sum_buckets(
     points: &[blst_p1_affine],
     ids: &[u16],
     batch: &mut AddBatch,
+    scratch: &mut SumScratch,
+    out: &mut [blst_p1_affine],
+) {
+    sum_buckets_tiled(points, ids, batch, scratch, out, SUM_TILE);
+}
+
+/// [`sum_buckets`] with an explicit tile size (separate so tests can exercise
+/// tile boundaries with small inputs).
+///
+/// A batch larger than one tile is summed tile by tile into the same bucket
+/// space; each tile's surviving bucket sums then re-enter as points keyed by
+/// their bucket until one tile's worth remains. The additions are exactly
+/// those of an untiled sum, reassociated.
+fn sum_buckets_tiled(
+    points: &[blst_p1_affine],
+    ids: &[u16],
+    batch: &mut AddBatch,
+    scratch: &mut SumScratch,
+    out: &mut [blst_p1_affine],
+    tile: usize,
+) {
+    // A tile of at least two buckets' worth of points at most halves into its
+    // per-bucket survivors, so the reduction is guaranteed to terminate.
+    let tile = tile.max(2 * out.len());
+    if points.len() <= tile {
+        sum_buckets_dense(points, ids, batch, scratch, out);
+        return;
+    }
+    let mut survivors: Vec<blst_p1_affine> = Vec::new();
+    let mut survivor_ids: Vec<u16> = Vec::new();
+    for (tile_points, tile_ids) in points.chunks(tile).zip(ids.chunks(tile)) {
+        sum_buckets_dense(tile_points, tile_ids, batch, scratch, out);
+        for (b, sum) in out.iter().enumerate() {
+            if !affine_is_inf(sum) {
+                survivors.push(*sum);
+                survivor_ids.push(b as u16);
+            }
+        }
+    }
+    sum_buckets_tiled(&survivors, &survivor_ids, batch, scratch, out, tile);
+}
+
+/// One-tile [`sum_buckets`]: a counting sort copies the points into
+/// contiguous per-bucket runs; every pass then halves each surviving run,
+/// ping-ponging between the sorted buffer and a spare so a pass's reads and
+/// writes touch disjoint buffers, as [`AddBatch`] requires (an odd run keeps
+/// its first element via a recorded copy). Runs stay in bucket order, so
+/// positions are running cursors, and a bucket leaves for `out` as soon as it
+/// holds a single point; buffer slots beyond a pass's output are stale and
+/// never read.
+fn sum_buckets_dense(
+    points: &[blst_p1_affine],
+    ids: &[u16],
+    batch: &mut AddBatch,
+    scratch: &mut SumScratch,
     out: &mut [blst_p1_affine],
 ) {
     debug_assert_eq!(points.len(), ids.len());
     let num_buckets = out.len();
-    // The schedule indexes the buffer with u32.
+    // The schedule indexes the buffers with u32.
     assert!(points.len() <= u32::MAX as usize);
 
     // Counting sort the points into contiguous per-bucket runs.
-    let mut lens = vec![0u32; num_buckets];
+    let lens = &mut scratch.lens;
+    lens.clear();
+    lens.resize(num_buckets, 0);
     for &id in ids {
         lens[id as usize] += 1;
     }
-    let mut starts = vec![0u32; num_buckets];
+    let cursor = &mut scratch.cursor;
+    cursor.clear();
     let mut acc = 0u32;
-    for (start, len) in starts.iter_mut().zip(&lens) {
-        *start = acc;
+    cursor.extend(lens.iter().map(|len| {
+        let start = acc;
         acc += len;
-    }
-    let mut buf = vec![blst_p1_affine::default(); points.len()];
-    let mut cursor = starts.clone();
+        start
+    }));
+    let sorted = SumScratch::buffer(&mut scratch.sorted, points.len());
     for (point, &id) in points.iter().zip(ids) {
         let slot = &mut cursor[id as usize];
-        buf[*slot as usize] = *point;
+        sorted[*slot as usize] = *point;
         *slot += 1;
     }
 
-    // Halve every bucket per pass until each holds at most one point.
-    loop {
-        let mut active = false;
-        for b in 0..num_buckets {
-            let (start, len) = (starts[b] as usize, lens[b] as usize);
-            if len < 2 {
-                continue;
+    // Empty buckets are done; the rest halve until a single point remains.
+    let active = &mut scratch.active;
+    active.clear();
+    let mut survivors = 0usize;
+    for (b, slot) in out.iter_mut().enumerate() {
+        match lens[b] {
+            0 => *slot = blst_p1_affine::default(),
+            len => {
+                active.push((b as u32, len));
+                survivors += len.div_ceil(2) as usize;
             }
-            active = true;
-            let keep = len & 1;
-            for k in 0..len / 2 {
-                let a = start + keep + 2 * k;
-                batch.push(&buf, a, a + 1, start + keep + k);
-                if batch.ops.len() >= INVERSION_CHUNK {
-                    batch.run(&mut buf);
-                }
-            }
-            lens[b] = (keep + len / 2) as u32;
-        }
-        batch.run(&mut buf);
-        if !active {
-            break;
         }
     }
-
-    for (b, slot) in out.iter_mut().enumerate() {
-        *slot = if lens[b] == 0 {
-            blst_p1_affine::default()
-        } else {
-            buf[starts[b] as usize]
-        };
+    let spare = SumScratch::buffer(&mut scratch.spare, survivors);
+    let (mut src_buf, mut dst_buf): (&mut [blst_p1_affine], &mut [blst_p1_affine]) =
+        (sorted, spare);
+    while !active.is_empty() {
+        let mut src_pos = 0usize;
+        let mut dst_pos = 0usize;
+        let mut write = 0usize;
+        for read in 0..active.len() {
+            let (bucket, len) = active[read];
+            let len = len as usize;
+            if len == 1 {
+                out[bucket as usize] = src_buf[src_pos];
+            } else {
+                let keep = len & 1;
+                if keep == 1 {
+                    batch.push_copy(src_buf[src_pos], dst_pos);
+                }
+                for k in 0..len / 2 {
+                    let first = src_pos + keep + 2 * k;
+                    batch.push(src_buf, first, first + 1, dst_pos + keep + k);
+                    if batch.ops.len() >= INVERSION_CHUNK {
+                        batch.run(src_buf, dst_buf);
+                    }
+                }
+                active[write] = (bucket, (keep + len / 2) as u32);
+                write += 1;
+                dst_pos += keep + len / 2;
+            }
+            src_pos += len;
+        }
+        active.truncate(write);
+        batch.run(src_buf, dst_buf);
+        core::mem::swap(&mut src_buf, &mut dst_buf);
     }
 }
 
@@ -455,100 +624,75 @@ fn sum_buckets(
 /// `arena[..3^m]`. `arena` must have length `2 * 3^m`; the tail is working
 /// space.
 ///
-/// The tree merges one digit at a time: after `k` merges the arena holds
-/// `3^(m-k)` records `[total, ones_0, twos_0, ..., ones_{k-1}, twos_{k-1}]`
-/// over disjoint bucket ranges. Merging three consecutive records sums their
-/// fields (two batched additions per field) and starts the new digit's
-/// marginals as copies of the second and third records' totals, for about
-/// `2 * 3^m` additions in total. All weights are the deterministic digits of
-/// the bucket index — the randomness lives entirely in the bucket assignment
-/// (see module docs). Records ping-pong between the arena's front and back,
-/// so no operation writes a slot a later operation reads.
+/// The tree merges one digit at a time: after `k` merges the live half of the
+/// arena holds `3^(m-k)` records `[total, ones_0, twos_0, ..., ones_{k-1},
+/// twos_{k-1}]` over disjoint bucket ranges. Merging three consecutive
+/// records sums their fields (two batched additions per field) and starts the
+/// new digit's marginals as copies of the second and third records' totals,
+/// for about `2 * 3^m` additions in total. All weights are the deterministic
+/// digits of the bucket index — the randomness lives entirely in the bucket
+/// assignment (see module docs). Records ping-pong between the arena's halves,
+/// keeping every pass's reads and writes disjoint as [`AddBatch`] requires.
 fn digit_marginals(
     arena: &mut [blst_p1_affine],
     m: u32,
     batch: &mut AddBatch,
 ) -> Vec<(blst_p1_affine, blst_p1_affine)> {
-    let capacity = arena.len();
-    debug_assert_eq!(capacity, 2 * 3usize.pow(m));
-    let mut groups = 3usize.pow(m) / 3;
+    let total = 3usize.pow(m);
+    debug_assert_eq!(arena.len(), 2 * total);
+    let (front, back) = arena.split_at_mut(total);
+    let mut groups = total / 3;
     let mut stride = 1usize;
-    let mut in_off = 0usize;
+    let mut src_is_front = true;
     loop {
-        let out_stride = stride + 2;
-        let out_off = if in_off == 0 {
-            capacity - groups * out_stride
+        let (src, dst): (&mut [blst_p1_affine], &mut [blst_p1_affine]) = if src_is_front {
+            (&mut *front, &mut *back)
         } else {
-            0
+            (&mut *back, &mut *front)
         };
-        // Two batched steps: field-wise sums of the first two records, then
-        // the third record's fields on top.
+        let out_stride = stride + 2;
+        // Two batched steps: field-wise sums of each group's first two
+        // records, then the third record's fields on top.
         for step in 0..2 {
             for g in 0..groups {
-                let in_base = in_off + 3 * g * stride;
-                let out_base = out_off + g * out_stride;
+                let in_base = 3 * g * stride;
+                let out_base = g * out_stride;
                 for f in 0..stride {
-                    let (a, b) = if step == 0 {
-                        (in_base + f, in_base + stride + f)
+                    if step == 0 {
+                        batch.push(src, in_base + f, in_base + stride + f, out_base + f);
                     } else {
-                        (out_base + f, in_base + 2 * stride + f)
-                    };
-                    batch.push(arena, a, b, out_base + f);
+                        batch.push_onto(
+                            dst,
+                            out_base + f,
+                            src,
+                            in_base + 2 * stride + f,
+                            out_base + f,
+                        );
+                    }
                     if batch.ops.len() >= INVERSION_CHUNK {
-                        batch.run(arena);
+                        batch.run(src, dst);
                     }
                 }
             }
-            batch.run(arena);
+            batch.run(src, dst);
         }
         // The new digit's marginals are the second and third records' totals.
         for g in 0..groups {
-            let in_base = in_off + 3 * g * stride;
-            let out_base = out_off + g * out_stride;
-            arena[out_base + stride] = arena[in_base + stride];
-            arena[out_base + stride + 1] = arena[in_base + 2 * stride];
+            let in_base = 3 * g * stride;
+            let out_base = g * out_stride;
+            dst[out_base + stride] = src[in_base + stride];
+            dst[out_base + stride + 1] = src[in_base + 2 * stride];
         }
         if groups == 1 {
             // One record left: [total, ones_0, twos_0, ..., ones_m, twos_m].
             return (0..m as usize)
-                .map(|j| (arena[out_off + 1 + 2 * j], arena[out_off + 2 + 2 * j]))
+                .map(|j| (dst[1 + 2 * j], dst[2 + 2 * j]))
                 .collect();
         }
-        in_off = out_off;
-        stride = out_stride;
         groups /= 3;
+        stride = out_stride;
+        src_is_front = !src_is_front;
     }
-}
-
-/// Replace every element with its inverse using Montgomery's trick: one field
-/// inversion plus three multiplications per element. `prefix` is reusable
-/// scratch.
-///
-/// Every element MUST be nonzero (`blst_fp_inverse(0) == 0` would silently
-/// poison the shared product); [`AddBatch::push`]'s classification guarantees
-/// it.
-fn batch_invert(values: &mut [blst_fp], prefix: &mut Vec<blst_fp>) {
-    if values.is_empty() {
-        return;
-    }
-    // prefix[i] = values[0] * ... * values[i]
-    prefix.clear();
-    let mut acc = values[0];
-    prefix.push(acc);
-    for value in &values[1..] {
-        acc = fp_mul(&acc, value);
-        prefix.push(acc);
-    }
-    // inverse = (values[0] * ... * values[i])^-1, walking i down from the end.
-    let mut inverse = blst_fp::default();
-    // SAFETY: both pointers reference valid blst_fp values.
-    unsafe { blst_fp_inverse(&mut inverse, &acc) };
-    for i in (1..values.len()).rev() {
-        let value_inverse = fp_mul(&inverse, &prefix[i - 1]);
-        inverse = fp_mul(&inverse, &values[i]);
-        values[i] = value_inverse;
-    }
-    values[0] = inverse;
 }
 
 /// Whether an affine point is the identity, which blst encodes as the
@@ -581,6 +725,7 @@ fn fp_mul(a: &blst_fp, b: &blst_fp) -> blst_fp {
     out
 }
 
+#[cfg(test)]
 fn fp_sqr(a: &blst_fp) -> blst_fp {
     let mut out = blst_fp::default();
     // SAFETY: all pointers reference valid blst_fp values.
@@ -588,20 +733,22 @@ fn fp_sqr(a: &blst_fp) -> blst_fp {
     out
 }
 
-/// Largest multiple of `buckets` representable in 32 bits, the rejection
-/// threshold for [`UniformIds::next`]. `buckets` must be at least 2.
-fn rejection_threshold(buckets: u32) -> u32 {
+/// Rejection cutoff for [`UniformIds::next`]: `2^32 mod buckets`. `buckets`
+/// must be at least 2.
+fn rejection_cutoff(buckets: u32) -> u32 {
     debug_assert!(buckets >= 2);
-    (((1u64 << 32) / u64::from(buckets)) * u64::from(buckets)) as u32
+    ((1u64 << 32) % u64::from(buckets)) as u32
 }
 
 /// A stream of exactly uniform bucket ids over a cryptographic RNG.
 ///
-/// Ids are drawn by rejection-sampling 32-bit words: a word is accepted when
-/// it is below the largest multiple of `buckets` that fits in 32 bits
-/// (rejecting fewer than one word in `2^16` for any `buckets <= 3^10`) and
-/// reduced modulo `buckets`, which is exactly uniform over `[0, buckets)`.
-/// Words are drawn in bulk to amortize RNG calls.
+/// Ids are drawn by Lemire's multiply-shift with rejection: a 32-bit word `w`
+/// maps to `(w * buckets) >> 32`, which sends `floor(2^32 / buckets)` or one
+/// more of the `2^32` words to each id; rejecting the words whose product's
+/// low half is below `2^32 mod buckets` trims every id to exactly
+/// `floor(2^32 / buckets)` accepted words, so accepted ids are exactly
+/// uniform over `[0, buckets)` (and fewer than one word in `2^16` is rejected
+/// for any `buckets <= 3^10`). Words are drawn in bulk to amortize RNG calls.
 ///
 /// Exact uniformity is load-bearing: the soundness bound leaves a fraction of
 /// a bit of margin over the security target, and any per-coefficient bias
@@ -613,7 +760,7 @@ struct UniformIds<'a, R: CryptoRng> {
 }
 
 impl<'a, R: CryptoRng> UniformIds<'a, R> {
-    fn new(rng: &'a mut R) -> Self {
+    const fn new(rng: &'a mut R) -> Self {
         let buffer = [0u8; 1024];
         Self {
             rng,
@@ -622,11 +769,11 @@ impl<'a, R: CryptoRng> UniformIds<'a, R> {
         }
     }
 
-    /// Return the next exactly uniform id in `[0, buckets)`; `threshold` must
-    /// be [`rejection_threshold`]`(buckets)` and `buckets` at most `3^10`.
-    fn next(&mut self, buckets: u32, threshold: u32) -> u16 {
+    /// Return the next exactly uniform id in `[0, buckets)`; `cutoff` must be
+    /// [`rejection_cutoff`]`(buckets)` and `buckets` at most `3^10`.
+    fn next(&mut self, buckets: u32, cutoff: u32) -> u16 {
         debug_assert!(buckets <= 3u32.pow(MAX_WIDTH));
-        debug_assert_eq!(threshold, rejection_threshold(buckets));
+        debug_assert_eq!(cutoff, rejection_cutoff(buckets));
         loop {
             if self.position + 4 > self.buffer.len() {
                 self.rng.fill_bytes(&mut self.buffer);
@@ -636,9 +783,9 @@ impl<'a, R: CryptoRng> UniformIds<'a, R> {
                 .try_into()
                 .expect("four bytes remain below the buffer length");
             self.position += 4;
-            let word = u32::from_le_bytes(bytes);
-            if word < threshold {
-                return (word % buckets) as u16;
+            let wide = u64::from(u32::from_le_bytes(bytes)) * u64::from(buckets);
+            if wide as u32 >= cutoff {
+                return (wide >> 32) as u16;
             }
         }
     }
@@ -684,12 +831,42 @@ mod tests {
         }
     }
 
+    /// Generate `n` distinct in-subgroup points cheaply (chained additions
+    /// instead of one scalar multiplication each).
+    fn chain_points(n: usize, rng: &mut impl CryptoRng) -> Vec<G1> {
+        let step = in_subgroup_point(rng);
+        let mut acc = in_subgroup_point(rng);
+        (0..n)
+            .map(|_| {
+                acc += &step;
+                acc
+            })
+            .collect()
+    }
+
+    /// Rebuild points exactly as [`G1::read_unchecked`] yields them: affine
+    /// coordinates lifted with z = 1. Benchmarks use this so they measure the
+    /// batch-decode workload rather than scalar-multiplication outputs.
+    fn as_decoded(points: &[G1]) -> Vec<G1> {
+        use blst::blst_p1_from_affine;
+        G1::batch_to_affine(points)
+            .iter()
+            .map(|affine| {
+                let mut point = blst_p1::default();
+                // SAFETY: valid pointers; lifting an affine point sets z = 1.
+                unsafe { blst_p1_from_affine(&mut point, affine) };
+                G1::from_blst_p1(point)
+            })
+            .collect()
+    }
+
     /// Run [`sum_buckets`] over G1 points with fresh scratch.
     fn run_sum_buckets(points: &[G1], ids: &[u16], num_buckets: usize) -> Vec<blst_p1_affine> {
         let affine = G1::batch_to_affine(points);
         let mut batch = AddBatch::default();
+        let mut scratch = SumScratch::default();
         let mut out = vec![blst_p1_affine::default(); num_buckets];
-        sum_buckets(&affine, ids, &mut batch, &mut out);
+        sum_buckets(&affine, ids, &mut batch, &mut scratch, &mut out);
         out
     }
 
@@ -760,13 +937,13 @@ mod tests {
     }
 
     #[test]
-    fn rejection_threshold_is_exact() {
+    fn rejection_cutoff_is_exact() {
         for width in 1..=MAX_WIDTH {
             let buckets = 3u32.pow(width);
-            let threshold = rejection_threshold(buckets);
-            // A multiple of the bucket count, with no room for one more.
-            assert_eq!(threshold % buckets, 0);
-            assert!(u64::from(threshold) + u64::from(buckets) > 1u64 << 32);
+            let cutoff = rejection_cutoff(buckets);
+            // Everything above the cutoff is a whole number of id ranges.
+            assert!(cutoff < buckets);
+            assert_eq!(((1u64 << 32) - u64::from(cutoff)) % u64::from(buckets), 0);
         }
     }
 
@@ -776,9 +953,9 @@ mod tests {
         let mut source = UniformIds::new(&mut rng);
         for width in 1..=MAX_WIDTH {
             let buckets = 3u32.pow(width);
-            let threshold = rejection_threshold(buckets);
+            let cutoff = rejection_cutoff(buckets);
             for _ in 0..1000 {
-                assert!(u32::from(source.next(buckets, threshold)) < buckets);
+                assert!(u32::from(source.next(buckets, cutoff)) < buckets);
             }
         }
     }
@@ -787,10 +964,10 @@ mod tests {
     fn bucket_ids_are_roughly_uniform() {
         let mut rng = test_rng();
         let mut source = UniformIds::new(&mut rng);
-        let threshold = rejection_threshold(9);
+        let cutoff = rejection_cutoff(9);
         let mut counts = [0usize; 9];
         for _ in 0..9000 {
-            counts[source.next(9, threshold) as usize] += 1;
+            counts[source.next(9, cutoff) as usize] += 1;
         }
         // Expected 1000 per id; the window is ~6.7 standard deviations wide.
         for &count in &counts {
@@ -870,8 +1047,15 @@ mod tests {
                 .collect();
             let affine = G1::batch_to_affine(&points);
             let mut batch = AddBatch::default();
+            let mut scratch = SumScratch::default();
             let mut arena = vec![blst_p1_affine::default(); 2 * buckets];
-            sum_buckets(&affine, &ids, &mut batch, &mut arena[..buckets]);
+            sum_buckets(
+                &affine,
+                &ids,
+                &mut batch,
+                &mut scratch,
+                &mut arena[..buckets],
+            );
             let marginals = digit_marginals(&mut arena, m, &mut batch);
             assert_eq!(marginals.len(), m as usize);
             for (j, (ones, twos)) in marginals.iter().enumerate() {
@@ -939,6 +1123,39 @@ mod tests {
                 .map(|_| (rng.next_u32() as usize % num_buckets) as u16)
                 .collect();
             assert_sums_match(&points, &ids, num_buckets);
+        }
+    }
+
+    #[test]
+    fn tiled_sum_matches_naive() {
+        // Small tiles force multi-tile reduction, including re-tiling of the
+        // survivors; the result must match the naive per-bucket sum exactly.
+        let mut rng = test_rng();
+        for (n, num_buckets, tile) in [(50usize, 3usize, 2usize), (64, 9, 16), (41, 2, 5)] {
+            let points: Vec<G1> = (0..n)
+                .map(|i| match i % 6 {
+                    0 => G1::zero(),
+                    1 => off_subgroup_point(&mut rng),
+                    _ => in_subgroup_point(&mut rng),
+                })
+                .collect();
+            let ids: Vec<u16> = (0..n)
+                .map(|_| (rng.next_u32() as usize % num_buckets) as u16)
+                .collect();
+            let affine = G1::batch_to_affine(&points);
+            let mut batch = AddBatch::default();
+            let mut scratch = SumScratch::default();
+            let mut sums = vec![blst_p1_affine::default(); num_buckets];
+            sum_buckets_tiled(&affine, &ids, &mut batch, &mut scratch, &mut sums, tile);
+            for (b, got) in sums.iter().enumerate() {
+                let mut expected = G1::zero();
+                for (point, &id) in points.iter().zip(&ids) {
+                    if id as usize == b {
+                        expected += point;
+                    }
+                }
+                assert_affine_eq(got, &expected, &format!("tile={tile} bucket {b}"));
+            }
         }
     }
 
@@ -1054,7 +1271,7 @@ mod tests {
         use std::time::Instant;
         let mut rng = test_rng();
         for n in [1000usize, 6000, 100_000] {
-            let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+            let points = as_decoded(&chain_points(n, &mut rng));
             let affine = G1::batch_to_affine(&points);
             for width in [5u32, 7, 9] {
                 let num_buckets = 3usize.pow(width);
@@ -1062,11 +1279,12 @@ mod tests {
                     .map(|_| (rng.next_u32() as usize % num_buckets) as u16)
                     .collect();
                 let mut batch = AddBatch::default();
+                let mut scratch = SumScratch::default();
                 let mut out = vec![blst_p1_affine::default(); num_buckets];
                 let reps = 50;
                 let start = Instant::now();
                 for _ in 0..reps {
-                    sum_buckets(&affine, &ids, &mut batch, &mut out);
+                    sum_buckets(&affine, &ids, &mut batch, &mut scratch, &mut out);
                     std::hint::black_box(&mut out);
                 }
                 let per_point = start.elapsed().as_nanos() as f64 / (reps * n) as f64;
@@ -1086,7 +1304,7 @@ mod tests {
         let n = 100_000usize;
         let m = 9u32;
         let buckets = 3usize.pow(m);
-        let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+        let points = as_decoded(&chain_points(n, &mut rng));
 
         let start = Instant::now();
         let affine = G1::batch_to_affine(&points);
@@ -1094,54 +1312,60 @@ mod tests {
 
         let start = Instant::now();
         let mut source = UniformIds::new(&mut rng);
-        let threshold = rejection_threshold(buckets as u32);
+        let cutoff = rejection_cutoff(buckets as u32);
         let id_sets: Vec<Vec<u16>> = (0..9)
             .map(|_| {
                 (0..n)
-                    .map(|_| source.next(buckets as u32, threshold))
+                    .map(|_| source.next(buckets as u32, cutoff))
                     .collect()
             })
             .collect();
         println!("ids (9 rounds) = {:?}", start.elapsed());
         let ids = &id_sets[0];
 
-        // Counting sort alone.
+        // Index counting sort alone.
         let start = Instant::now();
         for _ in 0..10 {
             let mut lens = vec![0u32; buckets];
             for &id in ids {
                 lens[id as usize] += 1;
             }
-            let mut starts = vec![0u32; buckets];
+            let mut cursor = vec![0u32; buckets];
             let mut acc = 0u32;
-            for (s, l) in starts.iter_mut().zip(&lens) {
-                *s = acc;
-                acc += l;
+            for (slot, len) in cursor.iter_mut().zip(&lens) {
+                *slot = acc;
+                acc += len;
             }
-            let mut buf = vec![blst_p1_affine::default(); n];
-            let mut cursor = starts.clone();
-            for (point, &id) in affine.iter().zip(ids) {
+            let mut idx = vec![0u32; n];
+            for (i, &id) in ids.iter().enumerate() {
                 let slot = &mut cursor[id as usize];
-                buf[*slot as usize] = *point;
+                idx[*slot as usize] = i as u32;
                 *slot += 1;
             }
-            std::hint::black_box(&mut buf);
+            std::hint::black_box(&mut idx);
         }
-        println!("counting sort = {:?} / round", start.elapsed() / 10);
+        println!("index sort = {:?} / round", start.elapsed() / 10);
 
         // Full bucket accumulation.
         let mut batch = AddBatch::default();
+        let mut scratch = SumScratch::default();
         let mut out = vec![blst_p1_affine::default(); buckets];
         let start = Instant::now();
         for _ in 0..10 {
-            sum_buckets(&affine, ids, &mut batch, &mut out);
+            sum_buckets(&affine, ids, &mut batch, &mut scratch, &mut out);
             std::hint::black_box(&mut out);
         }
         println!("sum_buckets = {:?} / round", start.elapsed() / 10);
 
         // Marginal tree alone.
         let mut arena = vec![blst_p1_affine::default(); 2 * buckets];
-        sum_buckets(&affine, ids, &mut batch, &mut arena[..buckets]);
+        sum_buckets(
+            &affine,
+            ids,
+            &mut batch,
+            &mut scratch,
+            &mut arena[..buckets],
+        );
         let saved: Vec<blst_p1_affine> = arena[..buckets].to_vec();
         let start = Instant::now();
         for _ in 0..10 {
@@ -1156,6 +1380,22 @@ mod tests {
             std::hint::black_box(point.in_subgroup());
         }
         println!("81 checks = {:?}", start.elapsed());
+
+        // Full rounds at each candidate width.
+        for width in [7u32, 8, 9, 10] {
+            let rounds = 81usize.div_ceil(width as usize);
+            let wide = 3usize.pow(width);
+            let cutoff = rejection_cutoff(wide as u32);
+            let ids: Vec<u16> = (0..n).map(|_| source.next(wide as u32, cutoff)).collect();
+            let start = Instant::now();
+            for _ in 0..rounds {
+                std::hint::black_box(round_in_g1(&affine, &ids, width));
+            }
+            println!(
+                "width={width} rounds={rounds} total = {:?}",
+                start.elapsed()
+            );
+        }
 
         // Raw field-op costs.
         let mut x = affine[0].x;
@@ -1180,50 +1420,45 @@ mod tests {
         println!("fp_inverse = {:?} / 1k", start.elapsed());
 
         // Engine phases on a synthetic level-0 schedule (pairs within runs).
-        let mut buf = affine.clone();
         let mut batch = AddBatch::default();
+        let mut dst = vec![blst_p1_affine::default(); n / 2];
         let start = Instant::now();
         for _ in 0..10 {
             for k in 0..n / 2 {
-                batch.push(&buf, 2 * k, 2 * k + 1, k);
+                batch.push(&affine, 2 * k, 2 * k + 1, k);
                 if batch.ops.len() >= INVERSION_CHUNK {
                     batch.ops.clear();
                     batch.dens.clear();
+                    batch.prefix.clear();
                     batch.copies.clear();
                 }
             }
             batch.ops.clear();
             batch.dens.clear();
+            batch.prefix.clear();
             batch.copies.clear();
         }
-        println!("classify only = {:?} / {} pairs", start.elapsed() / 10, n / 2);
-        let start = Instant::now();
-        for _ in 0..10 {
-            for k in 0..n / 2 {
-                batch.push(&buf, 2 * k, 2 * k + 1, k);
-                if batch.ops.len() >= INVERSION_CHUNK {
-                    batch.run(&mut buf);
-                }
-            }
-            batch.run(&mut buf);
-            buf.copy_from_slice(&affine);
-        }
         println!(
-            "classify+invert+complete = {:?} / {} pairs (incl. buf restore)",
+            "classify+prefix only = {:?} / {} pairs",
             start.elapsed() / 10,
             n / 2
         );
-        let dens: Vec<blst_fp> = affine.iter().take(50_000).map(|p| p.x).collect();
-        let mut values = dens.clone();
-        let mut prefix = Vec::new();
         let start = Instant::now();
         for _ in 0..10 {
-            values.copy_from_slice(&dens);
-            for chunk in values.chunks_mut(INVERSION_CHUNK) {
-                batch_invert(chunk, &mut prefix);
+            for k in 0..n / 2 {
+                batch.push(&affine, 2 * k, 2 * k + 1, k);
+                if batch.ops.len() >= INVERSION_CHUNK {
+                    batch.run(&affine, &mut dst);
+                }
             }
+            batch.run(&affine, &mut dst);
+            std::hint::black_box(&mut dst);
         }
-        println!("batch_invert = {:?} / 50k", start.elapsed() / 10);
+        println!(
+            "classify+invert+complete = {:?} / {} pairs",
+            start.elapsed() / 10,
+            n / 2
+        );
     }
 
     /// End-to-end timing across sizes. Run with:
@@ -1237,9 +1472,9 @@ mod tests {
         let threads = available_parallelism().unwrap();
         let rayon = Rayon::new(threads).unwrap();
         println!("threads = {threads}");
-        for n in [200usize, 1000, 6000, 100_000] {
+        for n in [200usize, 1000, 6000, 100_000, 1_000_000] {
             let mut rng = test_rng();
-            let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+            let points = as_decoded(&chain_points(n, &mut rng));
             println!("n={n} plan={:?}", plan(n, combinations_for_security(128)));
             let start = Instant::now();
             assert!(points.iter().all(G1::in_subgroup));
@@ -1276,12 +1511,12 @@ mod tests {
         ) -> bool {
             let affine = G1::batch_to_affine(points);
             let buckets = 3u32.pow(m);
-            let threshold = rejection_threshold(buckets);
+            let cutoff = rejection_cutoff(buckets);
             let mut source = UniformIds::new(rng);
             let id_sets: Vec<Vec<u16>> = (0..rounds)
                 .map(|_| {
                     (0..points.len())
-                        .map(|_| source.next(buckets, threshold))
+                        .map(|_| source.next(buckets, cutoff))
                         .collect()
                 })
                 .collect();
@@ -1308,16 +1543,19 @@ mod tests {
                     let mut bytes = vec![0u8; 2 * points.len()];
                     rng.fill_bytes(&mut bytes);
                     bytes
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]) & mask)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| u16::from_le_bytes(*pair) & mask)
                         .collect()
                 })
                 .collect();
             strategy
                 .map_collect_vec_with_multiplier(id_sets.iter(), points.len(), |ids| {
                     let mut batch = AddBatch::default();
+                    let mut scratch = SumScratch::default();
                     let mut sums = vec![blst_p1_affine::default(); num_buckets];
-                    sum_buckets(&affine, ids, &mut batch, &mut sums);
+                    sum_buckets(&affine, ids, &mut batch, &mut scratch, &mut sums);
                     sums.iter().all(|sum| {
                         // SAFETY: sum is a valid blst_p1_affine.
                         affine_is_inf(sum) || unsafe { blst_p1_affine_in_g1(sum) }
@@ -1332,7 +1570,7 @@ mod tests {
         println!("threads = {threads}");
         for n in [1000usize, 6000, 100_000] {
             let mut rng = test_rng();
-            let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+            let points = as_decoded(&chain_points(n, &mut rng));
             let start = Instant::now();
             assert!(points.iter().all(G1::in_subgroup));
             println!("n={n} per_point serial = {:?}", start.elapsed());

@@ -4,6 +4,30 @@ Complete working notes for writing an ePrint note. Everything below is verified
 (proofs re-derived, measurements reproduced, prior art read first-hand) unless
 explicitly marked TODO. Written 2026-08-19.
 
+> **Implementation update (2026-08-24).** A single-threaded optimization round
+> reworked the implementation after these notes were written; §2's mechanics
+> and all Apple-measured C timings below describe and measure the OLD
+> implementation (they understate C). What changed: width cap m ≤ 5 → ≤ 10
+> (u16 bucket ids; n=100k now runs 9 passes at m=9 instead of 17 at m=5, with
+> round widths summing to exactly t = 81); the per-output combine scan became
+> a marginal-merge tree (~2·3^m batched additions for all 2m digit sums); the
+> batch-affine engine ping-pongs disjoint buffers with completion fused into
+> the inversion's backward walk (no operand copies); accumulation is tiled at
+> 2^17 points so buffers stay cache-resident at large n; bucket ids come from
+> Lemire multiply-shift rejection on u32 words (still exactly uniform); and
+> `G1::batch_to_affine` recognizes z = 1 (decoded points) as a coordinate
+> copy. Re-measured on a 4-core Cascade Lake Xeon VM (exact check ~50.6 µs
+> there), serial batch vs serial per-point: n=1000 3.8×, n=6000 6.5×,
+> n=100k **10.9×** (5.03 s → 464 ms), n=10⁶ **12.3×** (51.6 s → 4.19 s);
+> parallel on 4 cores: 28.8× at n=100k, 33× at n=10⁶. Old-implementation
+> serial on the same VM was 4.4× at n=100k, so the rework is ~2.5× serially.
+> Per point at n=100k the scheme now spends ~10.8 batch-affine additions
+> (~65 field muls) against ~1130 muls per exact check — a machine-independent
+> serial ceiling of ~15-17× that is approached from below as n grows and
+> per-pass bookkeeping amortizes. Current numbers and the engineering
+> breakdown live in `cryptography/BATCHED_SUBGROUP.md`; re-run the
+> `measure_*` harnesses for paper-grade figures on the paper machine.
+
 ## 0. Thesis and framing
 
 **One-sentence claim:** batch subgroup membership testing on *unmodified*
@@ -67,9 +91,10 @@ technique; claim the composition + analysis + measured result.
 
 Parameters: security µ (default 128); t = ⌈µ·1000/1584⌉ total combinations
 (1584 = strict lower bound on 1000·log₂3, so t is never under-counted; t = 81
-at µ=128); width m ∈ 1..=5 and rounds r = ⌈t/m⌉ chosen by a cost model
-(`plan()`), with per-point fallback when batching loses. Soundness holds for
-EVERY (m, r) with r·m ≥ t; the model affects speed only.
+at µ=128); width m ∈ 1..=10 (was 1..=5 at handoff time) and rounds
+r = ⌈t/m⌉ chosen by a cost model (`plan()`), with per-point fallback when
+batching loses. Soundness holds for EVERY width schedule covering t
+combinations; the model affects speed only.
 
 Per round:
 1. **Coefficients.** Each point i gets m iid uniform trits c_{1..m,i} — its
@@ -102,10 +127,10 @@ Rounds are independent → parallelized via commonware-parallel Strategy
 
 Implementation quirks worth fixing before/while writing the paper:
 - The all-zero-vector bucket (3⁻ᵐ of points) is summed but never used —
-  skippable (≤1.2% at m ≥ 4).
-- m is capped at 5 by u8 bucket ids. Lifting to u16 enables m=6 (729 buckets,
-  14 rounds), modeled ~13% faster at n=10⁵ — this is what closes the B-tie
-  (see §5).
+  skippable (≤1.2% at m ≥ 4; negligible at the shipping m=9).
+- ~~m is capped at 5 by u8 bucket ids~~ — DONE in the 2026-08-24 rework
+  (u16 ids, m ≤ 10; n=10⁵ runs m=9 in 9 rounds), along with the tree combine,
+  fused engine, and tiling described in the update note at the top.
 
 ## 3. Soundness — complete proofs (all verified)
 

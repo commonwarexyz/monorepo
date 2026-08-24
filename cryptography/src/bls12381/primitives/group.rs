@@ -16,10 +16,10 @@ use crate::Secret;
 use alloc::{vec, vec::Vec};
 use blst::{
     BLS12_381_G1, BLS12_381_G2, BLST_ERROR, Pairing, blst_bendian_from_fp12,
-    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
-    blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
-    blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
-    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp, blst_fp_from_uint64, blst_fp12,
+    blst_fr, blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
+    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
+    blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
     blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
@@ -1083,6 +1083,27 @@ impl G1 {
         if points.is_empty() {
             return Vec::new();
         }
+
+        // Freshly decoded points carry z = 1, making their conversion a
+        // coordinate copy rather than field work.
+        let mut one = blst_fp::default();
+        // SAFETY: valid pointers; converts the six-limb integer 1 into
+        // Montgomery form, the z blst assigns when lifting an affine point.
+        unsafe { blst_fp_from_uint64(&mut one, [1u64, 0, 0, 0, 0, 0].as_ptr()) };
+        let mut copied = Vec::with_capacity(points.len());
+        for point in points {
+            if point.0.z.l != one.l {
+                break;
+            }
+            copied.push(blst_p1_affine {
+                x: point.0.x,
+                y: point.0.y,
+            });
+        }
+        if copied.len() == points.len() {
+            return copied;
+        }
+        drop(copied);
 
         let n = points.len();
         let mut out = vec![blst_p1_affine::default(); n];
