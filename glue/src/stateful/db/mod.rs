@@ -20,7 +20,7 @@
 //!
 //! Each database is split ([`split`]) into the set's sole [`Writer`] and
 //! cloneable [`Reader`]s. Batches hold a reader and take a [`ReadGuard`] per
-//! storage call. A batch handed to [`ManagedDb::finalize`] must not read
+//! storage call. A batch handed to [`ManagedDb::apply`] must not read
 //! through its own reader, because that call holds the write side.
 //!
 //! # State Sync
@@ -457,13 +457,18 @@ pub struct Single<T> {
 
 impl<T> From<T> for Single<T> {
     fn from(database: T) -> Self {
-        Self {
-            writer: Writer::new(database),
-        }
+        Self::new("stateful.db", database)
     }
 }
 
 impl<T> Single<T> {
+    /// Create a set whose cell is identified by `label` in lock traces.
+    fn new(label: &'static str, database: T) -> Self {
+        Self {
+            writer: Writer::new(label, database),
+        }
+    }
+
     /// A reader over the set's database.
     ///
     /// Same reader as [`DatabaseSet::readers`], reachable without naming the
@@ -855,7 +860,8 @@ macro_rules! impl_database_set {
             async fn init(context: E, config: Self::Config) -> Self {
                 join!($(
                     async {
-                        Single::from(
+                        Single::new(
+                            concat!("stateful.db.", stringify!($idx)),
                             $T::init(
                                 context.child(concat!("db_", stringify!($idx))),
                                 config.$idx,
@@ -1277,7 +1283,9 @@ macro_rules! impl_state_sync_set {
                     return Err(err);
                 }
 
-                let synced = ($(Single::from(synced.$idx?),)+);
+                let synced = ($(
+                    Single::new(concat!("stateful.db.", stringify!($idx)), synced.$idx?),
+                )+);
                 let Some((converged_anchor, converged_targets)) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };

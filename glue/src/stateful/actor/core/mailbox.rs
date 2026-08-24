@@ -265,8 +265,11 @@ where
         match receiver.await {
             Ok(valid) => valid,
             // The actor exited without answering. Never fabricate a verdict.
-            // Park until this future is dropped.
-            Err(_) => std::future::pending().await,
+            // Release the ancestry and park until this future is dropped.
+            Err(_) => {
+                drop(_ancestry_owner);
+                std::future::pending().await
+            }
         }
     }
 }

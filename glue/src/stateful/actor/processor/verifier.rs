@@ -174,8 +174,8 @@ where
                 Ok(parent) => parent,
                 Err(PrepareFailure::Invalid) => {
                     // An anchor that moved during this attempt can make valid
-                    // ancestry look invalid (the parent swept below the new
-                    // anchor), so retry and let the loop's classification
+                    // ancestry look invalid (the finalization dropped the
+                    // parent from the pending map), so retry and let the loop's classification
                     // decide. A stable anchor means the ancestry is genuinely
                     // invalid.
                     if self.execution.last_processed().digest != seen.digest {

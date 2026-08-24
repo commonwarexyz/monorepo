@@ -7,11 +7,12 @@
 //! ([`ExecutionError::Stale`](crate::stateful::ExecutionError::Stale)) and
 //! answered from the canonical chain.
 //!
-//! Each finalized block is applied, its flush deferred to a pool, and its
-//! snapshots published at apply (see [`Publisher`]). The block is
-//! acknowledged to marshal only once its flush is durable. Pruning runs
-//! while the mailbox is idle, waits until the pruned range is durable, and
-//! publishes fresh snapshots right away.
+//! Each finalized block is applied immediately. Snapshots are captured and
+//! published when a durability sync starts, and one active sync covers every
+//! block applied behind it (see [`Publisher`]). The block is acknowledged to
+//! marshal only once a sync proves it durable. A queued prune owns the next
+//! storage-mutation boundary. It waits until the pruned range is durable,
+//! prunes, and publishes fresh snapshots right away.
 
 use crate::stateful::{
     Application, Input,
@@ -209,7 +210,8 @@ where
     pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Finalized marshal blocks at or below this height were already reflected
-    /// in the selected database anchor and should be acknowledged only.
+    /// in the selected database anchor and are reported to the application and
+    /// acknowledged without reapplying them.
     pub(super) skip_finalized_until: Option<Height>,
 }
 
@@ -249,7 +251,8 @@ where
 
         loop {
             // Observe completed durability before taking more work. A queued prune suppresses
-            // an automatic dirty-suffix successor until it has released database readers.
+            // the automatic dirty-suffix successor until the prune has run at its own
+            // mutation boundary.
             if let Some(completion) = sync_completion(&mut durability.sync).now_or_never()
                 && !durability.complete(completion)
             {
@@ -278,8 +281,8 @@ where
             // for subsequent mailbox work, so handle it before later arrivals.
             let prune_needs_sync = pending_prune.is_some() && durability.needs_sync();
             let message = if prune_needs_sync {
-                // The prune must release verification readers before this sync can acquire
-                // its writer. Run that boundary now so durability does not wait for idle.
+                // The suppressed successor sync would defer durability, and the acks
+                // behind it, until the mailbox went idle. Run the prune's boundary now.
                 Err(TryRecvError::Empty)
             } else {
                 match deferred_message.take() {
@@ -429,18 +432,23 @@ where
                     span,
                     block,
                     acknowledgement,
-                    ..
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                        // `Application::finalized` is at-least-once. Exiting on
+                        // stop leaves the block unacknowledged, and marshal
+                        // redelivers it after restart.
                         let notify =
                             processor.notify_finalized(self.context.as_present(), block.as_ref());
-                        async {
-                            verifications.drive(notify).await;
-                            acknowledgement.acknowledge();
+                        select! {
+                            _ = &mut shutdown => {
+                                debug!("shutdown signal received, stopping processing");
+                                return;
+                            },
+                            _ = verifications.drive(notify).instrument(process) => {
+                                acknowledgement.acknowledge();
+                            },
                         }
-                        .instrument(process)
-                        .await;
                         continue;
                     }
 
@@ -505,8 +513,8 @@ where
                         durability.started(height, barrier);
                     }
 
-                    // Defer pruning to the loop so it can settle durability and quiesce
-                    // verification readers at one database mutation boundary.
+                    // Defer pruning to the loop so it can settle durability at one
+                    // database mutation boundary.
                     if let Some(prune) = prune {
                         pending_prune = Some(prune);
                     }
@@ -543,9 +551,20 @@ where
                             return;
                         };
                         processor = driven;
-                        let completion = sync_completion(&mut durability.sync).await;
-                        if !durability.complete(completion) {
-                            return;
+                        loop {
+                            select! {
+                                _ = &mut shutdown => {
+                                    debug!("shutdown signal received, stopping processing");
+                                    return;
+                                },
+                                completion = sync_completion(&mut durability.sync) => {
+                                    if !durability.complete(completion) {
+                                        return;
+                                    }
+                                    break;
+                                },
+                                _ = verifications.next_completed() => {},
+                            }
                         }
                         assert!(durability.covers(prune.barrier_height));
                     }
@@ -1845,7 +1864,7 @@ mod tests {
         });
     }
 
-    /// A verification whose fork was swept by a finalization still answers its
+    /// A verification whose fork a finalization dropped still answers its
     /// branch-relative verdict.
     #[test]
     fn pruned_deep_fork_verification_answers_true() {
@@ -2402,7 +2421,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_does_not_bypass_active_winner_replay() {
+    fn finalization_uses_cached_winner_while_replay_remains_active() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let finalized = TestBlock::child(&genesis, 1);
@@ -2953,6 +2972,98 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
+        });
+    }
+
+    /// A verification keeps making progress while a queued prune waits for the
+    /// covering durability sync over its coalesced target.
+    #[test]
+    fn verification_completes_while_prune_awaits_covering_sync() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let (mut mailbox, control, subscriber, _marshal, _actor) = spawn_processing_with_gates(
+                &context,
+                "gated-covering-prune",
+                Some(PruneConfig {
+                    maintenance_interval: NZUsize!(3),
+                    retained_marshal_blocks: 1,
+                    retained_qmdb_blocks: 0,
+                }),
+                VecDeque::from([verify_gate]),
+            )
+            .await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block1 = TestBlock::child(&genesis, 1);
+            let block2 = TestBlock::child(&block1, 2);
+            let block3 = TestBlock::child(&block2, 3);
+
+            // Block 1 starts the only tracked sync, and its flush stays parked.
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
+
+            // Hold a live verification inside the application before the prune
+            // queues.
+            let consensus_context = block3.context();
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), consensus_context),
+                ancestry::from_iter([Arc::new(block3.clone()), Arc::new(block2)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            verify_started
+                .await
+                .expect("verification should start before the prune queues");
+
+            // Block 3 coalesces behind block 1's parked flush and queues a
+            // prune whose barrier height (2) never got a sync of its own.
+            let (acknowledgement, waiter3) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block3), acknowledgement));
+            while control.applied.load(Ordering::Relaxed) < 3 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.flushes.lock().len(), 1);
+
+            // Releasing block 1's flush leaves durability (1) short of the
+            // prune target (2), so the prune starts the covering sync inline
+            // and waits on its parked flush.
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            waiter1.await.expect("block 1 acknowledgement");
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                subscriber.latest(),
+                Some(3),
+                "the covering sync publishes the coalesced suffix",
+            );
+            assert!(control.pruned.lock().is_empty());
+
+            // The verification must resolve while the prune waits on the
+            // covering flush.
+            verify_release
+                .send(())
+                .expect("verification should remain active");
+            select! {
+                result = &mut verify => assert!(result),
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("covering-sync wait blocked active verification");
+                },
+            }
+
+            // Releasing the covering flush makes the target durable. The acks
+            // drain and the prune runs at its boundary.
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            waiter2.await.expect("block 2 acknowledgement");
+            waiter3.await.expect("block 3 acknowledgement");
+            while control.pruned.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.pruned.lock().clone(), vec![2]);
         });
     }
 

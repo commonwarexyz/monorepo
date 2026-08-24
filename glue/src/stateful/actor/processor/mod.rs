@@ -34,18 +34,19 @@
 //! A job on the losing side of an apply is refused at its next database read
 //! ([`ExecutionError::Stale`]). It waits out the anchor move
 //! ([`Execution::anchor_past`]) and re-checks the candidate against the new
-//! canonical chain. A candidate that itself finalized is true, one that was
-//! swept away is false, and one still undecided executes again (the loop in
+//! canonical chain. A candidate that itself finalized is true, one whose
+//! branch lost is false, and one still undecided executes again (the loop in
 //! `verifier::Verifier::run`).
 //!
 //! An apply changes the databases before the anchor moves. A fork taken from
 //! the anchor in between could mix the two states, so forks refuse while the
-//! flag is set, and the sweep, the anchor move, and the flag clear happen
-//! under one lock ([`Execution::advance_to_finalized`]).
+//! flag is set, and dropping dead forks, the anchor move, and the flag clear
+//! happen under one lock ([`Execution::advance_to_finalized`]).
 //!
-//! The finalized block stays in the pending map until that sweep, so a job
-//! forking from it mid-apply finds it instead of rebuilding it on top of
-//! itself.
+//! When its verification was cached, the finalized block stays in the pending
+//! map until the anchor moves, so a job forking from it mid-apply finds it
+//! instead of rebuilding it on top of itself. A replayed miss caches nothing,
+//! and the flag alone protects forks in that window.
 
 use crate::stateful::{
     Application, ExecutionError, Input, Proposed, PruneConfig,
@@ -644,13 +645,15 @@ where
 
     /// Apply finalized state and prune dead in-memory forks.
     ///
-    /// Returns the processor, the snapshot to publish, the barrier proving that
-    /// snapshot durable, and any prune now due. [`None`] means the block was
-    /// already applied, which happens when marshal reports it twice.
+    /// Returns the processor, any prune now due, and, only when `start_sync`
+    /// is set, the snapshot to publish and the barrier proving that snapshot
+    /// durable. [`None`] means the block was already applied, which happens
+    /// when marshal reports it twice.
     ///
-    /// The block's state comes from its verification when that is cached, and is
-    /// replayed here otherwise. Verification jobs keep running throughout, so
-    /// this leaves the block reachable as a parent until the anchor moves.
+    /// The block's state comes from its verification when that is cached, and
+    /// a cached block stays reachable as a parent until the anchor moves. A
+    /// miss is replayed here without caching, and forks from the anchor refuse
+    /// until the anchor moves. Verification jobs keep running throughout.
     pub(super) async fn finalize(
         mut self,
         context: &E,
@@ -685,12 +688,13 @@ where
         // Marshal finalization is ordered. A pending miss means we can replay
         // this block on top of finalized state.
         //
-        // The entry stays in the pending map until the retention sweep below,
-        // so a job forking from this block finds it instead of rebuilding it
-        // on top of itself. Replayed `apply` output must match the block's
-        // commitments, and every path from here must reach
-        // `advance_to_finalized` or take the actor down -- a stranded window
-        // parks every later verification forever.
+        // A cached entry stays in the pending map until the anchor move below
+        // drops dead forks, so a job forking from this block finds it instead
+        // of rebuilding it on top of itself. A replayed miss caches nothing,
+        // and replayed `apply` output must match the block's commitments.
+        // Every path from here must reach `advance_to_finalized` or take the
+        // actor down -- a stranded window parks every later verification
+        // forever.
         self.execution.state.lock().finalizing = true;
         let batch = match self.execution.pending_batch(&digest) {
             Some(merkleized) => merkleized,
@@ -772,7 +776,8 @@ where
     /// build a new block proposal. The resulting block and its merkleized
     /// state are cached in `pending`. Sends `None` on `response` if the
     /// ancestry is invalid, the application declines to propose, or the
-    /// application errors.
+    /// proposal goes stale (debug-asserted unreachable, since no finalization
+    /// can interleave a proposal). A fatal application error panics.
     pub(super) fn propose<S, V>(
         &self,
         context: &E,
@@ -1284,10 +1289,10 @@ where
     /// block invalidates. A pending block survives only when it descends from
     /// the anchor and was created after its round.
     ///
-    /// The sweep, the anchor move, and the finalizing-window close happen under
-    /// one lock. Verification jobs read this state while a block applies, and a
-    /// job that saw the pending set already swept but the anchor not yet moved
-    /// would reject work that is still valid.
+    /// Dropping dead forks, the anchor move, and the finalizing-window close
+    /// happen under one lock. Verification jobs read this state while a block
+    /// applies, and a job that saw dead forks already dropped but the anchor
+    /// not yet moved would reject work that is still valid.
     fn advance_to_finalized(&self, anchor: Anchor<PendingDigest<A, E>>) {
         let mut state = self.state.lock();
         let compatible = compatible_pending(&state, anchor.digest, anchor.round);

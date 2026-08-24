@@ -27,6 +27,8 @@ enum State<T> {
 }
 
 struct Cell<T> {
+    /// Identifies this cell in lock traces and parking logs.
+    label: &'static str,
     state: TracedAsyncRwLock<State<T>>,
     /// Set when the writer drops. One-way, so a relaxed load suffices.
     closed: AtomicBool,
@@ -38,7 +40,7 @@ impl<T> Cell<T> {
         if self.closed.load(Ordering::Relaxed) {
             // The writer is gone. Park rather than serve frozen state.
             drop(guard);
-            tracing::error!("database cell closed, parking reader");
+            tracing::error!(cell = self.label, "database cell closed, parking reader");
             return future::pending().await;
         }
         match AsyncRwLockReadGuard::try_map(guard, |state| match state {
@@ -50,7 +52,7 @@ impl<T> Cell<T> {
                 // Poisoning only happens during actor teardown. Park until
                 // this task is dropped with it.
                 drop(guard);
-                tracing::error!("database cell poisoned, parking reader");
+                tracing::error!(cell = self.label, "database cell poisoned, parking reader");
                 future::pending().await
             }
         }
@@ -59,7 +61,7 @@ impl<T> Cell<T> {
 
 /// Split `db` into its unique [`Writer`] and a cloneable [`Reader`].
 pub fn split<T>(db: T) -> (Writer<T>, Reader<T>) {
-    let writer = Writer::new(db);
+    let writer = Writer::new("database_cell", db);
     let reader = writer.reader();
     (writer, reader)
 }
@@ -77,10 +79,12 @@ impl<T> Drop for Writer<T> {
 }
 
 impl<T> Writer<T> {
-    /// Put `db` in a fresh cell and return its writer.
-    pub fn new(db: T) -> Self {
+    /// Put `db` in a fresh cell identified by `label` in lock traces, and
+    /// return its writer.
+    pub fn new(label: &'static str, db: T) -> Self {
         Self(Arc::new(Cell {
-            state: TracedAsyncRwLock::new("database_cell", State::Live(db)),
+            label,
+            state: TracedAsyncRwLock::new(label, State::Live(db)),
             closed: AtomicBool::new(false),
         }))
     }

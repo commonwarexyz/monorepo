@@ -176,7 +176,6 @@ where
                     span,
                     block,
                     acknowledgement,
-                    ..
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
                     let handoffs;
@@ -357,10 +356,21 @@ where
             match handoff {
                 FinalizedHandoff::Covered(block, acknowledgement)
                 | FinalizedHandoff::Reflected(block, acknowledgement) => {
-                    processor
-                        .notify_finalized(context.as_present(), block.as_ref())
-                        .await;
-                    acknowledgement.acknowledge();
+                    // `Application::finalized` is at-least-once. Exiting on
+                    // stop leaves the block unacknowledged, and marshal
+                    // redelivers it after a restart.
+                    select! {
+                        _ = &mut shutdown => {
+                            warn!(
+                                height = block.height().get(),
+                                "exiting mid-handoff on shutdown"
+                            );
+                            return;
+                        },
+                        _ = processor.notify_finalized(context.as_present(), block.as_ref()) => {
+                            acknowledgement.acknowledge();
+                        },
+                    }
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     // Exiting on stop leaves the block unacknowledged, and
