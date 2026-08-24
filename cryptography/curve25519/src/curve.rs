@@ -141,8 +141,8 @@ impl F {
         }
 
         let mut out = [0u8; 32];
-        for (chunk, word) in out.chunks_exact_mut(8).zip(words) {
-            chunk.copy_from_slice(&word.to_le_bytes());
+        for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(words) {
+            *chunk = word.to_le_bytes();
         }
         out
     }

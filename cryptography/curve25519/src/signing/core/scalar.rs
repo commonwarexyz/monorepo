@@ -208,8 +208,8 @@ impl Scalar {
     /// Returns the canonical little-endian encoding of this scalar.
     pub fn to_bytes(self) -> [u8; 32] {
         let mut bytes = [0u8; 32];
-        for (chunk, limb) in bytes.chunks_exact_mut(8).zip(self.0) {
-            chunk.copy_from_slice(&limb.to_le_bytes());
+        for (chunk, limb) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(self.0) {
+            *chunk = limb.to_le_bytes();
         }
         bytes
     }

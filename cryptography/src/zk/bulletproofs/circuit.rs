@@ -1904,7 +1904,9 @@ pub mod fuzz {
                 ipa::Setup::new(
                     gens[2 * TEST_SETUP_PAIRS],
                     gens[..2 * TEST_SETUP_PAIRS]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|c| (c[0], c[1])),
                 ),
                 gens[2 * TEST_SETUP_PAIRS + 1],
