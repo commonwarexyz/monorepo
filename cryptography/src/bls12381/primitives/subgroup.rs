@@ -1455,8 +1455,13 @@ mod tests {
     #[test]
     fn spread_is_even_and_complete() {
         for combinations in [1usize, 2, 7, 81, 128, 255] {
-            for rounds in 1..=combinations {
+            // Too few rounds to carry the combinations at all is not a spread
+            // this has to be even about: it is the precondition `spread`
+            // asserts and `plan_cost` rejects before ever calling it.
+            let fewest = combinations.div_ceil(MAX_WIDTH as usize).max(1);
+            for rounds in fewest..=combinations {
                 let widths = spread(combinations, rounds);
+                assert!(widths.iter().all(|&m| m <= MAX_WIDTH));
                 assert_eq!(widths.len(), rounds);
                 // Every combination is placed, and none is wasted.
                 assert_eq!(
