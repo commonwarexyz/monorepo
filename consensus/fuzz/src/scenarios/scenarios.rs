@@ -45,6 +45,19 @@
 //! the engines start bare from the genesis floor, the first attackable live
 //! view is view 1 over genesis, and the round-bound parent fetch stays
 //! outstanding into the fuzzing phase.
+//!
+//! [`StandardCertifyBumpsNotarizedFetchForPendingVerify`] reproduces
+//! `test_standard_certify_bumps_notarized_fetch_for_pending_verify`
+//! (consensus/src/marshal/standard/mod.rs:2571) through its handoff point:
+//! the victim's `verify` of a locally missing candidate parks an in-progress
+//! certification gate on a local-only block wait, and `certify` then takes
+//! that gate and bumps a round-bound notarized fetch that resolves through
+//! the armed `(notarization, block)` delivery, so both the pending verify and
+//! the certify succeed with exactly one notarized fetch issued. The
+//! fabricated view-1 notarization is seeded into every honest engine's voter
+//! journal exactly as in [`StandardCertifyMissingCandidateFetchesByRound`],
+//! so the same composition argument applies and the first attackable live
+//! view is view 2 over the recovered source block.
 
 use super::{
     environment::{
@@ -98,6 +111,11 @@ where
         }
         ScenarioKind::StandardVerifyHeightLieParentFetchIsRoundBound => {
             StandardVerifyHeightLieParentFetchIsRoundBound
+                .drive(harness)
+                .await
+        }
+        ScenarioKind::StandardCertifyBumpsNotarizedFetchForPendingVerify => {
+            StandardCertifyBumpsNotarizedFetchForPendingVerify
                 .drive(harness)
                 .await
         }
@@ -483,6 +501,115 @@ impl Scenario for StandardVerifyHeightLieParentFetchIsRoundBound {
                 NodeExpectation::new(Node::D)
                     .lacks(child_digest)
                     .lacks(parent_digest),
+            ],
+            expectation: Expectation::genesis_rooted(),
+        }
+    }
+}
+
+/// Source: consensus/src/marshal/standard/mod.rs::test_standard_certify_bumps_notarized_fetch_for_pending_verify
+///
+/// Handoff: after `verify` of a locally missing candidate registered an
+/// in-progress certification gate parked on a local-only block wait, and
+/// `certify` then took that gate and bumped a round-bound notarized fetch,
+/// resolved through the armed `(notarization, block)` delivery: both the
+/// pending verify and the certify returned true. The source asserts that at
+/// least one round-bound notarized fetch was issued; the handoff multiset
+/// strengthens this to exactly one, so a second fetch for the round fails
+/// handoff, not just a missing one.
+///
+/// Node mapping (the node-addressing divergence S6 permits): the same uniform
+/// permutation as [`StandardCertifyMissingCandidateFetchesByRound`], source
+/// participant `i` -> {0: B, 1: C, 2: D, 3: A}. The source's
+/// `me = participants[0]` maps wholly to [`Node::B`]: the marshal actor under
+/// test, its scheme provider, the candidate block's leader, and the first
+/// quorum signer. The source iterates both wrapper kinds in one test body;
+/// per R2 the variant is fixed per fuzz target, so each target runs this
+/// prefix under its own variant.
+///
+/// Harness divergence (S6 plumbing): the source awaits each wrapper verdict
+/// in a `select!` against a 5-second sleep that panics on timeout; the
+/// harness `await_wrapper` is that same race behind one name.
+///
+/// Composition soundness (I5): identical to
+/// [`StandardCertifyMissingCandidateFetchesByRound`]. The fabricated view-1
+/// notarization is seeded as an `Artifact::Notarization` into every honest
+/// engine's voter journal with the engine floor kept at genesis, so startup
+/// replay installs the recovered proposal and no engine can produce a
+/// competing view-1 certificate. Only the victim holds the fetched candidate
+/// at handoff, and the first attackable live view is view 2 over it.
+pub(crate) struct StandardCertifyBumpsNotarizedFetchForPendingVerify;
+
+impl Scenario for StandardCertifyBumpsNotarizedFetchForPendingVerify {
+    async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
+        &self,
+        harness: &mut FuzzScenarioStandardHarness<P, M>,
+    ) -> ScenarioHandoff<P>
+    where
+        M::Wrapper: Clone,
+    {
+        harness.begin("test_standard_certify_bumps_notarized_fetch_for_pending_verify");
+        // The missing candidate: a height-1 block at view 1 on genesis, led by
+        // the source's `me` (Node::B under the participant permutation), built
+        // as in the source.
+        let genesis_digest = harness.genesis().digest();
+        let round_one = round(1);
+        let block_context = harness.context(round_one, Node::B, View::zero(), genesis_digest);
+        let block =
+            B::<P>::new::<Sha256>(block_context.clone(), genesis_digest, Height::new(1), 100);
+        let digest = block.digest();
+
+        // `verify` registers a pending certification gate whose block wait is
+        // local-only, so it stays parked until something delivers the block.
+        let verify = harness.wrapper_verify(Node::B, block_context, digest).await;
+
+        // Stage the notarized response so the bump's fetch can resolve.
+        let notarization =
+            harness.make_notarization(round_one, View::zero(), digest, &QUORUM_SIGNERS);
+        harness.respond_to_next_fetch(Node::B, (notarization.clone(), block.clone()).encode());
+
+        // `certify` takes the in-progress gate and bumps a round-bound
+        // notarized fetch; the armed delivery stores the block and wakes the
+        // pending verify, which resolves the gate certify awaits.
+        let certify = harness.wrapper_certify(Node::B, round_one, digest).await;
+
+        assert!(
+            harness.await_wrapper(verify, "bumped-fetch verify").await,
+            "verify should accept the fetched block"
+        );
+        assert!(
+            harness.await_wrapper(certify, "bumped-fetch certify").await,
+            "certify should succeed via the shared gate"
+        );
+
+        ScenarioHandoff {
+            engine_floor: Floor::Genesis(genesis_digest),
+            engine_journal: vec![notarization],
+            attack_anchor: attack_above::<P>(&block),
+            reference_chain: vec![block],
+            // Exactly one notarized fetch for the candidate's round: the
+            // multiset's one-to-one correspondence fails a second fetch for
+            // the round, not just a missing one.
+            node_fetches: vec![
+                (Node::A, Vec::new()),
+                (Node::B, vec![FetchMatch::NotarizedRound(round_one)]),
+                (Node::C, Vec::new()),
+                (Node::D, Vec::new()),
+            ],
+            node_active_fetches: vec![
+                (Node::A, Vec::new()),
+                (Node::B, vec![FetchMatch::NotarizedRound(round_one)]),
+                (Node::C, Vec::new()),
+                (Node::D, Vec::new()),
+            ],
+            // The victim is the sole holder of the fetched candidate at
+            // handoff, as in the source (a single validator with no peers
+            // holding anything).
+            expected_nodes: vec![
+                NodeExpectation::new(Node::A).lacks(digest),
+                NodeExpectation::new(Node::B).holds(digest),
+                NodeExpectation::new(Node::C).lacks(digest),
+                NodeExpectation::new(Node::D).lacks(digest),
             ],
             expectation: Expectation::genesis_rooted(),
         }

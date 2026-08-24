@@ -46,6 +46,13 @@ pub enum ScenarioKind {
     /// engines start bare from the genesis floor with that fetch still
     /// outstanding (see `scenarios.rs`).
     StandardVerifyHeightLieParentFetchIsRoundBound,
+    /// `test_standard_certify_bumps_notarized_fetch_for_pending_verify`: a
+    /// `verify` still pending when `certify` arrives is taken as certify's
+    /// gate, and certify bumps exactly one round-bound notarized fetch that
+    /// resolves through the armed delivery; the engines recover the
+    /// fabricated notarization from their seeded voter journals
+    /// (see `scenarios.rs`).
+    StandardCertifyBumpsNotarizedFetchForPendingVerify,
 }
 
 /// How the byzantine leader disseminates its attack-view block on channels 2 + 3.

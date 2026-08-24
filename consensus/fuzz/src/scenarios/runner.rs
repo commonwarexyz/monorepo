@@ -679,4 +679,8 @@ mod tests {
         height_lie_parent_fetch,
         StandardVerifyHeightLieParentFetchIsRoundBound
     );
+    scenario_smoke!(
+        certify_bumps_notarized_fetch,
+        StandardCertifyBumpsNotarizedFetchForPendingVerify
+    );
 }
