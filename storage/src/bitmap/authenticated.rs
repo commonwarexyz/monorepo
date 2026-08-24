@@ -457,7 +457,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     ///
     /// # Errors
     ///
-    /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds or has been pruned.
+    /// Returns [Error::BitOutOfBounds] if `bit` isn't in [self.pruned_bits(), self.len())
     pub async fn proof(
         &self,
         hasher: &impl Hasher<mmr::Family, Digest = D>,
