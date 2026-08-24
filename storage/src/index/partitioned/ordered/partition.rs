@@ -43,6 +43,7 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// here and prefetching its data hides the dependent cache misses a later lookup takes.
     // Not const: `_mm_prefetch` is const-callable only on nightly toolchains.
     #[allow(clippy::missing_const_for_fn)]
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch(&self) {
         #[cfg(all(target_arch = "x86_64", not(miri)))]
         // SAFETY: prefetch is a hint with no side effects; any address is permitted.
