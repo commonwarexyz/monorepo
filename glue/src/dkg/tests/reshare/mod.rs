@@ -505,6 +505,116 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary(#[case] network: Network
 #[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
+fn reshare_e2e_state_sync_active_player_late_restart(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let state_sync_floor = epocher
+        .first(epoch)
+        .expect("test epoch should be supported");
+    let late_height = epocher
+        .midpoint(epoch)
+        .expect("test epoch should be supported")
+        .next();
+    // Failure in epoch 0 carries the genesis output and share into the synced
+    // epoch, so the delayed node is an active dealer and player after joining.
+    let engine = ReshareEngine::with_committee(network, 4, 4)
+        .with_failures([0])
+        .with_state_sync_floor(state_sync_floor);
+    let delayed = engine.participants[3].clone();
+    let engine = engine.with_processed_hold(delayed.clone(), late_height);
+    let state_syncs = engine.state_syncs.clone();
+    let state_sync_starts = engine.state_sync_starts.clone();
+    let result = reshare_plan_with_boundary(
+        engine,
+        2,
+        BoundaryEpochInfos::new(3).with_expected_failures([0]),
+    )
+    .link(Link {
+        latency: Duration::from_millis(4),
+        jitter: Duration::from_millis(1),
+        success_rate: Probability!(1.0),
+    })
+    .crash(Crash::DelayRound {
+        participants: vec![delayed.clone()],
+        round: height_round(state_sync_floor),
+    })
+    .crash(Crash::ProcessedHeight {
+        participant: delayed.clone(),
+        heights: late_height.get()..=final_height(epoch.get()).get(),
+        downtime: Duration::from_millis(250),
+    })
+    .property(StateSyncedAtHeight::new(
+        delayed.clone(),
+        state_sync_floor,
+        state_sync_floor,
+        state_syncs,
+    ))
+    .property(SchemesRegistered::new(vec![delayed.clone()], epoch.next()))
+    .timeout(Duration::from_secs(120))
+    .run()
+    .unwrap()
+    .pop()
+    .unwrap();
+
+    assert_eq!(result.crashes, 1);
+    assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
+}
+
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_late_state_sync_carries_share_across_failure(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let state_sync_floor = epocher
+        .midpoint(epoch)
+        .expect("test epoch should be supported")
+        .next();
+    let start_height = epocher
+        .last(epoch)
+        .and_then(Height::previous)
+        .expect("test epoch should be supported");
+    let engine = ReshareEngine::with_committee(network, 4, 4)
+        .with_failures([0, 1])
+        .with_state_sync_floor(state_sync_floor);
+    let delayed = engine.participants[3].clone();
+    let state_syncs = engine.state_syncs.clone();
+    let state_sync_starts = engine.state_sync_starts.clone();
+    reshare_plan_with_boundary(
+        engine,
+        2,
+        BoundaryEpochInfos::new(3).with_expected_failures([0, 1]),
+    )
+    .link(Link {
+        latency: Duration::from_millis(4),
+        jitter: Duration::from_millis(1),
+        success_rate: Probability!(1.0),
+    })
+    .crash(Crash::DelayRound {
+        participants: vec![delayed.clone()],
+        round: height_round(start_height),
+    })
+    .property(StateSyncedAtHeight::new(
+        delayed.clone(),
+        state_sync_floor,
+        state_sync_floor,
+        state_syncs,
+    ))
+    .property(SchemesRegistered::new(vec![delayed.clone()], epoch.next()))
+    .timeout(Duration::from_secs(120))
+    .run()
+    .unwrap();
+
+    assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
+}
+
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
 fn reshare_e2e_state_sync_epoch_crosses_during_sync(#[case] network: Network) {
     // The node probes mid-epoch 1, fixing its floor and epoch info together,
     // then the harness holds bootstrap until the sampled committee finishes

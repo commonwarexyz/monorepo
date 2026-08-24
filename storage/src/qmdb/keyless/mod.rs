@@ -547,9 +547,9 @@ where
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the journal,
-    /// but does not durably commit it. Call [`Keyless::commit`] or [`Keyless::sync`], or await the
-    /// handle returned by [`Keyless::start_sync`], to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal.
+    /// Call [`Keyless::commit`] or [`Keyless::sync`], or await the handle returned by
+    /// [`Keyless::start_sync`], to make the applied state durable.
     #[tracing::instrument(name = "qmdb.keyless.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,

@@ -8,9 +8,6 @@
 //! data but not the output of said transactions during consensus, agreement must be achieved asynchronously
 //! over the output of consensus to support state sync and client balance proofs.
 //!
-//! _For applications that want to collect quorum certificates over concurrent, sequencer-driven broadcast,
-//! check out [crate::ordered_broadcast]._
-//!
 //! # Pluggable Cryptography
 //!
 //! The aggregation module is generic over the signing scheme, allowing users to choose the
