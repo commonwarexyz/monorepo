@@ -453,16 +453,26 @@ where
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     // Initialize the underlying `any` database. It takes sole ownership of the bitmap and
-    // populates it during snapshot rebuild.
-    let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
+    // populates it during snapshot rebuild. The grafted tree's ops-tree node digests are
+    // prefetched concurrently with that rebuild: the reads depend only on the opened log
+    // (the graftable range is a function of the operation count), while the grafted leaves
+    // also need the bitmap the rebuild produces, so hashing and assembly happen after.
+    let overlap = move |log: Arc<any::db::AuthenticatedLog<F, E, J, H, S>>| async move {
+        let chunks = db::graft_chunk_range::<F, N>(pruned_chunks, *log.size());
+        let positions = db::graft_node_positions::<F, N>(chunks);
+        Ok(log.merkle.get_nodes(&positions).await?)
+    };
+    let (any, node_digests) =
+        any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap), overlap).await?;
 
-    // Rebuild the grafted tree and canonical root from the initialized `any` state.
-    let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    // Assemble the grafted tree from the prefetched digests and compute the canonical root.
+    let (grafted_tree, root) = db::assemble_grafted_tree_and_root::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
         any.inactivity_floor_loc,
         any.root(),
+        node_digests,
         &strategy,
     )
     .await?;
