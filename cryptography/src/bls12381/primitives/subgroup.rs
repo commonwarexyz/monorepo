@@ -101,6 +101,10 @@ const LOG2_3_SCALED_LOWER_BOUND: usize = 1584;
 ///
 /// Each combination has error at most `1/3`, so `t` of them give
 /// `3^-t <= 2^-security` once `t >= security / log2(3)` (81 at 128-bit).
+///
+/// Saturates for `security > usize::MAX / 1000`; a count that large already
+/// exceeds any computable schedule, and the cost model then always selects
+/// exact per-point checking (zero error) over batching.
 const fn combinations_for_security(security: usize) -> usize {
     security
         .saturating_mul(1000)
