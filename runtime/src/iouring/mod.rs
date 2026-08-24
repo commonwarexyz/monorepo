@@ -312,7 +312,9 @@ impl Handle {
     /// Enqueue a request for the io_uring loop.
     ///
     /// On success, this publishes one submission and conditionally wakes the
-    /// loop if a futex or eventfd wait target is currently armed.
+    /// loop if a futex or eventfd wait target is currently armed. On failure,
+    /// it returns the unsent request so callers can recover its owned resources.
+    #[allow(clippy::result_large_err)]
     async fn enqueue(&self, request: Request) -> Result<(), mpsc::error::SendError<Request>> {
         self.inner
             .sender

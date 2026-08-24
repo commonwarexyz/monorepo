@@ -787,9 +787,9 @@ where
     /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
     /// more details).
     ///
-    /// This publishes the batch to the in-memory Current view and appends it to the journal, but
-    /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
-    /// returned by [`Db::start_sync`], to guarantee durability.
+    /// This publishes the batch to the in-memory Current view and appends it to the journal. Call
+    /// [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to make
+    /// the applied state durable.
     #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
     #[boxed]
     pub async fn apply_batch(

@@ -479,9 +479,6 @@ where
 /// `new_batch` captures the [`Shared`] database handle in the returned
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// applied state.
-///
-/// `finalize` applies the merkleized batch's changeset and starts
-/// persisting it, reporting durability on the returned handle.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -550,9 +547,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -654,9 +655,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -847,11 +852,14 @@ mod tests {
                 .unwrap();
 
             let (slot, database) = db.write().await;
-            let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database, winner)
+            let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, winner)
+                .await
+                .unwrap();
+            let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
                 .await
                 .unwrap();
             slot.put(database);
-            sync.await.expect("finalize flush failed");
+            sync.await.expect("database sync failed");
 
             // The winner is not an ancestor of the earlier fork, so reading through it
             // refuses instead of consulting state the fork never accounted for.
@@ -880,7 +888,7 @@ mod tests {
             let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
-            // Seed keys 0..50 and finalize.
+            // Seed keys 0..50 and persist them.
             let mut seed = db.new_batch_for_test::<_>().await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
@@ -890,12 +898,14 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) =
-                    <UnorderedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
+                let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
+                let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
+                    .await
+                    .unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
@@ -959,11 +969,8 @@ mod tests {
         Sequential,
     >;
 
-    /// `finalize` must return, with the batch readable through the shared
-    /// handle, while its flush is still parked at the storage layer.
-    /// Durability is reported only on the returned handle.
     #[test]
-    fn finalize_defers_flush_to_returned_handle() {
+    fn apply_does_not_finalize() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -986,21 +993,28 @@ mod tests {
                 .await
                 .unwrap();
 
+            let starts = pending.starts();
             let (slot, database) = db.write().await;
-            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+            let database = <DelayedFixedDb as ManagedDb<_>>::apply(database, merkleized)
                 .await
                 .unwrap();
             slot.put(database);
 
-            // The flush is parked, yet the batch is already readable.
-            assert!(
-                pending.starts() > pending.completions(),
-                "finalize must leave its flush parked",
-            );
+            assert_eq!(pending.starts(), starts, "apply must not start durability");
             {
                 let guard = db.read().await;
                 assert_eq!(guard.get(&key).await.unwrap(), Some(value));
             }
+
+            let (slot, database) = db.write().await;
+            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database)
+                .await
+                .unwrap();
+            slot.put(database);
+            assert!(
+                pending.starts() > pending.completions(),
+                "finalize must leave its flush parked",
+            );
 
             release_pending_syncs(&pending);
             drive_pending_syncs(&pending, sync)
