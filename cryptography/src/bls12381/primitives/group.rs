@@ -1075,6 +1075,11 @@ impl G1 {
         Self(p)
     }
 
+    /// Borrows the underlying `blst_p1`.
+    pub(crate) const fn as_blst_p1(&self) -> &blst_p1 {
+        &self.0
+    }
+
     /// Batch converts projective G1 points to affine.
     ///
     /// This uses Montgomery's trick to reduce n field inversions to 1,
