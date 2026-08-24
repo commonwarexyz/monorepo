@@ -222,8 +222,10 @@ async fn read_index_sections(
         }
         logical.truncate(logical.len() - logical.len() % IndexRecord::SIZE);
         let records = logical
-            .chunks_exact(IndexRecord::SIZE)
-            .map(|record| IndexRecord::decode(record).expect("oracle index record failed"))
+            .as_chunks::<{ IndexRecord::SIZE }>()
+            .0
+            .iter()
+            .map(|record| IndexRecord::decode(&record[..]).expect("oracle index record failed"))
             .collect();
         sections.insert(section, records);
     }
@@ -234,11 +236,13 @@ async fn recover_expected(
     context: &deterministic::Context,
     cfg: &prunable::Config<EightCap, ()>,
     intended: &[Entry],
-) -> (Vec<Entry>, BTreeMap<u64, u64>) {
+) -> (Vec<Entry>, BTreeMap<u64, u64>, BTreeMap<u64, u64>) {
     let sections = read_index_sections(context, &cfg.key_partition).await;
+    let mut index_sizes: BTreeMap<_, _> = sections.keys().map(|&section| (section, 0)).collect();
     let mut value_sizes: BTreeMap<_, _> = sections.keys().map(|&section| (section, 0)).collect();
     let mut expected = Vec::new();
     for (section, records) in sections {
+        let mut retained = 0usize;
         for record in records {
             let Some(value) = read_value(context, &cfg.value_partition, section, &record).await
             else {
@@ -259,28 +263,34 @@ async fn recover_expected(
             );
             value_sizes.insert(section, value_end);
             expected.push(entry);
+            retained += 1;
         }
+        let logical_size = retained * IndexRecord::SIZE;
+        let physical_size =
+            logical_size.div_ceil(INDEX_PAGE_SIZE) * (INDEX_PAGE_SIZE + PAGE_CHECKSUM_RECORD_SIZE);
+        index_sizes.insert(section, physical_size as u64);
     }
-    (expected, value_sizes)
+    (expected, index_sizes, value_sizes)
 }
 
-async fn assert_value_sizes(
+async fn assert_blob_sizes(
     context: &deterministic::Context,
     partition: &str,
     expected: &BTreeMap<u64, u64>,
+    kind: &str,
 ) {
     let mut actual = BTreeMap::new();
-    for name in context.scan(partition).await.expect("value scan failed") {
+    for name in context.scan(partition).await.expect("blob scan failed") {
         let section = u64::from_be_bytes(name.as_slice().try_into().expect("invalid section name"));
         let (_, size) = context
             .open(partition, &name)
             .await
-            .expect("value section open failed");
+            .expect("blob section open failed");
         actual.insert(section, size);
     }
     assert_eq!(
         &actual, expected,
-        "archive recovery left unindexed or trailing value bytes"
+        "archive recovery left trailing or missing {kind} bytes"
     );
 }
 
@@ -466,11 +476,11 @@ fn fuzz(input: FuzzInput) {
     let recovery_intended = intended.clone();
     let recovery_baseline = baseline.clone();
     let recovery_input = input.clone();
-    let ((expected, expected_value_sizes), checkpoint) = deterministic::Runner::from(checkpoint)
-        .start_and_recover(move |context| async move {
+    let ((expected, expected_index_sizes, expected_value_sizes), checkpoint) =
+        deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = config(&context, items_per_section);
-            let (expected, expected_value_sizes) =
+            let (expected, expected_index_sizes, expected_value_sizes) =
                 recover_expected(&context, &cfg, &recovery_intended).await;
             let archive = TestArchive::init(context.child("archive"), cfg.clone())
                 .await
@@ -496,9 +506,16 @@ fn fuzz(input: FuzzInput) {
                 );
             }
             assert_view(&archive, &recovery_intended, &expected).await;
-            assert_value_sizes(&context, &cfg.value_partition, &expected_value_sizes).await;
+            assert_blob_sizes(&context, &cfg.key_partition, &expected_index_sizes, "index").await;
+            assert_blob_sizes(
+                &context,
+                &cfg.value_partition,
+                &expected_value_sizes,
+                "value",
+            )
+            .await;
             drop(archive);
-            (expected, expected_value_sizes)
+            (expected, expected_index_sizes, expected_value_sizes)
         });
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
@@ -509,7 +526,14 @@ fn fuzz(input: FuzzInput) {
             .expect("second recovery failed");
 
         assert_view(&archive, &intended, &expected).await;
-        assert_value_sizes(&context, &cfg.value_partition, &expected_value_sizes).await;
+        assert_blob_sizes(&context, &cfg.key_partition, &expected_index_sizes, "index").await;
+        assert_blob_sizes(
+            &context,
+            &cfg.value_partition,
+            &expected_value_sizes,
+            "value",
+        )
+        .await;
 
         for entry in &intended {
             if expected.contains(entry) {

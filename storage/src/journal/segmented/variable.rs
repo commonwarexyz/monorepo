@@ -627,7 +627,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             .manager
             .get_mut(section)
             .expect("replayed section is present")
-            .recoverable_prefix_len(self.read_options)
+            .recoverable_prefix_len_with_options(self.read_options)
             .await
         {
             Ok(recoverable) => recoverable,
@@ -659,10 +659,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        if let Err(err) = repair_blob(&mut self.journal, section, recoverable).await {
-            self.repairing = false;
-            return Err(err);
-        }
+        repair_blob(&mut self.journal, section, recoverable).await?;
         let reader = match self
             .journal
             .0
@@ -698,9 +695,8 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     /// next section. The exception is [Error::ReplayInterrupted], which ends the
     /// replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, u32, V), Error>> {
-        // A dropped future can interrupt a repair, leaving the section's writer with
-        // in-memory state that no longer matches the blob. Fail the replay rather than
-        // repair or decode over it.
+        // An interrupted or failed repair can leave the section's writer with in-memory state
+        // that no longer matches the blob. Fail the replay rather than repair or decode over it.
         if self.repairing {
             self.repairing = false;
             self.sections.clear();
@@ -912,6 +908,49 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    async fn journal_with_torn_interior_page(
+        context: &mut deterministic::Context,
+        partition: &str,
+        later_section: bool,
+    ) -> (Journal<deterministic::Context, u64>, Config<()>) {
+        const LOGICAL_PAGE_SIZE: u64 = 64;
+        const FIRST_SECTION: u64 = 0;
+        const TORN_SECTION: u64 = 1;
+
+        let cfg = Config {
+            partition: partition.into(),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(
+                context,
+                NZU16!(LOGICAL_PAGE_SIZE as u16),
+                NZUsize!(4),
+            ),
+            write_buffer: NZUsize!(256),
+        };
+        let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+            .await
+            .unwrap();
+        (journal, _, _) = journal.append(FIRST_SECTION, &u64::MAX).await.unwrap();
+        for value in 0..15u64 {
+            let offset;
+            (journal, offset, _) = journal.append(TORN_SECTION, &value).await.unwrap();
+            assert_eq!(offset, value * 9);
+        }
+        if later_section {
+            (journal, _, _) = journal.append(2, &u64::MIN).await.unwrap();
+        }
+        journal = journal.sync_all().await.unwrap();
+        drop(journal);
+
+        corrupt_page(context, &cfg.partition, TORN_SECTION, 1, LOGICAL_PAGE_SIZE).await;
+
+        let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+            .await
+            .unwrap();
+        (journal, cfg)
+    }
 
     #[test_traced]
     fn test_segmented_variable_replay_propagates_read_options() {
@@ -1922,33 +1961,9 @@ mod tests {
     fn test_segmented_variable_replay_repairs_torn_interior_page_when_reached() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            const LOGICAL_PAGE_SIZE: u64 = 64;
             const FIRST_SECTION: u64 = 0;
             const PARTITION: &str = "segmented-variable-torn-interior";
             const TORN_SECTION: u64 = 1;
-
-            let cfg = Config {
-                partition: PARTITION.into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(LOGICAL_PAGE_SIZE as u16),
-                    NZUsize!(4),
-                ),
-                write_buffer: NZUsize!(256),
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            (journal, _, _) = journal.append(FIRST_SECTION, &u64::MAX).await.unwrap();
-            for value in 0..15u64 {
-                let offset;
-                (journal, offset, _) = journal.append(TORN_SECTION, &value).await.unwrap();
-                assert_eq!(offset, value * 9);
-            }
-            journal = journal.sync_all().await.unwrap();
-            drop(journal);
 
             // Fifteen nine-byte frames occupy 135 bytes. Pages 0 and 2 remain valid while page 1
             // is torn, so backward sizing reports the full tail. Forward page validation must
@@ -1958,18 +1973,8 @@ mod tests {
             // a prefetched later page fails validation. FIRST_SECTION establishes the ordered
             // lifecycle boundary: replay setup and consumption of an earlier section must not
             // read or repair this later section.
-            corrupt_page(
-                &mut context,
-                &cfg.partition,
-                TORN_SECTION,
-                1,
-                LOGICAL_PAGE_SIZE,
-            )
-            .await;
-
-            let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
-                .await
-                .unwrap();
+            let (journal, _) =
+                journal_with_torn_interior_page(&mut context, PARTITION, false).await;
             let original_size = context
                 .open(PARTITION, &TORN_SECTION.to_be_bytes())
                 .await
@@ -2014,6 +2019,41 @@ mod tests {
             let journal = replay.finish().unwrap();
             assert_eq!(journal.size(TORN_SECTION).unwrap(), 63);
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_variable_replay_stops_after_failed_interior_repair() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let (journal, _) = journal_with_torn_interior_page(
+                &mut context,
+                "segmented-variable-failed-interior-repair",
+                true,
+            )
+            .await;
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: Probability!(1.0),
+                    partial_rate: Probability!(0.0),
+                }),
+                ..Default::default()
+            };
+
+            // Section 0 delays validation of the torn section until iteration. Section 2 proves a
+            // fatal repair error cannot be treated like an ordinary per-section decode error.
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            assert!(matches!(replay.next().await, Some(Ok((0, 0, _, u64::MAX)))));
+            assert!(matches!(replay.next().await, Some(Err(Error::Runtime(_)))));
+            assert!(matches!(
+                replay.next().await,
+                Some(Err(Error::ReplayInterrupted))
+            ));
+            assert!(replay.next().await.is_none());
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
         });
     }
 

@@ -126,7 +126,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             let recoverable = manager
                 .get(section)?
                 .expect("listed section is present")
-                .recoverable_prefix_len(ReadOptions::default())
+                .recoverable_prefix_len()
                 .await?;
             let valid_size = recoverable - (recoverable % Self::CHUNK_SIZE_U64);
             if valid_size == size {

@@ -64,6 +64,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "immutable_archive_recovery"
+path = "fuzz_targets/immutable_archive_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "rmap_operations"
 path = "fuzz_targets/rmap_operations.rs"
 test = false
@@ -80,6 +87,13 @@ bench = false
 [[bin]]
 name = "metadata_operations"
 path = "fuzz_targets/metadata_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata_recovery"
+path = "fuzz_targets/metadata_recovery.rs"
 test = false
 doc = false
 bench = false
@@ -115,6 +129,13 @@ bench = false
 [[bin]]
 name = "freezer_operations"
 path = "fuzz_targets/freezer_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "freezer_recovery"
+path = "fuzz_targets/freezer_recovery.rs"
 test = false
 doc = false
 bench = false

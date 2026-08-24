@@ -882,7 +882,16 @@ impl<B: Blob> Writer<B> {
     ///
     /// Expects all appended bytes to have reached the blob (as after recovery): a partial page
     /// still buffered in this writer is unreadable from the blob and fails the scan.
-    pub async fn recoverable_prefix_len(&self, read_options: ReadOptions) -> Result<u64, Error> {
+    pub async fn recoverable_prefix_len(&self) -> Result<u64, Error> {
+        self.recoverable_prefix_len_with_options(ReadOptions::default())
+            .await
+    }
+
+    /// Same as [`Self::recoverable_prefix_len`], using `read_options` for each blob read.
+    pub async fn recoverable_prefix_len_with_options(
+        &self,
+        read_options: ReadOptions,
+    ) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size();
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
         Self::recoverable_prefix_len_from_pages(
@@ -1212,13 +1221,7 @@ mod tests {
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(
-                writer
-                    .recoverable_prefix_len(ReadOptions::default())
-                    .await
-                    .unwrap(),
-                0
-            );
+            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 0);
 
             let total = PAGE_SIZE.get() as usize * 2 + 50;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
@@ -1227,13 +1230,7 @@ mod tests {
 
             // Prefix validation uses the default options so recovery can reuse the validated pages.
             recordings.clear();
-            assert_eq!(
-                writer
-                    .recoverable_prefix_len(ReadOptions::default())
-                    .await
-                    .unwrap(),
-                total as u64
-            );
+            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), total as u64);
             let reads = recordings.snapshot().reads;
             assert!(!reads.is_empty());
             assert!(
@@ -1300,10 +1297,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             assert_eq!(
-                writer
-                    .recoverable_prefix_len(ReadOptions::default())
-                    .await
-                    .unwrap(),
+                writer.recoverable_prefix_len().await.unwrap(),
                 PAGE_SIZE.get() as u64
             );
         });
@@ -1346,13 +1340,7 @@ mod tests {
                 .unwrap();
             blob.sync().await.unwrap();
 
-            assert_eq!(
-                writer
-                    .recoverable_prefix_len(ReadOptions::default())
-                    .await
-                    .unwrap(),
-                20
-            );
+            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 20);
         });
     }
 

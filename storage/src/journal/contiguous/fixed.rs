@@ -460,9 +460,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let recoverable = writer
-                .recoverable_prefix_len(ReadOptions::default())
-                .await?;
+            let recoverable = writer.recoverable_prefix_len().await?;
             let valid = Self::items_to_bytes(recoverable / Self::CHUNK_SIZE_U64)?;
             if valid == writer.size() {
                 continue;

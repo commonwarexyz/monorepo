@@ -7,8 +7,9 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
+use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob as _, Buf, BufMut, BufferPooler, Error as RuntimeError, Runner, Storage as _,
+    Blob as _, Buf, BufMut, BufferPooler, Error as RuntimeError, ReadOptions, Runner, Storage as _,
     Supervisor as _, WriteOptions, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::journal::{
@@ -163,9 +164,16 @@ struct FuzzInput {
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
+const PAGE_CHECKSUM_RECORD_SIZE: usize = 12;
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
+
+#[derive(Clone, Copy)]
+struct AuthenticatedIndex {
+    logical_len: u64,
+    surviving_physical_extent: u64,
+}
 
 fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
     Config {
@@ -177,6 +185,68 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
         compression: None,
         codec_config: (),
     }
+}
+
+/// Select a page's authoritative checksum slot, falling back to the other slot if a write tore.
+fn valid_page_len(page: &[u8]) -> Option<usize> {
+    let page_size = usize::from(PAGE_SIZE.get());
+    let footer = page.get(page_size..)?;
+    if footer.len() != PAGE_CHECKSUM_RECORD_SIZE {
+        return None;
+    }
+    let slots = [
+        (
+            u16::from_be_bytes(footer[0..2].try_into().unwrap()) as usize,
+            u32::from_be_bytes(footer[2..6].try_into().unwrap()),
+        ),
+        (
+            u16::from_be_bytes(footer[6..8].try_into().unwrap()) as usize,
+            u32::from_be_bytes(footer[8..12].try_into().unwrap()),
+        ),
+    ];
+    let authoritative = usize::from(slots[1].0 > slots[0].0);
+    for slot in [authoritative, authoritative ^ 1] {
+        let (len, checksum) = slots[slot];
+        if len > 0 && len <= page_size && Crc32::checksum(&page[..len]) == checksum {
+            return Some(len);
+        }
+    }
+    None
+}
+
+/// Return whether any currently retained complete page lost bytes from the originally
+/// authenticated logical prefix. Truncation and deletion are recoverable and therefore do not
+/// count; neither do writes confined to page padding, an inactive footer slot, or an extension.
+async fn has_invalid_authenticated_index_page(
+    context: &deterministic::Context,
+    authenticated: &BTreeMap<u64, AuthenticatedIndex>,
+) -> bool {
+    let page_size = u64::from(PAGE_SIZE.get());
+    let physical_page_size = page_size + PAGE_CHECKSUM_RECORD_SIZE as u64;
+    for (&section, authenticated) in authenticated {
+        let Ok((blob, size)) = context.open(INDEX_PARTITION, &section.to_be_bytes()).await else {
+            continue;
+        };
+        let complete_pages = (size.min(authenticated.surviving_physical_extent)
+            / physical_page_size)
+            .min(authenticated.logical_len.div_ceil(page_size));
+        for page in 0..complete_pages {
+            let physical = blob
+                .read_at(
+                    page * physical_page_size,
+                    physical_page_size as usize,
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("oracle index read failed")
+                .coalesce();
+            let required = (authenticated.logical_len - page * page_size).min(page_size) as usize;
+            if valid_page_len(physical.as_ref()).is_none_or(|len| len < required) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn assert_adopted_entries_consistent(
@@ -247,17 +317,26 @@ fn fuzz(input: FuzzInput) {
             drop(oversized);
         }
 
-        // Phase 2: Apply corruptions. Under the fuzzer's CRC assumption, only a write overlapping
-        // bytes from an original authenticated index page can explain an integrity error. Track
-        // those original extents so a pure extension, including a later rewrite of that extension,
-        // cannot suppress the recovery oracle.
-        let mut authenticated_index_extents = BTreeMap::new();
-        for section in 1u64..=3 {
-            if let Ok((_blob, size)) = context.open(INDEX_PARTITION, &section.to_be_bytes()).await {
-                authenticated_index_extents.insert(section, size);
-            }
-        }
-        let mut index_page_integrity_may_be_invalidated = false;
+        let page_size = u64::from(PAGE_SIZE.get());
+        let physical_page_size = page_size + PAGE_CHECKSUM_RECORD_SIZE as u64;
+        let mut authenticated_indices = input
+            .entries_per_section
+            .iter()
+            .enumerate()
+            .map(|(section, count)| {
+                let logical_len = u64::from((count % 10) + 1) * TestEntry::SIZE as u64;
+                (
+                    section as u64 + 1,
+                    AuthenticatedIndex {
+                        logical_len,
+                        surviving_physical_extent: logical_len.div_ceil(page_size)
+                            * physical_page_size,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        // Phase 2: Apply corruptions.
         for corruption in &input.corruptions {
             match corruption {
                 CorruptionType::TruncateIndex {
@@ -268,11 +347,12 @@ fn fuzz(input: FuzzInput) {
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
                         let new_size = (size * (*size_factor as u64)) / 256;
-                        if blob.resize(new_size).await.is_ok()
-                            && blob.sync().await.is_ok()
-                            && let Some(extent) = authenticated_index_extents.get_mut(section)
-                        {
-                            *extent = (*extent).min(new_size);
+                        if blob.resize(new_size).await.is_ok() {
+                            if let Some(authenticated) = authenticated_indices.get_mut(section) {
+                                authenticated.surviving_physical_extent =
+                                    authenticated.surviving_physical_extent.min(new_size);
+                            }
+                            let _ = blob.sync().await;
                         }
                     }
                 }
@@ -298,19 +378,9 @@ fn fuzz(input: FuzzInput) {
                         && size > 0
                     {
                         let offset = (size * (*offset_factor as u64)) / 256;
-                        // Overwriting existing index bytes can invalidate the fixed-journal
-                        // page-integrity checks. Pure extensions/truncations are handled by
-                        // lower-level tail trimming and should not require this allowance.
-                        let result = blob
+                        let _ = blob
                             .write_at(offset, data.to_vec(), WriteOptions::SYNC)
                             .await;
-                        if result.is_ok()
-                            && authenticated_index_extents
-                                .get(section)
-                                .is_some_and(|&authenticated_extent| offset < authenticated_extent)
-                        {
-                            index_page_integrity_may_be_invalidated = true;
-                        }
                     }
                 }
                 CorruptionType::CorruptGlobBytes {
@@ -334,7 +404,7 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .is_ok()
                     {
-                        authenticated_index_extents.remove(section);
+                        authenticated_indices.remove(section);
                     }
                 }
                 CorruptionType::DeleteGlob { section } => {
@@ -367,12 +437,17 @@ fn fuzz(input: FuzzInput) {
         let mut recovered: Oversized<_, TestEntry, TestValue> =
             match Oversized::init(context.child("recovered"), cfg.clone(), None).await {
                 Ok(recovered) => recovered,
-                // Existing-byte overwrites in the paged index can invalidate fixed-journal
-                // integrity checks before oversized recovery has a chance to inspect entries.
-                Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
-                    if index_page_integrity_may_be_invalidated =>
-                {
-                    return;
+                Err(err @ JournalError::Runtime(RuntimeError::InvalidChecksum)) => {
+                    // External writes may make an originally authenticated page unreadable before
+                    // oversized recovery can inspect its entries. Permit that loud failure only
+                    // when the current raw image independently proves such damage. Truncation,
+                    // deletion, page padding, inactive checksum slots, and pure extensions cannot
+                    // suppress the recovery oracle.
+                    if has_invalid_authenticated_index_page(&context, &authenticated_indices).await
+                    {
+                        return;
+                    }
+                    panic!("Unexpected recovery failure: {err:?}");
                 }
                 Err(err) => panic!("Unexpected recovery failure: {err:?}"),
             };

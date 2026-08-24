@@ -3605,6 +3605,104 @@ mod tests {
         });
     }
 
+    /// Bytes appended after an index was truncated or removed cannot replace its authenticated
+    /// prefix.
+    #[test_traced]
+    fn test_recovery_discards_index_extension_after_prefix_loss() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to init");
+            for section in 1..=2 {
+                (oversized, _, _, _) = oversized
+                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                    .await
+                    .expect("Failed to append");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
+            }
+            drop(oversized);
+
+            // Keep both value blobs, but erase one index by truncation and the other by removal.
+            // Replace each with two complete pages of bytes that have no valid checksum slots.
+            for section in 1..=2u64 {
+                let (blob, original_size) = context
+                    .open(&cfg.index_partition, &section.to_be_bytes())
+                    .await
+                    .expect("Failed to open index blob");
+                if section == 1 {
+                    blob.resize(0).await.expect("Failed to truncate index");
+                    blob.sync().await.expect("Failed to sync index truncation");
+                } else {
+                    drop(blob);
+                    context
+                        .remove(&cfg.index_partition, Some(&section.to_be_bytes()))
+                        .await
+                        .expect("Failed to remove index");
+                }
+                let (blob, _) = context
+                    .open(&cfg.index_partition, &section.to_be_bytes())
+                    .await
+                    .expect("Failed to recreate index blob");
+                blob.write_at(
+                    0,
+                    vec![0; usize::try_from(original_size * 2).unwrap()],
+                    WriteOptions::SYNC,
+                )
+                .await
+                .expect("Failed to extend index");
+            }
+
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("second"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to recover extended index");
+            for section in 1..=2u64 {
+                assert!(matches!(
+                    oversized.get(section, 0).await,
+                    Err(Error::ItemOutOfRange(0))
+                ));
+                let (_, recovered_size) = context
+                    .open(&cfg.index_partition, &section.to_be_bytes())
+                    .await
+                    .expect("Failed to reopen index blob");
+                assert_eq!(recovered_size, 0);
+
+                let position;
+                (oversized, position, _, _) = oversized
+                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                    .await
+                    .expect("Failed to append after recovery");
+                assert_eq!(position, 0);
+            }
+            oversized = oversized.sync_all().await.expect("Failed to sync sentinel");
+            drop(oversized);
+
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("third"), cfg, None)
+                    .await
+                    .expect("Failed to reopen sentinel");
+            for section in 1..=2u64 {
+                let entry = oversized
+                    .get(section, 0)
+                    .await
+                    .expect("Sentinel index missing");
+                let (offset, size) = entry.value_location();
+                assert_eq!(entry.id, section);
+                assert_eq!(
+                    oversized
+                        .get_value(section, offset, size)
+                        .await
+                        .expect("Sentinel value missing"),
+                    [section as u8; 16]
+                );
+            }
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
     #[test_traced]
     fn test_recovery_glob_trailing_garbage_truncated() {
         // Tests the bug fix: when value is written to glob but index entry isn't
