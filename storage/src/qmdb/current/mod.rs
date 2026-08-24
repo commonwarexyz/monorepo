@@ -461,9 +461,10 @@ where
     let overlap = move |log: Arc<any::db::AuthenticatedLog<F, E, J, H, S>>| async move {
         // Read the digests on a few concurrent tasks: a single get_nodes call runs its
         // fault-path work (page reads, checksums, copies) on one task, which leaves the
-        // read CPU-bound on one core. A small task count avoids contending on the node
-        // journal's page-cache lock. Lane order restores position order on join, and each
-        // task is guarded so cancelling init aborts it.
+        // read CPU-bound on one core. The tasks run on the shared blocking pool so that
+        // work does not occupy async workers. A small task count avoids contending on the
+        // node journal's page-cache lock. Lane order restores position order on join, and
+        // each task is guarded so cancelling init aborts it.
         const GRAFT_READ_TASKS: usize = 3;
         let chunks = db::graft_chunk_range::<F, N>(pruned_chunks, *log.size());
         let positions = db::graft_node_positions::<F, N>(chunks);
@@ -475,12 +476,29 @@ where
             readers.push(any::db::AbortOnDrop::new(
                 graft_context
                     .child("graft_reader")
+                    .shared(true)
                     .spawn(move |_| async move { log.merkle.get_nodes(&range).await }),
             ));
         }
+
+        // Join the readers in lane order. On the first failure, abort and join every
+        // remaining reader before surfacing the error, so no reader outlives a failed
+        // init (dropping a guard only signals the abort without awaiting it).
         let mut nodes = Vec::with_capacity(positions.len());
+        let mut failure: Option<crate::qmdb::Error<F>> = None;
         for reader in readers {
-            nodes.extend(reader.join().await??);
+            if failure.is_some() {
+                reader.abort().await;
+                continue;
+            }
+            match reader.join().await {
+                Ok(Ok(lane_nodes)) => nodes.extend(lane_nodes),
+                Ok(Err(err)) => failure = Some(err.into()),
+                Err(err) => failure = Some(err.into()),
+            }
+        }
+        if let Some(err) = failure {
+            return Err(err);
         }
         Ok(nodes)
     };
