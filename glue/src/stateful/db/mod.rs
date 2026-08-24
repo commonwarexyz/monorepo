@@ -143,11 +143,7 @@ pub trait Unmerkleized: Sized + Send {
 /// Sealed batch state with a computed root.
 ///
 /// The application uses [`root`](Self::root) in block headers, and the wrapper
-/// later finalizes this batch.
-///
-/// Implementations are handles over shared batch state, so [`Clone`] is cheap.
-/// The wrapper relies on it to keep a block forkable while that same block is
-/// being applied.
+/// later applies this batch.
 pub trait Merkleized: Clone + Sized + Send + Sync {
     /// The digest type used for the state root.
     type Digest: Digest;
@@ -180,7 +176,7 @@ pub trait Merkleized: Clone + Sized + Send + Sync {
 ///
 /// Mutating methods take the database by value and return it on success. If a mutating
 /// method returns an error, or its future is dropped before it finishes, the database is
-/// gone: state that was not yet durable is discarded, but everything already on disk stays
+/// gone. State that was not yet durable is discarded, but everything already on disk stays
 /// recoverable.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
@@ -221,9 +217,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Create a new unmerkleized batch rooted at the database's applied
     /// state.
     ///
-    /// The batch keeps `database` and takes read access through it on every
+    /// The batch keeps `db` and takes read access through it on every
     /// read, so it stays valid across applies of compatible batches.
-    fn new_batch(database: Reader<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
+    fn new_batch(db: Reader<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Return true if a merkleized batch matches a sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
@@ -363,27 +359,19 @@ impl Barrier {
 /// Every method treats a database error as fatal and panics. Deferred flush
 /// failures surface later, through [`Barrier`].
 pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
-    /// One [`ManagedDb::Unmerkleized`] per database, scalar under [`Single`] and a tuple
-    /// for tuple sets.
+    /// One [`ManagedDb::Unmerkleized`] per database.
     type Unmerkleized: Send;
 
     /// One [`ManagedDb::Merkleized`] per database.
-    ///
-    /// [`Clone`] is cheap (see [`Merkleized`]) and the wrapper uses it to keep a
-    /// block forkable while that block is being applied.
     type Merkleized: Clone + Send + Sync;
 
     /// One [`Reader`] per database.
-    ///
-    /// Cloned into batches and into hooks that read applied state.
     type Readers: Clone + Send + Sync + 'static;
 
-    /// One [`ManagedDb::Snapshot`] per database.
+    /// One [`ManagedDb::Snapshot`] per database, shaped like [`Self::Unmerkleized`].
     type Snapshots: Send + Sync + 'static;
 
-    /// Configuration needed to construct every database in the set -- the database's
-    /// [`ManagedDb::Config`] under [`Single`], a tuple of per-database configs for
-    /// tuple sets.
+    /// Configuration needed to construct the database set.
     type Config: Send;
 
     /// Per-database sync targets extracted from a finalized block.
@@ -399,23 +387,15 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     fn readers(&self) -> Self::Readers;
 
     /// Create unmerkleized batches from each database's applied state.
-    ///
-    /// Takes readers rather than `&self` because verification jobs build
-    /// batches without holding the set. Methods that do take the set are the
-    /// ones only its owner calls.
     fn new_batches(readers: &Self::Readers) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Create child unmerkleized batches from a pending merkleized parent.
-    ///
-    /// Reads come from the in-memory merkleized state.
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized;
 
-    /// Return true if merkleized batches match the given sync targets.
+    /// Return true if merkleized batches match the sync targets.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
 
     /// Return sync targets for the set's current applied state.
-    ///
-    /// Applied state may be ahead of durable state while a flush is pending.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 
     /// Apply each merkleized batch's changeset.
@@ -1767,8 +1747,8 @@ async fn rewind<E, T: ManagedDb<E>>(
     target: T::SyncTarget,
     index: Option<usize>,
 ) -> Single<T> {
-    // Mutable rewind failures are fatal by design because the database
-    // handle may be internally diverged after a failed rewind.
+    // Mutable rewind failures are fatal by design because the database handle
+    // may be internally diverged after a failed rewind.
     let Single { writer } = member;
     let (writer, ()) = writer
         .mutate(|database| async move {

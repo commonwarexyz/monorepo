@@ -46,7 +46,8 @@ use std::{
     sync::Arc,
 };
 
-/// Wraps a QMDB [`UnmerkleizedBatch`] to implement [`Unmerkleized`](super::Unmerkleized).
+/// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
+/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -63,7 +64,8 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`].
+/// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
+/// reference to the parent database.
 ///
 /// A branch-scoped view of the database. It stays valid only while every batch finalized on
 /// the database is an ancestor of this batch (see [`MerkleizedBatch`]'s branch-validity
@@ -150,7 +152,8 @@ where
     }
 }
 
-/// Wraps a QMDB [`MerkleizedBatch`] to implement [`Merkleized`](super::Merkleized).
+/// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
+/// database, implementing the [`Merkleized`](super::Merkleized) trait.
 pub struct CurrentMerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -529,11 +532,11 @@ where
         )
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
-        let batch = database.read().await.new_batch();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let batch = db.read().await.new_batch();
         CurrentUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
         }
     }
@@ -646,11 +649,11 @@ where
         )
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
-        let batch = database.read().await.new_batch();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let batch = db.read().await.new_batch();
         CurrentUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
         }
     }
@@ -845,11 +848,11 @@ where
         )
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
-        let batch = database.read().await.new_batch();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let batch = db.read().await.new_batch();
         CurrentUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
         }
     }
@@ -971,11 +974,11 @@ where
         )
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
-        let batch = database.read().await.new_batch();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let batch = db.read().await.new_batch();
         CurrentUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
         }
     }

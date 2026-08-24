@@ -33,8 +33,8 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-/// Wraps a keyless [`UnmerkleizedBatch`] to implement
-/// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
+/// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
+/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -116,8 +116,8 @@ where
     }
 }
 
-/// Wraps a keyless [`MerkleizedBatch`] to implement
-/// [`Merkleized`](crate::stateful::db::Merkleized).
+/// Wraps a keyless [`MerkleizedBatch`] with a reference to the parent
+/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
 pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -277,14 +277,14 @@ where
         )
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = database.read().await;
-            (db.new_batch(), db.inactivity_floor_loc())
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
         };
         KeylessUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
             inactivity_floor,
         }
@@ -380,14 +380,14 @@ where
         )
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = database.read().await;
-            (db.new_batch(), db.inactivity_floor_loc())
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
         };
         KeylessUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
             inactivity_floor,
         }

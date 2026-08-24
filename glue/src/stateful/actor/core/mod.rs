@@ -277,8 +277,9 @@ where
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
         let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
-        // Publish the recovered state before the loop starts, so serving begins
-        // before the next finalization.
+
+        // The recovered state alone must publish before the loop starts, so
+        // serving begins before the next finalization.
         let mut snapshot_publisher = self.snapshot_publisher;
         let processor = processor.publish_snapshot(&mut snapshot_publisher).await;
         Processing {

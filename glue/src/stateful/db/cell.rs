@@ -127,8 +127,8 @@ impl<T> Reader<T> {
     }
 }
 
-/// A short read guard. Must cover exactly one storage call, never an
-/// application await, so a waiting mutation is delayed by at most one call.
+/// Must cover exactly one storage call, never an application await, so a waiting mutation is
+/// delayed by at most one call.
 pub struct ReadGuard<'a, T>(AsyncRwLockReadGuard<'a, T>);
 
 impl<T> Deref for ReadGuard<'_, T> {

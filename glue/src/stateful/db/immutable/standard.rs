@@ -39,8 +39,8 @@ use std::{ops::Deref, sync::Arc};
 /// Reader over the immutable database a wrapper batch reads through.
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Reader<Immutable<F, E, K, V, C, H, T, S>>;
 
-/// Wraps an immutable [`UnmerkleizedBatch`] to implement
-/// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
+/// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
+/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -124,8 +124,8 @@ where
     }
 }
 
-/// Wraps an immutable [`MerkleizedBatch`] to implement
-/// [`Merkleized`](crate::stateful::db::Merkleized).
+/// Wraps an immutable [`MerkleizedBatch`] with a reference to the parent
+/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -311,14 +311,14 @@ where
         )
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = database.read().await;
-            (db.new_batch(), db.inactivity_floor_loc())
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
         };
         ImmutableUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
             inactivity_floor,
         }
@@ -421,14 +421,14 @@ where
         )
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = database.read().await;
-            (db.new_batch(), db.inactivity_floor_loc())
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
         };
         ImmutableUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
             inactivity_floor,
         }

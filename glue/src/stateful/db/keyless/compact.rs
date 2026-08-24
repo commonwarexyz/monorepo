@@ -230,14 +230,14 @@ where
         }
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = database.read().await;
-            (db.new_batch(), db.inactivity_floor_loc())
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
         };
         KeylessUnjournaledUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
             inactivity_floor,
         }
@@ -312,14 +312,14 @@ where
         }
     }
 
-    async fn new_batch(database: Reader<Self>) -> Self::Unmerkleized {
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = database.read().await;
-            (db.new_batch(), db.inactivity_floor_loc())
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
         };
         KeylessUnjournaledUnmerkleized {
             batch,
-            db: database,
+            db,
             metadata: None,
             inactivity_floor,
         }

@@ -111,18 +111,13 @@ pub mod probe;
 #[cfg(test)]
 mod tests;
 
-/// Why a batch operation failed during block execution.
-///
-/// Implementations of [`Application`] propagate storage errors from batch operations
-/// with `?` and never interpret them. The wrapper is the only layer that knows what
-/// each case means for the block being executed.
+/// Why a block execution failed.
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     /// A competing finalization invalidated the batch's reads mid-execution.
-    /// The wrapper re-checks the block against the new canonical state.
     #[error("stale execution: a competing block was finalized")]
     Stale,
-    /// Any other storage failure. The wrapper panics.
+    /// Any other storage failure.
     #[error("storage failure: {0}")]
     Fatal(String),
 }
@@ -174,11 +169,9 @@ pub struct Input<Upstream, Provider> {
 /// cover, so it is always the complete view for its branch.
 ///
 /// [`Stateful`] may freely clone the application and invoke its methods
-/// concurrently. Any method may run on a fresh clone that is discarded
-/// afterward, so cloning must be cheap and state an implementor wants to keep
-/// must live behind shared handles. Implementors should treat `Application` as
-/// a stateless, deterministic state machine. Given the same method inputs and
-/// database state, every clone must produce the same state-transition result.
+/// concurrently. Implementors should treat `Application` as a stateless,
+/// deterministic state machine. Given the same method inputs and database
+/// state, every clone must produce the same state-transition result.
 /// Mutable state that affects those results must live in the database batches
 /// provided to proposal, verification, and replay methods.
 pub trait Application<E>: Clone + Send + 'static
@@ -244,10 +237,10 @@ where
     /// result is cached as pending state. If the implementor produces a
     /// block with mismatched targets, this function will panic.
     ///
-    /// Applications using [`qmdb::current`]
-    /// must still ensure the proposed block commits to the merkleized batch's
-    /// canonical root. The wrapper's sync-target check only verifies the ops
-    /// root and operation range used by replay sync.
+    /// Applications using [`qmdb::current`] must still ensure the proposed
+    /// block commits to the merkleized batch's canonical root. The wrapper's
+    /// sync-target check only verifies the ops root and operation range used
+    /// by replay sync.
     ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
@@ -274,13 +267,17 @@ where
     /// stable verdict. Return [`None`] only when the block is permanently
     /// invalid for the supplied context, ancestry, and batches. If validity may
     /// still change as additional information becomes available, continue
-    /// waiting instead of returning [`None`]. In other words, to abstain from
-    /// voting, do not resolve this future yet. Abstaining is not represented by
-    /// a special return value.
+    /// waiting instead of returning [`None`].
     ///
-    /// Validity is relative to the supplied inputs. A completed verdict stays
-    /// valid even when a competing branch finalizes: the wrapper may discard
-    /// the verified state instead of caching it, but the answer is unchanged.
+    /// Validity is relative to those inputs: finalizing a competing branch
+    /// later does not retroactively change a completed verdict. The wrapper may
+    /// discard the verified state instead of caching it, but the answer is
+    /// unchanged.
+    ///
+    /// In other words, to abstain from voting, do not resolve this future yet.
+    /// Keep it pending until the implementation can either prove the block
+    /// valid, prove it invalid, or the consensus engine cancels the request.
+    /// Abstaining is not represented by a special return value.
     ///
     /// Verification must reject any block whose execution result does not
     /// match the block's committed state (for example, a state root mismatch).
@@ -289,10 +286,10 @@ where
     /// this by checking that any returned merkleized state matches the block
     /// before it is cached as pending state.
     ///
-    /// Applications using [`qmdb::current`]
-    /// must still reject blocks whose committed canonical root differs from the
-    /// merkleized batch root. The wrapper's sync-target check only verifies the
-    /// ops root and operation range used by replay sync.
+    /// Applications using [`qmdb::current`] must still reject blocks whose
+    /// committed canonical root differs from the merkleized batch root. The
+    /// wrapper's sync-target check only verifies the ops root and operation
+    /// range used by replay sync.
     ///
     /// This future is scoped to its caller. Dropping the response cancels only
     /// this request. The wrapper never cancels it while the actor runs, so a
@@ -354,10 +351,7 @@ where
     /// reported or applied during handoff. Applications must derive synchronized state from the
     /// database set rather than rely on receiving every peer-state-sync finalization here.
     ///
-    /// This hook receives readers over the set. It runs after the block is
-    /// applied, and the block's marshal acknowledgement waits for it, so a slow
-    /// implementation stalls finalization. Result-affecting mutations must be
-    /// made through normal block execution, not from this observer.
+    /// `readers` are readers over the database set.
     ///
     /// For blocks that are reported, this is an at-least-once notification inherited from
     /// marshal's reporter stream: a crash after this hook runs but before a database sync covering

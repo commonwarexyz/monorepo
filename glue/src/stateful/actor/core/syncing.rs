@@ -91,7 +91,7 @@ where
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// Publishes the latest snapshots for serving.
+    /// Publishes the latest snapshots.
     pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Signals that the syncer has produced a usable artifact.
