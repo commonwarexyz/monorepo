@@ -141,6 +141,35 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             return;
         }
 
+        // For the same view, LeaderNullify is stronger than Inactivity. A
+        // buffered proposal may suppress inactivity, but the leader's explicit
+        // refusal must still abandon the view.
+        if let Self::Timeout {
+            round: new_round,
+            reason: new_reason,
+            ..
+        } = &message
+            && let Some(index) = overflow.messages.iter().position(|old_message| {
+                matches!(
+                    old_message,
+                    Self::Timeout { round, .. } if round.view() == new_round.view()
+                )
+            })
+        {
+            if *new_reason == TimeoutReason::LeaderNullify
+                && matches!(
+                    &overflow.messages[index],
+                    Self::Timeout {
+                        reason: TimeoutReason::Inactivity,
+                        ..
+                    }
+                )
+            {
+                overflow.messages[index] = message;
+            }
+            return;
+        }
+
         // Ignore the message if it is a duplicate
         if overflow
             .messages
@@ -156,16 +185,6 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                         ..
                     },
                 ) => new_proposal.view() == old_proposal.view(),
-                (
-                    Self::Timeout {
-                        round: new_round, ..
-                    },
-                    Self::Timeout {
-                        round: old_round, ..
-                    },
-                ) => {
-                    new_round.view() == old_round.view() // only retain the first queued timeout reason
-                }
                 (
                     Self::Verified {
                         certificate: new_certificate,
@@ -497,5 +516,50 @@ mod tests {
 
         let overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
+    }
+
+    #[test]
+    fn leader_nullify_replaces_inactivity_for_same_view() {
+        // A leader refusal upgrades an inactivity timeout already in the queue.
+        let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
+        Message::handle(
+            &mut overflow,
+            timeout_msg(View::new(4), TimeoutReason::Inactivity),
+        );
+        Message::handle(
+            &mut overflow,
+            timeout_msg(View::new(4), TimeoutReason::LeaderNullify),
+        );
+
+        let mut overflow = drain(overflow);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Timeout {
+                round,
+                reason: TimeoutReason::LeaderNullify,
+                ..
+            }) if round.view() == View::new(4)
+        ));
+        assert!(overflow.is_empty());
+
+        // A later inactivity timeout cannot downgrade a queued leader refusal.
+        let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
+        Message::handle(
+            &mut overflow,
+            timeout_msg(View::new(4), TimeoutReason::LeaderNullify),
+        );
+        Message::handle(
+            &mut overflow,
+            timeout_msg(View::new(4), TimeoutReason::Inactivity),
+        );
+        let mut overflow = drain(overflow);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Timeout {
+                reason: TimeoutReason::LeaderNullify,
+                ..
+            })
+        ));
+        assert!(overflow.is_empty());
     }
 }

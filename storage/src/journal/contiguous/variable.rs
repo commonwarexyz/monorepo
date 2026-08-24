@@ -34,7 +34,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf,
+    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Replay, Writer},
 };
 use commonware_utils::NZUsize;
@@ -603,6 +603,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<Vec<ReplayState<'a, E::Blob, V>>, Error> {
         let bounds = self.bounds();
         if start_pos > bounds.end {
@@ -639,7 +640,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 // points and cannot borrow `self`.
                 states.push(ReplayState::<E::Blob, V> {
                     blob,
-                    replay: blob_handle.replay_from(offset, buffer)?,
+                    replay: blob_handle.replay_from(offset, buffer, read_options)?,
                     budget: buffer.get() as u64,
                     pos: first_pos,
                     end_pos,
@@ -1031,8 +1032,9 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let states = self.replay_states(start_pos, buffer).await?;
+        let states = self.replay_states(start_pos, buffer, read_options).await?;
 
         Ok(super::replay_stream_from_states(states))
     }
@@ -1682,7 +1684,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         codec_config: &V::Cfg,
         compressed: bool,
     ) -> Result<BlobScan, Error> {
-        let replay = writer.replay(REPLAY_BUFFER_SIZE).await?;
+        let replay = writer
+            .replay(REPLAY_BUFFER_SIZE, ReadOptions::default())
+            .await?;
         let mut scanner = FrameScanner::<E::Blob, V>::new(replay, codec_config, compressed);
         let mut items = 0u64;
         loop {
@@ -2035,7 +2039,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 return Ok((offsets, size));
             };
 
-            let replay = writer.replay(REPLAY_BUFFER_SIZE).await?;
+            let replay = writer
+                .replay(REPLAY_BUFFER_SIZE, ReadOptions::default())
+                .await?;
             let mut scanner = FrameScanner::<E::Blob, V>::new(replay, codec_config, compressed);
             let blob_end_pos = super::blob_end_position(blob, items_per_blob, u64::MAX);
 
@@ -2401,9 +2407,12 @@ impl<E: Context, V: CodecShared> Contiguous for Inner<E, V> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
         let reader = self.reader();
-        let states = reader.replay_states(start_pos, buffer).await?;
+        let states = reader
+            .replay_states(start_pos, buffer, read_options)
+            .await?;
 
         Ok(super::replay_stream_from_states(states))
     }
@@ -2436,8 +2445,9 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        Contiguous::replay(&*self.0, start_pos, buffer).await
+        Contiguous::replay(&*self.0, start_pos, buffer, read_options).await
     }
 }
 
@@ -2579,15 +2589,15 @@ mod tests {
     use crate::journal::contiguous::tests::{corrupt_page, run_contiguous_tests};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Metrics as _, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,
+        Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, Writer},
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
-            next_pending_sync, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
+            fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use std::num::NonZeroU16;
 
@@ -2597,6 +2607,73 @@ mod tests {
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
+
+    #[test_traced]
+    fn test_replay_and_writable_tip_request_dont_cache() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8));
+            let cfg = Config {
+                partition: "variable-replay-read-options".into(),
+                items_per_section: NZU64!(20),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+
+            for item in 0..39 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Sealed history receives the replay operation's read policy directly.
+            page_cache.clear();
+            {
+                let stream = journal
+                    .replay(0, NZUsize!(32), ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                recordings.clear();
+                futures::pin_mut!(stream);
+                assert_eq!(stream.next().await.unwrap().unwrap(), (0, 0));
+
+                let reads = recordings.snapshot().reads;
+                assert!(!reads.is_empty());
+                assert!(
+                    reads
+                        .iter()
+                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                );
+            }
+
+            // Writable-tip misses request DONT_CACHE through CacheRef ownership.
+            page_cache.clear();
+            {
+                let stream = journal
+                    .replay(20, NZUsize!(32), ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                recordings.clear();
+                futures::pin_mut!(stream);
+                assert_eq!(stream.next().await.unwrap().unwrap(), (20, 20));
+
+                let reads = recordings.snapshot().reads;
+                assert!(!reads.is_empty());
+                assert!(
+                    reads
+                        .iter()
+                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                );
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
 
     #[test]
     fn test_start_sync_keeps_predecessor_sync() {
@@ -2848,7 +2925,11 @@ mod tests {
             // handle unobserved.
             journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(1.0),
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: Probability!(1.0),
+                    retention_rate: Probability!(0.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
                 ..Default::default()
             };
             let (mut journal, handle) = journal.start_sync().await.unwrap();
@@ -3077,7 +3158,10 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader.replay(u64::MAX - 1, NZUsize!(20)).await.unwrap();
+                let stream = reader
+                    .replay(u64::MAX - 1, NZUsize!(20), ReadOptions::default())
+                    .await
+                    .unwrap();
                 futures::pin_mut!(stream);
                 let (pos, item) = stream.next().await.unwrap().unwrap();
                 assert_eq!(pos, u64::MAX - 1);
@@ -3587,7 +3671,10 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader.replay(0, NZUsize!(20)).await.unwrap();
+                let stream = reader
+                    .replay(0, NZUsize!(20), ReadOptions::default())
+                    .await
+                    .unwrap();
                 futures::pin_mut!(stream);
                 for i in 0..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -3601,7 +3688,10 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader.replay(15, NZUsize!(20)).await.unwrap();
+                let stream = reader
+                    .replay(15, NZUsize!(20), ReadOptions::default())
+                    .await
+                    .unwrap();
                 futures::pin_mut!(stream);
                 for i in 15..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -3615,7 +3705,10 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader.replay(20, NZUsize!(20)).await.unwrap();
+                let stream = reader
+                    .replay(20, NZUsize!(20), ReadOptions::default())
+                    .await
+                    .unwrap();
                 futures::pin_mut!(stream);
                 for i in 20..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -3630,13 +3723,15 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let res = reader.replay(0, NZUsize!(20)).await;
+                let res = reader.replay(0, NZUsize!(20), ReadOptions::default()).await;
                 assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let res = reader.replay(19, NZUsize!(20)).await;
+                let res = reader
+                    .replay(19, NZUsize!(20), ReadOptions::default())
+                    .await;
                 assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
 
@@ -3644,7 +3739,10 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader.replay(20, NZUsize!(20)).await.unwrap();
+                let stream = reader
+                    .replay(20, NZUsize!(20), ReadOptions::default())
+                    .await
+                    .unwrap();
                 futures::pin_mut!(stream);
                 for i in 20..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -3658,7 +3756,10 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader.replay(40, NZUsize!(20)).await.unwrap();
+                let stream = reader
+                    .replay(40, NZUsize!(20), ReadOptions::default())
+                    .await
+                    .unwrap();
                 futures::pin_mut!(stream);
                 assert!(stream.next().await.is_none());
             }
@@ -3667,7 +3768,9 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let res = reader.replay(41, NZUsize!(20)).await;
+                let res = reader
+                    .replay(41, NZUsize!(20), ReadOptions::default())
+                    .await;
                 assert!(matches!(
                     res,
                     Err(crate::journal::Error::ItemOutOfRange(41))
@@ -3727,7 +3830,9 @@ mod tests {
                     let blob = blob_index as u64;
                     states.push(ReplayState::<_, u64> {
                         blob,
-                        replay: Blob::Writer(writer).replay_from(0, NZUsize!(1024)).unwrap(),
+                        replay: Blob::Writer(writer)
+                            .replay_from(0, NZUsize!(1024), ReadOptions::default())
+                            .unwrap(),
                         budget: 1024,
                         pos: blob * 10,
                         end_pos: (blob + 1) * 10,
@@ -3995,9 +4100,25 @@ mod tests {
             variable.sync().await.unwrap();
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+            let (recovery_context, recordings) = RecordingContext::new(context.child("second"));
+            let variable = Journal::<_, u64>::init(recovery_context, cfg.clone())
                 .await
                 .unwrap();
+
+            // Loading the checkpoint retains encoded mirrors of both metadata blobs, so both
+            // reads request DONT_CACHE.
+            let reads = recordings.snapshot().reads;
+            assert!(reads.len() > 2);
+            let (metadata_reads, recovery_reads) = reads.split_at(2);
+            assert_eq!(metadata_reads, [ReadOptions::DONT_CACHE; 2]);
+
+            // Data-page validation uses the default options so alignment can reuse those pages
+            // during recovery.
+            assert!(
+                recovery_reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::default())
+            );
 
             // Init should auto-repair: offsets journal pruned to match data blobs
             let bounds = variable.bounds();
@@ -6130,7 +6251,7 @@ mod tests {
                 drop(journal);
 
                 *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    sync_rate: Some(1.0),
+                    sync_rate: Some(Probability!(1.0)),
                     ..Default::default()
                 };
                 assert!(
@@ -6191,7 +6312,7 @@ mod tests {
                 // Fail the offsets metadata sync inside `stage_clear_intent` so `clear_to_size`
                 // aborts before any data is cleared. The reset intent never becomes durable.
                 *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    sync_rate: Some(1.0),
+                    sync_rate: Some(Probability!(1.0)),
                     ..Default::default()
                 };
                 assert!(journal.0.clear_to_size(7).await.is_err());
@@ -6249,7 +6370,7 @@ mod tests {
                 // subsequent `data.clear()` (a blob remove) so `clear_to_size` aborts after the
                 // intent is durable but before the data is cleared.
                 *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    remove_rate: Some(1.0),
+                    remove_rate: Some(Probability!(1.0)),
                     ..Default::default()
                 };
                 assert!(journal.0.clear_to_size(7).await.is_err());
@@ -7961,7 +8082,10 @@ mod tests {
             assert!(pruned);
 
             {
-                let stream = snapshot.replay(0, NZUsize!(1024)).await.unwrap();
+                let stream = snapshot
+                    .replay(0, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
                 futures::pin_mut!(stream);
                 let mut expected = 0u64;
                 while let Some(result) = stream.next().await {

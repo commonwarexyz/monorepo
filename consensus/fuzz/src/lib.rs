@@ -20,7 +20,7 @@ use commonware_consensus::{
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
     },
-    types::{Delta, Epoch, TermLength, View},
+    types::{Delta, Epoch, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{
     Sha256,
@@ -36,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
+use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, Probability, channel::mpsc::Receiver};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -100,7 +100,7 @@ async fn setup_degraded_network<E: Clock>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: 0.6,
+        success_rate: Probability!(0.6),
     };
     for (peer_idx, peer) in participants.iter().enumerate() {
         if peer_idx == victim_idx {
@@ -124,6 +124,8 @@ pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
     pub term_length: TermLength,
+    pub optimistic_views: ViewDelta,
+    pub heterogeneous_optimism: bool,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -154,6 +156,9 @@ impl Arbitrary<'_> for FuzzInput {
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
         let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
+        let optimistic_views =
+            ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
+        let heterogeneous_optimism = u.arbitrary()?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -185,9 +190,35 @@ impl Arbitrary<'_> for FuzzInput {
             degraded_network,
             required_containers,
             term_length,
+            optimistic_views,
+            heterogeneous_optimism,
             strategy,
         })
     }
+}
+
+/// Derive a per-validator optimistic-view budget from the fuzzed base value.
+///
+/// Mismatched values across validators are safe (see
+/// [`commonware_consensus::simplex::elector::Terms::stable`]), so a
+/// heterogeneous run varies them deterministically per validator. A
+/// homogeneous run gives every validator the base value, covering uniform
+/// deployments (including optimism disabled everywhere).
+fn validator_optimistic_views(input: &FuzzInput, validator: usize) -> ViewDelta {
+    if !input.heterogeneous_optimism {
+        return input.optimistic_views;
+    }
+    ViewDelta::new(
+        (input.optimistic_views.get() + validator as u64)
+            % (max_optimistic_views(input.term_length) + 1),
+    )
+}
+
+/// Largest fuzzed optimistic-view value: the domain `[0, term_length + 2]`
+/// covers 0 (optimistic validation disabled), the term-length boundary, and
+/// values beyond the term length, which production accepts but caps.
+fn max_optimistic_views(term_length: TermLength) -> u64 {
+    term_length.get() + 2
 }
 
 type NetworkChannels = (
@@ -238,7 +269,7 @@ async fn setup_network<P: simplex::Simplex>(
     let link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     };
     link_peers(
         &mut oracle,
@@ -345,6 +376,7 @@ fn spawn_honest_validator<
     oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
+    optimistic_views: ViewDelta,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
@@ -363,7 +395,7 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
 {
-    let elector = P::elector(term_length);
+    let elector = P::elector(term_length, optimistic_views);
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
         scheme: scheme.clone(),
@@ -448,6 +480,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 &oracle,
                 &participants,
                 input.term_length,
+                validator_optimistic_views(&input, i),
                 schemes[i].clone(),
                 validator.clone(),
                 relay.clone(),
@@ -489,7 +522,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 .collect(),
             config.n as usize,
         );
-        invariants::check::<P>(config.n, input.term_length, states);
+        invariants::check::<P>(config, input.term_length, states);
     });
 }
 
@@ -509,7 +542,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             Action::Update(Link {
                 latency: Duration::from_millis(500),
                 jitter: Duration::from_millis(500),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             }),
             input.partition.filter(),
         )
@@ -604,7 +637,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
             // Primary: legitimate engine
             let primary_context = context.child("primary");
-            let primary_elector = P::elector(input.term_length);
+            let primary_elector =
+                P::elector(input.term_length, validator_optimistic_views(&input, idx));
             let reporter_cfg = reporter::Config {
                 participants: participants
                     .as_ref()
@@ -683,6 +717,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 &oracle,
                 participants.as_ref(),
                 input.term_length,
+                validator_optimistic_views(&input, idx),
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),
@@ -724,7 +759,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 .collect(),
             config.n as usize,
         );
-        invariants::check::<P>(config.n, input.term_length, states);
+        invariants::check::<P>(config, input.term_length, states);
     });
 }
 

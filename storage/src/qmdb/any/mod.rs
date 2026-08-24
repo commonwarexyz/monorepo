@@ -81,7 +81,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{CodecShared, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -110,7 +110,7 @@ where
     F: Family,
     H: Hasher,
     U: Update,
-    Operation<F, U>: Encode,
+    Operation<F, U>: Codec,
 {
     single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
 }
@@ -157,12 +157,12 @@ pub async fn init<F, E, U, H, I, J, S>(
 where
     F: Family,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
     I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
@@ -178,12 +178,12 @@ pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
 where
     F: Family,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
     I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     let mut log = authenticated::Journal::<F, E, J, H, S>::new(
         context.child("log"),
@@ -376,15 +376,15 @@ pub(crate) mod test {
         -> impl Future<Output = Result<Self, Error>> + Send;
     }
 
-    impl<E, U, C, I, H, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
+    impl<E, C, I, H, U, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
     where
         E: crate::Context,
-        U: UpdateTrait,
         C: Mutable<Item = AnyOperation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        AnyOperation<mmr::Family, U>: Codec,
+        U: UpdateTrait,
         S: Strategy,
+        AnyOperation<mmr::Family, U>: Codec,
     {
         async fn rewind_to_size(self, size: Location) -> Result<Self, Error> {
             self.rewind(size).await

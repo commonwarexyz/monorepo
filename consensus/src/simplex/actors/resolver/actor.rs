@@ -58,10 +58,6 @@ pub struct Actor<
     /// applies to the resolver (see [Self::apply_effects]).
     state: State<S, D>,
 
-    /// Highest finalized view observed. Targeted ancestry at or below this
-    /// view can no longer be required by a valid proposal.
-    last_finalized: View,
-
     /// Encoded nullifications retained while they cover an unfinalized view.
     /// This cache survives floor raises so asks below the floor remain servable.
     nullifications: BTreeMap<View, Bytes>,
@@ -106,7 +102,6 @@ impl<
                 fetch_timeout: cfg.fetch_timeout,
 
                 state: State::new(cfg.term_length),
-                last_finalized: View::zero(),
                 nullifications: BTreeMap::new(),
                 pending_notarizations: BTreeMap::new(),
                 certified_notarizations: BTreeMap::new(),
@@ -210,6 +205,13 @@ impl<
         }
     }
 
+    /// Returns the highest finalized view, or zero if none is known.
+    fn last_finalized(&self) -> View {
+        self.state
+            .finalization()
+            .map_or(View::zero(), |certificate| certificate.view())
+    }
+
     /// Records a certificate and applies its resolver lifecycle effects.
     fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
@@ -217,6 +219,7 @@ impl<
         certificate: Certificate<S, D>,
     ) {
         let term_length = self.state.term_length();
+        let last_finalized = self.last_finalized();
 
         // Retain encoded certificates for as long as a peer can still ask for them.
         // [State] prunes at the floor, which rises sooner than finalization and
@@ -224,7 +227,7 @@ impl<
         match &certificate {
             Certificate::Nullification(nullification) => {
                 let view = nullification.view();
-                if view.term_end(term_length) > self.last_finalized {
+                if view.term_end(term_length) > last_finalized {
                     self.nullifications.insert(view, certificate.encode());
                     let covered = view..=view.term_end(term_length);
                     Self::retire(resolver, move |view, ask| {
@@ -234,7 +237,7 @@ impl<
             }
             Certificate::Notarization(notarization) => {
                 let view = notarization.view();
-                if view > self.last_finalized && !self.uncertifiable_notarizations.contains(&view) {
+                if view > last_finalized && !self.uncertifiable_notarizations.contains(&view) {
                     if !self.certified_notarizations.contains_key(&view) {
                         self.pending_notarizations
                             .insert(view, certificate.encode());
@@ -248,8 +251,7 @@ impl<
                 // Finalization is the global retirement boundary: a valid proposal
                 // can no longer name ancestry at or below it, so nothing here can
                 // still be asked for.
-                self.last_finalized = self.last_finalized.max(finalization.view());
-                let finalized = self.last_finalized;
+                let finalized = last_finalized.max(finalization.view());
                 self.nullifications
                     .retain(|view, _| view.term_end(term_length) > finalized);
                 self.pending_notarizations
@@ -276,9 +278,10 @@ impl<
     ) {
         // Every verdict clears the pending payload. Only successful
         // notarizations above finalization become servable.
+        let last_finalized = self.last_finalized();
         if let Some(notarization) = self.pending_notarizations.remove(&view)
             && success
-            && view > self.last_finalized
+            && view > last_finalized
         {
             self.certified_notarizations.insert(view, notarization);
         }
@@ -287,7 +290,7 @@ impl<
         // is not an answer to an exact-parent request.
         if !success {
             self.certified_notarizations.remove(&view);
-            if view > self.last_finalized {
+            if view > last_finalized {
                 self.uncertifiable_notarizations.insert(view);
             }
             Self::retire(resolver, move |asked, ask| {
@@ -375,14 +378,14 @@ impl<
         });
     }
 
-    /// Fetches ancestry from the leader whose proposal requires it.
+    /// Fetches missing proposal ancestry, preferring `target` when provided.
     fn resolve<R>(
         &self,
         resolver: &mut R,
         proposal: View,
         view: View,
         kind: Kind,
-        target: S::PublicKey,
+        target: Option<S::PublicKey>,
     ) where
         R: TargetedResolver<Key = U64, Subscriber = Ask, PublicKey = S::PublicKey>,
     {
@@ -398,14 +401,15 @@ impl<
             reason = "proposal_ancestry",
             kind = ask.kind.as_str()
         );
-        let _ = resolver.fetch_targeted(
-            Fetch {
-                key: U64::from(view),
-                subscriber: ask,
-                span,
-            },
-            NonEmptyVec::new(target),
-        );
+        let fetch = Fetch {
+            key: U64::from(view),
+            subscriber: ask,
+            span,
+        };
+        let _ = match target {
+            Some(target) => resolver.fetch_targeted(fetch, NonEmptyVec::new(target)),
+            None => resolver.fetch(fetch),
+        };
     }
 
     /// Returns whether local evidence has settled an ask for `kind` at `view`.
@@ -420,9 +424,9 @@ impl<
     /// evidence the actor records, but not what was asked for.
     fn settled(&self, view: View, kind: Kind) -> bool {
         // Finalization rules out any further need for the view. This is also
-        // what settles an ask answered by a finalization, since recording one
-        // raises [Self::last_finalized].
-        if view <= self.last_finalized {
+        // what settles an ask answered by a finalization, since resolver state
+        // retains the highest one independently of its construction floor.
+        if view <= self.last_finalized() {
             return true;
         }
         match kind {
@@ -459,14 +463,14 @@ impl<
 
     /// Selects the best certificate to serve for `view`.
     ///
-    /// An active finalization floor settles every ask at or below it. Otherwise
+    /// The highest finalization settles every ask at or below it. Otherwise
     /// an exact certified notarization is preferred to a covering
     /// nullification, matching proposal construction. If neither is retained,
     /// the current floor is served. Pending notarizations and notarizations
     /// that fail certification are never served.
     fn produce_certificate(&self, view: View) -> Option<Bytes> {
-        // A current finalization floor settles either kind, so retained
-        // ancestry cannot improve the answer.
+        // Prefer the retained finalization because a higher notarization does
+        // not settle an older ancestry request.
         if let Some(certificate @ Certificate::Finalization(_)) = self.state.get(view) {
             return Some(certificate.encode());
         }
@@ -480,8 +484,8 @@ impl<
             return Some(nullification.clone());
         }
 
-        // The floor advances by view, so this can serve a higher certified
-        // notarization after it supersedes an older finalization.
+        // Above retained finalization, the movable floor may still serve a
+        // higher certified notarization.
         self.state.get(view).map(|certificate| certificate.encode())
     }
 
@@ -521,18 +525,7 @@ impl<
             return None;
         }
 
-        let verified = match &incoming {
-            Certificate::Notarization(notarization) => {
-                notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
-            }
-            Certificate::Nullification(nullification) => {
-                nullification.verify::<_, D>(self.context.as_mut(), &self.scheme, &self.strategy)
-            }
-            Certificate::Finalization(finalization) => {
-                finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
-            }
-        };
-        if !verified {
+        if !incoming.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
             debug!(%view, "certificate failed verification");
             return None;
         }
@@ -656,7 +649,9 @@ mod tests {
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor, deterministic};
-    use commonware_utils::{NZU32, NZUsize, channel::oneshot, non_empty_vec, sync::Mutex};
+    use commonware_utils::{
+        NZU32, NZUsize, Probability, channel::oneshot, non_empty_vec, sync::Mutex,
+    };
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
@@ -797,8 +792,7 @@ mod tests {
         actor
     }
 
-    #[test_async]
-    async fn targeted_fetch_does_not_restrict_existing_backfill() {
+    fn assert_targeted_fetch_does_not_restrict_existing_backfill(target_index: usize) {
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
         runtime.start(|mut context| async move {
             let Fixture {
@@ -832,14 +826,14 @@ mod tests {
             }
             let mut connections = connections.into_iter();
             let requester_connection = connections.next().unwrap();
-            let (_target_sender, mut target_receiver) = connections.next().unwrap();
+            let (_silent_sender, mut silent_receiver) = connections.next().unwrap();
             let responder_connection = connections.next().unwrap();
             let _unused_connection = connections.next().unwrap();
 
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(
@@ -904,7 +898,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Advancing to view 2 creates an unrestricted background ask for
-            // view 1. The only connected peer is the silent target, so seeing
+            // view 1. The only connected peer is silent, so seeing
             // its request proves the background fetch is already in flight.
             requester_mailbox.updated(Certificate::Nullification(build_nullification(
                 &schemes,
@@ -913,25 +907,25 @@ mod tests {
                 View::new(2),
             )));
             let (requester_key, _) = select! {
-                request = target_receiver.recv() => request.expect("target channel closed"),
+                request = silent_receiver.recv() => request.expect("silent peer channel closed"),
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("background request did not reach silent target");
+                    panic!("background request did not reach silent peer");
                 },
             };
             assert_eq!(requester_key, participants[0]);
 
-            // Add a targeted ancestry ask for the same key and silent peer.
-            // It must attach a subscriber without narrowing the in-flight
-            // unrestricted fetch.
+            // A later targeted ancestry request may name a remote peer or the
+            // requester itself. It must attach its subscriber without
+            // narrowing the in-flight unrestricted fetch.
             requester_mailbox.resolve(
                 View::new(3),
                 requested,
                 Kind::Nullification,
-                participants[1].clone(),
+                Some(participants[target_index].clone()),
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            // Remove the silent target and expose a different responder. If
+            // Remove the silent peer and expose a different responder. If
             // the targeted ask narrowed the fetch, recovery cannot finish.
             oracle
                 .remove_link(participants[0].clone(), participants[1].clone())
@@ -957,7 +951,7 @@ mod tests {
             let recovered = select! {
                 message = requester_voter_receiver.recv() => message.expect("voter mailbox closed"),
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("unrestricted fetch was narrowed to the silent target");
+                    panic!("unrestricted fetch was narrowed by the targeted request");
                 },
             };
             assert!(matches!(
@@ -968,6 +962,16 @@ mod tests {
                 } if nullification == available
             ));
         });
+    }
+
+    #[test_async]
+    async fn targeted_fetch_does_not_restrict_existing_backfill() {
+        assert_targeted_fetch_does_not_restrict_existing_backfill(1);
+    }
+
+    #[test_async]
+    async fn self_targeted_fetch_does_not_restrict_existing_backfill() {
+        assert_targeted_fetch_does_not_restrict_existing_backfill(0);
     }
 
     /// A valid notarization that does not settle the ask does not prevent a
@@ -1014,7 +1018,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(
@@ -1156,7 +1160,7 @@ mod tests {
                 View::new(3),
                 requested,
                 Kind::Nullification,
-                participants[2].clone(),
+                Some(participants[2].clone()),
             );
             let recovered = select! {
                 message = requester_voter_receiver.recv() => {
@@ -1225,6 +1229,33 @@ mod tests {
         });
     }
 
+    /// A resolve without a target (no tracked round in the term knows the
+    /// leader) must fall back to an untargeted fetch, not be dropped.
+    #[test_async]
+    async fn resolve_without_target_falls_back_to_untargeted_fetch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture { verifier, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let actor = build_actor(context, verifier, TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+            let requested = View::new(9);
+
+            actor.resolve(
+                &mut resolver,
+                View::new(10),
+                requested,
+                Kind::Notarization,
+                None,
+            );
+            assert!(resolver.targeted().is_empty());
+            assert_eq!(resolver.outstanding(), vec![9]);
+            assert_eq!(
+                resolver.subscriptions(9),
+                vec![Ask::ancestry(Kind::Notarization)]
+            );
+        });
+    }
+
     #[test_async]
     async fn targeted_fetches_drop_only_when_ask_is_satisfied() {
         let runtime = deterministic::Runner::default();
@@ -1244,14 +1275,14 @@ mod tests {
                 View::new(10),
                 requested,
                 Kind::Nullification,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(11),
                 requested,
                 Kind::Notarization,
-                participants[1].clone(),
+                Some(participants[1].clone()),
             );
             resolver.fetch(Fetch {
                 key: U64::from(requested),
@@ -1301,14 +1332,14 @@ mod tests {
                 View::new(14),
                 requested,
                 Kind::Nullification,
-                participants[2].clone(),
+                Some(participants[2].clone()),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(14),
                 requested.next(),
                 Kind::Nullification,
-                participants[2].clone(),
+                Some(participants[2].clone()),
             );
             assert_eq!(resolver.targeted().len(), 2);
 
@@ -1321,14 +1352,14 @@ mod tests {
                 View::new(12),
                 second_requested,
                 Kind::Nullification,
-                participants[2].clone(),
+                Some(participants[2].clone()),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(13),
                 second_requested,
                 Kind::Notarization,
-                participants[3].clone(),
+                Some(participants[3].clone()),
             );
             resolver.fetch(Fetch {
                 key: U64::from(second_requested),
@@ -1358,7 +1389,7 @@ mod tests {
                 View::new(14),
                 second_requested,
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert_eq!(resolver.targeted().len(), 4);
 
@@ -1388,7 +1419,7 @@ mod tests {
                 finalized.next(),
                 requested,
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert!(resolver.outstanding().is_empty());
             assert_eq!(resolver.targeted().len(), 4);
@@ -1443,36 +1474,52 @@ mod tests {
     }
 
     #[test_async]
-    async fn higher_certified_floor_is_served_over_older_finalization() {
+    async fn higher_certified_floor_does_not_hide_older_finalization() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
-            let mut resolver = RecordingResolver::default();
+            let mut responder =
+                build_actor(context.child("responder"), verifier.clone(), TERM_LENGTH);
+            let mut responder_resolver = RecordingResolver::default();
 
             let requested = View::new(3);
             let finalization = Certificate::Finalization(build_finalization(
                 &schemes, &verifier, EPOCH, requested,
             ));
-            let expected_finalization = finalization.encode();
-            actor.updated(&mut resolver, finalization);
-            assert_eq!(
-                actor.produce_certificate(requested),
-                Some(expected_finalization)
-            );
+            responder.updated(&mut responder_resolver, finalization);
 
             let floor = View::new(6);
             let notarization =
                 Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, floor));
-            let expected = notarization.encode();
-            actor.updated(&mut resolver, notarization);
-            actor.certified(&mut resolver, floor, true);
+            responder.updated(&mut responder_resolver, notarization);
+            responder.certified(&mut responder_resolver, floor, true);
 
-            // The floor advances by view, so the higher certified
-            // notarization supersedes the older finalization.
-            assert_eq!(actor.produce_certificate(requested), Some(expected));
+            // The notarization is now the construction floor, but returning it
+            // for view 3 would leave the targeted ask ambiguous. The retained
+            // finalization settles that ask instead.
+            let data = responder
+                .produce_certificate(requested)
+                .expect("responder should retain settling finalization");
+
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("requester_voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut requester = build_actor(context.child("requester"), verifier, TERM_LENGTH);
+            let mut requester_resolver = RecordingResolver::default();
+            let (response, receiver) = oneshot::channel();
+            requester.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data,
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut requester_resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
         });
     }
 
@@ -1585,7 +1632,7 @@ mod tests {
                 View::new(10),
                 view,
                 Kind::Nullification,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert_eq!(
                 resolver.subscriptions(3),
@@ -1610,7 +1657,7 @@ mod tests {
                 View::new(11),
                 view,
                 Kind::Nullification,
-                participants[1].clone(),
+                Some(participants[1].clone()),
             );
             assert_eq!(resolver.targeted().len(), 1);
         });
@@ -1641,7 +1688,7 @@ mod tests {
                 View::new(8),
                 View::new(4),
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert_eq!(
                 resolver.targeted(),
@@ -1673,7 +1720,7 @@ mod tests {
                 View::new(10),
                 view,
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             actor.updated(
                 &mut resolver,
@@ -1690,7 +1737,7 @@ mod tests {
                 View::new(11),
                 view,
                 Kind::Notarization,
-                participants[1].clone(),
+                Some(participants[1].clone()),
             );
             assert_eq!(resolver.targeted().len(), 1);
         });
@@ -1771,7 +1818,7 @@ mod tests {
                 View::new(11),
                 view,
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert_eq!(resolver.targeted().len(), targeted);
         });
@@ -2039,7 +2086,7 @@ mod tests {
             );
 
             assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
-            assert_eq!(actor.last_finalized, View::new(6));
+            assert_eq!(actor.last_finalized(), View::new(6));
             assert!(matches!(
                 actor.state.get(View::new(6)),
                 Some(Certificate::Finalization(finalization))

@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler,
+    Buf, BufMut,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
@@ -86,7 +86,7 @@ impl EncodeSize for Record {
 }
 
 /// The archive's state, boxed so the public [Archive] handle stays pointer-sized.
-struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
+struct Inner<E: Context, K: Array, V: CodecShared> {
     /// Number of items per section.
     items_per_section: u64,
 
@@ -105,7 +105,7 @@ struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
     syncs: Counter,
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
@@ -232,7 +232,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
     }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// See [crate::archive::Archive::put].
     async fn put(mut self: Box<Self>, index: u64, key: K, data: V) -> Result<Box<Self>, Error> {
         // Ignore duplicates
@@ -361,9 +361,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
 /// dropped future) destroys the handle.
-pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
+pub struct Archive<E: Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Archive")
             .field("first_index", &self.0.first_index())
@@ -372,16 +372,14 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Ar
     }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archive
-    for Archive<E, K, V>
-{
+impl<E: Context, K: Array, V: CodecShared> crate::archive::Archive for Archive<E, K, V> {
     type Key = K;
     type Value = V;
 

@@ -11,6 +11,7 @@ use crate::aws::{
     utils::*,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_macros::boxed;
 use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
@@ -18,6 +19,7 @@ use futures::{
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
+    future::Future,
     net::IpAddr,
     path::PathBuf,
     slice,
@@ -86,6 +88,55 @@ fn validate_storage_config(config: &Config) -> Result<(), Error> {
         )?;
     }
     Ok(())
+}
+
+/// Runs regional launch queues in parallel, with monitoring first in its region.
+#[boxed]
+async fn run_launches<MF, F, M, T, E>(
+    monitoring_region: String,
+    monitoring: MF,
+    launches: impl IntoIterator<Item = (String, F)>,
+) -> Result<(M, Vec<T>), E>
+where
+    MF: Future<Output = Result<M, E>>,
+    F: Future<Output = Result<T, E>>,
+{
+    // Group launches by region and preserve input positions for the final result.
+    let mut launches_by_region: BTreeMap<String, Vec<(usize, F)>> = BTreeMap::new();
+    for (index, (region, launch)) in launches.into_iter().enumerate() {
+        launches_by_region
+            .entry(region)
+            .or_default()
+            .push((index, launch));
+    }
+
+    // Serialize launches within each region, with monitoring first in its region.
+    let colocated = launches_by_region
+        .remove(&monitoring_region)
+        .unwrap_or_default();
+    let run_region = |launches: Vec<(usize, F)>| async move {
+        let mut completed = Vec::with_capacity(launches.len());
+        for (index, launch) in launches {
+            completed.push((index, launch.await?));
+        }
+        Ok::<Vec<(usize, T)>, E>(completed)
+    };
+    let colocated = run_region(colocated);
+    let remote_regions = launches_by_region.into_values().map(run_region);
+    let monitoring_and_colocated = async move {
+        let monitoring = monitoring.await?;
+        Ok::<_, E>((monitoring, colocated.await?))
+    };
+
+    // Execute independent regional queues concurrently and restore the input order.
+    let ((monitoring, mut completed), remote) =
+        tokio::try_join!(monitoring_and_colocated, try_join_all(remote_regions),)?;
+    completed.extend(remote.into_iter().flatten());
+    completed.sort_unstable_by_key(|(index, _)| *index);
+    Ok((
+        monitoring,
+        completed.into_iter().map(|(_, result)| result).collect(),
+    ))
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
@@ -703,7 +754,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let region = instance.region.clone();
             let subnets = grouped_subnets(instance, resources, &availability_zone_groups);
             let az_support = resources.az_support.clone();
-            async move {
+            (region.clone(), async move {
                 let storage_class = parse_storage_class(&instance.name, &instance.storage_class)?;
                 let (mut ids, az) = launch_instances(
                     ec2_client,
@@ -735,15 +786,17 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     region,
                     (*instance).clone(),
                 ))
-            }
+            })
         },
     );
 
     // Wait for all launches to complete (get instance IDs)
-    let (monitoring_instance_id, binary_launches) = tokio::try_join!(
+    let (monitoring_instance_id, binary_launches) = run_launches(
+        monitoring_region.clone(),
         monitoring_launch_future,
-        try_join_all(binary_launch_futures)
-    )?;
+        binary_launch_futures,
+    )
+    .await?;
     info!("instances requested");
 
     // Group binary instances by region for batched DescribeInstances calls
@@ -1454,11 +1507,19 @@ fn grouped_subnets(
 #[cfg(test)]
 mod tests {
     use super::{
-        RegionResources, grouped_subnets, select_availability_zone_groups,
+        RegionResources, grouped_subnets, run_launches, select_availability_zone_groups,
         select_group_availability_zone, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
-    use std::collections::{BTreeSet, HashMap};
+    use std::{
+        collections::{BTreeSet, HashMap},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::time::sleep;
 
     fn instance(
         name: &str,
@@ -1499,6 +1560,94 @@ mod tests {
             storage_throughput: None,
             dashboard: "dashboard.json".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn launches_are_serial_within_each_region() {
+        let east_active = Arc::new(AtomicUsize::new(0));
+        let east_max = Arc::new(AtomicUsize::new(0));
+        let west_active = Arc::new(AtomicUsize::new(0));
+        let west_max = Arc::new(AtomicUsize::new(0));
+        let global_active = Arc::new(AtomicUsize::new(0));
+        let global_max = Arc::new(AtomicUsize::new(0));
+        let launches = [
+            ("us-west-2", 0usize),
+            ("us-east-1", 1),
+            ("us-west-2", 2),
+            ("us-east-1", 3),
+        ]
+        .into_iter()
+        .map(|(region, id)| {
+            let (regional_active, regional_max) = if region == "us-east-1" {
+                (east_active.clone(), east_max.clone())
+            } else {
+                (west_active.clone(), west_max.clone())
+            };
+            let global_active = global_active.clone();
+            let global_max = global_max.clone();
+            (region.to_string(), async move {
+                let regional = regional_active.fetch_add(1, Ordering::SeqCst) + 1;
+                regional_max.fetch_max(regional, Ordering::SeqCst);
+                let global = global_active.fetch_add(1, Ordering::SeqCst) + 1;
+                global_max.fetch_max(global, Ordering::SeqCst);
+                sleep(Duration::from_millis(10)).await;
+                global_active.fetch_sub(1, Ordering::SeqCst);
+                regional_active.fetch_sub(1, Ordering::SeqCst);
+                Ok::<usize, ()>(id)
+            })
+        });
+
+        let (_, completed) = run_launches(
+            "monitoring".to_string(),
+            async { Ok::<_, ()>(()) },
+            launches,
+        )
+        .await
+        .expect("launches should succeed");
+
+        assert_eq!(completed, [0, 1, 2, 3]);
+        assert_eq!(east_max.load(Ordering::SeqCst), 1);
+        assert_eq!(west_max.load(Ordering::SeqCst), 1);
+        assert!(global_max.load(Ordering::SeqCst) > 1);
+    }
+
+    #[tokio::test]
+    async fn monitoring_shares_the_binary_region_launch_queue() {
+        let east_active = Arc::new(AtomicUsize::new(0));
+        let east_max = Arc::new(AtomicUsize::new(0));
+
+        let monitoring = {
+            let active = east_active.clone();
+            let max = east_max.clone();
+            async move {
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max.fetch_max(count, Ordering::SeqCst);
+                sleep(Duration::from_millis(10)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok::<_, ()>("monitoring")
+            }
+        };
+        let binaries = [("us-east-1".to_string(), 0usize)]
+            .into_iter()
+            .map(|(region, id)| {
+                let active = east_active.clone();
+                let max = east_max.clone();
+                (region, async move {
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max.fetch_max(count, Ordering::SeqCst);
+                    sleep(Duration::from_millis(10)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<_, ()>(id)
+                })
+            });
+
+        let (monitoring, binaries) = run_launches("us-east-1".to_string(), monitoring, binaries)
+            .await
+            .expect("launches should succeed");
+
+        assert_eq!(monitoring, "monitoring");
+        assert_eq!(binaries, [0]);
+        assert_eq!(east_max.load(Ordering::SeqCst), 1);
     }
 
     fn resources_in(region: &str) -> RegionResources {

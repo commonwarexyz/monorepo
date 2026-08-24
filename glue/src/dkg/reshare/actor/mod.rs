@@ -101,8 +101,9 @@
 //! # Follower Mode
 //!
 //! The actor follows instead of participating when setup cannot read the boundary
-//! [`EpochInfo`] for the epoch containing marshal's next unprocessed height. This can occur during
-//! state-sync handoff because marshal may not retain the preceding boundary block.
+//! [`EpochInfo`] for the epoch containing marshal's next unprocessed height, or
+//! when a state-sync floor skips part of the inclusion window. In either
+//! case the actor lacks the public history needed to reconstruct the ceremony.
 //!
 //! ```text
 //! processed height + 1 = H
@@ -112,6 +113,7 @@
 //!        |
 //!        v
 //! boundary EpochInfo(N) unavailable locally
+//! or state-sync floor skipped inclusion blocks
 //!        |
 //!        v
 //! follower mode until final(N)
@@ -137,12 +139,14 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
+    network::{Directory, Manager},
     reshare::{Mailbox, Message, metrics::Metrics as ReshareMetrics, store::Store},
     state_sync::{self, Plan as StateSyncPlan},
     types::EpochInfo,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
+    Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher},
@@ -152,7 +156,7 @@ use commonware_cryptography::{
     bls12381::primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
     certificate::Scheme,
 };
-use commonware_p2p::{Blocker, Manager, Receiver, Sender, utils::mux::Muxer};
+use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
@@ -164,34 +168,41 @@ use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
 };
 
-type DkgCompletion<V, P> = Box<dyn FnOnce(Option<EpochInfo<V, P>>) + Send>;
+type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
 
 mod dealing;
 mod dkg;
 mod follower;
 mod inclusion;
 mod setup;
-use setup::Setup;
+use setup::{Setup, StateSyncStart};
 
 /// Configuration for the crate-private one-shot DKG mode.
-pub(crate) struct DkgConfig<V, P>
+pub(crate) struct DkgConfig<V, P, D>
 where
     V: BlsVariant,
     P: PublicKey,
+    D: Directory<P>,
 {
     pub(crate) participants: Set<P>,
-    pub(crate) completion: DkgCompletion<V, P>,
+    /// Transport directory for the one-shot ceremony's participants, embedded
+    /// verbatim in the emitted epoch-zero artifact. Every participant must
+    /// configure the same directory.
+    pub(crate) directory: D,
+    pub(crate) completion: DkgCompletion<V, P, D>,
 }
 
-enum Mode<V, P>
+enum Mode<V, P, D>
 where
     V: BlsVariant,
     P: PublicKey,
+    D: Directory<P>,
 {
     Reshare,
     Dkg {
         participants: Set<P>,
-        completion: Option<DkgCompletion<V, P>>,
+        directory: D,
+        completion: Option<DkgCompletion<V, P, D>>,
     },
 }
 
@@ -202,6 +213,8 @@ where
     X: Blocker<PublicKey = C::PublicKey>,
     S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock,
+    <MV::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = C::PublicKey>,
     R: Registrar<PublicKey = C::PublicKey>,
 {
     /// Signer for player acknowledgments and dealer logs.
@@ -233,7 +246,12 @@ where
     pub marshal: MarshalMailbox<S, MV>,
 
     /// Shared DKG state-sync startup recovery plan.
-    pub state_sync: StateSyncPlan<S, MV::Commitment, R::Variant>,
+    pub state_sync: StateSyncPlan<
+        S,
+        MV::Commitment,
+        R::Variant,
+        <MV::ApplicationBlock as ReshareBlock>::Directory,
+    >,
 
     /// Epoch readiness fence.
     pub fence: Fence,
@@ -250,8 +268,8 @@ where
     /// Runtime-storage partition prefix.
     pub partition_prefix: String,
 
-    /// Maximum participants accepted in decoded protocol values and
-    /// provider-supplied future participant sets.
+    /// Maximum entries accepted in each decoded or provider-supplied
+    /// participant set.
     pub max_participants: NonZeroU32,
 
     /// Epoch schedule used to interpret finalized block heights.
@@ -267,9 +285,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -288,7 +306,7 @@ where
     strategy: T,
     registrar: R,
     marshal: MarshalMailbox<S, MV>,
-    state_sync: StateSyncPlan<S, MV::Commitment, V>,
+    state_sync: StateSyncPlan<S, MV::Commitment, V, B::Directory>,
     fence: Fence,
     namespace: &'static [u8],
     sharing_mode: SharingMode,
@@ -297,7 +315,7 @@ where
     blocks_per_epoch: NonZeroU64,
     epocher: FixedEpocher,
     metrics: ReshareMetrics<C::PublicKey>,
-    mode: Mode<V, C::PublicKey>,
+    mode: Mode<V, C::PublicKey, B::Directory>,
     batch_verifier: PhantomData<BV>,
 }
 
@@ -307,9 +325,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -356,11 +374,12 @@ where
     pub(crate) fn new_dkg(
         context: E,
         config: Config<C, M, X, P, SS, T, BV, S, MV, R>,
-        dkg: DkgConfig<V, C::PublicKey>,
+        dkg: DkgConfig<V, C::PublicKey, B::Directory>,
     ) -> (Self, Mailbox<B, V, C, A>) {
         let (mut actor, mailbox) = Self::new(context, config);
         actor.mode = Mode::Dkg {
             participants: dkg.participants,
+            directory: dkg.directory,
             completion: Some(dkg.completion),
         };
         (actor, mailbox)
@@ -402,28 +421,39 @@ where
                 recovered_epoch,
             )
             .await;
-        if let Some(state_sync) = &state_sync {
+
+        // Install the recovered epoch scheme, then materialize the certified
+        // floor commitment and retain its height with the epoch metadata. Setup
+        // uses that bound to decide whether the public dealer-log window is
+        // replayable.
+        let mut state_sync = if let Some(state_sync) = state_sync {
             let share = self.recovered_share(&mut store, &state_sync.info).await;
             self.register_epoch(&state_sync.info, share).await;
-            self.marshal
+            let floor = self
+                .marshal
                 .subscribe_by_commitment(
                     state_sync.floor.proposal.payload,
                     CommitmentFallback::Wait,
                 )
                 .await
                 .expect("marshal must yield state sync floor block");
-        }
+            Some(StateSyncStart {
+                info: state_sync.info,
+                floor: floor.height(),
+            })
+        } else {
+            None
+        };
 
         if matches!(self.mode, Mode::Dkg { .. }) {
             self.run_dkg(&mut store, &mut dealing_mux).await;
             return;
         }
 
-        let mut current_epoch = state_sync.as_ref().map(|state_sync| state_sync.info.epoch);
-        let mut state_sync_info = state_sync.map(|state_sync| state_sync.info);
+        let mut current_epoch = state_sync.as_ref().map(|start| start.info.epoch);
         loop {
             let Some(prepared) = self
-                .setup(&mut store, current_epoch.take(), state_sync_info.take())
+                .setup(&mut store, current_epoch.take(), state_sync.take())
                 .await
             else {
                 return;

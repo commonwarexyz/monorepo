@@ -11,7 +11,8 @@
 //! Epoch changes are driven by finalized blocks:
 //!
 //! 1. Startup resolves an epoch, peer set, and floor from marshal or state sync.
-//! 2. The orchestrator tracks the peer set, loads the epoch scheme from its
+//! 2. After the epoch gate opens, the orchestrator resolves and tracks the peer
+//!    set, loads the epoch scheme from its
 //!    [`Provider`](commonware_cryptography::certificate::Provider), opens
 //!    epoch-specific P2P subchannels, and starts Simplex.
 //! 3. Marshal reports finalized blocks through [`Mailbox`].
@@ -45,6 +46,8 @@
 //! anchored by the last finalized block of the previous epoch. Ordinary restart
 //! expects that boundary block to remain in marshal's local finalized block
 //! archive; see [`crate::dkg`] for the marshal retention requirement.
+//! The recovered epoch also selects the peer snapshot, so restart and state-sync
+//! entry use the same epoch-scoped addresses as an uninterrupted node.
 //!
 //! # Catching Up
 //!
@@ -74,6 +77,7 @@ mod tests {
     use super::{Actor, Config};
     use crate::dkg::{
         fence::Fence,
+        network::{Addresses, Manager},
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::{max_supported_mode, mocks},
         types::{EpochInfo, EpochOutcome, Payload},
@@ -86,13 +90,16 @@ mod tests {
         types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use commonware_cryptography::{
-        Digestible as _,
+        Digestible as _, Hasher as _,
         bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
         certificate::Verifier as _,
         sha256::Sha256,
     };
     use commonware_macros::select;
-    use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
+    use commonware_p2p::{
+        Address,
+        simulated::{Config as NetworkConfig, Link, Network, Oracle},
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, Handle, Quota, Runner, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
@@ -100,10 +107,14 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        ordered::Set,
+        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, Probability, TestRng,
+        acknowledgement::Exact, ordered::Set, sequence::Unit,
     };
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
+        time::Duration,
+    };
 
     const BACKFILL_CHANNEL: u64 = 0;
     const VOTE_CHANNEL: u64 = 1;
@@ -113,7 +124,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 
@@ -225,7 +236,7 @@ mod tests {
                     None
                 };
                 started.push(
-                    Node::start_with_gate_epoch(
+                    Node::start(
                         context.child("node").with_attribute("index", index),
                         &oracle,
                         fixture,
@@ -233,6 +244,7 @@ mod tests {
                         boundary,
                         state_sync,
                         gate_epoch,
+                        oracle.manager(),
                     )
                     .await,
                 );
@@ -253,8 +265,17 @@ mod tests {
             index: usize,
         ) {
             self.nodes[index].abort();
-            self.nodes[index] =
-                Node::start(context, &self.oracle, fixture, index, None, None).await;
+            self.nodes[index] = Node::start(
+                context,
+                &self.oracle,
+                fixture,
+                index,
+                None,
+                None,
+                Epoch::new(1),
+                self.oracle.manager(),
+            )
+            .await;
         }
     }
 
@@ -278,27 +299,8 @@ mod tests {
     }
 
     impl Node {
-        async fn start(
-            context: deterministic::Context,
-            oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
-            fixture: &mocks::SchemeFixture,
-            index: usize,
-            boundary: Option<mocks::TestBlock>,
-            state_sync: Option<TestStateSync>,
-        ) -> Self {
-            Self::start_with_gate_epoch(
-                context,
-                oracle,
-                fixture,
-                index,
-                boundary,
-                state_sync,
-                Epoch::new(1),
-            )
-            .await
-        }
-
-        async fn start_with_gate_epoch(
+        #[allow(clippy::too_many_arguments)]
+        async fn start<M>(
             context: deterministic::Context,
             oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
             fixture: &mocks::SchemeFixture,
@@ -306,7 +308,11 @@ mod tests {
             boundary: Option<mocks::TestBlock>,
             state_sync: Option<TestStateSync>,
             gate_epoch: Epoch,
-        ) -> Self {
+            manager: M,
+        ) -> Self
+        where
+            M: Manager<PublicKey = mocks::TestPublicKey, Directory = Unit>,
+        {
             let public_key = fixture.participants[index].clone();
             let control = oracle.control(public_key.clone());
             let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
@@ -392,7 +398,7 @@ mod tests {
                 context.child("orchestrator"),
                 Config {
                     oracle: control.clone(),
-                    manager: oracle.manager(),
+                    manager,
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     marshal: marshal.clone(),
                     application: application.clone(),
@@ -569,6 +575,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
+            directory: Unit,
         }
     }
 
@@ -607,6 +614,50 @@ mod tests {
             let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
 
             assert_eq!(proposal.round.epoch(), Epoch::zero());
+        });
+    }
+
+    #[test]
+    fn address_failure_stops_before_consensus_engine_starts() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let participants = fixture.participants.clone();
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants,
+            )
+            .await;
+            let network = network.start();
+            let mut node = Node::start(
+                context.child("node"),
+                &oracle,
+                &fixture,
+                0,
+                None,
+                None,
+                Epoch::new(1),
+                mocks::FailingManager(oracle.manager()),
+            )
+            .await;
+
+            select! {
+                result = &mut node.orchestrator_handle => {
+                    result.expect("orchestrator should stop cleanly");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("orchestrator did not stop after peer-set failure");
+                },
+            }
+            assert!(node.application.proposals().is_empty());
+            node.abort();
+            network.abort();
         });
     }
 
@@ -806,6 +857,219 @@ mod tests {
 
             let state_sync = StateSync { info, floor };
             let _cluster = Cluster::start_with_state_sync(&mut context, &fixture, state_sync).await;
+        });
+    }
+
+    #[test]
+    fn state_sync_entry_activates_peers_from_in_band_directory() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            type AddressedBlock = mocks::MockBlock<
+                mocks::TestDigest,
+                mocks::TestContext,
+                Addresses<mocks::TestPublicKey>,
+            >;
+            type AddressedVariant = marshal::standard::Standard<AddressedBlock>;
+
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let participants = fixture.participants.clone();
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            let network_handle = network.start();
+
+            // A certificate-backed artifact for the synced epoch carries the
+            // committee's addresses in-band: a state-syncing node has no
+            // application state to resolve them from.
+            let synced_epoch = Epoch::new(3);
+            let directory = participants
+                .iter()
+                .enumerate()
+                .map(|(index, peer)| {
+                    let socket =
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7000 + index as u16);
+                    (peer.clone(), Address::Symmetric(socket))
+                })
+                .collect::<Addresses<_>>();
+            let participant_set = Set::from_iter_dedup(participants.iter().cloned());
+            let (output, _) = deal::<mocks::TestBlsVariant, _, N3f1>(
+                TestRng::new(7),
+                Mode::NonZeroCounter,
+                participant_set.clone(),
+            )
+            .expect("failed to create test DKG output");
+            let info = EpochInfo {
+                outcome: EpochOutcome::Success,
+                epoch: synced_epoch,
+                output,
+                players: participant_set.clone(),
+                next_players: participant_set,
+                directory: directory.clone(),
+            };
+
+            let genesis_digest = Sha256::hash(&[b""]);
+            let genesis: AddressedBlock = mocks::MockBlock::new::<Sha256>(
+                mocks::TestContext {
+                    round: Round::new(Epoch::zero(), View::zero()),
+                    leader: participants[0].clone(),
+                    parent: (View::zero(), genesis_digest),
+                },
+                genesis_digest,
+                Height::zero(),
+                0,
+            );
+            let floor = make_finalization(
+                Proposal::new(
+                    Round::new(synced_epoch, View::new(1)),
+                    View::zero(),
+                    genesis.digest(),
+                ),
+                &fixture.schemes,
+            );
+
+            let public_key = participants[0].clone();
+            let control = oracle.control(public_key.clone());
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let partition_prefix = "orchestrator-in-band-directory".to_string();
+
+            let backfill = control
+                .register(BACKFILL_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register marshal backfill channel");
+            let resolver = marshal_resolver::init(
+                context.child("marshal_resolver"),
+                marshal_resolver::Config {
+                    public_key: public_key.clone(),
+                    peer_provider: oracle.manager(),
+                    blocker: control.clone(),
+                    mailbox_size: NZUsize!(16),
+                    initial: Duration::from_millis(100),
+                    timeout: Duration::from_millis(200),
+                    fetch_retry_timeout: Duration::from_millis(100),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+                backfill,
+            );
+            let finalizations_by_height =
+                immutable::Archive::init(context.child("finalizations_by_height"), {
+                    let _: () = mocks::TestScheme::certificate_codec_config_unbounded();
+                    archive_config(
+                        &partition_prefix,
+                        "finalizations_by_height",
+                        page_cache.clone(),
+                        (),
+                    )
+                })
+                .await
+                .expect("failed to initialize finalizations archive");
+            let finalized_blocks = immutable::Archive::init(
+                context.child("finalized_blocks"),
+                archive_config(&partition_prefix, "finalized_blocks", page_cache, ()),
+            )
+            .await
+            .expect("failed to initialize finalized blocks archive");
+            let (marshal_actor, marshal, _): (
+                _,
+                marshal::core::Mailbox<mocks::TestScheme, AddressedVariant>,
+                _,
+            ) = marshal::core::Actor::<_, _, _, _, _, _, _, Exact>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
+                    epocher: FixedEpocher::new(NZU64!(2)),
+                    start: MarshalStart::Genesis(genesis),
+                    partition_prefix: partition_prefix.clone(),
+                    mailbox_size: NZUsize!(16),
+                    view_retention: ViewDelta::new(8),
+                    prunable_items_per_section: NZU64!(10),
+                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                    replay_buffer: NZUsize!(1024),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    block_codec_config: (),
+                    max_repair: NZUsize!(4),
+                    max_pending_acks: NZUsize!(4),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+            let state_sync = StateSyncPlan::init(
+                context.child("state_sync_plan"),
+                StateSyncConfig {
+                    partition_prefix: partition_prefix.clone(),
+                    max_participants: NZU32!(16),
+                    max_supported_mode: max_supported_mode(),
+                },
+                Some(StateSync {
+                    info: info.clone(),
+                    floor,
+                }),
+            )
+            .await;
+
+            let manager = mocks::DirectoryManager::new(oracle.manager());
+            let (_fence, gate) = Fence::new(synced_epoch);
+            let (actor, mailbox): (_, super::Mailbox<AddressedBlock, Exact>) = Actor::new(
+                context.child("orchestrator"),
+                Config {
+                    oracle: control.clone(),
+                    manager: manager.clone(),
+                    provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
+                    marshal: marshal.clone(),
+                    application: mocks::MockApplication::default(),
+                    strategy: Sequential,
+                    simplex: mocks::simplex_config(),
+                    gate,
+                    state_sync,
+                    blocks_per_epoch: NZU64!(2),
+                    muxer_size: 16,
+                    mailbox_size: NZUsize!(16),
+                    partition_prefix,
+                },
+            );
+            let marshal_handle = marshal_actor.start_unbuffered(mailbox, resolver);
+
+            let votes = control
+                .register(VOTE_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register vote channel");
+            let certificates = control
+                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register certificate channel");
+            let simplex_resolver = control
+                .register(RESOLVER_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register simplex resolver channel");
+            let orchestrator_handle = actor.start(votes, certificates, simplex_resolver);
+
+            let tracked = loop {
+                let tracked = manager.tracked();
+                if !tracked.is_empty() {
+                    break tracked;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            };
+            assert_eq!(tracked.len(), 1);
+            let (epoch, peers, tracked_directory) = &tracked[0];
+            assert_eq!(*epoch, synced_epoch);
+            assert_eq!(peers, &info.participants().tracked_peers());
+            assert_eq!(tracked_directory, &directory);
+
+            orchestrator_handle.abort();
+            marshal_handle.abort();
+            network_handle.abort();
         });
     }
 

@@ -1,5 +1,5 @@
 use crate::{
-    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs, WriteOptions,
+    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs, ReadOptions, WriteOptions,
     buffer::{SyncState, tip::Buffer},
 };
 use std::num::NonZeroUsize;
@@ -137,7 +137,11 @@ impl<B: Blob> Write<B> {
 
     /// Read bytes from the underlying blob.
     async fn read_blob(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Ok(self.blob.read_at(offset, len).await?.freeze())
+        Ok(self
+            .blob
+            .read_at(offset, len, ReadOptions::default())
+            .await?
+            .freeze())
     }
 
     /// Write bytes from `buf` at `offset`.

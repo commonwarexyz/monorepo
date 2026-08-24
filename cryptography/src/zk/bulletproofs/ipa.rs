@@ -87,7 +87,9 @@
 //! let setup = Setup::new(
 //!     GENERATORS[0].clone(),
 //!     GENERATORS[1..]
-//!         .chunks_exact(2)
+//!         .as_chunks::<2>()
+//!         .0
+//!         .iter()
 //!         .map(|chunk| (chunk[0].clone(), chunk[1].clone())),
 //! );
 //!
@@ -865,7 +867,9 @@ pub mod fuzz {
             Setup::new(
                 generators[0],
                 generators[1..]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|chunk| (chunk[0], chunk[1])),
             )
         })

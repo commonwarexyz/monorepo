@@ -18,7 +18,7 @@
 //! seeds the dealer polynomial and so reveals every share that dealer
 //! distributes).
 
-use crate::dkg::{SecretStore, types::EpochInfo};
+use crate::dkg::{SecretStore, network::Directory, types::EpochInfo};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
@@ -36,13 +36,13 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Storage as RuntimeStorage, buffer::paged::CacheRef,
+    BufferPooler, Clock, Metrics, ReadOptions, Storage as RuntimeStorage, buffer::paged::CacheRef,
 };
 use commonware_storage::journal::{
     self,
     segmented::variable::{Config as JournalConfig, Journal},
 };
-use commonware_utils::{Faults, N3f1, NZU16, NZUsize, futures::rebind};
+use commonware_utils::{Faults, N3f1, NZU16, NZUsize, futures::rebind, sequence::Unit};
 use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -152,25 +152,27 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// boundary blocks or the separate state-sync store, not this journal. All
 /// secret material (shares, private dealings, and the dealer RNG seed) is held only through
 /// [`SecretStore`], never in plaintext.
-pub struct Store<E, SS, V, P>
+pub struct Store<E, SS, V, P, D = Unit>
 where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
     SS: SecretStore,
     V: Variant,
     P: PublicKey,
+    D: Directory<P>,
 {
     secret_store: SS,
     events: Option<Journal<E, Event<V, P>>>,
-    current: Option<EpochInfo<V, P>>,
+    current: Option<EpochInfo<V, P, D>>,
     epochs: BTreeMap<Epoch, EpochCache<V, P>>,
 }
 
-impl<E, SS, V, P> Store<E, SS, V, P>
+impl<E, SS, V, P, D> Store<E, SS, V, P, D>
 where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
     SS: SecretStore,
     V: Variant,
     P: PublicKey,
+    D: Directory<P>,
 {
     /// Initializes the store and replays durable crash-recovery state.
     pub async fn init(
@@ -200,8 +202,10 @@ where
 
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         let events = {
+            // Replay rebuilds the epoch caches in memory, so journal pages need
+            // not remain in the OS page cache.
             let mut replay = events
-                .replay(0, 0, READ_BUFFER)
+                .replay(0, 0, READ_BUFFER, ReadOptions::DONT_CACHE)
                 .await
                 .expect("failed to replay reshare events");
 
@@ -236,7 +240,7 @@ where
     }
 
     /// Returns the current epoch state, if one has been entered.
-    pub fn current(&self) -> Option<EpochInfo<V, P>> {
+    pub fn current(&self) -> Option<EpochInfo<V, P, D>> {
         self.current.clone()
     }
 
@@ -274,7 +278,7 @@ where
     /// an observer.
     pub async fn commit_epoch(
         &mut self,
-        info: EpochInfo<V, P>,
+        info: EpochInfo<V, P, D>,
         rng_seed: Summary,
         share: Option<group::Share>,
     ) {
@@ -553,14 +557,19 @@ pub struct Dealer<V: Variant, C: Signer> {
 }
 
 impl<V: Variant, C: Signer> Dealer<V, C> {
+    /// Returns whether the recorded acknowledgements form a quorum.
+    pub fn has_acknowledgement_quorum<M: Faults>(&self, players: usize) -> bool {
+        self.unsent.len() <= M::max_faults(players) as usize
+    }
+
     /// Records a player ack.
     ///
     /// Returns [`Verdict::Fault`] if the player signed an invalid ack so the
     /// caller can penalize them. A duplicate or unsolicited ack, or one for a
     /// round we are not dealing in, is a benign [`Verdict::Skip`].
-    pub async fn handle<E, SS>(
+    pub async fn handle<E, SS, D>(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, D>,
         epoch: Epoch,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
@@ -568,6 +577,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
         SS: SecretStore,
+        D: Directory<C::PublicKey>,
     {
         if !self.unsent.contains_key(&player) {
             return Verdict::Skip;
@@ -632,9 +642,9 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Returns [`Verdict::Fault`] if the dealing is provably invalid so the
     /// caller can penalize the dealer. A duplicate dealing is a benign
     /// [`Verdict::Skip`].
-    pub async fn handle<E, SS>(
+    pub async fn handle<E, SS, D>(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, D>,
         epoch: Epoch,
         dealer: C::PublicKey,
         public: DealerPubMsg<V>,
@@ -643,6 +653,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
         SS: SecretStore,
+        D: Directory<C::PublicKey>,
     {
         if let Some(ack) = self.acks.get(&dealer) {
             return Verdict::Valid(ack.clone());
@@ -722,6 +733,7 @@ mod tests {
             output,
             players: Set::default(),
             next_players: Set::default(),
+            directory: Unit,
         }
     }
 

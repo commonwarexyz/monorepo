@@ -1,6 +1,6 @@
 //! Shared helpers for `iobuf` benchmarks.
 //!
-//! The `pool` and `freelist` benchmark modules share the same small set of
+//! The `allocation` and `freelist` benchmark modules share the same small set of
 //! threading presets and the same timing harness:
 //!
 //! - [`Threading`] defines the single-threaded and multi-threaded benchmark
@@ -16,11 +16,13 @@
 //!     single-threaded ones.
 //! - [`measure`] runs the benchmark body under those presets, including the
 //!   barrier synchronization used by the multi-threaded cases.
+//! - [`start_pool`] constructs a `BufferPool` for the end-to-end pool suites.
 //!
-//! Keeping these helpers in one place ensures that the `pool` and `freelist`
-//! benchmarks use the same contention patterns and wall-clock measurement
-//! rules.
+//! Keeping these helpers in one place ensures that the `allocation` and
+//! `freelist` benchmarks use the same contention patterns and wall-clock
+//! measurement rules.
 
+use commonware_runtime::{BufferPool, BufferPoolConfig, BufferPooler, Runner as _, tokio};
 use std::{
     hint::spin_loop,
     sync::{Arc, Barrier},
@@ -143,4 +145,12 @@ pub fn measure<T>(
     });
 
     start.elapsed()
+}
+
+pub fn start_pool(cfg: BufferPoolConfig) -> BufferPool {
+    let runner_cfg = tokio::Config::default()
+        .with_worker_threads(1)
+        .with_network_buffer_pool_config(cfg);
+
+    tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
 }

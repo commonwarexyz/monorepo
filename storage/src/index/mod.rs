@@ -208,7 +208,7 @@ pub trait Factory: Unordered + Sized {
 
 /// A trait defining the additional operations provided by a memory-efficient index that allows
 /// ordered traversal of the indexed keys.
-pub trait Ordered: Unordered + Send + Sync {
+pub trait Ordered: Unordered {
     // Returns an iterator over all values associated with a translated key that lexicographically
     // precedes the result of translating `key`. The implementation will cycle around to the last
     // translated key if `key` is less than or equal to the first translated key. The returned
@@ -1553,7 +1553,7 @@ mod tests {
 
     fn run_index_cursor_across_threads<I>(index: Arc<Mutex<I>>)
     where
-        I: Unordered<Value = u64> + Send + 'static,
+        I: Unordered<Value = u64> + 'static,
     {
         // Insert some initial data
         {

@@ -22,6 +22,7 @@ aws = [
 	"chrono",
 	"clap",
 	"commonware-cryptography",
+	"commonware-macros/std",
 	"futures",
 	"reqwest",
 	"serde_yaml",
@@ -50,6 +51,13 @@ tokio = { workspace = true, features = ["full"], optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4"], optional = true }
+
+[dev-dependencies]
+aws-smithy-runtime-api.workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+# This dependency is exercised only by tests behind the nondefault `aws` feature.
+development = ["aws-smithy-runtime-api"]
 
 [[bin]]
 name = "deployer"

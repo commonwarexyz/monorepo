@@ -1,5 +1,6 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    network::Manager,
     reshare::{Actor, EpochInfoResponse, Message, metrics::Phase, store::Store},
     types::Payload,
 };
@@ -12,7 +13,7 @@ use commonware_cryptography::{
     certificate::Scheme,
 };
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Manager};
+use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
@@ -28,9 +29,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -41,13 +42,14 @@ where
 {
     /// Enter follower mode until the end of the current epoch is observed.
     ///
-    /// This mode is entered when setup has no recoverable public protocol state. The actor cannot
-    /// participate in the active ceremony, so it waits until the final block. It registers the next
-    /// epoch as a signer only when a failed ceremony carries a locally held share forward;
-    /// otherwise, it registers as a verifier.
+    /// This mode is entered when setup lacks the public history required to
+    /// reconstruct the active ceremony, either because boundary information is
+    /// unavailable or state sync skipped part of the inclusion window. The actor
+    /// waits until the final block and registers for the next epoch from its
+    /// outcome.
     pub(super) async fn follow(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
     ) -> ControlFlow<()> {
         self.metrics.set_phase(Phase::Following);
 
