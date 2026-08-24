@@ -1,9 +1,8 @@
 use crate::{
     Application, Block, Epochable,
     marshal::{
-        application::validation::{
-            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
-        },
+        ancestry::has_contiguous_height,
+        application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
         core::Mailbox,
         standard::Standard,
     },
