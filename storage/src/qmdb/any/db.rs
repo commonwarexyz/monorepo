@@ -40,6 +40,41 @@ const fn same_position(a: &(usize, u64), b: &(usize, u64)) -> bool {
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
 
+/// Aborts a spawned init task if dropped before being joined, so cancelling an init future
+/// (e.g. via a timeout) cannot leave the task running and retaining its log clone.
+struct AbortOnDrop<T: Send + 'static>(Option<Handle<T>>);
+
+impl<T: Send + 'static> AbortOnDrop<T> {
+    const fn new(handle: Handle<T>) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Abort the task, then join it.
+    async fn abort(mut self) {
+        let handle = self.0.take().expect("handle joined once");
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    /// Join the task.
+    async fn join(mut self) -> Result<T, commonware_runtime::Error> {
+        // Poll the handle by reference: the guard must keep owning it so dropping this
+        // future mid-join still aborts the task.
+        let handle = self.0.as_mut().expect("handle joined once");
+        let result = handle.await;
+        self.0 = None;
+        result
+    }
+}
+
+impl<T: Send + 'static> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 /// Snapshot mutation needed to undo one operation while rewinding.
 enum SnapshotUndo<F: Family, K> {
     Replace {
@@ -797,7 +832,7 @@ where
         // and the overlap task have dropped every clone.
         let log = Arc::new(log);
         let overlap = overlap(log.clone());
-        let overlap = context.child("init_overlap").spawn(move |_| overlap);
+        let overlap = AbortOnDrop::new(context.child("init_overlap").spawn(move |_| overlap));
         let built = async {
             let bounds = log.bounds();
             if bounds.end == 0 {
@@ -856,12 +891,11 @@ where
         let (inactivity_floor_loc, active_keys, bitmap) = match built {
             Ok(built) => built,
             Err(err) => {
-                overlap.abort();
-                let _ = overlap.await;
+                overlap.abort().await;
                 return Err(err);
             }
         };
-        let overlap = overlap.await??;
+        let overlap = overlap.join().await??;
 
         // The build and overlap task have returned, so every clone of the log is dropped.
         // Reclaim it.
