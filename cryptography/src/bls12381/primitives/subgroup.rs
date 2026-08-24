@@ -224,6 +224,7 @@ fn round_cost(n: usize, m: u32) -> usize {
 /// combinations wastes none of them — which matters, since the round count is
 /// what the batch pays for.
 fn spread(combinations: usize, rounds: usize) -> Vec<u32> {
+    debug_assert!(combinations / rounds <= MAX_WIDTH as usize);
     let width = (combinations / rounds) as u32;
     let wide = combinations % rounds;
     (0..rounds)
@@ -234,11 +235,14 @@ fn spread(combinations: usize, rounds: usize) -> Vec<u32> {
 /// Modeled cost of the plan that spreads `combinations` over `rounds` rounds,
 /// or `None` if that spread needs a round wider than `widest`.
 fn plan_cost(n: usize, combinations: usize, rounds: usize, widest: u32) -> Option<usize> {
-    let width = (combinations / rounds) as u32;
+    // Compared before narrowing, so a round count far too small to be usable is
+    // rejected rather than wrapping into a plausible-looking width.
+    let width = combinations / rounds;
     let wide = combinations % rounds;
-    if width + u32::from(wide > 0) > widest {
+    if width + usize::from(wide > 0) > widest as usize {
         return None;
     }
+    let width = width as u32;
     Some(
         wide.saturating_mul(round_cost(n, width + 1))
             .saturating_add((rounds - wide).saturating_mul(round_cost(n, width))),
@@ -300,6 +304,9 @@ fn plan(n: usize, combinations: usize) -> Option<Vec<u32>> {
 /// The points must already be valid curve points (for example decoded with
 /// [`G1::read_unchecked`]); this establishes only subgroup membership. An empty
 /// slice is accepted.
+///
+/// A `security` of zero asks for no soundness at all — an error of `2^0` — and
+/// accepts without examining the points; every positive target examines them.
 ///
 /// `rng` must be a cryptographically secure source the prover cannot predict:
 /// the coefficients are the verifier's private randomness, exactly as in a
@@ -2084,16 +2091,41 @@ mod tests {
 
     #[test]
     fn wide_rounds_agree_with_per_point() {
-        // A batch large enough for the cost model to pick a wide round, so the
-        // collapse chain runs at full depth.
+        // A batch large enough for the cost model to pick its widest round, so
+        // the collapse chain runs at full depth end to end. The points are
+        // drawn from a small pool and cycled, both to keep the batch cheap to
+        // build and because the duplicates stress the doubling path.
         let mut rng = test_rng();
-        let n = 20_000;
+        let n = 100_000;
         let widths = plan(n, 81).expect("batched");
-        assert!(widths[0] >= 7, "expected a wide plan, got {widths:?}");
-        let mut points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+        let widest = 3usize.pow(*widths.iter().max().expect("nonempty"))
+            * size_of::<blst_p1_affine>();
+        assert!(
+            widest * 3 > SLOT_BUDGET,
+            "expected the budget to bind, got {widths:?}"
+        );
+        let pool: Vec<G1> = (0..64).map(|_| in_subgroup_point(&mut rng)).collect();
+        let mut points: Vec<G1> = (0..n).map(|i| pool[i % pool.len()]).collect();
         assert!(batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
         points[n - 1] = off_subgroup_point(&mut rng);
         assert!(!batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
+    }
+
+    #[test]
+    fn zero_security_accepts_without_checking() {
+        // An error bound of 2^0 is no bound, so the check is entitled to accept
+        // anything. Pin it, so the boundary is a decision rather than an
+        // accident, and pin that the very next target does examine the points.
+        let mut rng = test_rng();
+        let bad: Vec<G1> = (0..LARGE).map(|_| off_subgroup_point(&mut rng)).collect();
+        assert_eq!(combinations_for_security(0), 0);
+        assert_eq!(plan(bad.len(), 0), Some(Vec::new()));
+        assert!(batch_in_g1(&bad, 0, &Sequential, &mut rng));
+        // One bit of soundness is still one round: rejection is then only
+        // probable, so the certain part is that a round runs at all.
+        assert_eq!(combinations_for_security(1), 1);
+        assert_eq!(plan(bad.len(), 1).map(|widths| widths.len()), Some(1));
+        assert!(!batch_in_g1(&bad, SECURITY, &Sequential, &mut rng));
     }
 
     #[test]
