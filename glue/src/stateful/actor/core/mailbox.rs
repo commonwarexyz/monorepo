@@ -260,7 +260,7 @@ where
             verification: Verification { response },
         });
 
-        // The strong ancestry owner stays live across the await; dropping this
+        // The strong ancestry owner stays live across the await. Dropping this
         // future releases it even while the request sits in the mailbox.
         match receiver.await {
             Ok(valid) => valid,
