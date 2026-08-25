@@ -70,7 +70,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Handle, ReadOptions, Spawner};
+use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     cache::Clock,
@@ -471,42 +471,6 @@ where
     Ok(None)
 }
 
-/// Aborts a spawned init task if dropped before being joined, so cancelling an init future
-/// (e.g. via a timeout) cannot leave the task running (with its log clone) until it happens
-/// to observe a closed channel.
-pub(crate) struct AbortOnDrop<T: Send + 'static>(Option<Handle<T>>);
-
-impl<T: Send + 'static> AbortOnDrop<T> {
-    pub(crate) const fn new(handle: Handle<T>) -> Self {
-        Self(Some(handle))
-    }
-
-    /// Abort the task, then join it.
-    pub(crate) async fn abort(mut self) {
-        let handle = self.0.take().expect("handle joined once");
-        handle.abort();
-        let _ = handle.await;
-    }
-
-    /// Join the task.
-    pub(crate) async fn join(mut self) -> Result<T, commonware_runtime::Error> {
-        // Poll the handle by reference: the guard must keep owning it so dropping this
-        // future mid-join still aborts the task.
-        let handle = self.0.as_mut().expect("handle joined once");
-        let result = handle.await;
-        self.0 = None;
-        result
-    }
-}
-
-impl<T: Send + 'static> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.0 {
-            handle.abort();
-        }
-    }
-}
-
 /// Join `guards` in order, collecting each task's output. On the first failure (a task
 /// error or a failed join), abort and join every remaining guard before surfacing it, so
 /// no task outlives the failure (dropping a guard only signals the abort without awaiting
@@ -796,7 +760,7 @@ where
                     per_worker_cache,
                 )
             });
-        handles.push(AbortOnDrop::new(handle));
+        handles.push(handle.abort_on_drop());
     }
 
     // Replay the log and route each keyed op to the worker owning its partition. Decoding
@@ -877,7 +841,7 @@ where
                 .child("snapshot_decoder")
                 .dedicated()
                 .spawn(move |_| decode_snapshot_chunk::<F, C>(log, start, len, routing, tx));
-            pending.push_back((rx, AbortOnDrop::new(handle)));
+            pending.push_back((rx, handle.abort_on_drop()));
         };
 
         for _ in 0..decoders {
