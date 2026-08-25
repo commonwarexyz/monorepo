@@ -36,7 +36,8 @@
 //!
 //! The default [Clock] policy provides low-overhead replacement. [Clock2QPlus]
 //! adds scan resistance through separate admission and eviction regions backed
-//! by bounded history.
+//! by bounded history. [Sieve] retains FIFO insertion order and sifts
+//! unvisited entries with a backward-moving hand.
 //!
 //! # Concurrency
 //!
@@ -79,6 +80,7 @@
 
 pub mod clock;
 pub mod clock2qplus;
+pub mod sieve;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -86,6 +88,7 @@ pub use clock::Clock;
 pub use clock2qplus::Clock2QPlus;
 use core::{hash::Hash, num::NonZeroUsize, ops::Index};
 use hashbrown::HashMap;
+pub use sieve::Sieve;
 
 type Hasher = ahash::RandomState;
 
@@ -1187,6 +1190,17 @@ mod tests {
             ops in proptest::collection::vec(op_strategy(), 0..256),
         ) {
             exercise_policy::<clock2qplus::Clock2QPlus<u8>, _>(capacity, prefill, ops, |cache| {
+                cache.check_policy_invariants();
+            })?;
+        }
+
+        #[test]
+        fn sieve_invariants_hold(
+            capacity in 1usize..8,
+            prefill in any::<bool>(),
+            ops in proptest::collection::vec(op_strategy(), 0..256),
+        ) {
+            exercise_policy::<sieve::Sieve, _>(capacity, prefill, ops, |cache| {
                 cache.check_policy_invariants();
             })?;
         }
