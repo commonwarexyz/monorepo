@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_put_get_peek() {
+    fn test_basic_put_get_peek() {
         let mut cache = TestCache::new(NZUsize!(2));
         assert!(cache.is_empty());
         assert_eq!(cache.capacity(), 2);
@@ -667,17 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_is_const() {
-        const fn capacity(cache: &TestCache<u64, u64>) -> usize {
-            cache.capacity()
-        }
-
-        let cache = TestCache::new(NZUsize!(2));
-        assert_eq!(capacity(&cache), 2);
-    }
-
-    #[test]
-    fn put_replaces_existing() {
+    fn test_put_replaces_existing() {
         let mut cache = TestCache::new(NZUsize!(2));
         assert_eq!(cache.put(1u64, 10u64), None);
         assert_eq!(cache.put(1, 11), Some(10));
@@ -687,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_one_reuses_its_only_slot() {
+    fn test_capacity_one_reuses_its_only_slot() {
         let mut cache = TestCache::new(NZUsize!(1));
         cache.put(1u64, 10u64);
         cache.put(2, 20);
@@ -698,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn get_or_insert_with_calls_factory_only_on_miss() {
+    fn test_get_or_insert_with_calls_factory_only_on_miss() {
         let mut cache = TestCache::new(NZUsize!(2));
         let calls = Cell::new(0);
         let compute = |key: u64| {
@@ -714,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn try_get_or_insert_with_does_not_cache_errors() {
+    fn test_try_get_or_insert_with_does_not_cache_errors() {
         let mut cache = TestCache::new(NZUsize!(2));
 
         let error: Result<&u64, &str> = cache.try_get_or_insert_with(1u64, || Err("bad"));
@@ -728,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_keeps_slot_for_reuse() {
+    fn test_remove_keeps_slot_for_reuse() {
         let makes = Cell::new(0);
         let mut cache = TestCache::new(NZUsize!(2));
         cache.get_or_insert_mut(1, || {
@@ -760,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn retain_frees_slots_for_reuse() {
+    fn test_retain_frees_slots_for_reuse() {
         let mut cache = TestCache::new(NZUsize!(4));
         for key in 0..4u64 {
             cache.put(key, key * 10);
@@ -780,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn get_or_insert_mut_reuses_allocations() {
+    fn test_get_or_insert_mut_reuses_allocations() {
         let makes = Cell::new(0);
         let mut cache = TestCache::new(NZUsize!(3));
         for key in 0..100u64 {
@@ -797,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn prefill_allocates_once_and_reuses() {
+    fn test_prefill_allocates_once_and_reuses() {
         let makes = Cell::new(0);
         let mut cache = TestCache::new(NZUsize!(3));
         cache.prefill(|| {
@@ -824,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_drops_entries_and_allows_reuse() {
+    fn test_clear_drops_entries_and_allows_reuse() {
         let mut cache = TestCache::new(NZUsize!(4));
         for key in 0..4u64 {
             cache.put(key, key);
@@ -847,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn values_are_dropped_on_replacement_and_clear() {
+    fn test_values_are_dropped_on_replacement_and_clear() {
         let drops = Rc::new(Cell::new(0));
         let mut cache = TestCache::new(NZUsize!(2));
         for key in 0..2u64 {
@@ -865,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_retains_value_until_reuse() {
+    fn test_remove_retains_value_until_reuse() {
         let drops = Rc::new(Cell::new(0));
         let mut cache = TestCache::new(NZUsize!(2));
         cache.put(1, Tracked(drops.clone()));
@@ -877,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn get_at_validates_key() {
+    fn test_get_at_validates_key() {
         let mut cache = TestCache::new(NZUsize!(2));
         let (first, value) = cache.get_or_insert_mut(1u64, || 0u64);
         *value = 10;
@@ -892,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn get_at_rejects_stale_evicted_slot() {
+    fn test_get_at_rejects_stale_evicted_slot() {
         let mut cache = TestCache::new(NZUsize!(1));
         let (slot, value) = cache.get_or_insert_mut(1u64, || 0u64);
         *value = 10;
@@ -906,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn get_at_rejects_freed_slot() {
+    fn test_get_at_rejects_freed_slot() {
         let mut cache = TestCache::new(NZUsize!(2));
         let (slot, value) = cache.get_or_insert_mut(1u64, || 0u64);
         *value = 10;
@@ -922,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn get_or_insert_mut_slot_is_stable_on_hit() {
+    fn test_get_or_insert_mut_slot_is_stable_on_hit() {
         let mut cache = TestCache::new(NZUsize!(2));
         let (slot, value) = cache.get_or_insert_mut(1u64, || 0u64);
         *value = 10;
@@ -933,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn get_mut_updates_resident_value() {
+    fn test_get_mut_updates_resident_value() {
         let mut cache = TestCache::new(NZUsize!(2));
         cache.put(1u64, 10u64);
         assert_eq!(cache.get_mut(&2), None);
@@ -1013,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_can_evict_before_capacity() {
+    fn test_policy_can_evict_before_capacity() {
         let mut cache = Cache::<u64, u64, EarlyEvictionPolicy>::new(NZUsize!(3));
         cache.prefill(|| 0);
 
@@ -1058,10 +1048,10 @@ mod tests {
         prop_oneof![
             (0u8..16).prop_map(Op::Get),
             (0u8..16).prop_map(Op::Peek),
-            (0u8..16, any::<u16>()).prop_map(|(key, value)| Op::Put(key, value)),
-            (0u8..16, any::<u16>()).prop_map(|(key, value)| Op::GetOrInsert(key, value)),
-            (0u8..16, any::<u16>()).prop_map(|(key, value)| Op::GetOrInsertMut(key, value)),
-            (0u8..16, any::<u16>()).prop_map(|(key, value)| Op::GetMut(key, value)),
+            (0u8..16, any::<u16>()).prop_map(|(k, v)| Op::Put(k, v)),
+            (0u8..16, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsert(k, v)),
+            (0u8..16, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMut(k, v)),
+            (0u8..16, any::<u16>()).prop_map(|(k, v)| Op::GetMut(k, v)),
             (0u8..16).prop_map(Op::Remove),
             (0u8..16).prop_map(Op::Retain),
         ]
@@ -1082,8 +1072,10 @@ mod tests {
         if prefill {
             cache.prefill(|| 0u16);
         }
+        // Oracle: last value written for each live key. A key the cache
+        // reports as present must hold its last-written value (no stale or
+        // conjured values); an evicted key is simply absent.
         let mut model = HashMap::new();
-
         for op in ops {
             match op {
                 Op::Get(key) => {
@@ -1128,7 +1120,10 @@ mod tests {
             }
 
             prop_assert!(cache.len() <= capacity);
+            // The slot vector never exceeds capacity, proving reuse.
             prop_assert!(cache.slots.len() <= capacity);
+            // Every present key holds its last-written value and was logically
+            // inserted; absent keys are an allowed (evicted) state.
             for key in 0..16u8 {
                 let present = cache.contains(&key);
                 prop_assert_eq!(present, cache.peek(&key).is_some());

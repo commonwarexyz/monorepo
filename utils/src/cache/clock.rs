@@ -79,11 +79,13 @@ impl<K> Policy<K> for Clock {
                 let Claimed::Evicted(_) = claim(Some(victim)) else {
                     unreachable!("victim claim returned vacant capacity");
                 };
+
                 // Do not reconsider the new resident until the hand completes
                 // a revolution.
                 self.advance();
                 return (victim, AtomicBool::new(true));
             }
+
             // A set bit grants one second chance. Clear it and continue from
             // the following slot.
             referenced.store(false, Ordering::Relaxed);
