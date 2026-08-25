@@ -630,10 +630,13 @@ mod tests {
     type TestCache<K, V> = Cache<K, V, TestPolicy>;
 
     impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
+        /// Asserts the cache's structural invariants hold.
         pub(super) fn check_cache_invariants(&self) {
             assert!(self.slots.len() <= self.capacity());
             assert_eq!(self.index.len() + self.free.len(), self.slots.len());
 
+            // The index is a bijection onto the live slots, each slot's key
+            // round-trips, and live slots are disjoint from free slots.
             let free: HashSet<Slot> = self.free.iter().copied().collect();
             assert_eq!(free.len(), self.free.len(), "duplicate free slot");
             let mut seen = HashSet::new();
@@ -699,6 +702,7 @@ mod tests {
 
         assert_eq!(*cache.get_or_insert_with(1, || compute(1)), 100);
         assert_eq!(calls.get(), 1);
+        // A hit does not call the factory.
         assert_eq!(*cache.get_or_insert_with(1, || compute(1)), 100);
         assert_eq!(calls.get(), 1);
         cache.check_cache_invariants();
@@ -720,6 +724,8 @@ mod tests {
 
     #[test]
     fn test_remove_keeps_slot_for_reuse() {
+        // A removed entry frees its slot for reuse without growing the slot
+        // vector or calling the factory again.
         let makes = Cell::new(0);
         let mut cache = TestCache::new(NZUsize!(2));
         cache.get_or_insert_mut(1, || {
@@ -736,6 +742,8 @@ mod tests {
         assert!(cache.remove(&1));
         assert!(!cache.contains(&1));
         assert_eq!(cache.len(), 1);
+
+        // Reusing the freed slot does not call the factory or grow.
         *cache
             .get_or_insert_mut(3, || {
                 makes.set(makes.get() + 1);
@@ -743,7 +751,7 @@ mod tests {
             })
             .1 = 30;
 
-        assert_eq!(makes.get(), 2);
+        assert_eq!(makes.get(), 2, "freed slot should not call the factory");
         assert_eq!(cache.slots.len(), 2);
         assert_eq!(cache.get(&3).copied(), Some(30));
         assert!(!cache.remove(&999));
@@ -756,6 +764,7 @@ mod tests {
         for key in 0..4u64 {
             cache.put(key, key * 10);
         }
+        // Keep even keys.
         cache.retain(|key, _| key % 2 == 0);
         assert_eq!(cache.len(), 2);
         assert!(cache.contains(&0));
@@ -763,6 +772,7 @@ mod tests {
         assert!(!cache.contains(&1));
         assert!(!cache.contains(&3));
 
+        // Freed slots are reused for new inserts.
         cache.put(10, 100);
         cache.put(12, 120);
         assert_eq!(cache.slots.len(), 4);
@@ -772,6 +782,8 @@ mod tests {
 
     #[test]
     fn test_get_or_insert_mut_reuses_allocations() {
+        // The factory runs at most `capacity` times no matter how many distinct
+        // keys churn through the cache, proving evicted slots are reused.
         let makes = Cell::new(0);
         let mut cache = TestCache::new(NZUsize!(3));
         for key in 0..100u64 {
@@ -779,9 +791,9 @@ mod tests {
                 makes.set(makes.get() + 1);
                 0
             });
-            *value = key;
+            *value = key; // Overwrite the possibly stale reused value.
         }
-        assert_eq!(makes.get(), 3);
+        assert_eq!(makes.get(), 3, "factory should run only during growth");
         assert_eq!(cache.slots.len(), 3);
         assert_eq!(cache.len(), 3);
         cache.check_cache_invariants();
@@ -789,6 +801,8 @@ mod tests {
 
     #[test]
     fn test_prefill_allocates_once_and_reuses() {
+        // Prefill runs the factory exactly `capacity` times. Subsequent inserts
+        // reuse pre-allocated slots without growing or calling the factory.
         let makes = Cell::new(0);
         let mut cache = TestCache::new(NZUsize!(3));
         cache.prefill(|| {
@@ -800,6 +814,7 @@ mod tests {
         assert!(cache.is_empty());
         cache.check_cache_invariants();
 
+        // Churn many keys without further factory calls or slot growth.
         for key in 0..100u64 {
             *cache
                 .get_or_insert_mut(key, || {
@@ -808,7 +823,7 @@ mod tests {
                 })
                 .1 = key;
         }
-        assert_eq!(makes.get(), 3);
+        assert_eq!(makes.get(), 3, "prefilled slots must be reused");
         assert_eq!(cache.slots.len(), 3);
         assert_eq!(cache.len(), 3);
         cache.check_cache_invariants();
@@ -845,24 +860,31 @@ mod tests {
             cache.put(key, Tracked(drops.clone()));
         }
         assert_eq!(drops.get(), 0);
+
+        // Inserting a third entry evicts one and drops its value.
         cache.put(2, Tracked(drops.clone()));
         assert_eq!(drops.get(), 1);
 
+        // Replacing an existing key drops the old value.
         cache.put(2, Tracked(drops.clone()));
         assert_eq!(drops.get(), 2);
 
+        // Clearing drops the remaining two values.
         cache.clear();
         assert_eq!(drops.get(), 4);
     }
 
     #[test]
     fn test_remove_retains_value_until_reuse() {
+        // remove does not drop the value. The freed slot keeps it until a
+        // value-inserting method reuses the slot.
         let drops = Rc::new(Cell::new(0));
         let mut cache = TestCache::new(NZUsize!(2));
         cache.put(1, Tracked(drops.clone()));
         assert!(cache.remove(&1));
-        assert_eq!(drops.get(), 0);
+        assert_eq!(drops.get(), 0, "remove must not drop the value");
 
+        // Reusing the freed slot through a value insert drops the retained value.
         cache.put(2, Tracked(drops.clone()));
         assert_eq!(drops.get(), 1);
     }
@@ -875,8 +897,11 @@ mod tests {
         let (second, value) = cache.get_or_insert_mut(2u64, || 0u64);
         *value = 20;
 
+        // A recorded slot resolves with a key comparison and no hash lookup.
         assert_eq!(cache.get_at(first, &1).copied(), Some(10));
         assert_eq!(cache.get_at(second, &2).copied(), Some(20));
+
+        // The wrong key for a slot and an out-of-range slot are both misses.
         assert_eq!(cache.get_at(first, &2), None);
         assert_eq!(cache.get_at(cache.capacity(), &1), None);
         cache.check_cache_invariants();
@@ -884,6 +909,8 @@ mod tests {
 
     #[test]
     fn test_get_at_rejects_stale_evicted_slot() {
+        // Evicting key 1 reuses its slot for key 3. The stale hint fails the key
+        // comparison while the new key resolves at the same slot.
         let mut cache = TestCache::new(NZUsize!(1));
         let (slot, value) = cache.get_or_insert_mut(1u64, || 0u64);
         *value = 10;
@@ -898,12 +925,15 @@ mod tests {
 
     #[test]
     fn test_get_at_rejects_freed_slot() {
+        // remove keeps the slot's stale key for allocation reuse, but get_at
+        // must reject a freed slot without requiring external index cleanup.
         let mut cache = TestCache::new(NZUsize!(2));
         let (slot, value) = cache.get_or_insert_mut(1u64, || 0u64);
         *value = 10;
         assert!(cache.remove(&1));
         assert_eq!(cache.get_at(slot, &1), None);
 
+        // Reusing the slot for another key resolves the new key only.
         let (reused, value) = cache.get_or_insert_mut(2u64, || 0u64);
         *value = 20;
         assert_eq!(reused, slot);
