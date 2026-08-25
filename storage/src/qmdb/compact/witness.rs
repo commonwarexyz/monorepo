@@ -173,9 +173,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         }
     }
 
-    /// Read the cached witness.
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&VerifiedWitness<F, D>) -> R) -> R {
-        f(&self.tip_witness)
+    /// The cached tip witness.
+    pub(crate) const fn tip(&self) -> &VerifiedWitness<F, D> {
+        &self.tip_witness
     }
 
     /// Serve `request` from the single committed state this witness retains.
@@ -183,7 +183,6 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// The witness holds exactly the final commit operation and the pinned nodes one operation
     /// below it. Anything else is refused with the same errors a pruned operation log
     /// reports.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.sync.serve",
         level = "info",
@@ -199,41 +198,33 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         cfg: &Op::Cfg,
         request: Request<F>,
     ) -> Result<Response<F, Op, D>, Error<F>> {
-        let (entry, proof) = self.with(|w| -> Result<(Witness<F, D>, Proof<F, D>), Error<F>> {
-            let current = w.size();
-            let last_commit_loc = current - 1;
-            if request.size() > current || request.size() == 0 {
-                return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
-            }
-            if request.size() < current {
-                return Err(crate::journal::Error::ItemPruned(*request.size() - 1).into());
-            }
-            if request.start() >= request.size() {
-                return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
-            }
-            if request.start() < last_commit_loc {
-                return Err(crate::journal::Error::ItemPruned(*request.start()).into());
-            }
-            Ok((w.witness.clone(), w.proof.clone()))
-        })?;
-        let Witness {
-            op_bytes,
-            pinned_nodes,
-            ..
-        } = entry;
-        let op = Op::decode_cfg(op_bytes.as_ref(), cfg)
+        let size = self.tip_witness.size();
+        let last_commit_loc = size - 1;
+        if request.size() > size || request.size() == 0 {
+            return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
+        }
+        if request.size() < size {
+            return Err(crate::journal::Error::ItemPruned(*request.size() - 1).into());
+        }
+        if request.start() >= request.size() {
+            return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
+        }
+        if request.start() < last_commit_loc {
+            return Err(crate::journal::Error::ItemPruned(*request.start()).into());
+        }
+        let op = Op::decode_cfg(self.tip_witness.witness.op_bytes.as_ref(), cfg)
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
         // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
         // pinned nodes for this request.
         Ok(match request {
             Request::Operations { .. } => Response::Operations {
-                proof,
+                proof: self.tip_witness.proof.clone(),
                 operations: vec![op],
             },
             Request::Boundary { .. } => Response::Boundary {
-                proof,
+                proof: self.tip_witness.proof.clone(),
                 op,
-                pinned_nodes,
+                pinned_nodes: self.tip_witness.witness.pinned_nodes.clone(),
             },
         })
     }
@@ -429,12 +420,12 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         // start_sync may still be proving that tip durable, which pending_sync tracks separately.
         // During a pending import the cached witness is not in the journal yet, so it is exactly
         // what must be persisted. Replace the journal's contents with it.
-        let cached_size = self.with(|w| w.size());
+        let cached_size = self.tip().size();
         let verified = if cached_size == merkle.leaves() {
             if !self.import_pending {
                 return Ok((self, None));
             }
-            self.with(|w| w.clone())
+            self.tip().clone()
         } else if cached_size > merkle.leaves() {
             return Err(Error::DataCorrupted("witness ahead of in-memory state"));
         } else {
