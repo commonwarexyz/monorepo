@@ -317,10 +317,9 @@ where
     marshal
         .subscribe_parent(child)
         .map(move |parent| {
-            parent.filter(|parent| {
-                timer.observe(clock.as_ref());
-                expected.matches(parent.as_ref())
-            })
+            let parent = parent?;
+            timer.observe(clock.as_ref());
+            expected.matches(parent.as_ref()).then_some(parent)
         })
         .boxed()
 }

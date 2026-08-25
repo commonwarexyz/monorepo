@@ -1467,18 +1467,20 @@ where
                         _ => None,
                     })
                     .max();
-                let finalized_height_matches = annotations.iter().all(|annotation| match annotation {
-                    Annotation::Finalized(handler::Finalized::ByHeight { height: expected }) => {
-                        height == *expected
-                    }
-                    _ => true,
-                });
+                let height_matches_finalized_requests =
+                    annotations.iter().all(|annotation| match annotation {
+                        Annotation::Finalized(handler::Finalized::ByHeight {
+                            height: expected,
+                        }) => height == *expected,
+                        _ => true,
+                    });
 
-                // Round-bound proposal-parent fetches are `Key::Notarized`
-                // deliveries and are handled below. In this block-keyed path,
-                // `Finalized` means the block belongs in the finalized chain.
+                // Round-bound proposal-parent fetches use `Key::Notarized` and are handled below.
+                // `Finalized` annotations request finalized storage for block-keyed deliveries.
+                // A height-bound request names one archive slot. A response with a different
+                // decoded height is not archived, even if its finalization is cached.
                 let finalization = self.cache.get_finalization_for(digest).await;
-                let should_store_finalization = finalized_height_matches
+                let should_store_finalization = height_matches_finalized_requests
                     && (finalization.is_some()
                         || annotations
                             .iter()

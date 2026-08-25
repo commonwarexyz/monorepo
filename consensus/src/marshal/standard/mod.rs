@@ -338,8 +338,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_standard_commitment_fetch_height_above_hint_not_cached() {
-        harness::commitment_fetch_height_above_hint_not_cached::<InlineHarness>();
-        harness::commitment_fetch_height_above_hint_not_cached::<DeferredHarness>();
+        harness::commitment_fetch_height_above_hint_not_cached::<StandardHarness>();
     }
 
     #[test_traced("WARN")]
