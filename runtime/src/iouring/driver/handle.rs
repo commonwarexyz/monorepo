@@ -1667,6 +1667,17 @@ mod tests {
         noop_drop,
     );
 
+    unsafe fn count_clone(data: *const ()) -> RawWaker {
+        // SAFETY: the test keeps the referenced atomic alive until every
+        // waker using this static vtable has been dropped.
+        let clones = unsafe { &*data.cast::<AtomicUsize>() };
+        clones.fetch_add(1, Ordering::AcqRel);
+        RawWaker::new(data, &COUNT_CLONE_VTABLE)
+    }
+
+    static COUNT_CLONE_VTABLE: RawWakerVTable =
+        RawWakerVTable::new(count_clone, noop_wake, noop_wake_by_ref, noop_drop);
+
     /// Clone-panic recovery removes one generation and continues FIFO grants.
     #[test]
     fn test_capacity_reconcile_clone_panic_removes_head_and_grants_next() {
@@ -1856,6 +1867,39 @@ mod tests {
     }
 
     #[test]
+    fn test_capacity_queued_repoll_with_same_waker_avoids_replacement() {
+        let mut capacity = CapacityWaiters::new();
+        let clone_count = AtomicUsize::new(0);
+        // SAFETY: clone_count outlives the waker and the capacity arena. The
+        // vtable treats its pointer as an AtomicUsize and never owns it.
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(
+                std::ptr::from_ref(&clone_count).cast(),
+                &COUNT_CLONE_VTABLE,
+            ))
+        };
+        let mut registration = None;
+        assert_eq!(
+            poll_capacity(&mut capacity, &mut registration, 0, &waker),
+            CapacityAdmissionKind::Queued
+        );
+        let clones = clone_count.load(Ordering::Acquire);
+
+        assert_eq!(
+            poll_capacity(&mut capacity, &mut registration, 0, &waker),
+            CapacityAdmissionKind::Queued
+        );
+        assert_eq!(clone_count.load(Ordering::Acquire), clones);
+        assert_eq!(capacity.queued(), 1);
+
+        cancel_capacity(
+            &mut capacity,
+            registration.expect("capacity registration missing"),
+            0,
+        );
+    }
+
+    #[test]
     fn test_capacity_close_invalidates_mixed_queued_and_granted_nodes() {
         let mut capacity = CapacityWaiters::new();
         let counts: Vec<_> = (0..3)
@@ -2018,6 +2062,74 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_recv_rejects_offset_past_end_before_admission() {
+        let handle = Handle::new(1, RingWaker::new().unwrap());
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            1,
+            0,
+            false,
+            Instant::now(),
+        ));
+        let noop = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&noop);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = recv.as_mut().poll(&mut cx);
+        }));
+        assert!(result.is_err());
+        handle.with(|ops| {
+            assert!(ops.waiters.is_empty());
+            assert!(ops.backlog.is_empty());
+            assert_eq!(ops.capacity.registered(), 0);
+        });
+    }
+
+    #[test]
+    fn test_queued_ticket_admission_fails_after_close() {
+        let handle = Handle::new(1, RingWaker::new().unwrap());
+        let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(handle.recv(
+            Arc::new(blocker_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now(),
+        ));
+        let (left, _right) = UnixStream::pair().unwrap();
+        let file = Arc::new(File::from(OwnedFd::from(left)));
+        let mut admission = Box::pin(handle.start_sync(file));
+        let noop = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&noop);
+        assert!(blocker.as_mut().poll(&mut cx).is_pending());
+        assert!(admission.as_mut().poll(&mut cx).is_pending());
+        handle.with(|ops| {
+            assert_eq!(ops.waiters.len(), 1);
+            assert_eq!(ops.backlog.len(), 1);
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 1);
+        });
+
+        for waker in handle.close() {
+            waker.wake();
+        }
+        let Poll::Ready(mut ticket) = admission.as_mut().poll(&mut cx) else {
+            panic!("closed ticket admission remained pending");
+        };
+        assert!(matches!(
+            Pin::new(&mut ticket).poll(&mut cx),
+            Poll::Ready(Err(Error::Closed))
+        ));
+        handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 0);
+            assert_eq!(ops.capacity.reserved(), 0);
+        });
+    }
+
     unsafe fn clone_panicking_drop(_: *const ()) -> RawWaker {
         RawWaker::new(std::ptr::null(), &PANICKING_DROP_VTABLE)
     }
@@ -2087,6 +2199,32 @@ mod tests {
         }
     }
 
+    unsafe fn clone_payload_panicking_drop(_: *const ()) -> RawWaker {
+        RawWaker::new(std::ptr::null(), &PAYLOAD_PANICKING_DROP_VTABLE)
+    }
+
+    unsafe fn panic_payload_on_drop(_: *const ()) {
+        std::panic::panic_any(PanicPayload);
+    }
+
+    static PAYLOAD_PANICKING_DROP_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        clone_payload_panicking_drop,
+        noop_wake,
+        noop_wake_by_ref,
+        panic_payload_on_drop,
+    );
+
+    fn payload_panicking_drop_waker() -> Waker {
+        // SAFETY: the vtable never dereferences the null data pointer. Drop
+        // panics deliberately, while clone and wake preserve RawWaker rules.
+        unsafe {
+            Waker::from_raw(RawWaker::new(
+                std::ptr::null(),
+                &PAYLOAD_PANICKING_DROP_VTABLE,
+            ))
+        }
+    }
+
     struct PayloadPanicWaker;
 
     impl ArcWake for PayloadPanicWaker {
@@ -2106,9 +2244,25 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             wake_batch(actions);
         }));
-        assert!(result.is_err());
+        let payload = result.expect_err("wake batch should resume first panic");
+        std::mem::forget(payload);
         assert!(flag.0.load(Ordering::Acquire));
-        std::mem::forget(result.expect_err("wake batch should resume first panic"));
+    }
+
+    #[test]
+    fn test_wake_batch_forgets_secondary_drop_panic_and_runs_remaining_actions() {
+        let flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+        let actions = [
+            WakerAction::Drop(payload_panicking_drop_waker()),
+            WakerAction::Drop(payload_panicking_drop_waker()),
+            WakerAction::Wake(arc_waker(Arc::clone(&flag))),
+        ];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wake_batch(actions);
+        }));
+        let payload = result.expect_err("wake batch should resume first panic");
+        std::mem::forget(payload);
+        assert!(flag.0.load(Ordering::Acquire));
     }
 
     /// State panics outrank callback panics after every callback has run.

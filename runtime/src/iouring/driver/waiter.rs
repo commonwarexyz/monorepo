@@ -1152,11 +1152,14 @@ mod tests {
     use super::*;
     use crate::{
         IoBuf, IoBufMut, IoBufs,
-        iouring::driver::request::{Cache, ReadAtRequest, RecvRequest, SendRequest, SyncRequest},
+        iouring::driver::request::{
+            Cache, ReadAtRequest, RecvRequest, SendRequest, SyncRequest, WriteAtRequest,
+            WriteAtState,
+        },
     };
     use futures::task::noop_waker;
     use std::{
-        os::fd::{FromRawFd, IntoRawFd},
+        os::fd::OwnedFd,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::Arc,
     };
@@ -1166,8 +1169,7 @@ mod tests {
     fn make_sync_request() -> Request {
         let (sock_left, _sock_right) =
             std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
-        // SAFETY: sock_left is a valid fd that we own.
-        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let file = std::fs::File::from(OwnedFd::from(sock_left));
         Request::Sync(SyncRequest {
             file: Arc::new(file),
         })
@@ -1195,14 +1197,27 @@ mod tests {
     fn make_read_at_request() -> Request {
         let (sock_left, _sock_right) =
             std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
-        // SAFETY: sock_left is a valid fd that we own.
-        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let file = std::fs::File::from(OwnedFd::from(sock_left));
         Request::ReadAt(ReadAtRequest {
             file: Arc::new(file),
             offset: 0,
             len: 8,
             read: 0,
             buf: IoBufMut::with_capacity(8),
+            cache: Cache::Enabled,
+        })
+    }
+
+    fn make_write_at_request() -> Request {
+        let (sock_left, _sock_right) =
+            std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
+        let file = std::fs::File::from(OwnedFd::from(sock_left));
+        Request::WriteAt(WriteAtRequest {
+            file: Arc::new(file),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
         })
     }
@@ -1284,6 +1299,40 @@ mod tests {
             CompletionDropOutcome::Pending { waiter_id, .. } if waiter_id == second_waiter
         ));
         let _ = remove_waiter(&mut waiters, second_waiter);
+    }
+
+    #[test]
+    fn test_publish_ready_rejects_duplicate_without_replacing_output() {
+        let mut waiters = Waiters::new(1);
+        let mut completions = TicketCompletions::new();
+        let (completion_id, waiter_id) =
+            insert_ticket(&mut completions, &mut waiters, make_sync_request());
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        let CompletionOutcome::Ticket {
+            waiter_id: completed_waiter,
+            completion_id: completed_completion,
+            output,
+            target_tick: None,
+        } = waiters.on_completion(waiter_id.user_data(), 0)
+        else {
+            panic!("sync ticket did not produce detached output");
+        };
+        let _ = completions.publish_ready(completed_completion, completed_waiter, output);
+        waiters.finish_ticket(completed_waiter, completed_completion);
+
+        let duplicate = catch_unwind(AssertUnwindSafe(|| {
+            let _ = completions.publish_ready(
+                completion_id,
+                waiter_id,
+                Output::Sync(Err(Box::new(Error::Closed))),
+            );
+        }));
+        assert!(duplicate.is_err());
+        assert_eq!(completions.ready(), 1);
+        assert!(matches!(
+            completions.poll_take(completion_id, &noop_waker()),
+            Some(Output::Sync(Ok(())))
+        ));
     }
 
     #[test]
@@ -1577,12 +1626,52 @@ mod tests {
         let stale_id = insert(&mut waiters, make_sync_request(), Some(1));
         let _ = remove_waiter(&mut waiters, stale_id);
 
-        let active_id = insert(&mut waiters, make_sync_request(), Some(2));
+        let deadline = std::time::Instant::now();
+        let active_id = insert(
+            &mut waiters,
+            Request::Send(SendRequest {
+                fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                deadline: Some(deadline),
+            }),
+            None,
+        );
         assert_ne!(active_id, stale_id);
 
         assert!(!waiters.is_in_flight(stale_id));
+        assert!(waiters.deadline_to_schedule(stale_id).is_none());
+        assert_eq!(waiters.deadline_to_schedule(active_id), Some(deadline));
         assert!(matches!(waiters.stage(active_id), StageOutcome::Submit(_)));
         assert!(waiters.is_in_flight(active_id));
+    }
+
+    #[test]
+    fn test_waiters_completed_results_cannot_be_scheduled_or_staged() {
+        let mut waiters = Waiters::new(1);
+        let deadline = std::time::Instant::now();
+        let waiter_id = waiters.insert(
+            Request::Send(SendRequest {
+                fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                deadline: Some(deadline),
+            }),
+            noop_waker(),
+        );
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert!(matches!(
+            waiters.on_completion(waiter_id.user_data(), 5),
+            CompletionOutcome::Complete { freed: false, .. }
+        ));
+
+        assert!(waiters.deadline_to_schedule(waiter_id).is_none());
+        let restage = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.stage(waiter_id);
+        }));
+        assert!(restage.is_err());
+        assert!(matches!(
+            waiters.poll_take(waiter_id, &noop_waker()),
+            Some(Output::Send(Ok(())))
+        ));
     }
 
     #[test]
@@ -1725,6 +1814,35 @@ mod tests {
         // The terminal CQE frees the slot without parking a result.
         assert!(matches!(
             waiters.on_completion(waiter_id.user_data(), 0),
+            CompletionOutcome::Complete {
+                waker: None,
+                freed: true,
+                ..
+            }
+        ));
+        assert!(waiters.is_empty());
+    }
+
+    #[test]
+    fn test_waiters_requeue_partial_detached_write() {
+        let mut waiters = Waiters::new(1);
+        let waiter_id = insert(&mut waiters, make_write_at_request(), None);
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert!(matches!(
+            waiters.mark_orphaned(waiter_id),
+            DropOutcome::Detached
+        ));
+
+        assert!(matches!(
+            waiters.on_completion(waiter_id.user_data(), 2),
+            CompletionOutcome::Requeue(id) if id == waiter_id
+        ));
+        assert!(!waiters.is_in_flight(waiter_id));
+        assert_eq!(waiters.pending(), 1);
+
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert!(matches!(
+            waiters.on_completion(waiter_id.user_data(), 3),
             CompletionOutcome::Complete {
                 waker: None,
                 freed: true,
