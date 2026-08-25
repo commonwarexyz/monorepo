@@ -270,6 +270,45 @@ commonware_macros::stability_scope!(ALPHA {
         message_groups: Vec<Term<'a, V>>,
     }
 
+    /// Message points prepared once for an entire verification batch.
+    struct PreparedMessages<'a, V: Variant> {
+        points: HashMap<(&'a [u8], &'a [u8]), V::Signature>,
+    }
+
+    impl<'a, V: Variant> PreparedMessages<'a, V> {
+        fn new(pending: &[CanonicalClaim<'a, V>], strategy: &impl Strategy) -> Self {
+            let term_count = pending.iter().map(|claim| claim.terms.len()).sum();
+            let mut distinct = HashSet::with_capacity(term_count);
+            for claim in pending {
+                for &(_, namespace, message) in &claim.terms {
+                    distinct.insert((namespace, message));
+                }
+            }
+            let points = strategy
+                .map_collect_vec(distinct, |(namespace, message)| {
+                    (
+                        (namespace, message),
+                        hash_with_namespace::<V>(V::MESSAGE, namespace, message),
+                    )
+                })
+                .into_iter()
+                .collect();
+            Self { points }
+        }
+
+        fn get(&self, namespace: &[u8], message: &[u8]) -> V::Signature {
+            *self
+                .points
+                .get(&(namespace, message))
+                .expect("all canonical messages prepared")
+        }
+
+        #[cfg(test)]
+        fn len(&self) -> usize {
+            self.points.len()
+        }
+    }
+
     impl<'a, V: Variant> Verifier<'a, V> {
         /// Creates a verifier with space for `capacity` claims.
         pub fn new(capacity: usize) -> Self {
@@ -315,7 +354,16 @@ commonware_macros::stability_scope!(ALPHA {
                     message_groups,
                 });
             }
-            verify_claims_bisect::<R, V>(rng, &pending, &mut invalid, strategy);
+
+            let prepared_messages = PreparedMessages::new(&pending, strategy);
+
+            verify_claims_bisect::<R, V>(
+                rng,
+                &pending,
+                &prepared_messages,
+                &mut invalid,
+                strategy,
+            );
             invalid.sort_unstable();
             invalid
         }
@@ -356,13 +404,16 @@ commonware_macros::stability_scope!(ALPHA {
     fn verify_claims_bisect<R, V>(
         rng: &mut R,
         pending: &[CanonicalClaim<'_, V>],
+        prepared_messages: &PreparedMessages<'_, V>,
         invalid: &mut Vec<usize>,
         strategy: &impl Strategy,
     ) where
         R: CryptoRng,
         V: Variant,
     {
-        if pending.is_empty() || claims_product_holds::<R, V>(rng, pending, strategy) {
+        if pending.is_empty()
+            || claims_product_holds::<R, V>(rng, pending, prepared_messages, strategy)
+        {
             return;
         }
         if pending.len() == 1 {
@@ -370,13 +421,14 @@ commonware_macros::stability_scope!(ALPHA {
             return;
         }
         let (left, right) = pending.split_at(pending.len() / 2);
-        verify_claims_bisect::<R, V>(rng, left, invalid, strategy);
-        verify_claims_bisect::<R, V>(rng, right, invalid, strategy);
+        verify_claims_bisect::<R, V>(rng, left, prepared_messages, invalid, strategy);
+        verify_claims_bisect::<R, V>(rng, right, prepared_messages, invalid, strategy);
     }
 
     fn claims_product_holds<R, V>(
         rng: &mut R,
         pending: &[CanonicalClaim<'_, V>],
+        prepared_messages: &PreparedMessages<'_, V>,
         strategy: &impl Strategy,
     ) -> bool
     where
@@ -402,9 +454,9 @@ commonware_macros::stability_scope!(ALPHA {
         }
 
         let (publics, messages) = if distinct_publics.len() < distinct_messages.len() {
-            group_messages_by_public::<V>(pending, &scalars, strategy)
+            group_messages_by_public::<V>(pending, &scalars, prepared_messages, strategy)
         } else {
-            group_publics_by_message::<V>(pending, &scalars, strategy)
+            group_publics_by_message::<V>(pending, &scalars, prepared_messages, strategy)
         };
         V::verify_pairing_product(&publics, &messages, &combined, strategy).is_ok()
     }
@@ -412,6 +464,7 @@ commonware_macros::stability_scope!(ALPHA {
     fn group_publics_by_message<V: Variant>(
         pending: &[CanonicalClaim<'_, V>],
         scalars: &[SmallScalar],
+        prepared_messages: &PreparedMessages<'_, V>,
         strategy: &impl Strategy,
     ) -> (Vec<V::Public>, Vec<V::Signature>) {
         let scaled: Vec<Term<'_, V>> = strategy.map_collect_vec(
@@ -426,10 +479,7 @@ commonware_macros::stability_scope!(ALPHA {
         let terms = strategy.map_collect_vec(
             group_by_message::<V>(scaled),
             |(public, namespace, message)| {
-                (
-                    public,
-                    hash_with_namespace::<V>(V::MESSAGE, namespace, message),
-                )
+                (public, prepared_messages.get(namespace, message))
             },
         );
         terms.into_iter().unzip()
@@ -438,6 +488,7 @@ commonware_macros::stability_scope!(ALPHA {
     fn group_messages_by_public<V: Variant>(
         pending: &[CanonicalClaim<'_, V>],
         scalars: &[SmallScalar],
+        prepared_messages: &PreparedMessages<'_, V>,
         strategy: &impl Strategy,
     ) -> (Vec<V::Public>, Vec<V::Signature>) {
         let scaled = strategy.map_collect_vec(
@@ -448,10 +499,7 @@ commonware_macros::stability_scope!(ALPHA {
                     .map(move |&(public, namespace, message)| (public, namespace, message, scalar))
             }),
             |(public, namespace, message, scalar)| {
-                (
-                    public,
-                    hash_with_namespace::<V>(V::MESSAGE, namespace, message) * scalar,
-                )
+                (public, prepared_messages.get(namespace, message) * scalar)
             },
         );
 
@@ -727,6 +775,51 @@ mod tests {
     fn test_verify_claims_isolates_invalid() {
         verify_claims_isolates_invalid::<MinPk>();
         verify_claims_isolates_invalid::<MinSig>();
+    }
+
+    fn verify_claims_prepares_distinct_messages_once<V: Variant>() {
+        let mut rng = test_rng();
+        let namespaces: [&[u8]; 2] = [b"namespace 0", b"namespace 1"];
+        let messages: [&[u8]; 4] = [b"message 0", b"message 1", b"message 2", b"message 3"];
+        let distinct = namespaces.len() * messages.len();
+        let claim_count = 2 * distinct;
+        let mut claims = Vec::with_capacity(claim_count);
+        for index in 0..claim_count {
+            let pair = index % distinct;
+            let namespace = namespaces[pair / messages.len()];
+            let message = messages[pair % messages.len()];
+            let (private, public) = keypair::<_, V>(&mut rng);
+            let mut signature = sign_message::<V>(&private, namespace, message);
+            signature += &V::Signature::generator();
+            claims.push(Claim::<V> {
+                signature,
+                terms: vec![(public, namespace, message)],
+            });
+        }
+
+        let pending = claims
+            .into_iter()
+            .enumerate()
+            .map(|(index, claim)| CanonicalClaim {
+                index,
+                signature: claim.signature,
+                message_groups: canonicalize::<V>(claim.terms.clone()).unwrap(),
+                terms: claim.terms,
+            })
+            .collect::<Vec<_>>();
+        let prepared = PreparedMessages::new(&pending, &Sequential);
+        assert_eq!(prepared.len(), distinct);
+
+        let mut invalid = Vec::new();
+        verify_claims_bisect::<_, V>(&mut rng, &pending, &prepared, &mut invalid, &Sequential);
+        invalid.sort_unstable();
+        assert_eq!(invalid, (0..claim_count).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_verify_claims_prepares_distinct_messages_once() {
+        verify_claims_prepares_distinct_messages_once::<MinPk>();
+        verify_claims_prepares_distinct_messages_once::<MinSig>();
     }
 
     fn verify_claims_rejects_cross_cancellation<V: Variant>() {
