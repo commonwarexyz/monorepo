@@ -18,7 +18,7 @@
 // In scope for the intra-doc links in this module's documentation.
 #[allow(unused_imports)]
 use super::Executor;
-use crate::iouring::driver::{Affine, waker::Waker as RingWaker};
+use crate::iouring::driver::{Affine, current_thread_id, waker::Waker as RingWaker};
 #[allow(unused_imports)]
 use crate::{Error, Handle};
 use commonware_utils::sync::Mutex;
@@ -36,7 +36,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::{self, Poll},
-    thread::{self, ThreadId},
+    thread::ThreadId,
 };
 
 /// Type-erased boundary for a task in the arena.
@@ -250,7 +250,7 @@ pub(super) struct EventDelivery<'a> {
 
 impl Drop for EventDelivery<'_> {
     fn drop(&mut self) {
-        debug_assert_eq!(thread::current().id(), self.tasks.owner);
+        debug_assert_eq!(current_thread_id(), self.tasks.owner);
         self.tasks.delivering_events.store(false, Ordering::Relaxed);
     }
 }
@@ -291,7 +291,7 @@ impl Tasks {
                 free: Vec::new(),
                 closed: false,
             }),
-            owner: thread::current().id(),
+            owner: current_thread_id(),
             delivering_events: AtomicBool::new(false),
             unpark,
         }
@@ -302,7 +302,7 @@ impl Tasks {
     /// Driver completion callbacks and due-sleeper delivery hold this guard
     /// while invoking task wakers. Event phases must not nest.
     pub(super) fn event_delivery(&self) -> EventDelivery<'_> {
-        debug_assert_eq!(thread::current().id(), self.owner);
+        debug_assert_eq!(current_thread_id(), self.owner);
         debug_assert!(
             !self.delivering_events.load(Ordering::Relaxed),
             "event-delivery phases must not nest"
@@ -371,7 +371,7 @@ impl Tasks {
     /// normal even if they race such a phase, and task self-wakes remain
     /// normal because task polling is outside it.
     fn queue_wake(&self, task: Arc<dyn Erased>) {
-        let foreign = thread::current().id() != self.owner;
+        let foreign = current_thread_id() != self.owner;
         let lane = if !foreign && self.delivering_events.load(Ordering::Relaxed) {
             ReadyLane::Event
         } else {
@@ -403,7 +403,7 @@ impl Tasks {
     /// state would only force one spurious empty iteration (and possibly an
     /// extra `io_uring_enter`) per wake.
     pub(super) fn unpark_foreign(&self) {
-        if thread::current().id() != self.owner {
+        if current_thread_id() != self.owner {
             self.unpark.wake();
         }
     }

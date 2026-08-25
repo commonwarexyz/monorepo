@@ -4,7 +4,7 @@
 //! See [crate::iouring] for the full request flow and liveness discussion.
 
 mod handle;
-pub(crate) use handle::{AcceptTicket, Affine, Handle, Ops};
+pub(crate) use handle::{AcceptTicket, Affine, Handle, Ops, current_thread_id};
 mod request;
 pub(crate) use request::{Cache, RawSocketAddr};
 mod timeout;

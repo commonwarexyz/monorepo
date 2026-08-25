@@ -84,6 +84,17 @@ use std::{
     time::Instant,
 };
 
+thread_local! {
+    /// Cached identity for thread-affinity checks.
+    static CURRENT_THREAD_ID: ThreadId = thread::current().id();
+}
+
+/// Return the current thread identity without cloning its [`std::thread::Thread`].
+#[inline]
+pub(crate) fn current_thread_id() -> ThreadId {
+    CURRENT_THREAD_ID.with(|id| *id)
+}
+
 /// Cell whose contents are only accessible from the thread that created it.
 ///
 /// The affinity assert makes the cell shareable (`Sync`) without any lock:
@@ -102,7 +113,7 @@ unsafe impl<T: Send> Sync for Affine<T> {}
 impl<T> Affine<T> {
     /// Wrap `cell`, pinning access to the calling thread.
     pub(crate) fn new(cell: T) -> Self {
-        Self::pinned(thread::current().id(), cell)
+        Self::pinned(current_thread_id(), cell)
     }
 
     /// Wrap `cell`, pinning access to `owner`.
@@ -120,7 +131,7 @@ impl<T> Affine<T> {
     /// Panics when called from any other thread.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         assert!(
-            thread::current().id() == self.owner,
+            current_thread_id() == self.owner,
             "io_uring runtime operations must run on the runtime thread"
         );
         f(&self.cell)
@@ -130,7 +141,7 @@ impl<T> Affine<T> {
     ///
     /// Returns `None` off-thread. Used on drop paths, which must not panic.
     fn try_with<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
-        (thread::current().id() == self.owner).then(|| f(&self.cell))
+        (current_thread_id() == self.owner).then(|| f(&self.cell))
     }
 }
 
