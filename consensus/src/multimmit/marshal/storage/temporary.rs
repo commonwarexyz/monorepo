@@ -9,6 +9,17 @@ use commonware_storage::{
 };
 use commonware_utils::Array;
 
+/// One exact translated-key read captured from temporary storage.
+pub(in crate::multimmit::marshal) struct ReadPlan<E: Context, K: Array, V: CodecShared>(
+    prunable::KeyReadPlan<E::Blob, K, V>,
+);
+
+impl<E: Context, K: Array, V: CodecShared> ReadPlan<E, K, V> {
+    pub(in crate::multimmit::marshal) async fn execute(self) -> Result<Option<V>, archive::Error> {
+        self.0.execute().await
+    }
+}
+
 /// A consuming-handle adapter for candidates that may share an index.
 ///
 /// Mutations return the archive only on success. An error or canceled mutation future therefore
@@ -43,6 +54,14 @@ where
         key: &K,
     ) -> Result<Option<V>, archive::Error> {
         self.0.get(Identifier::Key(key)).await
+    }
+
+    /// Captures the candidates for an exact key without performing I/O.
+    pub(in crate::multimmit::marshal) fn read_plan(
+        &self,
+        key: &K,
+    ) -> Result<Option<ReadPlan<E, K, V>>, archive::Error> {
+        self.0.key_read_plan(key).map(|plan| plan.map(ReadPlan))
     }
 
     /// Gets every candidate stored at `index`.

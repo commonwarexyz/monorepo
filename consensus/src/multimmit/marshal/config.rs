@@ -500,6 +500,7 @@ where
         H: Hasher<Digest = B::Digest>,
     {
         self.validate().map_err(|error| error.to_string())?;
+        let metadata_step_capacity = self.effective_backfill_concurrency();
         // Resolver deliveries and synchronizer lookup pages can wait simultaneously behind one
         // durable admission cut.
         let custody_waiter_capacity = NonZeroUsize::new(
@@ -756,6 +757,7 @@ where
             actor_context,
             self.catalog_mailbox_size,
             self.admission_cut_capacity,
+            metadata_step_capacity,
             custody_waiter_capacity,
             self.max_commit_outputs,
             self.max_commit_block_bytes,

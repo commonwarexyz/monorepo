@@ -103,6 +103,7 @@ mod storage;
 
 use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Ordinal;
+pub(crate) use storage::ReadStep;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the [Ordinal].

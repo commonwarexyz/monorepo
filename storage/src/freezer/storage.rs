@@ -2,7 +2,7 @@ use super::{Config, Error, Identifier};
 use crate::{
     Context,
     journal::segmented::oversized::{
-        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+        Config as OversizedConfig, Oversized, Reader as OversizedReader, Record as OversizedRecord,
     },
 };
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
@@ -394,6 +394,79 @@ where
     }
 }
 
+#[derive(Clone, Copy)]
+struct Head {
+    section: u64,
+    position: u64,
+}
+
+/// One request in a bounded freezer read.
+pub(crate) enum ReadRequest<K: Array> {
+    Key(K),
+    Chain { key: K, section: u64, position: u64 },
+    Cursor(Cursor),
+}
+
+/// Result of executing one bounded freezer read step.
+pub(crate) enum ReadOutcome<K: Array, V: CodecShared> {
+    Done(Option<V>),
+    Continue(ReadRequest<K>),
+}
+
+/// Owned freezer read step captured from one exact journal section.
+pub(crate) struct ReadStep<B: Blob, K: Array, V: CodecShared> {
+    inner: ReadStepInner<B, K, V>,
+}
+
+enum ReadStepInner<B: Blob, K: Array, V: CodecShared> {
+    Missing,
+    Cursor {
+        reader: OversizedReader<B, Record<K>, V>,
+        cursor: Cursor,
+    },
+    Key {
+        reader: OversizedReader<B, Record<K>, V>,
+        key: K,
+        position: u64,
+    },
+}
+
+impl<B: Blob, K: Array, V: CodecShared> ReadStep<B, K, V> {
+    /// Perform the I/O for this step without borrowing the freezer.
+    pub(crate) async fn execute(self) -> Result<ReadOutcome<K, V>, Error> {
+        match self.inner {
+            ReadStepInner::Missing => Ok(ReadOutcome::Done(None)),
+            ReadStepInner::Cursor { reader, cursor } => reader
+                .get_value(cursor.offset(), cursor.size())
+                .await
+                .map(|value| ReadOutcome::Done(Some(value)))
+                .map_err(Error::Journal),
+            ReadStepInner::Key {
+                reader,
+                key,
+                position,
+            } => {
+                let key_entry = reader.get(position).await?;
+                if key_entry.key.as_ref() == key.as_ref() {
+                    let value = reader
+                        .get_value(key_entry.value_offset, key_entry.value_size)
+                        .await?;
+                    return Ok(ReadOutcome::Done(Some(value)));
+                }
+
+                Ok(match key_entry.next() {
+                    Some((section, position)) => ReadOutcome::Continue(ReadRequest::Chain {
+                        key,
+                        section,
+                        position,
+                    }),
+                    None => ReadOutcome::Done(None),
+                })
+            }
+        }
+    }
+}
+
 /// The freezer's state, boxed so the public [Freezer] handle stays pointer-sized.
 struct Inner<E: Context, K: Array, V: CodecShared> {
     // Context for storage operations
@@ -408,6 +481,9 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
 
     // Table blob that maps slots to key index chain heads
     table: E::Blob,
+
+    // Stable mirror used to capture a key lookup without reading the mutable table blob.
+    heads: Vec<Option<Head>>,
 
     // Combined key index + value storage with crash recovery
     oversized: Oversized<E, Record<K>, V>,
@@ -493,7 +569,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// Validate and clean invalid table entries for a given epoch.
     ///
-    /// Returns (modified, max_epoch, max_section, resizable) where:
+    /// Returns (modified, max_epoch, max_section, resizable, heads) where:
     /// - modified: whether any entries were cleaned
     /// - max_epoch: the maximum valid epoch found
     /// - max_section: the section corresponding to `max_epoch`
@@ -505,7 +581,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         table_resize_frequency: u8,
         max_valid_epoch: Option<u64>,
         table_replay_buffer: NonZeroUsize,
-    ) -> Result<(bool, u64, u64, u32), Error> {
+    ) -> Result<(bool, u64, u64, u32, Vec<Option<Head>>), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
         let mut reader =
@@ -516,6 +592,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
         let mut resizable = 0u32;
+        let mut heads = Vec::with_capacity(table_size as usize);
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
@@ -545,14 +622,14 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             modified |= entry1_cleared || entry2_cleared;
 
             // If the latest entry has reached the resize frequency, increment the resizable entries
-            if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2)
-                && added >= table_resize_frequency
-            {
+            let head = Self::read_latest_entry(&entry1, &entry2);
+            if head.is_some_and(|(_, _, added)| added >= table_resize_frequency) {
                 resizable += 1;
             }
+            heads.push(head.map(|(section, position, _)| Head { section, position }));
         }
 
-        Ok((modified, max_epoch, max_section, resizable))
+        Ok((modified, max_epoch, max_section, resizable, heads))
     }
 
     /// Determine the write offset for a table entry based on current entries and epoch.
@@ -687,7 +764,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .await?;
 
         // Determine checkpoint based on initialization scenario
-        let (checkpoint, resizable) = match checkpoint {
+        let (checkpoint, resizable, heads) = match checkpoint {
             // Non-empty checkpoint: align existing data to it
             Some(checkpoint) if !checkpoint.is_empty() => {
                 // A non-empty checkpoint against an empty table references data that does not exist
@@ -709,7 +786,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 };
 
                 // Validate and clean invalid entries
-                let (table_modified, _, _, resizable) = Self::recover_table(
+                let (table_modified, _, _, resizable, heads) = Self::recover_table(
                     &context,
                     &table,
                     checkpoint.table_size,
@@ -727,13 +804,17 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                     table.sync().await?;
                 }
 
-                (checkpoint, resizable)
+                (checkpoint, resizable, heads)
             }
 
             // Missing or empty checkpoint: reset wiped any existing data, so initialize a new table
             _ => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
+                (
+                    Checkpoint::init(config.table_initial_size),
+                    0,
+                    vec![None; config.table_initial_size as usize],
+                )
             }
         };
 
@@ -759,6 +840,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
+            heads,
             oversized,
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
@@ -866,7 +948,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         .await?;
 
         // If we're mid-resize and this entry has already been processed, update the new position too
-        if let Some(resize_progress) = self.resize_progress
+        let mirrored_table_index = if let Some(resize_progress) = self.resize_progress
             && table_index < resize_progress
         {
             self.unnecessary_writes.inc();
@@ -890,6 +972,18 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 new_entry,
             )
             .await?;
+            Some(new_table_index)
+        } else {
+            None
+        };
+
+        let head = Some(Head {
+            section: self.current_section,
+            position,
+        });
+        self.heads[table_index as usize] = head;
+        if let Some(table_index) = mirrored_table_index {
+            self.heads[table_index as usize] = head;
         }
 
         let cursor = Cursor::new(self.current_section, value_offset, value_size);
@@ -963,6 +1057,42 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         }
     }
 
+    /// Capture one bounded read step without performing I/O.
+    fn read_step(&self, request: ReadRequest<K>) -> Result<ReadStep<E::Blob, K, V>, Error> {
+        let (key, section, position) = match request {
+            ReadRequest::Cursor(cursor) => {
+                return Ok(ReadStep {
+                    inner: ReadStepInner::Cursor {
+                        reader: self.oversized.reader(cursor.section())?,
+                        cursor,
+                    },
+                });
+            }
+            ReadRequest::Chain {
+                key,
+                section,
+                position,
+            } => (key, section, position),
+            ReadRequest::Key(key) => {
+                let table_index = self.table_index(&key);
+                let Some(head) = self.heads[table_index as usize] else {
+                    return Ok(ReadStep {
+                        inner: ReadStepInner::Missing,
+                    });
+                };
+                (key, head.section, head.position)
+            }
+        };
+
+        Ok(ReadStep {
+            inner: ReadStepInner::Key {
+                reader: self.oversized.reader(section)?,
+                key,
+                position,
+            },
+        })
+    }
+
     /// See [Freezer::has].
     async fn has(&self, key: &K) -> Result<bool, Error> {
         self.has.inc();
@@ -980,6 +1110,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             return Ok(());
         };
         self.table.resize(Self::table_offset(new_size)).await?;
+        self.heads.resize(new_size as usize, None);
 
         // Start the resize
         self.resize_progress = Some(0);
@@ -1017,12 +1148,14 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
         // Process each entry in the chunk
         let mut writes = self.context.storage_buffer_pool().alloc(chunk_bytes);
+        let mut copied_heads = Vec::with_capacity(chunk_size as usize);
         for _ in 0..chunk_size {
             // Parse the next two slots directly from the read stream.
             let (entry1, entry2) = Self::parse_entries(&mut read_buf)?;
 
             // Get the current head
             let head = Self::read_latest_entry(&entry1, &entry2);
+            copied_heads.push(head.map(|(section, position, _)| Head { section, position }));
 
             // Get the reset entry (may be empty)
             let reset_entry = match head {
@@ -1050,6 +1183,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .table
             .write_at(new_offset, writes, WriteOptions::default());
         try_join(old_write, new_write).await?;
+
+        for (offset, head) in copied_heads.into_iter().enumerate() {
+            self.heads[(old_size + current_index + offset as u32) as usize] = head;
+        }
 
         // Update progress
         if chunk_end >= old_size {
@@ -1189,6 +1326,14 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// is much faster to use it than searching for a `key`.
     pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
         self.0.get(identifier).await
+    }
+
+    /// Capture one bounded read step without performing I/O.
+    pub(crate) fn read_step(
+        &self,
+        request: ReadRequest<K>,
+    ) -> Result<ReadStep<E::Blob, K, V>, Error> {
+        self.0.read_step(request)
     }
 
     /// Check whether a value exists for a given key.

@@ -18,6 +18,7 @@ use crate::{
     multimmit::{
         marshal::{
             storage::{
+                archive::ReadOutcome as FinalizedReadOutcome,
                 blocks::{BlockMeta, FinalBlock},
                 checkpoint::{CatalogState, Checkpoint},
                 pending::{BODY_READ_CONCURRENCY, BodyReadGroup, PendingBlocks},
@@ -33,7 +34,7 @@ use crate::{
             TransactionBlockHeader,
         },
     },
-    types::View,
+    types::{Height, View},
 };
 use commonware_actor::{
     Feedback,
@@ -278,10 +279,8 @@ where
                 .blocks
                 .remove(&evicted_reference)
                 .expect("cache order names a retained block");
-            self.by_digest.remove(&(
-                evicted_reference.chain(),
-                evicted_reference.digest(),
-            ));
+            self.by_digest
+                .remove(&(evicted_reference.chain(), evicted_reference.digest()));
             self.encoded_bytes -= block.encoded_len;
             evictions = evictions.saturating_add(1);
         }
@@ -407,9 +406,7 @@ impl CommitToken {
 
 /// Completion of one accepted producer-block custody cut.
 #[must_use = "custody is not established until the token completes"]
-pub(in crate::multimmit::marshal) struct AdmissionToken(
-    oneshot::Receiver<Result<(), Error>>,
-);
+pub(in crate::multimmit::marshal) struct AdmissionToken(oneshot::Receiver<Result<(), Error>>);
 
 impl AdmissionToken {
     pub(in crate::multimmit::marshal) async fn wait(self) -> Result<(), Error> {
@@ -544,22 +541,163 @@ type CustodyWaiter<H> = (
 );
 type AdmissionCommand<H, V, B> = (Vec<Admission<H, V, B>>, AdmissionMode, Reply<()>);
 
-enum CatalogEvent<D, M, S, C> {
+struct HistorySegmentState<H: Hasher> {
+    commitment: H::Digest,
+    max_items: usize,
+    max_bytes: usize,
+    item_bytes: usize,
+    records: HistorySegment<H>,
+}
+
+struct HeaderBranch<H: Hasher> {
+    reference: Option<BlockRef<H::Digest>>,
+    max_items: usize,
+    item_bytes: usize,
+    headers: HeaderSegment<H>,
+}
+
+struct HeaderSegmentsState<H: Hasher> {
+    max_bytes: usize,
+    branches: Vec<HeaderBranch<H>>,
+}
+
+struct OutputRefsState<H: Hasher> {
+    next: u64,
+    remaining: usize,
+    max_bytes: u64,
+    encoded_bytes: u64,
+    outputs: OutputRefs<H>,
+}
+
+enum MetadataJob<E: Context, H: Hasher> {
+    History {
+        state: HistorySegmentState<H>,
+        reply: Reply<HistorySegment<H>>,
+        step: storage::HistoryRead<E, H>,
+    },
+    Headers {
+        state: HeaderSegmentsState<H>,
+        reply: Reply<HeaderSegments<H>>,
+        steps: Pool<(usize, Result<storage::FinalBlockReadOutcome<H>, Error>)>,
+    },
+    Outputs {
+        state: OutputRefsState<H>,
+        reply: Reply<OutputRefs<H>>,
+        step: storage::FinalBlockReadStep<E, H>,
+    },
+}
+
+enum MetadataCompletion<E: Context, H: Hasher> {
+    Canceled(usize),
+    History {
+        state: HistorySegmentState<H>,
+        reply: Reply<HistorySegment<H>>,
+        result: Result<storage::HistoryReadOutcome<E, H>, Error>,
+    },
+    Headers {
+        state: HeaderSegmentsState<H>,
+        reply: Reply<HeaderSegments<H>>,
+        steps: Pool<(usize, Result<storage::FinalBlockReadOutcome<H>, Error>)>,
+        index: usize,
+        result: Result<storage::FinalBlockReadOutcome<H>, Error>,
+    },
+    Outputs {
+        state: OutputRefsState<H>,
+        reply: Reply<OutputRefs<H>>,
+        result: Result<storage::FinalBlockReadOutcome<H>, Error>,
+    },
+}
+
+impl<E: Context, H: Hasher> MetadataCompletion<E, H> {
+    const fn steps(&self) -> usize {
+        match self {
+            Self::Canceled(steps) => *steps,
+            Self::History { .. } | Self::Headers { .. } | Self::Outputs { .. } => 1,
+        }
+    }
+}
+
+impl<E: Context, H: Hasher> MetadataJob<E, H> {
+    fn steps(&self) -> usize {
+        match self {
+            Self::History { .. } | Self::Outputs { .. } => 1,
+            Self::Headers { steps, .. } => steps.len(),
+        }
+    }
+
+    async fn execute(self) -> MetadataCompletion<E, H> {
+        match self {
+            Self::History {
+                state,
+                mut reply,
+                step,
+            } => {
+                let result = select! {
+                    _ = reply.closed() => return MetadataCompletion::Canceled(1),
+                    result = step.execute() => result,
+                };
+                MetadataCompletion::History {
+                    state,
+                    reply,
+                    result,
+                }
+            }
+            Self::Headers {
+                state,
+                mut reply,
+                mut steps,
+            } => {
+                let count = steps.len();
+                let (index, result) = select! {
+                    _ = reply.closed() => return MetadataCompletion::Canceled(count),
+                    completion = steps.next_completed() => completion,
+                };
+                MetadataCompletion::Headers {
+                    state,
+                    reply,
+                    steps,
+                    index,
+                    result,
+                }
+            }
+            Self::Outputs {
+                state,
+                mut reply,
+                step,
+            } => {
+                let result = select! {
+                    _ = reply.closed() => return MetadataCompletion::Canceled(1),
+                    result = step.execute() => result.map_err(Error::storage),
+                };
+                MetadataCompletion::Outputs {
+                    state,
+                    reply,
+                    result,
+                }
+            }
+        }
+    }
+}
+
+enum CatalogEvent<D, R, M, S, C> {
     Durability(D),
+    Metadata(R),
     Materialization(M),
     Seal(S),
     Command(C),
 }
 
-async fn next_catalog_event<D, M, S, C>(
+async fn next_catalog_event<D, R, M, S, C>(
     durability: D,
+    metadata: R,
     materialization: M,
     seal: S,
     command: C,
     accept_commands: bool,
-) -> CatalogEvent<D::Output, M::Output, S::Output, C::Output>
+) -> CatalogEvent<D::Output, R::Output, M::Output, S::Output, C::Output>
 where
     D: Future,
+    R: Future,
     M: Future,
     S: Future,
     C: Future,
@@ -573,6 +711,7 @@ where
     };
     select! {
         completion = durability => CatalogEvent::Durability(completion),
+        completion = metadata => CatalogEvent::Metadata(completion),
         completion = materialization => CatalogEvent::Materialization(completion),
         completion = seal => CatalogEvent::Seal(completion),
         command = command => CatalogEvent::Command(command),
@@ -827,11 +966,7 @@ where
     }
 
     /// Returns an exact pending block without exposing catalog storage ownership.
-    #[tracing::instrument(
-        name = "multimmit.marshal.catalog.block",
-        level = "debug",
-        skip_all
-    )]
+    #[tracing::instrument(name = "multimmit.marshal.catalog.block", level = "debug", skip_all)]
     pub(in crate::multimmit::marshal) async fn block(
         &self,
         reference: BlockRef<H::Digest>,
@@ -934,11 +1069,7 @@ where
     }
 
     /// Installs a durable floor and waits until delivery has crossed its generation reset.
-    #[tracing::instrument(
-        name = "multimmit.marshal.catalog.install",
-        level = "info",
-        skip_all
-    )]
+    #[tracing::instrument(name = "multimmit.marshal.catalog.install", level = "info", skip_all)]
     pub(in crate::multimmit::marshal) async fn install(
         &self,
         checkpoint: Checkpoint<H::Digest>,
@@ -1078,6 +1209,9 @@ where
     commands: mailbox::Receiver<TracedCommand<H, V, B>>,
     deferred: Option<TracedCommand<H, V, B>>,
     durability: Pool<DurabilityCompletion<H::Digest>>,
+    metadata_reads: Pool<MetadataCompletion<E, H>>,
+    metadata_steps: usize,
+    metadata_step_capacity: usize,
     /// In-flight sealed-segment proofs; optimization-only writes that never gate barriers.
     seals: Pool<(Vec<u64>, Result<(), Error>)>,
     durability_capacity: usize,
@@ -1120,9 +1254,7 @@ where
 
     fn command_ready(&self, command: &Command<H, V, B>) -> bool {
         match command {
-            Command::Promoted(_, _) => {
-                !self.admission_active && self.pending_admission.is_none()
-            }
+            Command::Promoted(_, _) => !self.admission_active && self.pending_admission.is_none(),
             Command::Admit(admissions, _, _)
                 if !admissions.is_empty() && admissions.len() <= self.durability_capacity =>
             {
@@ -1130,10 +1262,24 @@ where
                 admissions.len() <= self.durability_capacity - pending
             }
             Command::Bodies(_, _) => self.body_waiters.len() < self.body_waiter_capacity,
+            Command::HistorySegment(_, max_items, max_bytes, _)
+                if *max_items != 0 && *max_bytes != 0 =>
+            {
+                self.metadata_has_capacity(1)
+            }
+            Command::HeaderSegments(requests, max_bytes, _)
+                if *max_bytes != 0
+                    && requests.len() <= self.metadata_step_capacity
+                    && requests.iter().all(|(_, max_items)| *max_items != 0) =>
+            {
+                self.metadata_has_capacity(requests.len())
+            }
+            Command::OutputRefs(_, _, _, _) => self.metadata_has_capacity(1),
             command => {
                 !command.commit_barrier()
                     || (self.barrier_ready()
-                        && (!command.body_barrier() || self.materializer.is_idle()))
+                        && (!command.body_barrier()
+                            || (self.materializer.is_idle() && self.metadata_reads.is_empty())))
             }
         }
     }
@@ -1163,6 +1309,7 @@ where
             // Direct draining is safe only when no completion can become ready.
             } else if commands_open
                 && self.durability.is_empty()
+                && self.metadata_reads.is_empty()
                 && self.seals.is_empty()
                 && self.materializer.is_idle()
             {
@@ -1181,6 +1328,7 @@ where
                 && self.pending_admission.is_none()
                 && !self.admission_active
                 && self.durability.is_empty()
+                && self.metadata_reads.is_empty()
                 && self.seals.is_empty()
                 && self.materializer.is_idle()
                 && self.body_waiters.is_empty()
@@ -1190,6 +1338,7 @@ where
 
             match next_catalog_event(
                 self.durability.next_completed(),
+                self.metadata_reads.next_completed(),
                 self.materializer.complete_next(),
                 self.seals.next_completed(),
                 self.commands.recv(),
@@ -1199,6 +1348,9 @@ where
             {
                 CatalogEvent::Durability(completion) => {
                     self.complete_durability(completion).await?;
+                }
+                CatalogEvent::Metadata(completion) => {
+                    self.complete_metadata(completion)?;
                 }
                 CatalogEvent::Seal((sealed, result)) => {
                     result?;
@@ -1260,9 +1412,7 @@ where
                     .insert(block.reference(), Arc::clone(block)),
             );
         }
-        self.metrics
-            .materialized_cache_evictions
-            .inc_by(evictions);
+        self.metrics.materialized_cache_evictions.inc_by(evictions);
         self.update_cache_metrics();
         respond(completed.reply, Ok(completed.values))?;
         Ok(available)
@@ -1338,8 +1488,7 @@ where
         let groups = self.stores.body_read_groups(
             missing,
             max_group_bytes,
-            NonZeroUsize::new(BODY_READ_CONCURRENCY)
-                .expect("body read concurrency is non-zero"),
+            NonZeroUsize::new(BODY_READ_CONCURRENCY).expect("body read concurrency is non-zero"),
         )?;
         self.submit_body_waiter(BodyWaiter {
             references,
@@ -1409,10 +1558,7 @@ where
         );
     }
 
-    fn cached_block(
-        &self,
-        reference: &BlockRef<H::Digest>,
-    ) -> Option<Arc<TransactionBlock<H, B>>> {
+    fn cached_block(&self, reference: &BlockRef<H::Digest>) -> Option<Arc<TransactionBlock<H, B>>> {
         self.block_cache
             .get(reference)
             .or_else(|| self.materialized_cache.get(reference))
@@ -1430,6 +1576,8 @@ where
 
     fn fail(&mut self, error: Error) {
         self.materializer.fail(error.clone());
+        self.metadata_reads.cancel_all();
+        self.metadata_steps = 0;
         self.seals.cancel_all();
         if let Some(command) = self.deferred.take() {
             command.fail(error.clone());
@@ -1490,9 +1638,8 @@ where
                         "multimmit.marshal.catalog.seal_pending",
                         segments = sealed.len(),
                     );
-                    self.seals.push(
-                        async move { (sealed, drain(handles).await) }.instrument(span),
-                    );
+                    self.seals
+                        .push(async move { (sealed, drain(handles).await) }.instrument(span));
                 }
                 self.complete_custody_waiters().await?;
                 self.start_admission_sync().await.map(|_| ())
@@ -1653,10 +1800,7 @@ where
     }
 
     async fn start_commit_archives(&mut self, pending: &PendingCommit<H, B>) -> Result<(), Error> {
-        let timer = self
-            .metrics
-            .finalized_archive_durability
-            .timer(&self.clock);
+        let timer = self.metrics.finalized_archive_durability.timer(&self.clock);
         let handles = self
             .stores
             .start_finalized_sync(&pending.publication)
@@ -1917,9 +2061,7 @@ where
                         Ok(TracedCommand {
                             command: Command::Admit(admissions, mode, reply),
                             span,
-                        })
-                            if admissions.len() <= remaining - items =>
-                        {
+                        }) if admissions.len() <= remaining - items => {
                             processing_span.follows_from(span.id());
                             items += admissions.len();
                             commands.push((admissions, mode, reply));
@@ -2347,9 +2489,426 @@ where
         Ok(())
     }
 
+    fn push_metadata(&mut self, job: MetadataJob<E, H>) {
+        let steps = job.steps();
+        self.metadata_steps = self
+            .metadata_steps
+            .checked_add(steps)
+            .expect("metadata step count does not overflow");
+        assert!(self.metadata_steps <= self.metadata_step_capacity);
+        self.metadata_reads.push(job.execute());
+    }
+
+    fn resume_metadata(&mut self, job: MetadataJob<E, H>) {
+        self.metadata_reads.push(job.execute());
+    }
+
+    fn release_metadata_steps(&mut self, steps: usize) {
+        self.metadata_steps = self
+            .metadata_steps
+            .checked_sub(steps)
+            .expect("metadata completion owns its active steps");
+    }
+
+    fn metadata_has_capacity(&self, steps: usize) -> bool {
+        self.metadata_steps
+            .checked_add(steps)
+            .is_some_and(|total| total <= self.metadata_step_capacity)
+    }
+
+    fn start_history_segment(
+        &mut self,
+        commitment: H::Digest,
+        max_items: usize,
+        max_bytes: usize,
+        reply: Reply<HistorySegment<H>>,
+    ) -> Result<(), Error> {
+        if max_items == 0 || max_bytes == 0 {
+            return respond(
+                reply,
+                Err(Error::Invalid("history segment bounds are zero")),
+            );
+        }
+        if reply.is_closed() {
+            return Ok(());
+        }
+        if !self.metadata_has_capacity(1) {
+            return respond(
+                reply,
+                Err(Error::Invalid(
+                    "catalog metadata read capacity is exhausted",
+                )),
+            );
+        }
+        let step = match self.stores.history_read(commitment) {
+            Ok(step) => step,
+            Err(error) => return respond(reply, Err(error)),
+        };
+        self.push_metadata(MetadataJob::History {
+            state: HistorySegmentState {
+                commitment,
+                max_items,
+                max_bytes,
+                item_bytes: 0,
+                records: Vec::new(),
+            },
+            reply,
+            step,
+        });
+        Ok(())
+    }
+
+    fn advance_header_branch(
+        &self,
+        branch: &mut HeaderBranch<H>,
+        outcome: Option<storage::FinalBlockReadOutcome<H>>,
+        max_bytes: usize,
+    ) -> Result<Option<storage::FinalBlockReadStep<E, H>>, Error> {
+        let mut outcome = outcome;
+        loop {
+            let Some(reference) = branch.reference else {
+                return Ok(None);
+            };
+            let header = match outcome.take() {
+                Some(FinalizedReadOutcome::Continue(request)) => {
+                    return self.stores.continue_final_block_read(request).map(Some);
+                }
+                Some(FinalizedReadOutcome::Done(value)) => {
+                    self.stores.finalized_block_header(reference, value)?
+                }
+                None => match self.stores.pending_block_header(reference) {
+                    Some(header) => Some(header),
+                    None => {
+                        return self
+                            .stores
+                            .final_block_by_key_read(reference.digest())
+                            .map(Some);
+                    }
+                },
+            };
+            let Some(header) = header else {
+                branch.reference = None;
+                return Ok(None);
+            };
+            let next_item_bytes = branch.item_bytes.saturating_add(header.encode_size());
+            let encoded_bytes = branch
+                .headers
+                .len()
+                .saturating_add(1)
+                .encode_size()
+                .saturating_add(next_item_bytes);
+            if encoded_bytes > max_bytes {
+                branch.reference = None;
+                return Ok(None);
+            }
+            let height = reference.height().get();
+            branch.item_bytes = next_item_bytes;
+            branch.headers.push(header.clone());
+            if branch.headers.len() == branch.max_items || height == 1 {
+                branch.reference = None;
+                return Ok(None);
+            }
+            branch.reference = Some(BlockRef::new(
+                reference.chain(),
+                Height::new(height - 1),
+                header.parent(),
+            ));
+        }
+    }
+
+    fn start_header_segments(
+        &mut self,
+        requests: Vec<(BlockRef<H::Digest>, usize)>,
+        max_bytes: usize,
+        reply: Reply<HeaderSegments<H>>,
+    ) -> Result<(), Error> {
+        if max_bytes == 0 || requests.iter().any(|(_, max_items)| *max_items == 0) {
+            return respond(reply, Err(Error::Invalid("header segment bounds are zero")));
+        }
+        if requests.len() > self.metadata_step_capacity {
+            return respond(
+                reply,
+                Err(Error::Invalid(
+                    "header segment request vector exceeds capacity",
+                )),
+            );
+        }
+        if reply.is_closed() {
+            return Ok(());
+        }
+        if !self.metadata_has_capacity(requests.len()) {
+            return respond(
+                reply,
+                Err(Error::Invalid(
+                    "catalog metadata read capacity is exhausted",
+                )),
+            );
+        }
+        let mut state = HeaderSegmentsState {
+            max_bytes,
+            branches: requests
+                .into_iter()
+                .map(|(reference, max_items)| HeaderBranch {
+                    reference: Some(reference),
+                    max_items,
+                    item_bytes: 0,
+                    headers: Vec::new(),
+                })
+                .collect(),
+        };
+        let mut steps = Pool::default();
+        for (index, branch) in state.branches.iter_mut().enumerate() {
+            match self.advance_header_branch(branch, None, max_bytes) {
+                Ok(Some(step)) => steps.push(async move {
+                    (index, step.execute().await.map_err(Error::storage))
+                }),
+                Ok(None) => {}
+                Err(error) => return respond(reply, Err(error)),
+            }
+        }
+        if steps.is_empty() {
+            return respond(
+                reply,
+                Ok(state
+                    .branches
+                    .into_iter()
+                    .map(|branch| branch.headers)
+                    .collect()),
+            );
+        }
+        self.push_metadata(MetadataJob::Headers {
+            state,
+            reply,
+            steps,
+        });
+        Ok(())
+    }
+
+    fn start_output_refs(
+        &mut self,
+        start: OutputIndex,
+        max_items: usize,
+        max_bytes: NonZeroUsize,
+        reply: Reply<OutputRefs<H>>,
+    ) -> Result<(), Error> {
+        let Some(committed) = self.durable_checkpoint.committed() else {
+            return respond(
+                reply,
+                Err(Error::Invalid(
+                    "output range does not begin at a committed row",
+                )),
+            );
+        };
+        if start > committed {
+            return respond(
+                reply,
+                Err(Error::Invalid(
+                    "output range does not begin at a committed row",
+                )),
+            );
+        }
+        if reply.is_closed() {
+            return Ok(());
+        }
+        if !self.metadata_has_capacity(1) {
+            return respond(
+                reply,
+                Err(Error::Invalid(
+                    "catalog metadata read capacity is exhausted",
+                )),
+            );
+        }
+        let available = committed
+            .get()
+            .checked_sub(start.get())
+            .and_then(|distance| distance.checked_add(1))
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(usize::MAX);
+        let step = match self.stores.final_block_at_read(start.get()) {
+            Ok(step) => step,
+            Err(error) => return respond(reply, Err(error)),
+        };
+        self.push_metadata(MetadataJob::Outputs {
+            state: OutputRefsState {
+                next: start.get(),
+                remaining: max_items.min(available),
+                max_bytes: u64::try_from(max_bytes.get()).unwrap_or(u64::MAX),
+                encoded_bytes: 0,
+                outputs: Vec::new(),
+            },
+            reply,
+            step,
+        });
+        Ok(())
+    }
+
+    fn complete_metadata(&mut self, completion: MetadataCompletion<E, H>) -> Result<(), Error> {
+        self.release_metadata_steps(completion.steps());
+        match completion {
+            MetadataCompletion::Canceled(_) => Ok(()),
+            MetadataCompletion::History {
+                mut state,
+                reply,
+                result,
+            } => {
+                if reply.is_closed() {
+                    return Ok(());
+                }
+                match result {
+                    Err(error) => respond(reply, Err(error)),
+                    Ok(storage::HistoryReadOutcome::Continue(continuation)) => {
+                        let step = match self.stores.continue_history_read(continuation) {
+                            Ok(step) => step,
+                            Err(error) => return respond(reply, Err(error)),
+                        };
+                        self.push_metadata(MetadataJob::History { state, reply, step });
+                        Ok(())
+                    }
+                    Ok(storage::HistoryReadOutcome::Done(None)) => {
+                        respond(reply, Ok(state.records))
+                    }
+                    Ok(storage::HistoryReadOutcome::Done(Some(record))) => {
+                        let next_item_bytes = state.item_bytes.saturating_add(record.encode_size());
+                        let encoded_bytes = state
+                            .records
+                            .len()
+                            .saturating_add(1)
+                            .encode_size()
+                            .saturating_add(next_item_bytes);
+                        if encoded_bytes > state.max_bytes {
+                            return respond(reply, Ok(state.records));
+                        }
+                        state.commitment = record.parent();
+                        state.item_bytes = next_item_bytes;
+                        state.records.push(record);
+                        if state.records.len() == state.max_items {
+                            return respond(reply, Ok(state.records));
+                        }
+                        let step = match self.stores.history_read(state.commitment) {
+                            Ok(step) => step,
+                            Err(error) => return respond(reply, Err(error)),
+                        };
+                        self.push_metadata(MetadataJob::History { state, reply, step });
+                        Ok(())
+                    }
+                }
+            }
+            MetadataCompletion::Headers {
+                mut state,
+                reply,
+                mut steps,
+                index,
+                result,
+            } => {
+                if reply.is_closed() {
+                    self.release_metadata_steps(steps.len());
+                    return Ok(());
+                }
+                let outcome = match result {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        self.release_metadata_steps(steps.len());
+                        return respond(reply, Err(error));
+                    }
+                };
+                match self.advance_header_branch(
+                    &mut state.branches[index],
+                    Some(outcome),
+                    state.max_bytes,
+                ) {
+                    Ok(Some(step)) => {
+                        steps.push(async move {
+                            (index, step.execute().await.map_err(Error::storage))
+                        });
+                        self.metadata_steps = self
+                            .metadata_steps
+                            .checked_add(1)
+                            .expect("metadata step count does not overflow");
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.release_metadata_steps(steps.len());
+                        return respond(reply, Err(error));
+                    }
+                }
+                if steps.is_empty() {
+                    return respond(
+                        reply,
+                        Ok(state
+                            .branches
+                            .into_iter()
+                            .map(|branch| branch.headers)
+                            .collect()),
+                    );
+                }
+                self.resume_metadata(MetadataJob::Headers {
+                    state,
+                    reply,
+                    steps,
+                });
+                Ok(())
+            }
+            MetadataCompletion::Outputs {
+                mut state,
+                reply,
+                result,
+            } => {
+                if reply.is_closed() {
+                    return Ok(());
+                }
+                let outcome = match result {
+                    Ok(outcome) => outcome,
+                    Err(error) => return respond(reply, Err(error)),
+                };
+                let value = match outcome {
+                    FinalizedReadOutcome::Continue(request) => {
+                        let step = match self.stores.continue_final_block_read(request) {
+                            Ok(step) => step,
+                            Err(error) => return respond(reply, Err(error)),
+                        };
+                        self.push_metadata(MetadataJob::Outputs { state, reply, step });
+                        return Ok(());
+                    }
+                    FinalizedReadOutcome::Done(value) => value,
+                };
+                let output = match self.stores.stored_ref(state.next, value) {
+                    Ok(output) => output,
+                    Err(error) => return respond(reply, Err(error)),
+                };
+                if !state.outputs.is_empty()
+                    && state
+                        .encoded_bytes
+                        .checked_add(output.encoded_len)
+                        .is_none_or(|total| total > state.max_bytes)
+                {
+                    return respond(reply, Ok(state.outputs));
+                }
+                state.encoded_bytes = state.encoded_bytes.saturating_add(output.encoded_len);
+                state.outputs.push(output);
+                state.remaining -= 1;
+                if state.remaining == 0 {
+                    return respond(reply, Ok(state.outputs));
+                }
+                state.next = match state.next.checked_add(1) {
+                    Some(next) => next,
+                    None => return respond(reply, Err(Error::Invalid("output index overflow"))),
+                };
+                let step = match self.stores.final_block_at_read(state.next) {
+                    Ok(step) => step,
+                    Err(error) => return respond(reply, Err(error)),
+                };
+                self.push_metadata(MetadataJob::Outputs { state, reply, step });
+                Ok(())
+            }
+        }
+    }
+
     async fn process(&mut self, command: Command<H, V, B>) -> Result<(), Error> {
         match command {
-            command @ (Command::Install(_, _, _, _, _)
+            command @ (Command::HistorySegment(_, _, _, _)
+            | Command::HeaderSegments(_, _, _)
+            | Command::OutputRefs(_, _, _, _)
+            | Command::Install(_, _, _, _, _)
             | Command::Prune(_, _)
             | Command::Promoted(_, _))
                 if !self.command_ready(&command) =>
@@ -2368,19 +2927,11 @@ where
             Command::FinalLqc(id, reply) => respond(reply, self.stores.final_lqc(id).await),
             Command::LatestLqc(reply) => respond(reply, self.stores.latest_lqc().await),
             Command::History(key, reply) => respond(reply, self.stores.history(key).await),
-            Command::HistorySegment(key, max_items, max_bytes, reply) => respond(
-                reply,
-                self.stores.history_segment(key, max_items, max_bytes).await,
-            ),
+            Command::HistorySegment(key, max_items, max_bytes, reply) => {
+                self.start_history_segment(key, max_items, max_bytes, reply)
+            }
             Command::HeaderSegments(requests, max_bytes, reply) => {
-                let stores = &self.stores;
-                respond(
-                    reply,
-                    try_join_all(requests.into_iter().map(|(reference, max_items)| {
-                        stores.header_segment(reference, max_items, max_bytes)
-                    }))
-                    .await,
-                )
+                self.start_header_segments(requests, max_bytes, reply)
             }
             Command::WaitForCustody(references, reply) => {
                 if references
@@ -2414,23 +2965,7 @@ where
                 respond(reply, Ok(candidate))
             }
             Command::OutputRefs(start, max_items, max_bytes, reply) => {
-                let result = match self.durable_checkpoint.committed() {
-                    Some(committed) if start <= committed => {
-                        let available = committed
-                            .get()
-                            .checked_sub(start.get())
-                            .and_then(|distance| distance.checked_add(1))
-                            .and_then(|count| usize::try_from(count).ok())
-                            .unwrap_or(usize::MAX);
-                        self.stores
-                            .output_refs(start, max_items.min(available), max_bytes.get())
-                            .await
-                    }
-                    _ => Err(Error::Invalid(
-                        "output range does not begin at a committed row",
-                    )),
-                };
-                respond(reply, result)
+                self.start_output_refs(start, max_items, max_bytes, reply)
             }
             Command::Commit(mut batch, reply) => {
                 if self.durable_checkpoint == batch.checkpoint {
@@ -2545,8 +3080,7 @@ where
                 }
                 if !self.commit_state.is_idle() {
                     self.accepted_checkpoint.preserve_acknowledged(Some(index));
-                    self.pending_acknowledgement =
-                        Some((index, advances, reply, Span::current()));
+                    self.pending_acknowledgement = Some((index, advances, reply, Span::current()));
                 } else {
                     self.start_acknowledgement(index, advances, reply).await?;
                 }
@@ -2685,7 +3219,10 @@ fn frontier_advances<D: Digest>(current: &[BlockRef<D>], next: &[BlockRef<D>]) -
 
 /// Awaits every handle in one durability wave.
 async fn drain(handles: Vec<Handle<()>>) -> Result<(), Error> {
-    try_join_all(handles).await.map(|_| ()).map_err(Error::storage)
+    try_join_all(handles)
+        .await
+        .map(|_| ())
+        .map_err(Error::storage)
 }
 
 fn respond<T>(reply: Reply<T>, result: Result<T, Error>) -> Result<(), Error> {
@@ -2700,6 +3237,7 @@ pub(in crate::multimmit::marshal) async fn spawn<R, T, E, H, V, B>(
     context: R,
     capacity: NonZeroUsize,
     admission_cut_capacity: NonZeroUsize,
+    metadata_step_capacity: NonZeroUsize,
     custody_waiter_capacity: NonZeroUsize,
     max_commit_outputs: NonZeroUsize,
     max_commit_block_bytes: NonZeroUsize,
@@ -2783,6 +3321,9 @@ where
             commands: receiver,
             deferred: None,
             durability: Pool::default(),
+            metadata_reads: Pool::default(),
+            metadata_steps: 0,
+            metadata_step_capacity: metadata_step_capacity.get(),
             seals: Pool::default(),
             durability_capacity: admission_cut_capacity.get(),
             custody_waiter_capacity: custody_waiter_capacity.get(),
@@ -2808,8 +3349,8 @@ type SpawnedCatalog<H, V, B> = (CatalogClient<H, V, B>, Handle<Result<(), Error>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::materializer::BODY_READER_RESIDENCY;
+    use super::*;
     use crate::{
         marshal::mocks::block::EmptyBlock,
         multimmit::{
@@ -3033,8 +3574,7 @@ mod tests {
             let configure = |context: &DeterministicContext| {
                 let mut config = config(context, &committee);
                 config.max_commit_outputs = NZUsize!(4);
-                config.archive.page_cache =
-                    CacheRef::from_pooler(context, NZU16!(1), NZUsize!(1));
+                config.archive.page_cache = CacheRef::from_pooler(context, NZU16!(1), NZUsize!(1));
                 config
             };
 
@@ -3071,9 +3611,7 @@ mod tests {
                     outputs: blocks
                         .iter()
                         .enumerate()
-                        .map(|(index, block)| {
-                            output_row(OutputIndex::new(index as u64), block)
-                        })
+                        .map(|(index, block)| output_row(OutputIndex::new(index as u64), block))
                         .collect(),
                     checkpoint,
                 })
@@ -3115,6 +3653,182 @@ mod tests {
     }
 
     #[test]
+    fn header_batch_capacity_is_independent_of_admission_cut() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                57,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_HEADER_CAPACITY",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let blocks = (0..4)
+                .map(|chain| producer_block(&committee, chain, 57 + u64::from(chain)))
+                .collect::<Vec<_>>();
+            let mut config = config(&context, &committee);
+            set_capacity(&mut config, 1);
+            let (client, handle, _delivery) =
+                spawn_catalog(config, context.child("catalog")).await;
+            for block in &blocks {
+                client
+                    .admit_block(block.reference(), Arc::clone(block))
+                    .await
+                    .unwrap();
+            }
+
+            let headers = client
+                .header_segments(
+                    blocks
+                        .iter()
+                        .map(|block| (block.reference(), 1))
+                        .collect(),
+                    usize::MAX,
+                )
+                .await
+                .unwrap();
+            assert_eq!(headers.len(), blocks.len());
+            for (headers, block) in headers.iter().zip(&blocks) {
+                assert_eq!(headers, std::slice::from_ref(block.header()));
+            }
+
+            drop(client);
+            assert!(handle.await.is_ok());
+        });
+    }
+
+    #[test]
+    fn header_branches_advance_independently() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                58,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_HEADER_BRANCHES",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let parents = (0..2)
+                .map(|chain| producer_block(&committee, chain, 58 + u64::from(chain)))
+                .collect::<Vec<_>>();
+            let children = parents
+                .iter()
+                .enumerate()
+                .map(|(chain, parent)| {
+                    let body = TestBody::new(
+                        Sha256::hash(&[b"application parent"]),
+                        Height::new(10),
+                        60 + chain as u64,
+                    );
+                    let header = TransactionBlockHeader::new(
+                        committee.config.epoch(),
+                        ChainId::new(chain as u32),
+                        Height::new(2),
+                        parent.reference().digest(),
+                        body.digest(),
+                    )
+                    .unwrap();
+                    Arc::new(TransactionBlock::new(header, body).unwrap())
+                })
+                .collect::<Vec<_>>();
+            let blocks = parents.iter().chain(&children).cloned().collect::<Vec<_>>();
+            let configure = |context: &DeterministicContext| {
+                let mut config = config(context, &committee);
+                config.max_commit_outputs = NZUsize!(4);
+                config.finalized_blocks = ArchiveMode::Immutable;
+                config
+            };
+
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(&context), context.child("initial")).await;
+            for block in &blocks {
+                client
+                    .admit_block(block.reference(), Arc::clone(block))
+                    .await
+                    .unwrap();
+            }
+            let current = client.checkpoint().await.unwrap();
+            let mut emitted = current.emitted().to_vec();
+            for block in &children {
+                emitted[block.reference().chain().get() as usize] = block.reference();
+            }
+            client
+                .commit(Commit {
+                    selected: Vec::new(),
+                    history: Vec::new(),
+                    outputs: blocks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, block)| output_row(OutputIndex::new(index as u64), block))
+                        .collect(),
+                    checkpoint: Checkpoint::new(
+                        current.epoch(),
+                        current.generation(),
+                        current.archive_layout(),
+                        current.floor(),
+                        current.history(),
+                        current.history_index(),
+                        current.ordered().to_vec(),
+                        emitted.clone(),
+                        Some(OutputIndex::new(3)),
+                        None,
+                    )
+                    .unwrap(),
+                })
+                .await
+                .unwrap();
+            client.promoted(emitted).await.unwrap();
+            drop(client);
+            handle.abort();
+            let _ = handle.await;
+
+            let reads = PendingReads::default();
+            let delayed = DelayedReadContext {
+                inner: context.child("delayed"),
+                pending: reads.clone(),
+            };
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(&context), delayed.child("reopened")).await;
+            let slow_gate = reads.arm();
+            let fast_gate = reads.arm();
+            let mut request = Box::pin(client.header_segments(
+                children
+                    .iter()
+                    .map(|block| (block.reference(), 2))
+                    .collect(),
+                usize::MAX,
+            ));
+            let mut first_steps = Box::pin(try_join_all([slow_gate.blocked, fast_gate.blocked]));
+            commonware_macros::select! {
+                result = &mut first_steps => { result.unwrap(); },
+                result = &mut request => panic!("header request completed before both branches blocked: {result:?}"),
+                _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                    panic!("both header branches did not reach independent storage reads")
+                },
+            }
+            drop(first_steps);
+
+            let continuation_gate = reads.arm();
+            fast_gate.release.send(()).unwrap();
+            commonware_macros::select! {
+                result = continuation_gate.blocked => result.unwrap(),
+                result = &mut request => panic!("header request completed while one branch remained blocked: {result:?}"),
+                _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                    panic!("an unblocked header branch did not advance independently")
+                },
+            }
+            continuation_gate.release.send(()).unwrap();
+            slow_gate.release.send(()).unwrap();
+            let headers = request.await.unwrap();
+            for ((headers, child), parent) in headers.iter().zip(&children).zip(&parents) {
+                assert_eq!(headers, &[child.header().clone(), parent.header().clone()]);
+            }
+
+            drop(client);
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    #[test]
     fn historical_body_reads_do_not_displace_live_custody() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
@@ -3140,8 +3854,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let materialized_before =
-                metric_total(&context.encode(), "materialized_bodies_total");
+            let materialized_before = metric_total(&context.encode(), "materialized_bodies_total");
             assert_eq!(
                 client.bodies(vec![first.reference()]).await.unwrap()[0].as_deref(),
                 Some(first.as_ref())
@@ -3402,8 +4115,7 @@ mod tests {
             let configure = |context: &DeterministicContext| {
                 let mut config = config(context, &committee);
                 set_capacity(&mut config, 2);
-                config.max_hot_block_bytes =
-                    NonZeroUsize::new(blocks[0].encode_size()).unwrap();
+                config.max_hot_block_bytes = NonZeroUsize::new(blocks[0].encode_size()).unwrap();
                 config.max_materialized_block_bytes = config.max_hot_block_bytes;
                 config
             };
@@ -3423,24 +4135,35 @@ mod tests {
             // slot is already occupied.
             let (client, handle, _delivery) =
                 spawn_catalog(configure(&context), context.child("reopened")).await;
-            let acquisitions =
-                || metric_total(&context.encode(), "reader_acquisitions_total");
+            let acquisitions = || metric_total(&context.encode(), "reader_acquisitions_total");
             let recoveries = || {
-                metric_sum(&context.encode(), "reader_acquisitions_total", Some("Recovered"))
+                metric_sum(
+                    &context.encode(),
+                    "reader_acquisitions_total",
+                    Some("Recovered"),
+                )
             };
             let read = |index: usize| {
                 let client = &client;
                 let blocks = &blocks;
                 async move {
                     assert_eq!(
-                        client.block(blocks[index].reference()).await.unwrap().as_deref(),
+                        client
+                            .block(blocks[index].reference())
+                            .await
+                            .unwrap()
+                            .as_deref(),
                         Some(blocks[index].as_ref())
                     );
                 }
             };
 
             read(0).await;
-            assert_eq!(acquisitions(), 1, "the first cold segment reader was not acquired");
+            assert_eq!(
+                acquisitions(),
+                1,
+                "the first cold segment reader was not acquired"
+            );
             read(1).await;
             assert_eq!(
                 acquisitions(),
@@ -3465,9 +4188,17 @@ mod tests {
             // opened reader (segment 0). Revisiting segment 0 must reacquire it through its
             // sealed proof, never through recovery.
             read(2 * (filling + 1)).await;
-            assert_eq!(acquisitions(), 2 + filling as u64, "next segment past residency");
+            assert_eq!(
+                acquisitions(),
+                2 + filling as u64,
+                "next segment past residency"
+            );
             read(2 * (filling + 2)).await;
-            assert_eq!(acquisitions(), 3 + filling as u64, "second segment past residency");
+            assert_eq!(
+                acquisitions(),
+                3 + filling as u64,
+                "second segment past residency"
+            );
             read(0).await;
             assert_eq!(
                 acquisitions(),
@@ -3796,6 +4527,101 @@ mod tests {
     }
 
     #[test]
+    fn producer_admission_progresses_while_cold_metadata_read_is_blocked() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                56,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_METADATA_READ_ADMISSION",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let cold = producer_block(&committee, 0, 56);
+            let staged = producer_block(&committee, 1, 57);
+
+            let configure = |context: &DeterministicContext| config(context, &committee);
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(&context), context.child("initial")).await;
+            client
+                .admit_block(cold.reference(), Arc::clone(&cold))
+                .await
+                .unwrap();
+            let current = client.checkpoint().await.unwrap();
+            let mut emitted = current.emitted().to_vec();
+            emitted[0] = cold.reference();
+            client
+                .commit(Commit {
+                    selected: Vec::new(),
+                    history: Vec::new(),
+                    outputs: vec![output_row(OutputIndex::ZERO, &cold)],
+                    checkpoint: Checkpoint::new(
+                        current.epoch(),
+                        current.generation(),
+                        current.archive_layout(),
+                        current.floor(),
+                        current.history(),
+                        current.history_index(),
+                        current.ordered().to_vec(),
+                        emitted,
+                        Some(OutputIndex::ZERO),
+                        None,
+                    )
+                    .unwrap(),
+                })
+                .await
+                .unwrap();
+            drop(client);
+            assert!(handle.await.is_ok());
+
+            let reads = PendingReads::default();
+            let delayed = DelayedReadContext {
+                inner: context.child("delayed"),
+                pending: reads.clone(),
+            };
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(&context), delayed.child("reopened")).await;
+
+            let gate = reads.arm();
+            let mut blocked = Box::pin(gate.blocked);
+            let mut metadata_read =
+                Box::pin(client.output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024 * 1024)));
+            commonware_macros::select! {
+                result = &mut blocked => result.expect("read gate closed before metadata I/O"),
+                _ = &mut metadata_read => {
+                    panic!("cold metadata read completed before reaching storage")
+                },
+                _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                    panic!("cold metadata read did not reach storage")
+                },
+            }
+
+            let mut prune = Box::pin(client.prune(0));
+            commonware_macros::select! {
+                result = &mut prune => result.unwrap(),
+                _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                    panic!("pruning was blocked behind an exact cold metadata read")
+                },
+            }
+            drop(prune);
+
+            let mut admission =
+                Box::pin(client.admit_block(staged.reference(), Arc::clone(&staged)));
+            commonware_macros::select! {
+                result = &mut admission => result.unwrap(),
+                _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                    panic!("durable producer admission was blocked behind a cold metadata read")
+                },
+            }
+            drop(admission);
+
+            gate.release.send(()).expect("blocked read was dropped");
+            assert_eq!(metadata_read.await.unwrap()[0].reference, cold.reference());
+            drop(client);
+            assert!(handle.await.is_ok());
+        });
+    }
+
+    #[test]
     fn application_prune_preserves_queued_cold_materialization() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
@@ -4085,8 +4911,7 @@ mod tests {
 
             let mut reopened = config(&context, &committee);
             reopened.max_hot_block_bytes = NonZeroUsize::new(second.encode_size()).unwrap();
-            reopened.max_materialized_block_bytes =
-                NonZeroUsize::new(first.encode_size()).unwrap();
+            reopened.max_materialized_block_bytes = NonZeroUsize::new(first.encode_size()).unwrap();
             reopened.max_commit_outputs = NZUsize!(2);
             let (client, handle, mut delivery) =
                 spawn_catalog(reopened, context.child("reopened")).await;
@@ -5176,14 +6001,12 @@ mod tests {
 
             syncs.arm();
             let token = client
-                .start_commit(
-                    Commit {
-                        selected: Vec::new(),
-                        history: Vec::new(),
-                        outputs: vec![output_row(OutputIndex::ZERO, &block)],
-                        checkpoint,
-                    },
-                )
+                .start_commit(Commit {
+                    selected: Vec::new(),
+                    history: Vec::new(),
+                    outputs: vec![output_row(OutputIndex::ZERO, &block)],
+                    checkpoint,
+                })
                 .await
                 .unwrap();
             let archive_syncs = syncs.calls();
@@ -5383,17 +6206,15 @@ mod tests {
             )
             .unwrap();
             let result = client
-                .start_commit(
-                    Commit {
-                        selected: Vec::new(),
-                        history: Vec::new(),
-                        outputs: vec![
-                            output_row(OutputIndex::ZERO, &first),
-                            output_row(OutputIndex::new(1), &second),
-                        ],
-                        checkpoint: oversized,
-                    },
-                )
+                .start_commit(Commit {
+                    selected: Vec::new(),
+                    history: Vec::new(),
+                    outputs: vec![
+                        output_row(OutputIndex::ZERO, &first),
+                        output_row(OutputIndex::new(1), &second),
+                    ],
+                    checkpoint: oversized,
+                })
                 .await;
             assert!(matches!(result, Err(Error::Invalid(_))));
 
@@ -5413,14 +6234,12 @@ mod tests {
             )
             .unwrap();
             client
-                .start_commit(
-                    Commit {
-                        selected: Vec::new(),
-                        history: Vec::new(),
-                        outputs: vec![output_row(OutputIndex::ZERO, &first)],
-                        checkpoint: singleton,
-                    },
-                )
+                .start_commit(Commit {
+                    selected: Vec::new(),
+                    history: Vec::new(),
+                    outputs: vec![output_row(OutputIndex::ZERO, &first)],
+                    checkpoint: singleton,
+                })
                 .await
                 .unwrap()
                 .wait()

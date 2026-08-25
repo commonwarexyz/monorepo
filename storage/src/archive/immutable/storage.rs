@@ -21,6 +21,91 @@ const FREEZER_PREFIX: u8 = 0;
 /// Prefix for [Ordinal] records.
 const ORDINAL_PREFIX: u8 = 1;
 
+/// An opaque request for a bounded immutable archive read.
+pub struct ReadRequest<K: Array> {
+    inner: ReadRequestInner<K>,
+}
+
+enum ReadRequestInner<K: Array> {
+    Key(K),
+    Index(u64),
+    KeyChain { key: K, section: u64, position: u64 },
+    Value(Cursor),
+}
+
+impl<K: Array> ReadRequest<K> {
+    /// Begin a read of the value selected by `key`.
+    pub const fn key(key: K) -> Self {
+        Self {
+            inner: ReadRequestInner::Key(key),
+        }
+    }
+
+    /// Begin a read of the value selected by `index`.
+    pub const fn index(index: u64) -> Self {
+        Self {
+            inner: ReadRequestInner::Index(index),
+        }
+    }
+
+    fn from_freezer(request: freezer::ReadRequest<K>) -> Self {
+        let inner = match request {
+            freezer::ReadRequest::Key(key) => ReadRequestInner::Key(key),
+            freezer::ReadRequest::Chain {
+                key,
+                section,
+                position,
+            } => ReadRequestInner::KeyChain {
+                key,
+                section,
+                position,
+            },
+            freezer::ReadRequest::Cursor(cursor) => ReadRequestInner::Value(cursor),
+        };
+        Self { inner }
+    }
+}
+
+/// Result of executing one bounded immutable archive read step.
+pub enum ReadOutcome<K: Array, V: CodecShared> {
+    /// The read finished with the captured value, or with no matching value.
+    Done(Option<V>),
+    /// The read requires one more synchronously captured step.
+    Continue(ReadRequest<K>),
+}
+
+/// Owned immutable archive read step captured synchronously by the archive owner.
+pub struct ReadStep<E: Context, K: Array, V: CodecShared> {
+    inner: ReadStepInner<E, K, V>,
+}
+
+enum ReadStepInner<E: Context, K: Array, V: CodecShared> {
+    Missing,
+    Ordinal(ordinal::ReadStep<E::Blob, Cursor>),
+    Freezer(freezer::ReadStep<E::Blob, K, V>),
+}
+
+impl<E: Context, K: Array, V: CodecShared> ReadStep<E, K, V> {
+    /// Perform this step's I/O without borrowing or mutating the archive.
+    pub async fn execute(self) -> Result<ReadOutcome<K, V>, Error> {
+        match self.inner {
+            ReadStepInner::Missing => Ok(ReadOutcome::Done(None)),
+            ReadStepInner::Ordinal(step) => {
+                let cursor = step.execute().await?;
+                Ok(ReadOutcome::Continue(ReadRequest {
+                    inner: ReadRequestInner::Value(cursor),
+                }))
+            }
+            ReadStepInner::Freezer(step) => match step.execute().await? {
+                freezer::ReadOutcome::Done(value) => Ok(ReadOutcome::Done(value)),
+                freezer::ReadOutcome::Continue(request) => {
+                    Ok(ReadOutcome::Continue(ReadRequest::from_freezer(request)))
+                }
+            },
+        }
+    }
+}
+
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 enum Record {
@@ -220,6 +305,47 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Ok(result)
     }
 
+    /// Capture one bounded read step without performing I/O.
+    fn read_step(&self, request: ReadRequest<K>) -> Result<ReadStep<E, K, V>, Error> {
+        if matches!(
+            &request.inner,
+            ReadRequestInner::Key(_) | ReadRequestInner::Index(_)
+        ) {
+            self.gets.inc();
+        }
+
+        let inner = match request.inner {
+            ReadRequestInner::Index(index) => self
+                .ordinal
+                .read_step(index)
+                .map_or(ReadStepInner::Missing, ReadStepInner::Ordinal),
+            ReadRequestInner::Key(key) => self
+                .freezer
+                .read_step(freezer::ReadRequest::Key(key))
+                .map(ReadStepInner::Freezer)
+                .map_err(Error::Freezer)?,
+            ReadRequestInner::KeyChain {
+                key,
+                section,
+                position,
+            } => self
+                .freezer
+                .read_step(freezer::ReadRequest::Chain {
+                    key,
+                    section,
+                    position,
+                })
+                .map(ReadStepInner::Freezer)
+                .map_err(Error::Freezer)?,
+            ReadRequestInner::Value(cursor) => self
+                .freezer
+                .read_step(freezer::ReadRequest::Cursor(cursor))
+                .map(ReadStepInner::Freezer)
+                .map_err(Error::Freezer)?,
+        };
+        Ok(ReadStep { inner })
+    }
+
     /// Initialize the section.
     fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
@@ -403,6 +529,11 @@ impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Capture one bounded read step without performing I/O.
+    pub fn read_step(&self, request: ReadRequest<K>) -> Result<ReadStep<E, K, V>, Error> {
+        self.0.read_step(request)
     }
 }
 

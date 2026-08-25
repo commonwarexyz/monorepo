@@ -5,7 +5,7 @@ use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob, Buf, BufMut, Error as RError, Handle, WriteOptions,
-    buffer::{Read as ReadBuffer, Write},
+    buffer::{OwnedView, Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::bitmap::BitMap;
@@ -21,6 +21,26 @@ use tracing::{debug, warn};
 struct Record<V: CodecFixed<Cfg = ()>> {
     value: V,
     crc: u32,
+}
+
+/// Owned read of one ordinal record at a captured logical section size.
+pub(crate) struct ReadStep<B: Blob, V: CodecFixed<Cfg = ()>> {
+    blob: OwnedView<B>,
+    index: u64,
+    offset: u64,
+    _phantom: PhantomData<V>,
+}
+
+impl<B: Blob, V: CodecFixed<Cfg = ()>> ReadStep<B, V> {
+    /// Read and validate the captured record.
+    pub(crate) async fn execute(self) -> Result<V, Error> {
+        let read_buf = self
+            .blob
+            .read_at(self.offset, Record::<V>::SIZE)
+            .await?
+            .coalesce();
+        Record::<V>::decode_valid(read_buf.as_ref()).ok_or(Error::InvalidRecord(self.index))
+    }
 }
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
@@ -339,6 +359,25 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         Ok(Some(value))
     }
 
+    /// Capture a read of one existing index without performing I/O.
+    fn read_step(&self, index: u64) -> Option<ReadStep<E::Blob, V>> {
+        self.intervals.get(&index)?;
+
+        let items_per_blob = self.config.items_per_blob.get();
+        let section = index / items_per_blob;
+        let blob = self
+            .blobs
+            .get(&section)
+            .expect("interval references a missing ordinal section");
+        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
+        Some(ReadStep {
+            blob: blob.view(),
+            index,
+            offset,
+            _phantom: PhantomData,
+        })
+    }
+
     /// See [Ordinal::has].
     fn has(&self, index: u64) -> bool {
         self.has.inc();
@@ -497,6 +536,11 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Get the value for a given index.
     pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
         self.0.get(index).await
+    }
+
+    /// Capture a read of one existing index without performing I/O.
+    pub(crate) fn read_step(&self, index: u64) -> Option<ReadStep<E::Blob, V>> {
+        self.0.read_step(index)
     }
 
     /// Check if an index exists.

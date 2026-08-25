@@ -30,8 +30,8 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
-use commonware_runtime::{BufMut, Error as RError, Handle};
-use std::{io::Cursor, num::NonZeroUsize};
+use commonware_runtime::{Blob, BufMut, Error as RError, Handle, buffer::OwnedView};
+use std::{io::Cursor, num::NonZeroUsize, sync::Arc};
 use zstd::{bulk::compress, decode_all};
 
 /// Configuration for blob storage.
@@ -50,6 +50,51 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
+/// Validate, decompress, and decode one glob frame.
+fn decode_frame<V: CodecShared>(
+    buf: &[u8],
+    compression: Option<u8>,
+    codec_config: &V::Cfg,
+) -> Result<V, Error> {
+    // Entry format: [compressed_data] [crc32 (4 bytes)]
+    if buf.len() < crc32::Digest::SIZE {
+        return Err(Error::Runtime(RError::BlobInsufficientLength));
+    }
+
+    let data_len = buf.len() - crc32::Digest::SIZE;
+    let compressed_data = &buf[..data_len];
+    let stored_checksum =
+        u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
+
+    let checksum = Crc32::checksum(compressed_data);
+    if checksum != stored_checksum {
+        return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+    }
+
+    if compression.is_some() {
+        let decompressed =
+            decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
+        V::decode_cfg(decompressed.as_ref(), codec_config).map_err(Error::Codec)
+    } else {
+        V::decode_cfg(compressed_data, codec_config).map_err(Error::Codec)
+    }
+}
+
+/// Owned reader for one glob section at a captured logical size.
+pub(crate) struct Reader<B: Blob, V: Codec> {
+    blob: OwnedView<B>,
+    compression: Option<u8>,
+    codec_config: Arc<V::Cfg>,
+}
+
+impl<B: Blob, V: CodecShared> Reader<B, V> {
+    /// Read and validate a framed value from the captured section.
+    pub(crate) async fn get(&self, offset: u64, size: u32) -> Result<V, Error> {
+        let buf = self.blob.read_at(offset, size as usize).await?.coalesce();
+        decode_frame(buf.as_ref(), self.compression, self.codec_config.as_ref())
+    }
+}
+
 /// The glob's state, boxed so the public [Glob] handle stays pointer-sized.
 struct Inner<E: Context, V: Codec> {
     manager: Manager<E, WriteFactory>,
@@ -58,7 +103,7 @@ struct Inner<E: Context, V: Codec> {
     compression: Option<u8>,
 
     /// Codec configuration.
-    codec_config: V::Cfg,
+    codec_config: Arc<V::Cfg>,
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
@@ -76,7 +121,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok(Self {
             manager,
             compression: cfg.compression,
-            codec_config: cfg.codec_config,
+            codec_config: Arc::new(cfg.codec_config),
         })
     }
 
@@ -110,6 +155,19 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((offset, entry_size))
     }
 
+    /// See [Glob::reader].
+    fn reader(&self, section: u64) -> Result<Reader<E::Blob, V>, Error> {
+        let blob = self
+            .manager
+            .view(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+        Ok(Reader {
+            blob,
+            compression: self.compression,
+            codec_config: self.codec_config.clone(),
+        })
+    }
+
     /// See [Glob::get].
     async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         let writer = self
@@ -119,36 +177,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Read via buffered writer (handles read-through for buffered data)
         let buf = writer.read_at(offset, size as usize).await?.coalesce();
-
-        // Entry format: [compressed_data] [crc32 (4 bytes)]
-        if buf.len() < crc32::Digest::SIZE {
-            return Err(Error::Runtime(RError::BlobInsufficientLength));
-        }
-
-        let data_len = buf.len() - crc32::Digest::SIZE;
-        let compressed_data = &buf.as_ref()[..data_len];
-        let stored_checksum = u32::from_be_bytes(
-            buf.as_ref()[data_len..]
-                .try_into()
-                .expect("checksum is 4 bytes"),
-        );
-
-        // Verify checksum
-        let checksum = Crc32::checksum(compressed_data);
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-
-        // Decompress if needed and decode
-        let value = if self.compression.is_some() {
-            let decompressed =
-                decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
-            V::decode_cfg(decompressed.as_ref(), &self.codec_config).map_err(Error::Codec)?
-        } else {
-            V::decode_cfg(compressed_data, &self.codec_config).map_err(Error::Codec)?
-        };
-
-        Ok(value)
+        decode_frame(buf.as_ref(), self.compression, self.codec_config.as_ref())
     }
 
     /// See [Glob::verify].
@@ -283,6 +312,14 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     pub async fn append(mut self, section: u64, value: &V) -> Result<(Self, u64, u32), Error> {
         let (offset, size) = self.0.append(section, value).await?;
         Ok((self, offset, size))
+    }
+
+    /// Capture an owned reader for one exact existing section.
+    ///
+    /// Capture is synchronous and constant-time. The reader retains the section's current logical
+    /// size and remains readable if the live glob later prunes or removes the section.
+    pub(crate) fn reader(&self, section: u64) -> Result<Reader<E::Blob, V>, Error> {
+        self.0.reader(section)
     }
 
     /// Read value at offset with known size (from index entry).

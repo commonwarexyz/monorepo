@@ -4,13 +4,13 @@ use crate::{
     archive::{Error, Identifier},
     index::{Unordered, unordered::Index},
     journal::segmented::oversized::{
-        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+        Config as OversizedConfig, Oversized, Reader as OversizedReader, Record as OversizedRecord,
     },
     rmap::RMap,
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut, Handle,
+    Blob, Buf, BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
@@ -82,6 +82,55 @@ impl<K: Array> OversizedRecord for Record<K> {
         self.value_offset = offset;
         self.value_size = size;
         self
+    }
+}
+
+/// An owned read of the value selected by an archive index at capture time.
+pub struct IndexReadPlan<B: Blob, K: Array, V: CodecShared> {
+    reader: OversizedReader<B, Record<K>, V>,
+    position: u64,
+}
+
+impl<B: Blob, K: Array, V: CodecShared> IndexReadPlan<B, K, V> {
+    /// Execute the captured read without accessing the live archive.
+    pub async fn execute(self) -> Result<Option<V>, Error> {
+        let entry = self.reader.get(self.position).await?;
+        let (offset, size) = entry.value_location();
+        Ok(Some(self.reader.get_value(offset, size).await?))
+    }
+}
+
+struct KeyCandidate {
+    section: u64,
+    positions: Vec<u64>,
+}
+
+/// An owned key read over the translated-key candidates present at capture time.
+pub struct KeyReadPlan<B: Blob, K: Array, V: CodecShared> {
+    key: K,
+    candidates: Vec<KeyCandidate>,
+    readers: BTreeMap<u64, OversizedReader<B, Record<K>, V>>,
+    unnecessary_reads: Counter,
+}
+
+impl<B: Blob, K: Array, V: CodecShared> KeyReadPlan<B, K, V> {
+    /// Execute the captured read without accessing the live archive.
+    pub async fn execute(self) -> Result<Option<V>, Error> {
+        for candidate in self.candidates {
+            let reader = self
+                .readers
+                .get(&candidate.section)
+                .expect("every candidate section has a reader");
+            for position in candidate.positions {
+                let entry = reader.get(position).await?;
+                if entry.key.as_ref() == self.key.as_ref() {
+                    let (offset, size) = entry.value_location();
+                    return Ok(Some(reader.get_value(offset, size).await?));
+                }
+                self.unnecessary_reads.inc();
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -271,6 +320,55 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             .get_value(section, value_offset, value_size)
             .await?;
         Ok(Some(value))
+    }
+
+    fn index_read_plan(&self, index: u64) -> Result<Option<IndexReadPlan<E::Blob, K, V>>, Error> {
+        self.gets.inc();
+        if self.pruned(index) {
+            return Ok(None);
+        }
+        let Some(&position) = self.indices.get(&index) else {
+            return Ok(None);
+        };
+        let section = self.section(index);
+        Ok(Some(IndexReadPlan {
+            reader: self.oversized.reader(section)?,
+            position,
+        }))
+    }
+
+    fn key_read_plan(&self, key: &K) -> Result<Option<KeyReadPlan<E::Blob, K, V>>, Error> {
+        self.gets.inc();
+        let mut candidates = Vec::new();
+        let mut readers = BTreeMap::new();
+
+        for index in self.keys.get(key) {
+            if self.pruned(*index) {
+                continue;
+            }
+            if !self.indices.contains_key(index) {
+                return Err(Error::RecordCorrupted);
+            }
+
+            let section = self.section(*index);
+            if let btree_map::Entry::Vacant(entry) = readers.entry(section) {
+                entry.insert(self.oversized.reader(section)?);
+            }
+            candidates.push(KeyCandidate {
+                section,
+                positions: self.iter_positions(*index).collect(),
+            });
+        }
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(KeyReadPlan {
+            key: key.clone(),
+            candidates,
+            readers,
+            unnecessary_reads: self.unnecessary_reads.clone(),
+        }))
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
@@ -613,6 +711,23 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
         self.0 = self.0.prune(min).await?;
         Ok(self)
     }
+
+    /// Capture the value selected by `index` without performing I/O.
+    pub fn index_read_plan(
+        &self,
+        index: u64,
+    ) -> Result<Option<IndexReadPlan<E::Blob, K, V>>, Error> {
+        self.0.index_read_plan(index)
+    }
+
+    /// Captures every translated-key candidate for `key` without performing I/O.
+    ///
+    /// Capture work is proportional to translated-key collisions and same-index duplicates. Each
+    /// referenced section is retained so the resulting plan remains exact across pruning.
+    pub fn key_read_plan(&self, key: &K) -> Result<Option<KeyReadPlan<E::Blob, K, V>>, Error> {
+        self.0.key_read_plan(key)
+    }
+
 }
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archive

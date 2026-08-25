@@ -89,6 +89,80 @@ struct Entry<K, V> {
     value: V,
 }
 
+/// Address of one finalized-archive read step.
+pub(in crate::multimmit::marshal) enum ReadRequest<K: Array> {
+    Index(u64),
+    Key(K),
+    Immutable {
+        expected_key: Option<K>,
+        request: immutable::ReadRequest<K>,
+    },
+}
+
+/// Result of one owned finalized-archive read step.
+pub(in crate::multimmit::marshal) enum ReadOutcome<K: Array, V: CodecShared> {
+    Done(Option<(K, V)>),
+    Continue(ReadRequest<K>),
+}
+
+/// Owned I/O captured synchronously from one finalized archive.
+pub(in crate::multimmit::marshal) struct ReadStep<E: Context, K: Array, V: CodecShared> {
+    inner: ReadStepInner<E, K, V>,
+}
+
+enum ReadStepInner<E: Context, K: Array, V: CodecShared> {
+    Missing,
+    PrunableIndex(prunable::IndexReadPlan<E::Blob, K, Entry<K, V>>),
+    PrunableKey {
+        expected_key: K,
+        plan: prunable::KeyReadPlan<E::Blob, K, Entry<K, V>>,
+    },
+    Immutable {
+        expected_key: Option<K>,
+        step: immutable::ReadStep<E, K, Entry<K, V>>,
+    },
+}
+
+impl<E: Context, K: Array, V: CodecShared> ReadStep<E, K, V> {
+    /// Executes this step without borrowing the archive that captured it.
+    pub(in crate::multimmit::marshal) async fn execute(self) -> Result<ReadOutcome<K, V>, Error> {
+        let (expected_key, outcome) = match self.inner {
+            ReadStepInner::Missing => return Ok(ReadOutcome::Done(None)),
+            ReadStepInner::PrunableIndex(plan) => (None, plan.execute().await?),
+            ReadStepInner::PrunableKey { expected_key, plan } => {
+                (Some(expected_key), plan.execute().await?)
+            }
+            ReadStepInner::Immutable { expected_key, step } => {
+                return match step.execute().await? {
+                    immutable::ReadOutcome::Done(entry) => {
+                        Self::finish(expected_key, entry).map(ReadOutcome::Done)
+                    }
+                    immutable::ReadOutcome::Continue(request) => {
+                        Ok(ReadOutcome::Continue(ReadRequest::Immutable {
+                            expected_key,
+                            request,
+                        }))
+                    }
+                };
+            }
+        };
+        Self::finish(expected_key, outcome).map(ReadOutcome::Done)
+    }
+
+    fn finish(
+        expected_key: Option<K>,
+        entry: Option<Entry<K, V>>,
+    ) -> Result<Option<(K, V)>, Error> {
+        match entry {
+            Some(entry) if expected_key.is_none_or(|key| key == entry.key) => {
+                Ok(Some((entry.key, entry.value)))
+            }
+            Some(_) => Err(Error::KeyLookupMismatch),
+            None => Ok(None),
+        }
+    }
+}
+
 impl<K: Array, V: CodecShared> Read for Entry<K, V> {
     type Cfg = V::Cfg;
 
@@ -200,6 +274,49 @@ where
             Some(_) => Err(Error::KeyLookupMismatch),
             None => Ok(None),
         }
+    }
+
+    /// Captures one exact read step without performing I/O.
+    pub(in crate::multimmit::marshal) fn read_step(
+        &self,
+        request: ReadRequest<K>,
+    ) -> Result<ReadStep<E, K, V>, Error> {
+        let inner = match (&self.0, request) {
+            (Backend::Prunable(archive), ReadRequest::Index(index)) => archive
+                .index_read_plan(index)?
+                .map_or(ReadStepInner::Missing, ReadStepInner::PrunableIndex),
+            (Backend::Prunable(archive), ReadRequest::Key(key)) => {
+                archive.key_read_plan(&key)?.map_or_else(
+                    || ReadStepInner::Missing,
+                    |plan| ReadStepInner::PrunableKey {
+                        expected_key: key,
+                        plan,
+                    },
+                )
+            }
+            (Backend::Prunable(_), ReadRequest::Immutable { .. }) => {
+                unreachable!("immutable continuation belongs to an immutable archive")
+            }
+            (Backend::Immutable(archive), ReadRequest::Index(index)) => ReadStepInner::Immutable {
+                expected_key: None,
+                step: archive.read_step(immutable::ReadRequest::index(index))?,
+            },
+            (Backend::Immutable(archive), ReadRequest::Key(key)) => ReadStepInner::Immutable {
+                expected_key: Some(key.clone()),
+                step: archive.read_step(immutable::ReadRequest::key(key))?,
+            },
+            (
+                Backend::Immutable(archive),
+                ReadRequest::Immutable {
+                    expected_key,
+                    request,
+                },
+            ) => ReadStepInner::Immutable {
+                expected_key,
+                step: archive.read_step(request)?,
+            },
+        };
+        Ok(ReadStep { inner })
     }
 
     /// Returns the lowest retained index, if the archive is non-empty.

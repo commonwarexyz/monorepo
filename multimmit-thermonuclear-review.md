@@ -244,3 +244,34 @@ cross-cutting and actor reviews.
 - The unrelated `cl/more-robust-glue-nits` bookmark conflict was not modified.
 
 Confidence in the listed findings: high.
+
+## Remediation progress
+
+The accepted remediation scope is findings 2 through 13; finding 1 remains an acknowledged
+structural constraint of the initial Multimmit import. Each completed item lives in its own
+revision and received a focused reduction pass before validation.
+
+- [x] 2: immutable archive durability is genuinely pipelined.
+- [x] 3: exact cold metadata reads no longer execute in Catalog.
+- [x] 4: reliable marshal ingress is bounded.
+- [x] 5: `test-utils` is self-contained.
+- [x] 6: the example retains only locally published bodies.
+- [x] 7: canceled bulk page reads release their ownership graph.
+- [x] 8: aggregate verification prepares repeated messages once.
+- [x] 9: Simplex again documents and tests evidence-equivalent election.
+- [x] 10: no change required. Production batch signing contains at most one DA vote; the reported
+  multi-correlation leak is unreachable.
+- [x] 11: promotion reclamation no longer shares the global commit barrier.
+- [x] 12: fuzz network faults persist until an explicit heal action.
+- [x] 13: allocation contracts are ordinary tests and Criterion measures only target work.
+
+Finding 3 uses request-owned exact read plans. Catalog remains the sole mutation owner, captures
+each plan synchronously, and only processes continuations after the prior step returns. Pruning may
+advance while captured reads pin their exact storage; floor installation waits for all staged
+metadata reads because it replaces archive ownership and coordinates.
+
+The final review separated metadata-read capacity from admission cuts, allowed independent header
+branches to advance as their reads complete, retained incremental metadata writes behind dependent
+durability, restored the benchmark's finalization oracle, and removed an unused archive read API.
+The completed tree passes all 2,944 storage tests and all 1,698 consensus tests, along with format,
+all-feature consensus check, stability, and changed-crate Clippy validation.

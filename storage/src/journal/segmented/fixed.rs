@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Handle, Metrics, Storage,
-    buffer::paged::{CacheRef, Replay as BlobReplay},
+    buffer::paged::{CacheRef, OwnedView, Replay as BlobReplay},
 };
 use commonware_utils::NZUsize;
 use std::{collections::VecDeque, marker::PhantomData, num::NonZeroUsize};
@@ -49,6 +49,32 @@ pub struct Config {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
+}
+
+/// Owned reader for one fixed journal section at a captured logical size.
+pub(crate) struct Reader<B: Blob, A: CodecFixed> {
+    blob: OwnedView<B>,
+    _array: PhantomData<A>,
+}
+
+impl<B: Blob, A: CodecFixedShared> Reader<B, A> {
+    /// Read an item by its section-local position.
+    pub(crate) async fn get(&self, position: u64) -> Result<A, Error> {
+        let offset = position
+            .checked_mul(A::SIZE as u64)
+            .ok_or(Error::ItemOutOfRange(position))?;
+
+        let buf = self
+            .blob
+            .read_at(offset, A::SIZE)
+            .await
+            .map_err(|err| match err {
+                commonware_runtime::Error::BlobInsufficientLength
+                | commonware_runtime::Error::OffsetOverflow => Error::ItemOutOfRange(position),
+                err => Error::Runtime(err),
+            })?;
+        A::decode(buf.coalesce()).map_err(Error::Codec)
+    }
 }
 
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
@@ -112,6 +138,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         trace!(section, position, "appended item");
 
         Ok(position)
+    }
+
+    /// See [Journal::reader].
+    fn reader(&self, section: u64) -> Result<Reader<E::Blob, A>, Error> {
+        let blob = self
+            .manager
+            .view(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+        Ok(Reader {
+            blob,
+            _array: PhantomData,
+        })
     }
 
     /// See [Journal::get].
@@ -334,6 +372,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn append(mut self, section: u64, item: &A) -> Result<(Self, u64), Error> {
         let position = self.0.append(section, item).await?;
         Ok((self, position))
+    }
+
+    /// Capture an owned reader for one exact existing section.
+    ///
+    /// Capture is synchronous and constant-time. The reader retains the section's current logical
+    /// size and remains readable if the live journal later prunes the section.
+    pub(crate) fn reader(&self, section: u64) -> Result<Reader<E::Blob, A>, Error> {
+        self.0.reader(section)
     }
 
     /// Read the item at the given section and position.
@@ -1804,6 +1850,71 @@ mod tests {
                 let single = journal.get(0, *pos).await.unwrap();
                 assert_eq!(batch[*pos as usize], single);
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_live_get_many_reuses_writer_cache_id() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
+            for i in 0..4 {
+                (journal, _) = journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync(0).await.unwrap();
+
+            let mut buf = vec![0u8; Journal::<deterministic::Context, Digest>::CHUNK_SIZE];
+            let _ = journal.get_many(0, &[0], &mut buf).await.unwrap();
+            let (_, hits) = journal.get_many(0, &[0], &mut buf).await.unwrap();
+            assert_eq!(hits, 1, "live reads must retain the writer's cache id");
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_selected_section_reader_excludes_appends_and_survives_prune() {
+        fn assert_send_static<T: Send + 'static>(_: &T) {}
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
+            for i in 0..3 {
+                (journal, _) = journal.append(1, &test_digest(i)).await.unwrap();
+            }
+            (journal, _) = journal.append(2, &test_digest(20)).await.unwrap();
+
+            let reader = journal.reader(1).expect("section must exist");
+            assert_send_static(&reader);
+            assert!(matches!(
+                journal.reader(3),
+                Err(Error::SectionOutOfRange(3))
+            ));
+
+            (journal, _) = journal.append(1, &test_digest(3)).await.unwrap();
+            (journal, _) = journal.append(2, &test_digest(21)).await.unwrap();
+            assert_eq!(reader.get(2).await.unwrap(), test_digest(2));
+            assert!(matches!(reader.get(3).await, Err(Error::ItemOutOfRange(3))));
+
+            let (journal, pruned) = journal.prune(2).await.unwrap();
+            assert!(pruned);
+            assert!(matches!(
+                journal.reader(1),
+                Err(Error::AlreadyPrunedToSection(2))
+            ));
+
+            let values = context
+                .child("reader")
+                .spawn(move |_| async move {
+                    vec![reader.get(0).await.unwrap(), reader.get(2).await.unwrap()]
+                })
+                .await
+                .unwrap();
+            assert_eq!(values, vec![test_digest(0), test_digest(2)]);
 
             journal.destroy().await.unwrap();
         });

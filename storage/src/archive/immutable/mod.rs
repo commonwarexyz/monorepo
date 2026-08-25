@@ -78,7 +78,7 @@
 mod storage;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
-pub use storage::Archive;
+pub use storage::{Archive, ReadOutcome, ReadRequest, ReadStep};
 
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
@@ -175,6 +175,86 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             codec_config: (),
         }
+    }
+
+    async fn execute_read(
+        archive: &Archive<deterministic::Context, Digest, i32>,
+        mut request: ReadRequest<Digest>,
+    ) -> Option<i32> {
+        loop {
+            match archive
+                .read_step(request)
+                .expect("read step should capture")
+                .execute()
+                .await
+                .expect("read step should execute")
+            {
+                ReadOutcome::Done(value) => return value,
+                ReadOutcome::Continue(next) => request = next,
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_steps_capture_key_head_and_resolve_index() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let key = Sha256::hash(&[b"key"]);
+            let archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("storage"), start_sync_config(&context))
+                    .await
+                    .unwrap();
+            let archive = archive.put(1, key, 10).await.unwrap();
+            let captured = archive
+                .read_step(ReadRequest::key(key))
+                .expect("key head should capture");
+            let archive = archive.put(2, key, 20).await.unwrap();
+
+            assert!(matches!(
+                captured.execute().await.unwrap(),
+                ReadOutcome::Done(Some(10))
+            ));
+            assert_eq!(
+                execute_read(&archive, ReadRequest::key(key)).await,
+                Some(20)
+            );
+            assert_eq!(
+                execute_read(&archive, ReadRequest::index(1)).await,
+                Some(10)
+            );
+            assert_eq!(execute_read(&archive, ReadRequest::index(3)).await, None);
+        });
+    }
+
+    #[test]
+    fn test_read_steps_follow_resized_head_mirror() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = start_sync_config(&context);
+            cfg.freezer_table_initial_size = 2;
+            cfg.freezer_table_resize_frequency = 1;
+            cfg.freezer_table_resize_chunk_size = 1;
+            let mut archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("storage"), cfg).await.unwrap();
+            let keys = [
+                Sha256::hash(&[b"first"]),
+                Sha256::hash(&[b"second"]),
+                Sha256::hash(&[b"third"]),
+                Sha256::hash(&[b"fourth"]),
+            ];
+
+            for (index, key) in keys.iter().copied().enumerate() {
+                archive = archive.put(index as u64, key, index as i32).await.unwrap();
+                archive = archive.sync().await.unwrap();
+            }
+
+            for (index, key) in keys.into_iter().enumerate() {
+                assert_eq!(
+                    execute_read(&archive, ReadRequest::key(key)).await,
+                    Some(index as i32)
+                );
+            }
+        });
     }
 
     #[test]

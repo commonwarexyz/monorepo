@@ -8,8 +8,8 @@ use commonware_formatting::hex;
 use commonware_runtime::{
     Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
     buffer::{
-        Write,
-        paged::{CacheRef, Writer},
+        OwnedView as WriteView, Write,
+        paged::{CacheRef, OwnedView as AppendView, Writer},
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
@@ -24,6 +24,12 @@ use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Send + Sync {
+    /// Owned immutable view produced by this buffer.
+    type View: Send + Sync + 'static;
+
+    /// Capture the buffer's current logical bytes without flushing or syncing.
+    fn view(&self) -> Self::View;
+
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> u64;
 
@@ -45,6 +51,12 @@ pub trait SectionBuffer: Send + Sync {
 }
 
 impl<B: Blob> SectionBuffer for Writer<B> {
+    type View = AppendView<B>;
+
+    fn view(&self) -> Self::View {
+        Self::view(self)
+    }
+
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -67,6 +79,12 @@ impl<B: Blob> SectionBuffer for Writer<B> {
 }
 
 impl<B: Blob> SectionBuffer for Write<B> {
+    type View = WriteView<B>;
+
+    fn view(&self) -> Self::View {
+        Self::view(self)
+    }
+
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -260,6 +278,15 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(self.blobs.get(&section))
     }
 
+    /// Capture an owned immutable view of one exact existing section.
+    ///
+    /// Capture is synchronous and constant-time. It does not flush, sync, scan, or clone the
+    /// section map.
+    pub fn view(&self, section: u64) -> Result<Option<<F::Buffer as SectionBuffer>::View>, Error> {
+        self.prune_guard(section)?;
+        Ok(self.blobs.get(&section).map(SectionBuffer::view))
+    }
+
     /// Get a mutable reference to a blob, creating it if it doesn't exist.
     pub async fn get_or_create(&mut self, section: u64) -> Result<&mut F::Buffer, Error> {
         self.prune_guard(section)?;
@@ -364,9 +391,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             self.pruned.inc();
         }
 
-        if pruned {
-            self.oldest_retained_section = min;
-        }
+        self.oldest_retained_section = self.oldest_retained_section.max(min);
 
         Ok(pruned)
     }
@@ -566,6 +591,10 @@ mod tests {
     }
 
     impl SectionBuffer for TestBuffer {
+        type View = ();
+
+        fn view(&self) -> Self::View {}
+
         fn size(&self) -> u64 {
             0
         }
@@ -675,6 +704,36 @@ mod tests {
 
             complete_next_pending_sync(&pending, Ok(()));
             handle.await.expect("sync handle should complete");
+            manager.destroy().await.expect("destroy failed");
+        });
+    }
+
+    #[test]
+    fn test_noop_prune_advances_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending, wait_for_syncs);
+            let mut manager = Manager::init(context.child("manager"), cfg)
+                .await
+                .expect("failed to initialize manager");
+
+            manager
+                .get_or_create(10)
+                .await
+                .expect("failed to create section");
+            assert!(!manager.prune(5).await.expect("prune failed"));
+            assert!(manager.pruned(4));
+            assert!(matches!(
+                manager.view(4),
+                Err(Error::AlreadyPrunedToSection(5))
+            ));
+            assert!(matches!(
+                manager.get_or_create(4).await,
+                Err(Error::AlreadyPrunedToSection(5))
+            ));
+
             manager.destroy().await.expect("destroy failed");
         });
     }

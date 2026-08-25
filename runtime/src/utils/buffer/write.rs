@@ -1,8 +1,80 @@
 use crate::{
-    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs, WriteOptions,
+    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBuf, IoBufs, WriteOptions,
     buffer::{SyncState, tip::Buffer},
 };
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, ops::Range};
+
+/// An owned, immutable logical view of a buffered [`Write`].
+///
+/// Constructing a view with [`Write::view`] is synchronous and constant-time: it clones the blob
+/// handle and shares the writer's immutable tip buffer. Capturing a view does not flush or sync the
+/// writer. Appends and updates within the captured tip use the buffer's existing copy-on-write
+/// path, so the view continues to expose the bytes and logical size present at capture.
+///
+/// Blob-backed bytes below the captured tip remain subject to mutations made through the writer.
+/// Callers that retain a view must not resize or overwrite that prefix. Removing the blob by name
+/// is safe because the view owns a blob handle and inherits [`crate::Storage`]'s read-after-remove
+/// guarantee.
+#[derive(Clone)]
+pub struct OwnedView<B: Blob> {
+    blob: B,
+    size: u64,
+    tail_offset: u64,
+    tail: IoBuf,
+}
+
+impl<B: Blob> OwnedView<B> {
+    /// Returns the logical size captured by this view.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Read exactly `len` immutable bytes starting at `offset`.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        read_at(self, offset, len).await
+    }
+}
+
+/// Logical state needed by the shared buffered-read algorithm.
+trait ReadView {
+    type Blob: Blob;
+
+    fn blob(&self) -> &Self::Blob;
+    fn size(&self) -> u64;
+    fn tail_offset(&self) -> u64;
+    fn tail_slice(&self, range: Range<usize>) -> IoBuf;
+}
+
+/// Read against a fixed logical size and tail boundary.
+async fn read_at<V: ReadView>(view: &V, offset: u64, len: usize) -> Result<IoBufs, Error> {
+    let end_offset = offset
+        .checked_add(len as u64)
+        .ok_or(Error::OffsetOverflow)?;
+    if end_offset > view.size() {
+        return Err(Error::BlobInsufficientLength);
+    }
+
+    // Keep the zero-length fast path after the bounds check so offset > size preserves the
+    // BlobInsufficientLength contract.
+    if len == 0 {
+        return Ok(IoBufs::default());
+    }
+
+    let tail_offset = view.tail_offset();
+    if offset >= tail_offset {
+        let start = (offset - tail_offset) as usize;
+        return Ok(view.tail_slice(start..start + len).into());
+    }
+
+    if end_offset <= tail_offset {
+        return Ok(view.blob().read_at(offset, len).await?.freeze());
+    }
+
+    let blob_len = (tail_offset - offset) as usize;
+    let mut blob = view.blob().read_at(offset, blob_len).await?.freeze();
+    blob.append(view.tail_slice(0..len - blob_len));
+    Ok(blob)
+}
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.
@@ -25,6 +97,9 @@ use std::num::NonZeroUsize;
 /// resize, or otherwise mutate the blob while a [Write] exists. External mutations bypass the
 /// buffer state and [Self::sync] may use [Blob::write_at] with [WriteOptions::SYNC], which is
 /// not a durability barrier for those external mutations.
+///
+/// [`Self::view`] captures an owned read handle without flushing. Captured tip bytes are shared
+/// immutably and later tip mutations use copy-on-write.
 ///
 /// # Example
 ///
@@ -95,49 +170,22 @@ impl<B: Blob> Write<B> {
         self.buffer.size()
     }
 
-    /// Read exactly `len` immutable bytes starting at `offset`.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        // Ensure the read doesn't overflow.
-        let end_offset = offset
-            .checked_add(len as u64)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // If the data required is beyond the size of the blob, return an error.
-        if end_offset > self.buffer.size() {
-            return Err(Error::BlobInsufficientLength);
+    /// Capture an owned immutable view of the current logical bytes.
+    ///
+    /// This operation is synchronous and constant-time. It does not flush or sync the writer.
+    #[must_use]
+    pub fn view(&self) -> OwnedView<B> {
+        OwnedView {
+            blob: self.blob.clone(),
+            size: self.buffer.size(),
+            tail_offset: self.buffer.offset,
+            tail: self.buffer.slice(..),
         }
-
-        // Keep the zero-length fast path after the bounds check so offset > size still preserves
-        // the BlobInsufficientLength contract.
-        if len == 0 {
-            return Ok(IoBufs::default());
-        }
-
-        // Entirely in buffered tip.
-        if offset >= self.buffer.offset {
-            let start = (offset - self.buffer.offset) as usize;
-            let end = start + len;
-            return Ok(self.buffer.slice(start..end).into());
-        }
-
-        // Entirely in blob.
-        if end_offset <= self.buffer.offset {
-            return self.read_blob(offset, len).await;
-        }
-
-        // Overlaps blob and buffered tip.
-        let blob_len = (self.buffer.offset - offset) as usize;
-        let tip_len = len - blob_len;
-        let tip = self.buffer.slice(..tip_len);
-
-        let mut blob = self.read_blob(offset, blob_len).await?;
-        blob.append(tip);
-        Ok(blob)
     }
 
-    /// Read bytes from the underlying blob.
-    async fn read_blob(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Ok(self.blob.read_at(offset, len).await?.freeze())
+    /// Read exactly `len` immutable bytes starting at `offset`.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        read_at(self, offset, len).await
     }
 
     /// Write bytes from `buf` at `offset`.
@@ -274,5 +322,176 @@ impl<B: Blob> Write<B> {
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync_blob(&mut self) -> Result<(), Error> {
         self.sync_state.sync(&self.blob).await
+    }
+}
+
+impl<B: Blob> ReadView for Write<B> {
+    type Blob = B;
+
+    fn blob(&self) -> &Self::Blob {
+        &self.blob
+    }
+
+    fn size(&self) -> u64 {
+        self.buffer.size()
+    }
+
+    fn tail_offset(&self) -> u64 {
+        self.buffer.offset
+    }
+
+    fn tail_slice(&self, range: Range<usize>) -> IoBuf {
+        self.buffer.slice(range)
+    }
+}
+
+impl<B: Blob> ReadView for OwnedView<B> {
+    type Blob = B;
+
+    fn blob(&self) -> &Self::Blob {
+        &self.blob
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn tail_offset(&self) -> u64 {
+        self.tail_offset
+    }
+
+    fn tail_slice(&self, range: Range<usize>) -> IoBuf {
+        self.tail.slice(range)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        IoBufsMut, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
+        deterministic,
+    };
+    use commonware_utils::NZUsize;
+    use std::sync::{Arc, Weak};
+
+    /// Blob wrapper whose lifetime proves view-owned handles are released.
+    #[derive(Clone)]
+    struct TrackedBlob<B: Blob> {
+        inner: B,
+        _lifetime: Arc<()>,
+    }
+
+    impl<B: Blob> TrackedBlob<B> {
+        fn new(inner: B) -> (Self, Weak<()>) {
+            let lifetime = Arc::new(());
+            let weak = Arc::downgrade(&lifetime);
+            (
+                Self {
+                    inner,
+                    _lifetime: lifetime,
+                },
+                weak,
+            )
+        }
+    }
+
+    impl<B: Blob> Blob for TrackedBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs, options).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
+    }
+
+    #[test]
+    fn test_owned_view_freezes_buffered_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, size) = context
+                .open("test_partition", b"raw_view_tip")
+                .await
+                .unwrap();
+            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(16));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            let view = writer.view();
+            assert_eq!(view.size(), 5);
+
+            // Updating shared tip bytes and extending the writer both use copy-on-write.
+            writer.write_at(0, b"HELLO later").await.unwrap();
+            assert_eq!(
+                view.read_at(0, 5).await.unwrap().coalesce().as_ref(),
+                b"hello"
+            );
+            assert!(matches!(
+                view.read_at(0, 6).await,
+                Err(Error::BlobInsufficientLength)
+            ));
+            assert_eq!(
+                writer.read_at(0, 11).await.unwrap().coalesce().as_ref(),
+                b"HELLO later"
+            );
+        });
+    }
+
+    #[test]
+    fn test_owned_view_survives_remove_spawn_and_releases_blob() {
+        fn assert_send_static<T: Send + 'static>(_: &T) {}
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let name = b"raw_view_remove";
+            let (blob, size) = context.open("test_partition", name).await.unwrap();
+            let (blob, lifetime) = TrackedBlob::new(blob);
+            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+
+            // The first write bypasses the small buffer; the second remains in the tip.
+            writer.write_at(0, b"persisted").await.unwrap();
+            writer.write_at(9, b"-tail").await.unwrap();
+            let view = writer.view();
+            assert_send_static(&view);
+            drop(writer);
+
+            context.remove("test_partition", Some(name)).await.unwrap();
+            let read = context
+                .child("owned_view_read")
+                .spawn(move |_| async move { view.read_at(0, 14).await.unwrap().coalesce() })
+                .await
+                .unwrap();
+            assert_eq!(read.as_ref(), b"persisted-tail");
+            assert!(
+                lifetime.upgrade().is_none(),
+                "completed view task must release its blob clone"
+            );
+        });
     }
 }

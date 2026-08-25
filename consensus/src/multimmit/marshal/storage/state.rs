@@ -12,11 +12,14 @@ use crate::{
         marshal::{
             actors::catalog::{Commit, Error, metadata_blob_size},
             storage::{
-                archive::{FinalizedArchive, Shared},
+                archive::{
+                    FinalizedArchive, ReadOutcome as ArchiveReadOutcome,
+                    ReadRequest as ArchiveReadRequest, ReadStep as ArchiveReadStep, Shared,
+                },
                 blocks::{BlockMeta, FinalBlock, FinalBlockMeta, validated_reference},
                 checkpoint::{CatalogState, Checkpoint, Prune, next_lqc_index},
                 pending::{BodyReadGroup, BodyReader, PendingBlocks},
-                temporary::TemporaryArchive,
+                temporary::{ReadPlan as TemporaryReadPlan, TemporaryArchive},
             },
             types::OutputIndex,
         },
@@ -27,7 +30,7 @@ use crate::{
     },
     types::View,
 };
-use commonware_codec::{Codec, Decode, Encode, EncodeSize};
+use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::{Digestible, Hasher, bls12381::primitives::variant::Variant};
 use commonware_runtime::Handle;
 use commonware_storage::{Context, metadata::Metadata, translator::Translator};
@@ -49,6 +52,58 @@ pub(in crate::multimmit::marshal) type PendingLqc<T, E, H, V> =
     TemporaryArchive<T, E, <H as Hasher>::Digest, SharedLqc<V, H>>;
 pub(in crate::multimmit::marshal) type PendingHistory<T, E, H> =
     TemporaryArchive<T, E, <H as Hasher>::Digest, SharedHistory<H>>;
+
+pub(in crate::multimmit::marshal) type FinalBlockReadRequest<H> =
+    ArchiveReadRequest<<H as Hasher>::Digest>;
+pub(in crate::multimmit::marshal) type FinalBlockReadStep<E, H> =
+    ArchiveReadStep<E, <H as Hasher>::Digest, FinalBlockMeta<<H as Hasher>::Digest>>;
+pub(in crate::multimmit::marshal) type FinalBlockReadOutcome<H> =
+    ArchiveReadOutcome<<H as Hasher>::Digest, FinalBlockMeta<<H as Hasher>::Digest>>;
+
+/// Exact finalized step plus the pending fallback captured for one history key.
+pub(in crate::multimmit::marshal) struct HistoryRead<E: Context, H: Hasher> {
+    finalized: ArchiveReadStep<E, H::Digest, SharedHistory<H>>,
+    pending: Option<TemporaryReadPlan<E, H::Digest, SharedHistory<H>>>,
+}
+
+pub(in crate::multimmit::marshal) struct HistoryReadContinuation<E: Context, H: Hasher> {
+    finalized: ArchiveReadRequest<H::Digest>,
+    pending: Option<TemporaryReadPlan<E, H::Digest, SharedHistory<H>>>,
+}
+
+pub(in crate::multimmit::marshal) enum HistoryReadOutcome<E: Context, H: Hasher> {
+    Done(Option<Arc<TipRecord<H::Digest>>>),
+    Continue(HistoryReadContinuation<E, H>),
+}
+
+impl<E: Context, H: Hasher> HistoryRead<E, H> {
+    pub(in crate::multimmit::marshal) async fn execute(
+        self,
+    ) -> Result<HistoryReadOutcome<E, H>, Error> {
+        match self.finalized.execute().await.map_err(Error::storage)? {
+            ArchiveReadOutcome::Done(Some((_, record))) => {
+                Ok(HistoryReadOutcome::Done(Some(record.into_inner())))
+            }
+            ArchiveReadOutcome::Done(None) => {
+                let record = match self.pending {
+                    Some(plan) => plan
+                        .execute()
+                        .await
+                        .map_err(Error::storage)?
+                        .map(Shared::into_inner),
+                    None => None,
+                };
+                Ok(HistoryReadOutcome::Done(record))
+            }
+            ArchiveReadOutcome::Continue(finalized) => {
+                Ok(HistoryReadOutcome::Continue(HistoryReadContinuation {
+                    finalized,
+                    pending: self.pending,
+                }))
+            }
+        }
+    }
+}
 
 pub(in crate::multimmit::marshal) struct StoredRef<D: commonware_cryptography::Digest> {
     pub index: OutputIndex,
@@ -396,9 +451,7 @@ where
         Ok(handles)
     }
 
-    pub(in crate::multimmit::marshal) fn sealed_body_readers(
-        &self,
-    ) -> Vec<BodyReader<E, H, B>> {
+    pub(in crate::multimmit::marshal) fn sealed_body_readers(&self) -> Vec<BodyReader<E, H, B>> {
         self.pending_blocks
             .as_ref()
             .expect("catalog owns pending blocks")
@@ -547,35 +600,40 @@ where
             .map(|value| value.map(Shared::into_inner))
     }
 
-    /// Reads a bounded exact history segment from newest to oldest.
-    pub(in crate::multimmit::marshal) async fn history_segment(
+    /// Captures finalized history and its pending fallback at the same owner turn.
+    pub(in crate::multimmit::marshal) fn history_read(
         &self,
-        mut commitment: H::Digest,
-        max_items: usize,
-        max_bytes: usize,
-    ) -> Result<Vec<Arc<TipRecord<H::Digest>>>, Error> {
-        debug_assert!(max_items > 0);
-        debug_assert!(max_bytes > 0);
-        let mut records = Vec::with_capacity(max_items);
-        let mut item_bytes = 0usize;
-        while records.len() < max_items {
-            let Some(record) = self.history(commitment).await? else {
-                break;
-            };
-            let next_bytes = item_bytes.saturating_add(record.encode_size());
-            let encoded_bytes = records
-                .len()
-                .saturating_add(1)
-                .encode_size()
-                .saturating_add(next_bytes);
-            if encoded_bytes > max_bytes {
-                break;
-            }
-            commitment = record.parent();
-            item_bytes = next_bytes;
-            records.push(record);
-        }
-        Ok(records)
+        commitment: H::Digest,
+    ) -> Result<HistoryRead<E, H>, Error> {
+        let pending = self
+            .pending_history
+            .as_ref()
+            .expect("catalog owns pending history")
+            .read_plan(&commitment)
+            .map_err(Error::storage)?;
+        let finalized = self
+            .final_history
+            .as_ref()
+            .expect("catalog owns finalized history")
+            .read_step(ArchiveReadRequest::Key(commitment))
+            .map_err(Error::storage)?;
+        Ok(HistoryRead { finalized, pending })
+    }
+
+    pub(in crate::multimmit::marshal) fn continue_history_read(
+        &self,
+        continuation: HistoryReadContinuation<E, H>,
+    ) -> Result<HistoryRead<E, H>, Error> {
+        let finalized = self
+            .final_history
+            .as_ref()
+            .expect("catalog owns finalized history")
+            .read_step(continuation.finalized)
+            .map_err(Error::storage)?;
+        Ok(HistoryRead {
+            finalized,
+            pending: continuation.pending,
+        })
     }
 
     pub(in crate::multimmit::marshal) fn body_read_groups(
@@ -615,75 +673,77 @@ where
             .ok_or_else(|| Error::storage("finalized block reference is invalid"))
     }
 
-    /// Returns the exact block header without decoding its body.
-    ///
-    /// Pending custody remains authoritative until pruning; the finalized archive is the
-    /// historical fallback after custody is reclaimed.
-    pub(in crate::multimmit::marshal) async fn block_header(
+    /// Returns a header still covered by pending custody.
+    pub(in crate::multimmit::marshal) fn pending_block_header(
         &self,
         reference: BlockRef<H::Digest>,
-    ) -> Result<Option<TransactionBlockHeader<H::Digest>>, Error> {
-        if let Some(header) = self
-            .pending_blocks
+    ) -> Option<TransactionBlockHeader<H::Digest>> {
+        self.pending_blocks
             .as_ref()
             .expect("catalog owns pending blocks")
             .header(reference)
-        {
-            return Ok(Some(header));
-        }
-        if let Some(meta) = self
-            .final_blocks
-            .as_ref()
-            .expect("catalog owns finalized block metadata")
-            .get_by_key(&reference.digest())
-            .await
-            .map_err(Error::storage)?
-        {
-            return Ok(
-                (self.validated_reference(reference.digest(), meta.block())? == reference)
-                    .then(|| meta.block().header().clone()),
-            );
-        }
-        Ok(None)
     }
 
-    /// Reads a bounded exact producer-header segment from newest to oldest.
-    pub(in crate::multimmit::marshal) async fn header_segment(
+    pub(in crate::multimmit::marshal) fn final_block_by_key_read(
         &self,
-        mut reference: BlockRef<H::Digest>,
-        max_items: usize,
-        max_bytes: usize,
-    ) -> Result<Vec<TransactionBlockHeader<H::Digest>>, Error> {
-        debug_assert!(max_items > 0);
-        debug_assert!(max_bytes > 0);
-        let mut headers = Vec::with_capacity(max_items);
-        let mut item_bytes = 0usize;
-        while headers.len() < max_items {
-            let Some(header) = self.block_header(reference).await? else {
-                break;
-            };
-            let next_bytes = item_bytes.saturating_add(header.encode_size());
-            let encoded_bytes = headers
-                .len()
-                .saturating_add(1)
-                .encode_size()
-                .saturating_add(next_bytes);
-            if encoded_bytes > max_bytes {
-                break;
-            }
-            let height = reference.height().get();
-            reference = BlockRef::new(
-                reference.chain(),
-                Height::new(height.saturating_sub(1)),
-                header.parent(),
-            );
-            item_bytes = next_bytes;
-            headers.push(header);
-            if height == 1 {
-                break;
-            }
-        }
-        Ok(headers)
+        digest: H::Digest,
+    ) -> Result<FinalBlockReadStep<E, H>, Error> {
+        self.final_blocks
+            .as_ref()
+            .expect("catalog owns finalized block metadata")
+            .read_step(ArchiveReadRequest::Key(digest))
+            .map_err(Error::storage)
+    }
+
+    pub(in crate::multimmit::marshal) fn final_block_at_read(
+        &self,
+        index: u64,
+    ) -> Result<FinalBlockReadStep<E, H>, Error> {
+        self.final_blocks
+            .as_ref()
+            .expect("catalog owns finalized block metadata")
+            .read_step(ArchiveReadRequest::Index(index))
+            .map_err(Error::storage)
+    }
+
+    pub(in crate::multimmit::marshal) fn continue_final_block_read(
+        &self,
+        request: FinalBlockReadRequest<H>,
+    ) -> Result<FinalBlockReadStep<E, H>, Error> {
+        self.final_blocks
+            .as_ref()
+            .expect("catalog owns finalized block metadata")
+            .read_step(request)
+            .map_err(Error::storage)
+    }
+
+    pub(in crate::multimmit::marshal) fn finalized_block_header(
+        &self,
+        reference: BlockRef<H::Digest>,
+        value: Option<(H::Digest, FinalBlockMeta<H::Digest>)>,
+    ) -> Result<Option<TransactionBlockHeader<H::Digest>>, Error> {
+        let Some((digest, meta)) = value else {
+            return Ok(None);
+        };
+        Ok(
+            (self.validated_reference(digest, meta.block())? == reference)
+                .then(|| meta.block().header().clone()),
+        )
+    }
+
+    pub(in crate::multimmit::marshal) fn stored_ref(
+        &self,
+        index: u64,
+        value: Option<(H::Digest, FinalBlockMeta<H::Digest>)>,
+    ) -> Result<StoredRef<H::Digest>, Error> {
+        let (digest, meta) =
+            value.ok_or_else(|| Error::storage("committed output row is missing"))?;
+        Ok(StoredRef {
+            index: OutputIndex::new(index),
+            reference: self.validated_reference(digest, meta.block())?,
+            encoded_len: meta.block().encoded_len(),
+            generation: meta.generation(),
+        })
     }
 
     /// Returns exact custody metadata without decoding the block body.
@@ -716,51 +776,6 @@ where
             );
         }
         Ok(None)
-    }
-
-    /// Reads a dense compact output prefix without materializing any block body.
-    pub(in crate::multimmit::marshal) async fn output_refs(
-        &self,
-        start: OutputIndex,
-        max_items: usize,
-        max_bytes: usize,
-    ) -> Result<Vec<StoredRef<H::Digest>>, Error> {
-        debug_assert!(max_items > 0);
-        debug_assert!(max_bytes > 0);
-        let max_bytes = u64::try_from(max_bytes).unwrap_or(u64::MAX);
-        let mut outputs = Vec::with_capacity(max_items);
-        let mut encoded_bytes = 0u64;
-        for offset in 0..max_items {
-            let offset = u64::try_from(offset)
-                .map_err(|_| Error::Invalid("output batch offset exceeds u64"))?;
-            let index = start
-                .get()
-                .checked_add(offset)
-                .ok_or(Error::Invalid("output index overflow"))?;
-            let (digest, meta) = self
-                .final_blocks
-                .as_ref()
-                .expect("catalog owns finalized block metadata")
-                .get_at(index)
-                .await
-                .map_err(Error::storage)?
-                .ok_or_else(|| Error::storage("committed output row is missing"))?;
-            if !outputs.is_empty()
-                && encoded_bytes
-                    .checked_add(meta.block().encoded_len())
-                    .is_none_or(|total| total > max_bytes)
-            {
-                break;
-            }
-            encoded_bytes = encoded_bytes.saturating_add(meta.block().encoded_len());
-            outputs.push(StoredRef {
-                index: OutputIndex::new(index),
-                reference: self.validated_reference(digest, meta.block())?,
-                encoded_len: meta.block().encoded_len(),
-                generation: meta.generation(),
-            });
-        }
-        Ok(outputs)
     }
 
     /// Reclaims immutable-mode temporary bodies covered by a durable promotion cursor.

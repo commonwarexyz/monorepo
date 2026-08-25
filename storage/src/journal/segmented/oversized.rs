@@ -53,12 +53,15 @@
 //! still verified lazily at read.
 
 use super::{
-    fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
-    glob::{Config as GlobConfig, Glob},
+    fixed::{
+        Config as FixedConfig, Journal as FixedJournal, Reader as FixedReader,
+        Replay as FixedReplay,
+    },
+    glob::{Config as GlobConfig, Glob, Reader as GlobReader},
 };
 use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{Error as RError, Handle};
+use commonware_runtime::{Blob, Error as RError, Handle};
 use futures::future::try_join;
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
@@ -100,6 +103,24 @@ pub struct Config<C> {
 
     /// Codec configuration for values.
     pub codec_config: C,
+}
+
+/// Owned reader for one oversized journal section at a captured logical cut.
+pub(crate) struct Reader<B: Blob, I: Record, V: Codec> {
+    index: FixedReader<B, I>,
+    values: GlobReader<B, V>,
+}
+
+impl<B: Blob, I: Record + Send + Sync, V: CodecShared> Reader<B, I, V> {
+    /// Read an index entry by its section-local position.
+    pub(crate) async fn get(&self, position: u64) -> Result<I, Error> {
+        self.index.get(position).await
+    }
+
+    /// Read a value using the location stored in its index entry.
+    pub(crate) async fn get_value(&self, offset: u64, size: u32) -> Result<V, Error> {
+        self.values.get(offset, size).await
+    }
 }
 
 /// Segmented journal for entries with oversized values.
@@ -447,6 +468,17 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Ok((self, position, offset, size))
     }
 
+    /// Capture owned readers for one exact existing index/value section pair.
+    ///
+    /// Capture is synchronous and constant-time. Both readers retain the current logical cut and
+    /// remain readable if the live journal later prunes the section.
+    pub(crate) fn reader(&self, section: u64) -> Result<Reader<E::Blob, I, V>, Error> {
+        Ok(Reader {
+            index: self.index.reader(section)?,
+            values: self.values.reader(section)?,
+        })
+    }
+
     /// Get entry at position (index entry only, not value).
     pub async fn get(&self, section: u64, position: u64) -> Result<I, Error> {
         self.index.get(section, position).await
@@ -700,8 +732,8 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, Buf, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
-        buffer::paged::CacheRef, deterministic, mocks::SyncFaultContext,
+        Buf, BufMut, BufferPooler, Runner, Spawner as _, Storage as _, Supervisor as _,
+        WriteOptions, buffer::paged::CacheRef, deterministic, mocks::SyncFaultContext,
     };
     use commonware_utils::{NZU16, NZUsize};
 
@@ -815,6 +847,74 @@ mod tests {
             assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_selected_section_reader_excludes_appends_and_survives_prune() {
+        fn assert_send_static<T: Send + 'static>(_: &T) {}
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("storage"), cfg, None)
+                    .await
+                    .expect("failed to init");
+
+            let old_value = [1u8; 16];
+            let old_offset;
+            let old_size;
+            (oversized, _, old_offset, old_size) = oversized
+                .append(1, TestEntry::new(1, 0, 0), &old_value)
+                .await
+                .unwrap();
+            (oversized, _, _, _) = oversized
+                .append(2, TestEntry::new(2, 0, 0), &[2u8; 16])
+                .await
+                .unwrap();
+            oversized = oversized.sync(1).await.unwrap();
+
+            let reader = oversized.reader(1).expect("section must exist");
+            assert_send_static(&reader);
+            assert!(matches!(
+                oversized.reader(3),
+                Err(Error::SectionOutOfRange(3))
+            ));
+
+            let later_offset;
+            let later_size;
+            (oversized, _, later_offset, later_size) = oversized
+                .append(1, TestEntry::new(3, 0, 0), &[3u8; 16])
+                .await
+                .unwrap();
+            assert!(matches!(reader.get(1).await, Err(Error::ItemOutOfRange(1))));
+            assert!(matches!(
+                reader.get_value(later_offset, later_size).await,
+                Err(Error::Runtime(RError::BlobInsufficientLength))
+            ));
+
+            let (oversized, pruned) = oversized.prune(2).await.unwrap();
+            assert!(pruned);
+            assert!(matches!(
+                oversized.reader(1),
+                Err(Error::AlreadyPrunedToSection(2))
+            ));
+
+            let (entry, value) = context
+                .child("reader")
+                .spawn(move |_| async move {
+                    (
+                        reader.get(0).await.unwrap(),
+                        reader.get_value(old_offset, old_size).await.unwrap(),
+                    )
+                })
+                .await
+                .unwrap();
+            assert_eq!(entry.id, 1);
+            assert_eq!(value, old_value);
+
+            oversized.destroy().await.unwrap();
         });
     }
 
