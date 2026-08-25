@@ -1135,6 +1135,17 @@ mod tests {
     }
 
     #[test]
+    fn test_unsolicited_ecanceled_remains_an_error() {
+        assert!(matches!(
+            CqeResult::from_raw(
+                -libc::ECANCELED,
+                WaiterState::Active { target_tick: None }
+            ),
+            CqeResult::Error(code) if code == -libc::ECANCELED
+        ));
+    }
+
+    #[test]
     fn test_request_deadline_helpers_and_invariants() {
         // Verify deadline helpers only report deadlines for network requests and
         // that invalid low-level request shapes still fail before reaching the kernel.

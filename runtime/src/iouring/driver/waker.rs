@@ -689,6 +689,22 @@ pub mod tests {
         assert_eq!(state_bits(&waker), 0);
     }
 
+    #[cfg(not(feature = "loom"))]
+    #[test]
+    fn test_futex_wait_rejects_changed_state_before_syscall() {
+        let waker = Waker::new().expect("eventfd creation should succeed");
+        waker
+            .inner
+            .state
+            .store(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
+
+        waker.wake();
+        assert!(!waker.futex_wait(WAITING_ON_FUTEX_BIT));
+
+        waker.clear_wait();
+        assert_eq!(state_bits(&waker), 0);
+    }
+
     #[test]
     fn test_arm_after_sticky_wake_skips_blocking() {
         // Verify a wake latched before arming makes the next blocking section
@@ -1064,5 +1080,4 @@ mod loom_tests {
             assert_eq!(eventfd_count(&waker), 0);
         });
     }
-
 }

@@ -1075,8 +1075,7 @@ pub(crate) mod testing {
             };
             // Mirror the runtime's teardown: a waker panic must not skip the
             // drain (drain panics abort inside [Driver::drain]).
-            let wakers =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.close()));
+            let wakers = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.close()));
             driver.drain();
             if let Err(payload) = wakers {
                 std::panic::resume_unwind(payload);
@@ -3256,6 +3255,230 @@ mod tests {
 
         drop(recv_a);
         drop(recv_b);
+    }
+
+    #[test]
+    fn test_fill_retries_wake_rearm_when_sq_is_full() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let (left, _right) = UnixStream::pair().unwrap();
+
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+
+        // Stage the op directly so the initial wake rearm still needs the
+        // single SQ slot.
+        let driver_state = harness.handle.clone();
+        let driver = harness.driver();
+        driver_state.with(|ops| {
+            let mut submission_queue = driver.ring.submission();
+            assert!(!driver.inner.stage_backlog(ops, &mut submission_queue));
+            assert!(submission_queue.is_full());
+        });
+
+        let fill =
+            driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
+        assert!(driver.inner.wake_rearm_needed);
+
+        driver.inner.submit(&mut driver.ring).unwrap();
+        let fill =
+            driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        assert_eq!(fill, FillResult::AtWaiterCapacity);
+        assert!(!driver.inner.wake_rearm_needed);
+
+        drop(recv);
+    }
+
+    #[test]
+    fn test_fill_reports_exact_sq_saturation() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 2,
+            ..Default::default()
+        });
+        let (left, _right) = UnixStream::pair().unwrap();
+
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+
+        // The wake poll and one op exactly fill the SQ without exhausting the
+        // waiter table or leaving more work queued.
+        let driver_state = harness.handle.clone();
+        let driver = harness.driver();
+        let fill = driver_state.with(|ops| {
+            let fill = driver.inner.fill_submission_queue(ops, &mut driver.ring);
+            assert!(ops.backlog.is_empty());
+            assert!(!ops.waiters.is_full());
+            fill
+        });
+        assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
+
+        drop(recv);
+    }
+
+    #[test]
+    fn test_cancel_staging_batches_across_sq_submissions() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 2,
+            ..Default::default()
+        });
+        let (left_a, _right_a) = UnixStream::pair().unwrap();
+        let (left_b, _right_b) = UnixStream::pair().unwrap();
+
+        let handle = harness.handle.clone();
+        let mut recvs = vec![
+            Box::pin(handle.recv(
+                Arc::new(left_a.into()),
+                IoBufMut::with_capacity(1),
+                0,
+                1,
+                false,
+                Instant::now() + Duration::from_secs(60),
+            )),
+            Box::pin(handle.recv(
+                Arc::new(left_b.into()),
+                IoBufMut::with_capacity(1),
+                0,
+                1,
+                false,
+                Instant::now() + Duration::from_secs(60),
+            )),
+        ];
+        for recv in &mut recvs {
+            assert!(poll_once(&harness, recv).is_pending());
+        }
+
+        // Submit the ops without consuming the initial wake-poll slot. The
+        // next fill has room for only one of the two queued cancellations.
+        let driver_state = harness.handle.clone();
+        let driver = harness.driver();
+        driver_state.with(|ops| {
+            let mut submission_queue = driver.ring.submission();
+            assert!(!driver.inner.stage_backlog(ops, &mut submission_queue));
+            assert!(submission_queue.is_full());
+        });
+        driver.inner.submit(&mut driver.ring).unwrap();
+        driver_state.with(|ops| driver.inner.cancel_all(ops));
+
+        let fill =
+            driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
+        driver_state.with(|ops| assert_eq!(ops.pending_cancels.len(), 1));
+
+        driver.inner.submit(&mut driver.ring).unwrap();
+        let fill =
+            driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        assert_eq!(fill, FillResult::AtWaiterCapacity);
+        driver_state.with(|ops| assert!(ops.pending_cancels.is_empty()));
+        driver.inner.submit(&mut driver.ring).unwrap();
+
+        let results = harness.block_on(futures::future::join_all(recvs));
+        for result in results {
+            assert!(matches!(result, Err((_, Error::Closed))));
+        }
+    }
+
+    #[test]
+    fn test_cancel_all_retires_local_ticket_without_cancel_sqe() {
+        let mut harness = TestLoop::new(RingConfig::default());
+        let (left, _right) = UnixStream::pair().unwrap();
+        let file = File::from(OwnedFd::from(left));
+
+        let handle = harness.handle.clone();
+        let mut admission = Box::pin(handle.start_sync(Arc::new(file)));
+        let Poll::Ready(mut ticket) = poll_once(&harness, &mut admission) else {
+            panic!("sync admission should not wait for capacity");
+        };
+
+        let driver_state = harness.handle.clone();
+        let driver = harness.driver();
+        driver_state.with(|ops| {
+            driver.inner.cancel_all(ops);
+            assert!(ops.pending_cancels.is_empty());
+
+            let mut submission_queue = driver.ring.submission();
+            assert!(!driver.inner.stage_backlog(ops, &mut submission_queue));
+            assert!(submission_queue.is_empty());
+        });
+
+        assert!(matches!(
+            poll_once(&harness, &mut ticket),
+            Poll::Ready(Err(Error::Closed))
+        ));
+        assert_eq!(harness.tracked(), 0);
+    }
+
+    #[test]
+    fn test_cancel_staging_skips_op_retired_by_original_completion() {
+        let mut harness = TestLoop::new(RingConfig::default());
+        let (left, _right) = UnixStream::pair().unwrap();
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+
+        let driver_state = harness.handle.clone();
+        let driver = harness.driver();
+        let waker = driver_state.with(|ops| {
+            let waiter_id = ops.backlog.pop_front().expect("recv should be queued");
+            assert!(matches!(
+                ops.waiters.stage(waiter_id),
+                StageOutcome::Submit(_)
+            ));
+            driver.inner.cancel_all(ops);
+            assert_eq!(ops.pending_cancels.front(), Some(&waiter_id));
+
+            let CompletionOutcome::Complete {
+                waker,
+                target_tick,
+                freed: false,
+            } = ops.waiters.on_completion(waiter_id.user_data(), 0)
+            else {
+                panic!("original completion did not retire cancelled recv");
+            };
+            if let Some(tick) = target_tick {
+                driver.inner.timeout_wheel.remove(tick);
+            }
+
+            let mut submission_queue = driver.ring.submission();
+            assert!(!driver
+                .inner
+                .stage_cancellations(ops, &mut submission_queue));
+            assert!(ops.pending_cancels.is_empty());
+            assert!(submission_queue.is_empty());
+            waker
+        });
+        waker.expect("recv waker missing").wake();
+
+        assert!(matches!(
+            poll_once(&harness, &mut recv),
+            Poll::Ready(Err((_, Error::RecvFailed)))
+        ));
+        assert_eq!(harness.tracked(), 0);
     }
 
     #[test]
