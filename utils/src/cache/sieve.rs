@@ -85,14 +85,19 @@ impl Sieve {
     #[inline]
     fn push(&mut self, slot: Slot) {
         let old_head = self.head;
+
+        // The incoming resident becomes newest. Its older neighbor is the
+        // former head, while it has no newer predecessor.
         self.slots[slot] = ResidentSlot {
             previous: UNLINKED,
             next: old_head.unwrap_or(UNLINKED),
         };
 
         if let Some(head) = old_head {
+            // Repair the former head's link toward the new resident.
             self.slots[head].previous = slot;
         } else {
+            // The first resident is both the newest and oldest entry.
             self.tail = Some(slot);
         }
         self.head = Some(slot);
@@ -103,14 +108,21 @@ impl Sieve {
     fn unlink(&mut self, slot: Slot) {
         let ResidentSlot { previous, next } = self.slots[slot];
 
+        // `previous` points toward the newer head. If the removed resident is
+        // the next candidate, continue the current pass in that direction.
         if self.hand == Some(slot) {
             self.hand = linked(previous);
         }
+
+        // Splice the resident out while repairing either its newer neighbor or
+        // the head endpoint.
         if previous != UNLINKED {
             self.slots[previous].next = next;
         } else {
             self.head = linked(next);
         }
+
+        // Repair the older neighbor or the tail endpoint on the other side.
         if next != UNLINKED {
             self.slots[next].previous = previous;
         } else {
@@ -162,6 +174,9 @@ impl<K> Policy<K> for Sieve {
         C: FnOnce(Option<Slot>) -> Claimed<K>,
     {
         if has_vacancy {
+            // Vacant capacity joins the head without disturbing an existing
+            // hand. Starting unvisited makes one-hit entries immediately
+            // eligible when the hand reaches them.
             let Claimed::Vacant(slot) = claim(None) else {
                 unreachable!("vacancy claim returned an eviction");
             };
@@ -169,6 +184,9 @@ impl<K> Policy<K> for Sieve {
             return (slot, AtomicBool::new(false));
         }
 
+        // Continue the current pass at the saved hand. A missing hand denotes
+        // the first pass or a completed pass, both of which restart at the
+        // oldest resident.
         let mut victim = self
             .hand
             .or(self.tail)
@@ -183,12 +201,19 @@ impl<K> Policy<K> for Sieve {
             // A visited resident survives in place. Clearing its bit gives the
             // next pass fresh evidence about whether it remains popular.
             visited.store(false, Ordering::Relaxed);
+
+            // Walk toward the newer head. Moving past it completes one pass
+            // and wraps back to the oldest tail.
             victim = linked(self.slots[victim].previous)
                 .or(self.tail)
                 .expect("a full SIEVE cache must have a queue tail");
         }
 
+        // Save the next hand before unlinking overwrites the victim's links.
         let next_hand = linked(self.slots[victim].previous);
+
+        // Let the cache transfer the victim's key before policy metadata
+        // reuses the same stable slot for the incoming resident.
         let Claimed::Evicted(_) = claim(Some(victim)) else {
             unreachable!("victim claim returned vacant capacity");
         };
@@ -197,6 +222,9 @@ impl<K> Policy<K> for Sieve {
         // neighbor. A missing neighbor restarts the following pass at the tail.
         self.hand = next_hand;
         self.unlink(victim);
+
+        // SIEVE keeps survivors stationary, but the incoming resident always
+        // reuses the victim's stable slot at the queue head.
         self.push(victim);
         (victim, AtomicBool::new(false))
     }
@@ -210,6 +238,8 @@ impl<K> Policy<K> for Sieve {
 
     #[inline]
     fn clear(&mut self) {
+        // Keep the fixed link arena allocated while returning every slot and
+        // endpoint to the empty-policy state.
         self.slots.fill(ResidentSlot::default());
         self.head = None;
         self.tail = None;
