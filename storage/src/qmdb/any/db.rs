@@ -35,40 +35,7 @@ type ShardReads<T> = (Vec<Option<T>>, Vec<(usize, u64)>);
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
 
-/// Aborts a spawned init task if dropped before being joined, so cancelling an init future
-/// (e.g. via a timeout) cannot leave the task running and retaining its log clone.
-struct AbortOnDrop<T: Send + 'static>(Option<Handle<T>>);
-
-impl<T: Send + 'static> AbortOnDrop<T> {
-    const fn new(handle: Handle<T>) -> Self {
-        Self(Some(handle))
-    }
-
-    /// Abort the task, then join it.
-    async fn abort(mut self) {
-        let handle = self.0.take().expect("handle joined once");
-        handle.abort();
-        let _ = handle.await;
-    }
-
-    /// Join the task.
-    async fn join(mut self) -> Result<T, commonware_runtime::Error> {
-        // Poll the handle by reference: the guard must keep owning it so dropping this
-        // future mid-join still aborts the task.
-        let handle = self.0.as_mut().expect("handle joined once");
-        let result = handle.await;
-        self.0 = None;
-        result
-    }
-}
-
-impl<T: Send + 'static> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.0 {
-            handle.abort();
-        }
-    }
-}
+pub(crate) use crate::qmdb::AbortOnDrop;
 
 /// Snapshot mutation needed to undo one operation while rewinding.
 enum SnapshotUndo<F: Family, K> {
