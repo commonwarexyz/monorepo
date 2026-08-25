@@ -69,7 +69,7 @@ harness = false
 path = "benches/multimmit/bench.rs"
 
 [features]
-test-utils = []
+test-utils = ["mocks"]
 mocks = [
 	"commonware-cryptography/mocks",
 	"commonware-p2p/mocks",
