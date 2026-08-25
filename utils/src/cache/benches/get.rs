@@ -1,4 +1,4 @@
-use commonware_utils::{TestRng, cache::Clock};
+use commonware_utils::{TestRng, cache::Cache};
 use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 use std::{hint::black_box, num::NonZeroUsize};
@@ -6,7 +6,7 @@ use std::{hint::black_box, num::NonZeroUsize};
 /// Benchmarks the cache-hit read path: a full cache, all lookups present.
 fn bench_get(c: &mut Criterion) {
     for capacity in [1usize << 10, 1 << 14, 1 << 18] {
-        let mut cache: Clock<u64, u64> = Clock::new(NonZeroUsize::new(capacity).unwrap());
+        let mut cache: Cache<u64, u64> = Cache::new(NonZeroUsize::new(capacity).unwrap());
         for i in 0..capacity as u64 {
             cache.put(i, i);
         }
