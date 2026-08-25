@@ -57,9 +57,11 @@
 //! deliberate trade: thread affinity is what lets the op path run without locks. Move
 //! plain data between workers and open resources on the worker that uses them.
 //!
-//! Everything else crosses workers freely: task handles, contexts (spawning,
-//! sleeping, stopping), channels, and *dropping* a ring-bound resource (foreign
-//! drops are routed back to the owning worker's loop and released there).
+//! Task handles, contexts (spawning, sleeping, stopping), and channels may cross
+//! workers. Ring-bound resource values may also be dropped on another worker.
+//! Pending operation and ticket state is routed back to its owner so kernel
+//! resources remain alive until completion. An idle resource's descriptor may
+//! instead close on the thread that drops its final owner.
 //!
 //! # Architecture
 //!

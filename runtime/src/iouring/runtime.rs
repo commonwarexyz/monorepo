@@ -9,6 +9,24 @@
 //! the thread parks via [Driver::park] until a completion arrives, a timer
 //! fires, a producer enqueues work, or another thread wakes a task.
 //!
+//! The owner thread repeats this scheduling cycle:
+//!
+//! ```text
+//! normal ready FIFO ----\
+//!                        +--> bounded task batch --> root poll
+//! event ready FIFO  ----/                             |
+//!                                                    v
+//!                                      driver turn + due sleepers
+//!                                                    |
+//!                               ready work ----------+-- no work --> park
+//! ```
+//!
+//! Driver completions and due sleepers enter the event FIFO. Other wakes enter
+//! the normal FIFO. Each turn admits at most [`READY_TASKS_PER_TURN`] task
+//! tokens, with at most [`EVENT_READY_TASKS_PER_TURN`] of the initial snapshot
+//! reserved for event work. Either lane may use capacity the other lane leaves
+//! idle, and the root and driver still receive a service point after the batch.
+//!
 //! Ordinary tasks run inline on the executor thread. Tasks spawned with
 //! [crate::Spawner::dedicated] or [crate::Spawner::shared] with
 //! `blocking == true` run as the root of a [Worker] on their own thread with
