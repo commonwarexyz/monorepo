@@ -136,10 +136,9 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]):
-    /// `()` for index types that build serially, and the number of build tasks for index types
-    /// that build in parallel: the init task plus the decode and insert tasks it coordinates
-    /// (`1` builds entirely on the init task).
+    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
+    /// for index types that build serially, and the number of build tasks for index types that
+    /// build in parallel. A value of `1` builds the index entirely on the init task.
     pub init_concurrency: B,
 }
 
