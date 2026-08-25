@@ -97,11 +97,12 @@ Multimmit has five cargo-fuzz targets:
   every accepted frame to re-encode canonically.
 - `multimmit_batcher` exercises the production batcher's bounded per-plane lanes and scheduling.
 - `multimmit_engine_minpk` and `multimmit_engine_minsig` share one byte-driven harness over six
-  production engines. At most sixteen actions schedule bounded reloads and simulated-network
-  outages around a committee-wide same-storage reopen. A final lossless suffix requires every
-  engine and producer chain to advance while an independent reporter oracle checks output prefixes,
-  height monotonicity, stable signing subjects, observed certificate-share quorums, and configured
-  state ceilings. Each campaign has a deterministic one-minute runtime deadline.
+  production engines. At most sixteen actions schedule bounded reloads and persistent,
+  independently healable simulated-network faults around a committee-wide same-storage reopen. A
+  final lossless suffix requires every engine and producer chain to advance while an independent
+  reporter oracle checks output prefixes, height monotonicity, stable signing subjects, observed
+  certificate-share quorums, and configured state ceilings. Each campaign has a deterministic
+  one-minute runtime deadline.
 
 Run a bounded local campaign from the workspace root with:
 

@@ -29,7 +29,7 @@ const NODES: usize = 6;
 const SEED_BYTES: usize = std::mem::size_of::<u64>();
 const MAX_ACTIONS: usize = 16;
 const MAX_INPUT_BYTES: usize = SEED_BYTES + MAX_ACTIONS;
-const ACTION_KINDS: usize = 4;
+const ACTION_KINDS: usize = 5;
 const ACTION_TICK: Duration = Duration::from_millis(50);
 const RELOAD_DELAY: Duration = Duration::from_millis(20);
 const FINAL_TICKS: usize = 400;
@@ -82,6 +82,7 @@ enum ActionKind {
     Reload,
     Disconnect,
     Degrade,
+    Heal,
     Tick,
 }
 
@@ -93,9 +94,40 @@ fn decode_action(byte: u8) -> (usize, ActionKind) {
         1 => ActionKind::Disconnect,
         2 => ActionKind::Degrade,
         3 => ActionKind::Tick,
+        4 => ActionKind::Heal,
         _ => unreachable!("action kind is reduced modulo {ACTION_KINDS}"),
     };
     (node, kind)
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum NetworkState {
+    #[default]
+    Healthy,
+    Degraded,
+    Disconnected,
+}
+
+impl NetworkState {
+    const fn link(self) -> Link {
+        match self {
+            Self::Healthy => Link {
+                latency: Duration::from_millis(2),
+                jitter: Duration::from_millis(5),
+                success_rate: 1.0,
+            },
+            Self::Degraded => Link {
+                latency: Duration::from_millis(25),
+                jitter: Duration::from_millis(5),
+                success_rate: 0.5,
+            },
+            Self::Disconnected => Link {
+                latency: Duration::from_millis(2),
+                jitter: Duration::from_millis(5),
+                success_rate: 0.0,
+            },
+        }
+    }
 }
 
 fn signer_tally_is_valid(
@@ -158,6 +190,7 @@ struct Harness<V: Variant> {
     generations: Vec<usize>,
     state: Invariants,
     resources: ResourceLimits,
+    network: [NetworkState; NODES],
     seed: u64,
 }
 
@@ -185,6 +218,7 @@ impl<V: Variant> Harness<V> {
             generations: vec![0; NODES],
             state,
             resources,
+            network: [NetworkState::Healthy; NODES],
             seed,
         }
     }
@@ -317,54 +351,47 @@ impl<V: Variant> Harness<V> {
         match kind {
             ActionKind::Reload => self.reload(node).await,
             ActionKind::Disconnect => {
-                self.set_node_links(node, 0.0, Duration::from_millis(2))
+                self.set_node_network(node, NetworkState::Disconnected)
                     .await;
-                self.context.sleep(ACTION_TICK).await;
-                self.heal_node(node).await;
             }
             ActionKind::Degrade => {
-                self.set_node_links(node, 0.5, Duration::from_millis(25))
-                    .await;
-                self.context.sleep(ACTION_TICK).await;
-                self.heal_node(node).await;
+                self.set_node_network(node, NetworkState::Degraded).await;
             }
+            ActionKind::Heal => self.set_node_network(node, NetworkState::Healthy).await,
             ActionKind::Tick => self.context.sleep(ACTION_TICK).await,
         }
         self.observe().await;
     }
 
-    async fn set_node_links(&self, node: usize, success_rate: f64, latency: Duration) {
-        let target = &self.committee.identities[node];
-        for peer in &self.committee.identities {
-            if peer == target {
+    async fn set_node_network(&mut self, node: usize, state: NetworkState) {
+        self.network[node] = state;
+        for peer in 0..NODES {
+            if peer == node {
                 continue;
             }
-            for (from, to) in [(target, peer), (peer, target)] {
-                let _ = self.oracle.remove_link(from.clone(), to.clone()).await;
-                self.oracle
-                    .add_link(
-                        from.clone(),
-                        to.clone(),
-                        Link {
-                            latency,
-                            jitter: Duration::from_millis(5),
-                            success_rate,
-                        },
-                    )
-                    .await
-                    .expect("replacement link installs");
-            }
+            self.set_link(node, peer, self.network[node].max(self.network[peer]))
+                .await;
         }
     }
 
-    async fn heal_node(&self, node: usize) {
-        self.set_node_links(node, 1.0, Duration::from_millis(2))
-            .await;
+    async fn set_link(&self, left: usize, right: usize, state: NetworkState) {
+        let left = &self.committee.identities[left];
+        let right = &self.committee.identities[right];
+        for (from, to) in [(left, right), (right, left)] {
+            let _ = self.oracle.remove_link(from.clone(), to.clone()).await;
+            self.oracle
+                .add_link(from.clone(), to.clone(), state.link())
+                .await
+                .expect("replacement link installs");
+        }
     }
 
-    async fn heal_all(&self) {
-        for node in 0..NODES {
-            self.heal_node(node).await;
+    async fn heal_all(&mut self) {
+        self.network.fill(NetworkState::Healthy);
+        for left in 0..NODES {
+            for right in left + 1..NODES {
+                self.set_link(left, right, NetworkState::Healthy).await;
+            }
         }
     }
 
@@ -860,11 +887,24 @@ mod tests {
                 ActionKind::Reload,
                 ActionKind::Disconnect,
                 ActionKind::Degrade,
+                ActionKind::Heal,
                 ActionKind::Tick,
             ] {
                 assert!(decoded.contains(&(node, kind)));
             }
         }
+    }
+
+    #[test]
+    fn network_faults_compose_by_strongest_endpoint() {
+        assert_eq!(
+            NetworkState::Disconnected.max(NetworkState::Degraded),
+            NetworkState::Disconnected
+        );
+        assert_eq!(
+            NetworkState::Healthy.max(NetworkState::Degraded),
+            NetworkState::Degraded
+        );
     }
 
     #[test]
