@@ -241,6 +241,7 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+        self.handle.assert_owner();
         // Create the listening socket inline: socket setup, bind, and listen
         // are cheap non-blocking syscalls.
         let fd = new_socket(&socket).map_err(|_| Error::BindFailed)?;
@@ -388,6 +389,7 @@ impl crate::Listener for Listener {
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.handle.assert_owner();
         Ok(self.local_addr)
     }
 }
@@ -650,6 +652,7 @@ impl crate::Stream for Stream {
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
+        self.handle.assert_owner();
         let buffered = self.buffer_len - self.buffer_pos;
         let len = std::cmp::min(buffered, max_len);
         &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len]

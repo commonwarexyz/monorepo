@@ -131,6 +131,7 @@ impl crate::Storage for Storage {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Blob, u64, u16), Error> {
+        self.io_handle.assert_owner();
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock

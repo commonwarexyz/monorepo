@@ -1840,6 +1840,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(storage_directory);
     }
 
+    /// Context-backed resource constructors retain their origin worker's
+    /// ring. Moving a context to another worker must reject construction
+    /// before creating storage or observing a bind result.
+    #[test]
+    fn test_resource_construction_with_moved_context_panics_before_side_effects() {
+        let cfg = Config::default().with_catch_panics(true);
+        let storage_directory = cfg.storage_directory().clone();
+        let test_storage_directory = storage_directory.clone();
+
+        Runner::new(cfg).start(|context| async move {
+            let storage_context = context.child("foreign_storage_context");
+            let storage =
+                context
+                    .child("foreign_storage_worker")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        let _ = storage_context.open("partition", b"blob").await;
+                    });
+            assert!(matches!(storage.await, Err(Error::Exited)));
+            assert!(
+                !test_storage_directory.exists(),
+                "foreign open created the storage directory"
+            );
+
+            let occupied = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let occupied_addr = occupied.local_addr().unwrap();
+            let network_context = context.child("foreign_network_context");
+            let network =
+                context
+                    .child("foreign_network_worker")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        let _ = network_context.bind(occupied_addr).await;
+                    });
+            assert!(
+                matches!(network.await, Err(Error::Exited)),
+                "foreign bind returned the kernel error before checking affinity"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    /// Cached listener and stream accessors are still worker-affine. A
+    /// foreign worker must not read a cached address or buffered bytes.
+    #[test]
+    fn test_cached_network_accessors_on_other_worker_panic() {
+        let cfg = Config::default().with_catch_panics(true);
+        Runner::new(cfg).start(|context| async move {
+            let listener = context
+                .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .await
+                .unwrap();
+            let local_addr =
+                context
+                    .child("foreign_local_addr")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        let _ = listener.local_addr();
+                    });
+            assert!(
+                matches!(local_addr.await, Err(Error::Exited)),
+                "foreign local_addr returned cached data"
+            );
+
+            let mut listener = context
+                .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (mut client_sink, _client_stream) = context.dial(addr).await.unwrap();
+            let (_, _server_sink, mut server_stream) = listener.accept().await.unwrap();
+
+            client_sink.send(IoBuf::from(b"buffered")).await.unwrap();
+            let first = server_stream.recv(1).await.unwrap();
+            assert_eq!(first.coalesce(), b"b");
+            assert_eq!(server_stream.peek(7), b"uffered");
+
+            let peek =
+                context
+                    .child("foreign_buffered_peek")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        let _ = server_stream.peek(7);
+                    });
+            assert!(
+                matches!(peek.await, Err(Error::Exited)),
+                "foreign peek returned buffered data"
+            );
+        });
+    }
+
     /// Using a ring-bound resource from another worker fails loudly with the
     /// documented affinity panic (the task fails, the runtime survives): the
     /// io_uring runtime deliberately does not provide the tokio backend's
