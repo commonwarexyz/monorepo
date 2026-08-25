@@ -75,7 +75,6 @@
 //! generations currently assigned to at least one database, so memory usage
 //! is bounded by the number of databases regardless of how long sync runs.
 
-use commonware_codec::Encode;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Roundable, Viewable,
     types::{Height, Round},
@@ -83,7 +82,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
+use commonware_storage::qmdb::sync::{FeedbackTx, Request, Response, Source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -109,6 +108,7 @@ pub mod current;
 pub mod immutable;
 pub mod keyless;
 pub mod p2p;
+pub mod qmdb;
 
 /// A database shared across tasks.
 ///
@@ -1685,125 +1685,6 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         }
         self.dbs[idx] = DbSyncState::Reached { generation };
     }
-}
-
-/// Sync a database that durably persists an operation log.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn sync_standard_db<E, DB, S>(
-    context: E,
-    config: DB::Config,
-    source: S,
-    target: sync::Target<DB::Family, DB::Digest>,
-    tip_updates: mpsc::Receiver<sync::Target<DB::Family, DB::Digest>>,
-    finish: Option<mpsc::Receiver<()>>,
-    reached_target: Option<mpsc::Sender<sync::Target<DB::Family, DB::Digest>>>,
-    sync_config: SyncEngineConfig,
-) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
-where
-    DB: sync::Database<Context = E>,
-    DB::Op: Encode,
-    S: sync::SourceFor<DB>,
-{
-    sync::sync(sync::engine::Config {
-        context,
-        source,
-        target,
-        max_outstanding_requests: sync_config.max_outstanding_requests,
-        fetch_batch_size: sync_config.fetch_batch_size,
-        apply_batch_size: sync_config.apply_batch_size,
-        db_config: config,
-        update_rx: Some(tip_updates),
-        finish_rx: finish,
-        reached_target_tx: reached_target,
-        max_retained_roots: sync_config.max_retained_roots,
-    })
-    .await
-}
-
-/// Aborts an adapter task when its owning sync future completes or is cancelled.
-struct Forwarder(Handle<()>);
-
-impl Drop for Forwarder {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Sync a database that does not durably persist an operation log.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn sync_compact_db<E, DB, S>(
-    context: E,
-    config: DB::Config,
-    source: S,
-    target: sync::CompactTarget<DB::Family, DB::Digest>,
-    mut tip_updates: mpsc::Receiver<sync::CompactTarget<DB::Family, DB::Digest>>,
-    finish: Option<mpsc::Receiver<()>>,
-    reached_target: Option<mpsc::Sender<sync::CompactTarget<DB::Family, DB::Digest>>>,
-    sync_config: SyncEngineConfig,
-) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
-where
-    E: Metrics + Spawner,
-    DB: sync::Database<Context = E>,
-    DB::Op: Encode,
-    S: sync::SourceFor<DB>,
-{
-    let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
-    // Start at the newest target already queued.
-    while let Ok(update) = tip_updates.try_recv() {
-        let Ok(update) = sync::Target::try_from(&update) else {
-            continue;
-        };
-        if update.advances(&initial) {
-            initial = update;
-        }
-    }
-
-    let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
-    // Retain the handle until the engine exits so the adapter is aborted on completion or cancel.
-    let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
-        while let Some(update) = tip_updates.recv().await {
-            // Ignore malformed updates.
-            let Ok(update) = sync::Target::try_from(&update) else {
-                continue;
-            };
-            if update_tx.send(update).await.is_err() {
-                break;
-            }
-        }
-    }));
-
-    let reached_target_tx = reached_target.map(|reached| {
-        let (tx, mut rx) = mpsc::channel::<sync::Target<DB::Family, DB::Digest>>(1);
-        context.child("compact_reached").spawn(move |_| async move {
-            while let Some(reached_engine_target) = rx.recv().await {
-                let target = sync::CompactTarget {
-                    root: reached_engine_target.root,
-                    size: reached_engine_target.range.end(),
-                };
-                if reached.send(target).await.is_err() {
-                    break;
-                }
-            }
-        });
-        tx
-    });
-
-    let result = sync::sync(sync::engine::Config {
-        context,
-        source,
-        target: initial,
-        db_config: config,
-        fetch_batch_size: sync_config.fetch_batch_size,
-        apply_batch_size: sync_config.apply_batch_size,
-        max_outstanding_requests: sync_config.max_outstanding_requests,
-        max_retained_roots: sync_config.max_retained_roots,
-        update_rx: Some(update_rx),
-        finish_rx: finish,
-        reached_target_tx,
-    })
-    .await;
-    drop(update_forwarder);
-    result
 }
 
 #[tracing::instrument(name = "stateful.db.apply", level = "info", skip_all, fields(index = index))]

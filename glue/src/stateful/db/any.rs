@@ -1,4 +1,4 @@
-//! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
+//! [`Qmdb`] adapters for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
 //! read-through to applied state. This module provides wrapper types
@@ -7,10 +7,10 @@
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    Merkleized as MerkleizedTrait, Shared, Unmerkleized as UnmerkleizedTrait,
+    qmdb::{Checkpoint, Qmdb},
 };
-use commonware_codec::{Codec, Read as CodecRead};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
@@ -26,7 +26,6 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::{
-            FixedConfig, VariableConfig,
             batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
             initial_root,
@@ -35,11 +34,11 @@ use commonware_storage::{
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         operation::Key,
-        sync::{self, Target as AnySyncTarget},
+        sync,
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use commonware_utils::Array;
 use std::{
     ops::{Deref, Range},
     sync::Arc,
@@ -474,12 +473,8 @@ where
     }
 }
 
-/// Implement [`ManagedDb`] for unordered QMDB databases with fixed-size values.
-///
-/// `new_batch` captures the [`Shared`] database handle in the returned
-/// wrapper so that `get()` and `merkleize()` can read through to
-/// applied state.
-impl<F, E, K, V, H, T, S> ManagedDb<E>
+/// Adapt unordered `any` databases with fixed-size values.
+impl<F, E, K, V, H, T, S> Qmdb
     for Db<
         F,
         E,
@@ -495,7 +490,7 @@ where
     E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
-    H: Hasher + 'static,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {
@@ -517,72 +512,61 @@ where
         unordered::Update<K, FixedEncoding<V>>,
         S,
     >;
-    type Error = Error<F>;
-    type Config = FixedConfig<T, S>;
-    type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type SyncTarget = sync::Target<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn open(context: E, config: Self::Config) -> Result<Self, Error<F>> {
+        Self::init(context, config).await
     }
 
-    fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+    fn initial_root() -> H::Digest {
+        initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>()
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    fn wrap_batch(&self, shared: Shared<Self>) -> Self::Unmerkleized {
         AnyUnmerkleized {
-            batch: database.new_batch(),
+            batch: self.new_batch(),
             db: shared,
             metadata: None,
         }
     }
 
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
-            && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip.size
+    fn checkpoint(&self) -> Checkpoint<F, H::Digest> {
+        Checkpoint {
+            root: self.root(),
+            boundary: self.sync_boundary(),
+            size: self.bounds().end,
+        }
     }
 
-    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    fn batch_checkpoint(batch: &Self::Merkleized) -> Checkpoint<F, H::Digest> {
+        let bounds = batch.bounds();
+        Checkpoint {
+            root: batch.root(),
+            boundary: bounds.inactivity_floor,
+            size: bounds.tip.size,
+        }
+    }
+
+    async fn apply_merkleized(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn persist(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
-    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        self.prune((*target.range.start()).into()).await
+    async fn prune_to(self, boundary: Location<F>) -> Result<Self, Error<F>> {
+        self.prune(boundary).await
     }
 
-    fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
+    async fn rewind_to(self, size: Location<F>) -> Result<Self, Error<F>> {
+        self.rewind(size).await?.sync().await
     }
 }
 
-/// Implement [`ManagedDb`] for unordered QMDB databases with variable-size values.
-impl<F, E, K, V, H, T, S> ManagedDb<E>
+/// Adapt unordered `any` databases with variable-size values.
+impl<F, E, K, V, H, T, S> Qmdb
     for Db<
         F,
         E,
@@ -621,172 +605,63 @@ where
         unordered::Update<K, VariableEncoding<V>>,
         S,
     >;
-    type Error = Error<F>;
-    type Config = VariableConfig<
-        T,
-        <Operation<F, unordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
-        S,
-    >;
-    type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type SyncTarget = sync::Target<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn open(context: E, config: Self::Config) -> Result<Self, Error<F>> {
+        Self::init(context, config).await
     }
 
-    fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, unordered::Update<K, VariableEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+    fn initial_root() -> H::Digest {
+        initial_root::<F, unordered::Update<K, VariableEncoding<V>>, H>()
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    fn wrap_batch(&self, shared: Shared<Self>) -> Self::Unmerkleized {
         AnyUnmerkleized {
-            batch: database.new_batch(),
+            batch: self.new_batch(),
             db: shared,
             metadata: None,
         }
     }
 
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
-            && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip.size
+    fn checkpoint(&self) -> Checkpoint<F, H::Digest> {
+        Checkpoint {
+            root: self.root(),
+            boundary: self.sync_boundary(),
+            size: self.bounds().end,
+        }
     }
 
-    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    fn batch_checkpoint(batch: &Self::Merkleized) -> Checkpoint<F, H::Digest> {
+        let bounds = batch.bounds();
+        Checkpoint {
+            root: batch.root(),
+            boundary: bounds.inactivity_floor,
+            size: bounds.tip.size,
+        }
+    }
+
+    async fn apply_merkleized(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn persist(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
-    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        self.prune((*target.range.start()).into()).await
+    async fn prune_to(self, boundary: Location<F>) -> Result<Self, Error<F>> {
+        self.prune(boundary).await
     }
 
-    fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
-}
-
-impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
-    for Db<
-        F,
-        E,
-        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, FixedEncoding<V>>,
-        ANY_BITMAP_CHUNK_BYTES,
-        S,
-    >
-where
-    F: Family,
-    E: Context + Spawner,
-    K: Array,
-    V: value::FixedValue + 'static,
-    H: Hasher,
-    T: Translator,
-    S: Strategy,
-    R: sync::SourceFor<Self>,
-{
-    type SyncError = sync::Error<F, R::Error, H::Digest>;
-
-    async fn sync_db(
-        context: E,
-        config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
-    ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
-    }
-}
-
-impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
-    for Db<
-        F,
-        E,
-        VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, VariableEncoding<V>>,
-        ANY_BITMAP_CHUNK_BYTES,
-        S,
-    >
-where
-    F: Family,
-    E: Context + Spawner,
-    K: Key,
-    V: value::VariableValue + 'static,
-    H: Hasher,
-    T: Translator,
-    S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
-    R: sync::SourceFor<Self>,
-{
-    type SyncError = sync::Error<F, R::Error, H::Digest>;
-
-    async fn sync_db(
-        context: E,
-        config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
-    ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+    async fn rewind_to(self, size: Location<F>) -> Result<Self, Error<F>> {
+        self.rewind(size).await?.sync().await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::ManagedDb;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -798,7 +673,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::any::unordered::fixed,
+        qmdb::any::{FixedConfig, unordered::fixed},
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
