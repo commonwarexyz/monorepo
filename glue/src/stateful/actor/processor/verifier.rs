@@ -1,6 +1,6 @@
 use super::{
-    Application, Cancellation, Execution, PendingDigest, PrepareBatchesError, ReplayFlights,
-    VerificationResult, await_or_cancel, fetch_ancestor, is_already_processed,
+    Application, Cancellation, Execution, PendingDigest, PrepareBatchesError, Provenance,
+    ReplayFlights, VerificationResult, await_or_cancel, fetch_ancestor, is_already_processed,
 };
 use crate::stateful::{ExecutionError, actor::core::Verification, db::DatabaseSet};
 use commonware_consensus::{
@@ -129,7 +129,7 @@ where
         };
         let block_digest = block.digest();
 
-        if self.execution.pending_contains(&block_digest) {
+        if self.execution.pending_verified(&block_digest) {
             timer.observe(context);
             return VerificationResult::Decided(true);
         }
@@ -439,10 +439,13 @@ where
         // Caching is retention, not part of the verdict. The execution matched
         // the block's commitments on its own branch, and a finalization
         // discarding the entry does not change that answer.
-        if !self
-            .execution
-            .cache_pending(block_digest, parent.digest, round, merkleized)
-        {
+        if !self.execution.cache_pending(
+            block_digest,
+            parent.digest,
+            round,
+            merkleized,
+            Provenance::Verified,
+        ) {
             debug!(
                 parent_digest = ?parent.digest,
                 ?block_digest,

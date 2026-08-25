@@ -114,6 +114,22 @@ pub(in crate::stateful::actor) enum VerificationResult {
     Cancelled,
 }
 
+/// How a [`PendingEntry`]'s state was produced.
+///
+/// `Applied` state is reconstructed by [`Application::apply`], which executes a
+/// block's transitions unconditionally to serve as a speculative parent for a
+/// descendant. It is not a verification verdict, so it must never fast-answer a
+/// verification (and thus certification) request for its own digest. `Verified`
+/// state completed [`Application::verify`] for that exact digest, or is our own
+/// proposal, and may.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    /// Reconstructed by `apply` as speculative parent state.
+    Applied,
+    /// Accepted by `verify`, or produced by a local proposal.
+    Verified,
+}
+
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
 where
@@ -123,6 +139,7 @@ where
     round: Round,
     parent: PendingDigest<A, E>,
     merkleized: PendingBatches<A, E>,
+    provenance: Provenance,
 }
 
 /// Speculative state shared by independently-polled verification jobs.
@@ -611,6 +628,11 @@ where
     }
 
     #[cfg(test)]
+    fn pending_verified(&self, digest: &PendingDigest<A, E>) -> bool {
+        self.execution.pending_verified(digest)
+    }
+
+    #[cfg(test)]
     fn clear_pending(&self) {
         self.execution.state.lock().pending.clear();
         self.execution.update_pending_metric();
@@ -891,7 +913,13 @@ where
                 "proposed state must match block commitments",
             );
             assert!(
-                execution.cache_pending(block.digest(), parent_digest, round, merkleized),
+                execution.cache_pending(
+                    block.digest(),
+                    parent_digest,
+                    round,
+                    merkleized,
+                    Provenance::Verified,
+                ),
                 "proposal parent must remain compatible until the proposal completes",
             );
             execution.update_pending_metric();
@@ -915,6 +943,19 @@ where
         (state.last_processed, state.pending.len())
     }
 
+    /// Whether `digest` has cached state that completed `verify` (or a local
+    /// proposal). Speculative `apply` replay state does not count, so a
+    /// certification that reconstructed an ancestor cannot fast-answer without
+    /// a real verification verdict for that ancestor's own digest.
+    fn pending_verified(&self, digest: &PendingDigest<A, E>) -> bool {
+        self.state
+            .lock()
+            .pending
+            .get(digest)
+            .is_some_and(|entry| entry.provenance == Provenance::Verified)
+    }
+
+    #[cfg(test)]
     fn pending_contains(&self, digest: &PendingDigest<A, E>) -> bool {
         self.state.lock().pending.contains_key(digest)
     }
@@ -933,11 +974,18 @@ where
         parent: PendingDigest<A, E>,
         round: Round,
         merkleized: PendingBatches<A, E>,
+        provenance: Provenance,
     ) -> bool {
         let mut state = self.state.lock();
-        if let Some(existing) = state.pending.get(&digest) {
+        if let Some(existing) = state.pending.get_mut(&digest) {
             debug_assert_eq!(existing.parent, parent, "pending parent changed for digest");
             debug_assert_eq!(existing.round, round, "pending round changed for digest");
+            // A real verification verdict promotes speculative replay state, so
+            // a later certification of this digest fast-answers honestly.
+            // `Applied` never demotes an entry that already verified.
+            if provenance == Provenance::Verified {
+                existing.provenance = Provenance::Verified;
+            }
             return true;
         }
 
@@ -960,6 +1008,7 @@ where
                 round,
                 parent,
                 merkleized,
+                provenance,
             },
         );
         true
@@ -1087,9 +1136,15 @@ where
             return Err(PrepareBatchesError::Invalid);
         }
 
-        self.cache_pending(digest, parent_digest, round, merkleized)
-            .then_some(())
-            .ok_or(PrepareBatchesError::Invalid)
+        self.cache_pending(
+            digest,
+            parent_digest,
+            round,
+            merkleized,
+            Provenance::Applied,
+        )
+        .then_some(())
+        .ok_or(PrepareBatchesError::Invalid)
     }
 
     /// Replays one block while sharing completed work with concurrent requests.
@@ -1386,7 +1441,7 @@ where
 mod tests {
     use super::{
         Applied, Clock, Metrics, PendingBatches, PendingDigest, PrepareBatchesError, Processor,
-        Prune, Pruning, ReplayClaim, ReplayFlights, Rng, Spawner, fetch_ancestor,
+        Provenance, Prune, Pruning, ReplayClaim, ReplayFlights, Rng, Spawner, fetch_ancestor,
     };
 
     impl<D: Copy + Ord> ReplayFlights<D> {
@@ -1411,9 +1466,10 @@ mod tests {
             parent: PendingDigest<A, E>,
             round: Round,
             merkleized: PendingBatches<A, E>,
+            provenance: Provenance,
         ) -> bool {
             self.execution
-                .cache_pending(digest, parent, round, merkleized)
+                .cache_pending(digest, parent, round, merkleized, provenance)
         }
     }
     use crate::stateful::{
@@ -1972,7 +2028,8 @@ mod tests {
                 block.digest(),
                 parent.digest(),
                 round,
-                merkleized
+                merkleized,
+                Provenance::Verified,
             ));
             self.provider.insert(block.clone());
             block
@@ -2458,6 +2515,7 @@ mod tests {
                     loser.digest(),
                     Round::new(Epoch::zero(), late_view),
                     merkleized,
+                    Provenance::Verified,
                 ),
                 "completed work on a losing fork must not publish after finalization",
             );
@@ -2499,6 +2557,73 @@ mod tests {
             assert!(
                 harness.processor.pending_contains(&block3.digest()),
                 "target block should be reconstructed",
+            );
+
+            // Reconstruction runs `apply`, not `verify`, so the rebuilt state is
+            // available as a speculative parent but is not a verification verdict.
+            // A later verification of these digests must not be short-circuited.
+            assert!(
+                !harness.processor.pending_verified(&block2.digest()),
+                "replayed ancestor must not count as verified",
+            );
+            assert!(
+                !harness.processor.pending_verified(&block3.digest()),
+                "replayed target must not count as verified",
+            );
+        });
+    }
+
+    /// A real `verify` verdict promotes speculative replay state to verified so a
+    /// later certification of that digest can fast-answer honestly, and `apply`
+    /// replay never demotes an entry that already verified.
+    #[test]
+    fn cache_pending_provenance_promotes_but_never_demotes() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+
+            // Stage a replayed (apply-provenance) child of the applied anchor.
+            let (replayed, replayed_merkleized) = harness.build_child(&genesis, View::new(1)).await;
+            let replayed_round = Round::new(Epoch::zero(), View::new(1));
+            assert!(harness.processor.cache_pending(
+                replayed.digest(),
+                genesis.digest(),
+                replayed_round,
+                replayed_merkleized,
+                Provenance::Applied,
+            ));
+            assert!(harness.processor.pending_contains(&replayed.digest()));
+            assert!(
+                !harness.processor.pending_verified(&replayed.digest()),
+                "apply-provenance state must not read as verified",
+            );
+
+            // A genuine verification of the same digest promotes it.
+            let (_, verified_merkleized) = harness.build_child(&genesis, View::new(1)).await;
+            assert!(harness.processor.cache_pending(
+                replayed.digest(),
+                genesis.digest(),
+                replayed_round,
+                verified_merkleized,
+                Provenance::Verified,
+            ));
+            assert!(
+                harness.processor.pending_verified(&replayed.digest()),
+                "a real verify verdict must promote replayed state",
+            );
+
+            // A later replay of the same digest must not demote it back.
+            let (_, replay_again) = harness.build_child(&genesis, View::new(1)).await;
+            assert!(harness.processor.cache_pending(
+                replayed.digest(),
+                genesis.digest(),
+                replayed_round,
+                replay_again,
+                Provenance::Applied,
+            ));
+            assert!(
+                harness.processor.pending_verified(&replayed.digest()),
+                "apply replay must not demote already-verified state",
             );
         });
     }

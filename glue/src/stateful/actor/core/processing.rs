@@ -898,6 +898,166 @@ mod tests {
         )
     }
 
+    /// Rejects `verify` for one height while `apply` accepts everything, so a
+    /// replayed (applied) ancestor diverges from what verification would decide.
+    #[derive(Clone)]
+    struct RejectVerifyApp {
+        rejected_height: Height,
+        apply_calls: Arc<AtomicUsize>,
+        verify_calls: Arc<AtomicUsize>,
+    }
+
+    impl Application<deterministic::Context> for RejectVerifyApp {
+        type SigningScheme = TestScheme;
+        type Context = <TestApp as Application<deterministic::Context>>::Context;
+        type Block = TestBlock;
+        type Databases = TestDatabases;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            panic!("reject-verify application genesis is not used")
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
+            panic!("reject-verify application proposal is not used")
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
+            self.verify_calls.fetch_add(1, Ordering::SeqCst);
+            let mut ancestry = Box::pin(ancestry);
+            let block = ancestry
+                .next()
+                .await
+                .expect("verification should receive a candidate block");
+            if block.height() == self.rejected_height {
+                return Ok(None);
+            }
+            Ok(Some(TestMerkleized))
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: TestUnmerkleized,
+        ) -> Result<TestMerkleized, ExecutionError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(TestMerkleized)
+        }
+    }
+
+    /// A directly-notarized but application-invalid parent, replayed via `apply`
+    /// while verifying an optimistic child, must not be laundered into a verified
+    /// verdict. A later verification (which is what certification recovery drives
+    /// after a restart drops the in-memory gate) must run `Application::verify` on
+    /// the parent and reject it, rather than short-circuiting on the cached replay
+    /// state.
+    #[test]
+    fn replayed_parent_does_not_short_circuit_later_verification() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let child = TestBlock::child(&parent, 2);
+
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(&mut signing, b"replayed-parent-bypass", 1).schemes
+                [0]
+            .clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "replayed-parent-bypass",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = RejectVerifyApp {
+                rejected_height: parent.height(),
+                apply_calls: apply_calls.clone(),
+                verify_calls: verify_calls.clone(),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                snapshot_publisher: publisher,
+                skip_finalized_until: None,
+            };
+            let actor = context
+                .child("loop")
+                .spawn(move |_| processing.start(processor, Vec::new()));
+            let mut mailbox = Mailbox::new(sender);
+
+            // Verifying the child reconstructs the parent's state with `apply`.
+            assert!(
+                mailbox
+                    .verify(
+                        (context.child("verify_child"), child.context()),
+                        ancestry::from_iter([
+                            Arc::new(child),
+                            Arc::new(parent.clone()),
+                            Arc::new(genesis.clone()),
+                        ]),
+                    )
+                    .await,
+                "child verification should succeed after replaying its parent",
+            );
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+
+            // The parent was only replayed, never verified. Certification
+            // recovery must run `verify` on it and reject the invalid block.
+            assert!(
+                !mailbox
+                    .verify(
+                        (context.child("verify_parent"), parent.context()),
+                        ancestry::from_iter([Arc::new(parent), Arc::new(genesis)]),
+                    )
+                    .await,
+                "parent verification must reject the application-invalid block",
+            );
+            assert_eq!(
+                verify_calls.load(Ordering::SeqCst),
+                2,
+                "certification recovery must run Application::verify on the replayed parent",
+            );
+
+            actor.abort();
+            drop(marshal.guards);
+        });
+    }
+
     /// A spawned gated application's mailbox, snapshot subscriber, marshal
     /// guard, and actor handle.
     type GatedApplication = (
