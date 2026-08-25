@@ -152,9 +152,6 @@ pub trait Policy<K> {
     /// `slot` identifies the key's previous slot when it was cached.
     fn remove(&mut self, slot: Option<Slot>, key: &K);
 
-    /// Retains policy state only for keys accepted by `keep`.
-    fn retain<F: FnMut(&K) -> bool>(&mut self, keep: F);
-
     /// Clears all policy-owned state.
     fn clear(&mut self);
 }
@@ -363,6 +360,12 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// The slot index identifies the entry until it is evicted or removed, so
     /// callers can record it in an external index and resolve later reads with
     /// [Self::get_at] instead of a hash lookup.
+    ///
+    /// # Panics
+    ///
+    /// If `make` panics while producing a value for a new slot, policy metadata
+    /// may already have been updated. If the panic is caught, this cache must
+    /// not be used again.
     pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> (Slot, &mut V) {
         let slot = match self.index.get(&key) {
             Some(&slot) => {
@@ -618,8 +621,6 @@ mod tests {
                 self.residents.remove(position);
             }
         }
-
-        fn retain<F: FnMut(&K) -> bool>(&mut self, _keep: F) {}
 
         fn clear(&mut self) {
             self.residents.clear();
@@ -992,10 +993,6 @@ mod tests {
             self.history.retain(|historical| historical != key);
         }
 
-        fn retain<F: FnMut(&u64) -> bool>(&mut self, keep: F) {
-            self.history.retain(keep);
-        }
-
         fn clear(&mut self) {
             self.residents.clear();
             self.history.clear();
@@ -1023,9 +1020,6 @@ mod tests {
         cache.put(3, 30);
         cache.put(4, 40);
         assert_eq!(cache.policy.history, vec![2, 3]);
-        cache.retain(|key, _| *key >= 3);
-        cache.policy.retain(|key| *key >= 3);
-        assert_eq!(cache.policy.history, vec![3]);
 
         cache.clear();
         assert!(cache.policy.residents.is_empty());
