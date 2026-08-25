@@ -2,11 +2,12 @@
 //! event loop.
 //!
 //! The thread that calls [crate::Runner::start] runs both the task executor
-//! and the io_uring event loop: each iteration polls every ready task, then
-//! services the ring via [Driver::turn] so completions wake tasks and
-//! staged submissions reach the kernel. When nothing is runnable, the thread
-//! parks via [Driver::park] until a completion arrives, a timer fires, a
-//! producer enqueues work, or another thread wakes a task.
+//! and the io_uring event loop: each iteration polls a bounded batch of ready
+//! tasks, with a small initial quota for tasks woken by the prior event
+//! delivery, then services the ring via [Driver::turn] so completions wake
+//! tasks and staged submissions reach the kernel. When nothing is runnable,
+//! the thread parks via [Driver::park] until a completion arrives, a timer
+//! fires, a producer enqueues work, or another thread wakes a task.
 //!
 //! Ordinary tasks run inline on the executor thread. Tasks spawned with
 //! [crate::Spawner::dedicated] or [crate::Spawner::shared] with
@@ -95,6 +96,16 @@ cfg_if::cfg_if! {
 ///
 /// [SystemTime::limit]: commonware_utils::SystemTimeExt::limit
 const MAX_TIMER_DURATION: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+
+/// Maximum number of spawned-task ready tokens polled per worker turn.
+const READY_TASKS_PER_TURN: usize = 64;
+
+/// Initial event-ready share of each spawned-task batch.
+///
+/// Half the turn lets completion bursts drain without replaying the old
+/// backlog delay, while the other half guarantees equal normal FIFO progress
+/// whenever normal work was present at the snapshot.
+const EVENT_READY_TASKS_PER_TURN: usize = READY_TASKS_PER_TURN / 2;
 
 #[derive(Debug)]
 struct Metrics {
@@ -709,27 +720,51 @@ impl Worker {
         // Build the root task's waker (the root starts ready).
         let root_waker = Tasks::root_waker(&executor.tasks);
 
-        // Reusable drain buffer, local to this frame: a busy executor swaps
-        // it with the live queue instead of allocating per iteration, and by
-        // the time teardown clears the arena no task is parked in it.
-        let mut scratch: Vec<Arc<dyn Erased>> = Vec::new();
+        // Reusable ready-task buffer, local to this frame. Its capacity stays
+        // at the batch high-water mark so a busy executor does not allocate
+        // per iteration, and by teardown no task is parked in it.
+        let mut scratch: Vec<Arc<dyn Erased>> = Vec::with_capacity(READY_TASKS_PER_TURN);
 
         // Process tasks until the root task completes.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
         let result = catch_unwind(AssertUnwindSafe(|| {
             loop {
-                // Drain all ready tasks. Wakes that arrive while this snapshot
-                // is being polled land in the next snapshot. The queue holds
-                // the tasks themselves, so polling needs no registry lookup.
+                // Take one bounded batch. Event-delivered tokens receive the
+                // initial quota, while a normal token present at the snapshot
+                // is always reserved and either lane may fill unused capacity.
+                // Wakes that arrive while a snapshot is being polled land in a
+                // shared lane and may fill unused budget in this turn. Tokens
+                // beyond the combined budget remain for a later turn. Every
+                // moved token consumes budget, including a stale wake of an
+                // already completed task. The lanes hold the tasks themselves,
+                // so polling needs no registry lookup.
                 //
                 // Tasks run before the root so a task registered ahead of the
                 // root's poll (e.g. the process-metrics collector) is polled
                 // even if the root never yields.
-                executor.tasks.drain_into(&mut scratch);
-                for task in scratch.drain(..) {
-                    let slot = task.slot();
-                    if task.poll() {
-                        executor.tasks.remove(slot);
+                let mut remaining = READY_TASKS_PER_TURN;
+                let mut event_quota = EVENT_READY_TASKS_PER_TURN;
+                loop {
+                    executor
+                        .tasks
+                        .drain_into(&mut scratch, remaining, event_quota);
+                    // Event priority applies to the turn's initial snapshot.
+                    // Refills preserve the shared lane order without granting
+                    // a fresh event quota.
+                    event_quota = 0;
+                    let drained = scratch.len();
+                    if drained == 0 {
+                        break;
+                    }
+                    remaining -= drained;
+                    for task in scratch.drain(..) {
+                        let slot = task.slot();
+                        if task.poll() {
+                            executor.tasks.remove(slot);
+                        }
+                    }
+                    if remaining == 0 {
+                        break;
                     }
                 }
 
@@ -742,12 +777,15 @@ impl Worker {
                     }
                 }
 
-                // Service the ring: completions wake tasks and staged submissions
+                // Service the ring and deliver due sleepers under one event
+                // phase. Only first task-wake transitions published by this
+                // owner thread enter the event lane. Staged submissions also
                 // reach the kernel before the executor considers parking.
-                driver.turn();
-
-                // Wake sleepers whose deadlines have elapsed.
-                executor.wake_ready_sleepers(Instant::now());
+                {
+                    let _event_delivery = executor.tasks.event_delivery();
+                    driver.turn();
+                    executor.wake_ready_sleepers(Instant::now());
+                }
 
                 // If any task became ready, keep polling instead of parking.
                 if executor.tasks.has_ready() {
@@ -758,8 +796,11 @@ impl Worker {
                 // next timer (ring timeout wheel or sleeper alarm) is due.
                 driver.park(executor.next_alarm());
 
-                // Fire any sleepers that became due while parked.
-                executor.wake_ready_sleepers(Instant::now());
+                // Fire sleepers that became due while parked as event wakes.
+                {
+                    let _event_delivery = executor.tasks.event_delivery();
+                    executor.wake_ready_sleepers(Instant::now());
+                }
             }
         }));
 
@@ -1628,7 +1669,14 @@ mod tests {
     };
     use commonware_parallel::Strategy as _;
     use commonware_utils::{NZUsize, channel::oneshot};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use futures::task::{ArcWake, waker};
+    use std::{
+        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
+        sync::{
+            atomic::{AtomicBool, AtomicUsize},
+            mpsc::{Receiver, SyncSender},
+        },
+    };
 
     /// Property: network timeouts at exactly the 30-year policy bound pass
     /// validation. Setup: both timeouts set to [MAX_TIMER_DURATION]. Action:
@@ -1713,6 +1761,418 @@ mod tests {
             cfg.resolved_storage_buffer_pool_config().pool_min_size(),
             222
         );
+    }
+
+    /// Root readiness is serviced once after one spawned-task batch. If the
+    /// root completes at that boundary, tasks beyond the batch stay unpolled
+    /// and teardown drops every child future exactly once.
+    #[test]
+    fn test_root_completion_tears_down_at_ready_batch_boundary() {
+        struct PendingProbe {
+            polls: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Future for PendingProbe {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
+                self.polls.fetch_add(1, Ordering::AcqRel);
+                Poll::Pending
+            }
+        }
+
+        impl Drop for PendingProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let observed_polls = Arc::clone(&polls);
+        let observed_drops = Arc::clone(&drops);
+
+        Runner::default().start(move |context| async move {
+            let mut handles = Vec::new();
+            for _ in 0..=READY_TASKS_PER_TURN {
+                let polls = Arc::clone(&polls);
+                let drops = Arc::clone(&drops);
+                handles.push(
+                    context
+                        .child("pending")
+                        .spawn(move |_| PendingProbe { polls, drops }),
+                );
+            }
+
+            let mut yielded = false;
+            std::future::poll_fn(move |cx| {
+                if yielded {
+                    Poll::Ready(())
+                } else {
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+
+            drop(handles);
+        });
+
+        assert_eq!(
+            observed_polls.load(Ordering::Acquire),
+            READY_TASKS_PER_TURN,
+            "only one ready batch may run before the root completes"
+        );
+        assert_eq!(
+            observed_drops.load(Ordering::Acquire),
+            READY_TASKS_PER_TURN + 1,
+            "teardown must drop both polled and queued child futures"
+        );
+    }
+
+    /// A lone self-waker refills unused capacity in the current task turn.
+    /// A due internal alarm records the first event-service boundary, which
+    /// must occur only after the task consumes four of the 64 token slots.
+    #[test]
+    fn test_in_turn_refill_polls_self_waker_before_event_service() {
+        struct ServiceWake {
+            /// Whether sleeper delivery invoked this waker.
+            delivered: Arc<AtomicBool>,
+            /// Resolves the root after the service boundary.
+            sender: Mutex<Option<oneshot::Sender<()>>>,
+        }
+
+        impl ArcWake for ServiceWake {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                arc_self.delivered.store(true, Ordering::Release);
+                if let Some(sender) = arc_self.sender.lock().take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        struct RefillProbe {
+            /// Worker whose sleeper queue marks the service boundary.
+            executor: Arc<Executor>,
+            /// Waker installed in the due alarm on the first poll.
+            service_waker: Option<Waker>,
+            /// Whether the worker serviced the due alarm.
+            delivered: Arc<AtomicBool>,
+            /// Total task polls observed.
+            polls: Arc<AtomicUsize>,
+        }
+
+        impl Future for RefillProbe {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut std_task::Context<'_>) -> Poll<()> {
+                let poll = self.polls.fetch_add(1, Ordering::AcqRel) + 1;
+                assert!(
+                    !self.delivered.load(Ordering::Acquire),
+                    "event service ran before in-turn refill poll {poll}"
+                );
+                if poll == 1 {
+                    let state = Arc::new(AlarmState {
+                        waker: Mutex::new(self.service_waker.take()),
+                    });
+                    self.executor.register_alarm(Alarm {
+                        time: Instant::now(),
+                        state,
+                    });
+                }
+                if poll == 4 {
+                    return Poll::Ready(());
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+
+        let delivered = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed_delivered = Arc::clone(&delivered);
+        let observed_polls = Arc::clone(&polls);
+
+        Runner::default().start(move |context| async move {
+            let (send, recv) = oneshot::channel();
+            let service_waker = waker(Arc::new(ServiceWake {
+                delivered: Arc::clone(&delivered),
+                sender: Mutex::new(Some(send)),
+            }));
+            let executor = context.executor.upgrade().unwrap();
+            let child_delivered = Arc::clone(&delivered);
+            let child_polls = Arc::clone(&polls);
+            context
+                .child("refill")
+                .spawn(move |_| RefillProbe {
+                    executor,
+                    service_waker: Some(service_waker),
+                    delivered: child_delivered,
+                    polls: child_polls,
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(polls.load(Ordering::Acquire), 4);
+            assert!(!delivered.load(Ordering::Acquire));
+            recv.await.unwrap();
+            assert!(delivered.load(Ordering::Acquire));
+        });
+
+        assert_eq!(observed_polls.load(Ordering::Acquire), 4);
+        assert!(observed_delivered.load(Ordering::Acquire));
+    }
+
+    /// An ordinary spawned sleeper that has returned Pending consumes its
+    /// timer wake before the old normal backlog drains. More than four batches
+    /// of self-waking children keep the normal lane saturated, and the first
+    /// child blocks long enough to make the sleeper due during that batch.
+    #[test]
+    fn test_spawned_sleep_event_precedes_old_ready_backlog() {
+        struct Saturating {
+            first: bool,
+            blocked: bool,
+            polls: Arc<AtomicUsize>,
+            stop: Arc<AtomicBool>,
+        }
+
+        impl Future for Saturating {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut std_task::Context<'_>) -> Poll<()> {
+                let poll = self.polls.fetch_add(1, Ordering::AcqRel) + 1;
+                assert!(
+                    poll <= READY_TASKS_PER_TURN * 8,
+                    "spawned sleeper was not serviced under ready saturation"
+                );
+                if self.first && !self.blocked {
+                    self.blocked = true;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if self.stop.load(Ordering::Acquire) {
+                    return Poll::Ready(());
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let pending_seen = Arc::new(AtomicBool::new(false));
+        let resumed_at = Arc::new(AtomicUsize::new(usize::MAX));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        Runner::default().start(move |context| async move {
+            let sleeper_polls = Arc::clone(&polls);
+            let sleeper_pending_seen = Arc::clone(&pending_seen);
+            let sleeper_resumed_at = Arc::clone(&resumed_at);
+            let sleeper = context.child("sleeper").spawn(move |context| async move {
+                let mut sleep = Box::pin(context.sleep(Duration::from_millis(1)));
+                let pending =
+                    std::future::poll_fn(|cx| Poll::Ready(sleep.as_mut().poll(cx).is_pending()))
+                        .await;
+                assert!(pending, "spawned sleeper must first return Pending");
+                sleeper_pending_seen.store(true, Ordering::Release);
+                sleep.await;
+                sleeper_resumed_at.store(sleeper_polls.load(Ordering::Acquire), Ordering::Release);
+            });
+
+            let mut handles = Vec::new();
+            for i in 0..READY_TASKS_PER_TURN * 4 {
+                let polls = Arc::clone(&polls);
+                let stop = Arc::clone(&stop);
+                handles.push(context.child("saturating").spawn(move |_| Saturating {
+                    first: i == 0,
+                    blocked: false,
+                    polls,
+                    stop,
+                }));
+            }
+
+            sleeper.await.unwrap();
+            let at_timer = resumed_at.load(Ordering::Acquire);
+            assert!(pending_seen.load(Ordering::Acquire));
+            assert!(
+                at_timer < READY_TASKS_PER_TURN * 4,
+                "spawned sleeper resumed after the old backlog drained at {at_timer} child polls"
+            );
+            assert!(
+                at_timer < READY_TASKS_PER_TURN,
+                "event-ready sleeper did not lead the next batch at {at_timer} child polls"
+            );
+
+            stop.store(true, Ordering::Release);
+            for handle in handles {
+                handle.await.unwrap();
+            }
+        });
+    }
+
+    /// An ordinary spawned accept consumer is polled immediately after the
+    /// driver observes its CQE, before the old normal backlog drains. A proxy
+    /// waker records driver observation separately from the consumer poll.
+    #[test]
+    fn test_spawned_accept_event_precedes_old_ready_backlog() {
+        struct CompletionWake {
+            task: Waker,
+            polls: Arc<AtomicUsize>,
+            observed_at: Arc<AtomicUsize>,
+        }
+
+        impl ArcWake for CompletionWake {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                let polls = arc_self.polls.load(Ordering::Acquire);
+                let _ = arc_self.observed_at.compare_exchange(
+                    usize::MAX,
+                    polls,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                arc_self.task.wake_by_ref();
+            }
+        }
+
+        struct Saturating {
+            connection_gate: Option<(SyncSender<()>, Receiver<()>)>,
+            polls: Arc<AtomicUsize>,
+            stop: Arc<AtomicBool>,
+        }
+
+        impl Future for Saturating {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut std_task::Context<'_>) -> Poll<()> {
+                self.polls.fetch_add(1, Ordering::AcqRel);
+                if let Some((start, connected)) = self.connection_gate.take() {
+                    start.send(()).expect("connector thread exited");
+                    connected
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("connector did not establish loopback connection");
+                }
+                if self.stop.load(Ordering::Acquire) {
+                    return Poll::Ready(());
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let completion_at = Arc::new(AtomicUsize::new(usize::MAX));
+        let consumer_at = Arc::new(AtomicUsize::new(usize::MAX));
+        let pending_seen = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        Runner::default().start(move |context| async move {
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let (start_send, start_recv) = std::sync::mpsc::sync_channel(0);
+            let (connected_send, connected_recv) = std::sync::mpsc::sync_channel(0);
+            let connector = std::thread::spawn(move || {
+                start_recv.recv().expect("saturating child exited");
+                let client = TcpStream::connect(addr).expect("connect loopback listener");
+                connected_send
+                    .send(())
+                    .expect("saturating child exited before connection acknowledgment");
+                client
+            });
+
+            // The guard only bounds a scheduler regression. The poll-count
+            // assertions below are the fairness oracle.
+            let (guard_cancel_send, guard_cancel_recv) = std::sync::mpsc::channel();
+            let guard_stop = Arc::clone(&stop);
+            let guard = std::thread::spawn(move || {
+                if guard_cancel_recv
+                    .recv_timeout(Duration::from_secs(10))
+                    .is_err()
+                {
+                    guard_stop.store(true, Ordering::Release);
+                }
+            });
+
+            // Register the ordinary accept consumer before the old backlog.
+            // Its first poll submits the accept and leaves its queued latch
+            // clear before the first saturating child starts the connector.
+            let accept_polls = Arc::clone(&polls);
+            let accept_completion_at = Arc::clone(&completion_at);
+            let accept_consumer_at = Arc::clone(&consumer_at);
+            let accept_pending_seen = Arc::clone(&pending_seen);
+            let accept_task = context.child("accept").spawn(move |_| async move {
+                let mut accept = Box::pin(listener.accept());
+                let accepted = std::future::poll_fn(|cx| {
+                    let proxy = waker(Arc::new(CompletionWake {
+                        task: cx.waker().clone(),
+                        polls: Arc::clone(&accept_polls),
+                        observed_at: Arc::clone(&accept_completion_at),
+                    }));
+                    let mut proxy_cx = std_task::Context::from_waker(&proxy);
+                    let result = accept.as_mut().poll(&mut proxy_cx);
+                    match result {
+                        Poll::Pending => {
+                            accept_pending_seen.store(true, Ordering::Release);
+                            Poll::Pending
+                        }
+                        Poll::Ready(result) => {
+                            accept_consumer_at
+                                .store(accept_polls.load(Ordering::Acquire), Ordering::Release);
+                            Poll::Ready(result)
+                        }
+                    }
+                })
+                .await;
+                drop(accept);
+                drop(listener);
+                accepted
+            });
+
+            let mut connection_gate = Some((start_send, connected_recv));
+            let mut handles = Vec::new();
+            for _ in 0..READY_TASKS_PER_TURN * 4 {
+                let connection_gate = connection_gate.take();
+                let polls = Arc::clone(&polls);
+                let stop = Arc::clone(&stop);
+                handles.push(context.child("saturating").spawn(move |_| Saturating {
+                    connection_gate,
+                    polls,
+                    stop,
+                }));
+            }
+
+            // The first saturating child waits for the foreign connector,
+            // guaranteeing the connection is queued before this batch ends.
+            let accepted = accept_task.await.unwrap();
+
+            stop.store(true, Ordering::Release);
+            let _ = guard_cancel_send.send(());
+            guard.join().expect("hang guard panicked");
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            let client = connector.join().expect("connector thread panicked");
+            let (_, sink, stream) = accepted.unwrap();
+            drop(stream);
+            drop(sink);
+            drop(client);
+
+            let driver_at = completion_at.load(Ordering::Acquire);
+            let consumed_at = consumer_at.load(Ordering::Acquire);
+            assert!(pending_seen.load(Ordering::Acquire));
+            assert!(
+                driver_at < READY_TASKS_PER_TURN * 4,
+                "driver observed the accept CQE after {driver_at} child polls"
+            );
+            assert_eq!(
+                consumed_at, driver_at,
+                "accept consumer polled at {consumed_at}, driver observed its CQE at {driver_at}"
+            );
+        });
     }
 
     /// A dedicated task runs on its own worker with its own ring: storage

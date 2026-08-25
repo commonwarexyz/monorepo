@@ -2,32 +2,38 @@
 //!
 //! A spawned task is one [TaskCell] allocation: the concrete future stored
 //! inline, the identity behind an `ArcWake` waker sharing that allocation,
-//! and a queued latch that coalesces repeated wakes into one ready-queue
+//! and a queued latch that coalesces repeated wakes into one ready-lane
 //! entry. Polling crosses a single type-erased boundary ([Erased]) so the
 //! compiler sees the concrete future type inside the monomorphized cell.
-//! [Tasks] owns the ready queue and the arena of running tasks: completed
-//! slots are recycled for later spawns, and futures stay pinned to the
-//! worker thread that polls them ([Affine]) while registration and wakes may
-//! arrive from any thread (a foreign wake latches the ring's out-of-band
-//! wake state). Teardown clears the arena and rejects racing registrations
-//! instead of leaking tasks nothing will ever poll.
+//! [Tasks] owns normal and event-ready FIFO lanes plus the arena of running
+//! tasks. Initial polls, task self-wakes, and foreign-thread wakes use the
+//! normal lane. A first wake delivered by the owner during an explicit event
+//! phase uses the event lane so bounded executor turns can promptly poll I/O
+//! and timer consumers without starving the normal backlog. Completed slots
+//! are recycled for later spawns, and futures stay pinned to the worker
+//! thread that polls them ([Affine]) while registration and wakes may arrive
+//! from any thread. Teardown clears the arena and both lanes, and rejects
+//! racing registrations instead of leaking tasks nothing will ever poll.
 
 // In scope for the intra-doc links in this module's documentation.
 #[allow(unused_imports)]
 use super::Executor;
-use crate::iouring::driver::{waker::Waker as RingWaker, Affine};
+use crate::iouring::driver::{Affine, waker::Waker as RingWaker};
 #[allow(unused_imports)]
 use crate::{Error, Handle};
 use commonware_utils::sync::Mutex;
-use futures::task::{waker, waker_ref, ArcWake};
+use futures::task::{ArcWake, waker, waker_ref};
 use std::{
     cell::RefCell,
+    collections::VecDeque,
     future::Future,
-    mem::{swap, take},
+    marker::PhantomData,
+    mem::take,
     pin::Pin,
+    rc::Rc,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Weak,
+        atomic::{AtomicBool, Ordering},
     },
     task::{self, Poll},
     thread::{self, ThreadId},
@@ -63,15 +69,16 @@ where
     slot: usize,
     /// Re-enqueue target for wakes.
     tasks: Weak<Tasks>,
-    /// Whether the task is already in the ready queue (or terminally done).
+    /// Whether the task is already in a ready lane (or terminally done).
     ///
     /// A waker may legally fire many times before its task is polled, and
-    /// each unguarded push is a full re-poll (a future waking itself twice
-    /// per poll would double the queue every executor turn). Only the wake
-    /// that transitions this latch queues the task, and the rest coalesce. The
-    /// latch is released immediately before polling a live future and set
-    /// terminally once the future is gone, so late wakes on a completed or
-    /// cleared cell buy at most one dead poll.
+    /// each unguarded push is a full re-poll (a future waking itself twice per
+    /// poll would double the queue every executor turn). Only the wake that
+    /// transitions this latch selects and enters a lane, and the rest
+    /// coalesce. This also prevents an event wake from promoting a normal
+    /// token already queued. The latch is released immediately before polling
+    /// a live future and set terminally once the future is gone, so late wakes
+    /// on a completed or cleared cell buy at most one dead poll.
     queued: AtomicBool,
     /// The future, polled and cleared only on the owning worker thread (a
     /// spawning thread builds the cell but never touches the future), so no
@@ -95,7 +102,9 @@ where
             return;
         }
         if let Some(tasks) = self.tasks.upgrade() {
-            tasks.queue(Arc::clone(self) as Arc<dyn Erased>);
+            // Publish only after winning the queued-latch transition. A
+            // coalesced wake above cannot move an existing token.
+            tasks.queue_wake(Arc::clone(self) as Arc<dyn Erased>);
         }
     }
 }
@@ -192,10 +201,64 @@ struct Running {
     closed: bool,
 }
 
+/// One of the two FIFO lanes for spawned-task ready tokens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadyLane {
+    /// Initial polls, self-wakes, and all foreign-thread wakes.
+    Normal,
+    /// Owner-thread wakes published during an event-delivery phase.
+    Event,
+}
+
+/// Spawned-task ready tokens protected by one snapshot lock.
+///
+/// Keeping both lanes under the same lock lets [Tasks::drain_into] reserve
+/// normal service based on one consistent snapshot while preserving FIFO
+/// order within each lane.
+struct Ready {
+    /// Ordinary readiness in arrival order.
+    normal: VecDeque<Arc<dyn Erased>>,
+    /// Event-delivered readiness in arrival order.
+    event: VecDeque<Arc<dyn Erased>>,
+}
+
+/// Move exactly `count` tokens from the front of `lane` into `scratch`.
+///
+/// Callers cap `count` to the lane length before entering this hot loop.
+#[inline]
+fn drain_front(
+    lane: &mut VecDeque<Arc<dyn Erased>>,
+    scratch: &mut Vec<Arc<dyn Erased>>,
+    count: usize,
+) {
+    for _ in 0..count {
+        scratch.push(lane.pop_front().expect("drain count exceeds lane length"));
+    }
+}
+
+/// RAII marker for owner-thread event delivery.
+///
+/// Dropping the marker resets the phase during normal return and unwinding.
+/// The marker is not sendable because the phase belongs to [Tasks::owner].
+#[must_use = "the event-delivery phase ends when the guard is dropped"]
+pub(super) struct EventDelivery<'a> {
+    /// Task set whose owner thread is delivering events.
+    tasks: &'a Tasks,
+    /// Prevents moving the owner-thread phase marker to another thread.
+    not_send: PhantomData<Rc<()>>,
+}
+
+impl Drop for EventDelivery<'_> {
+    fn drop(&mut self) {
+        debug_assert_eq!(thread::current().id(), self.tasks.owner);
+        self.tasks.delivering_events.store(false, Ordering::Relaxed);
+    }
+}
+
 /// The tasks being executed by the [Executor].
 pub(super) struct Tasks {
-    /// Tasks ready to be polled, queued by pointer (no ids, no lookups).
-    ready: Mutex<Vec<Arc<dyn Erased>>>,
+    /// Spawned tasks ready to be polled, queued by pointer (no ids or lookups).
+    ready: Mutex<Ready>,
     /// Whether the root task is ready to be polled. Starts true for the
     /// kickoff poll.
     root_ready: AtomicBool,
@@ -204,6 +267,9 @@ pub(super) struct Tasks {
     /// The worker thread that polls (and tears down) these tasks. Task cells
     /// are pinned to it so registration works from any thread.
     owner: ThreadId,
+    /// Whether the owner thread is currently delivering driver or timer
+    /// events. Only that thread reads true and may select the event lane.
+    delivering_events: AtomicBool,
     /// Wakes the runtime thread when a task becomes ready.
     ///
     /// Latches the event loop's out-of-band wake state so a parked executor
@@ -215,7 +281,10 @@ impl Tasks {
     /// Create a new task queue owned by the calling (worker) thread.
     pub(super) fn new(unpark: RingWaker) -> Self {
         Self {
-            ready: Mutex::new(Vec::new()),
+            ready: Mutex::new(Ready {
+                normal: VecDeque::new(),
+                event: VecDeque::new(),
+            }),
             root_ready: AtomicBool::new(true),
             running: Mutex::new(Running {
                 slots: Vec::new(),
@@ -223,7 +292,25 @@ impl Tasks {
                 closed: false,
             }),
             owner: thread::current().id(),
+            delivering_events: AtomicBool::new(false),
             unpark,
+        }
+    }
+
+    /// Enter an event-delivery phase on the owner thread.
+    ///
+    /// Driver completion callbacks and due-sleeper delivery hold this guard
+    /// while invoking task wakers. Event phases must not nest.
+    pub(super) fn event_delivery(&self) -> EventDelivery<'_> {
+        debug_assert_eq!(thread::current().id(), self.owner);
+        debug_assert!(
+            !self.delivering_events.load(Ordering::Relaxed),
+            "event-delivery phases must not nest"
+        );
+        self.delivering_events.store(true, Ordering::Relaxed);
+        EventDelivery {
+            tasks: self,
+            not_send: PhantomData,
         }
     }
 
@@ -266,14 +353,39 @@ impl Tasks {
         };
 
         // Queue the first poll.
-        arc_self.queue(cell as Arc<dyn Erased>);
+        arc_self.queue_normal(cell as Arc<dyn Erased>);
         true
     }
 
-    /// Enqueue an already registered task to be polled.
-    fn queue(&self, task: Arc<dyn Erased>) {
-        self.ready.lock().push(task);
+    /// Enqueue a task's initial poll at the back of the normal lane.
+    fn queue_normal(&self, task: Arc<dyn Erased>) {
+        self.ready.lock().normal.push_back(task);
         self.unpark_foreign();
+    }
+
+    /// Classify and enqueue a wake that won its task's queued latch.
+    ///
+    /// One current-thread lookup determines both event eligibility and
+    /// whether the ring needs a foreign wake. Only an owner-thread wake inside
+    /// an event-delivery phase enters the event lane. Foreign wakes remain
+    /// normal even if they race such a phase, and task self-wakes remain
+    /// normal because task polling is outside it.
+    fn queue_wake(&self, task: Arc<dyn Erased>) {
+        let foreign = thread::current().id() != self.owner;
+        let lane = if !foreign && self.delivering_events.load(Ordering::Relaxed) {
+            ReadyLane::Event
+        } else {
+            ReadyLane::Normal
+        };
+        let mut ready = self.ready.lock();
+        match lane {
+            ReadyLane::Normal => ready.normal.push_back(task),
+            ReadyLane::Event => ready.event.push_back(task),
+        }
+        drop(ready);
+        if foreign {
+            self.unpark.wake();
+        }
     }
 
     /// Mark the root task ready to be polled.
@@ -301,17 +413,50 @@ impl Tasks {
         self.root_ready.swap(false, Ordering::Acquire)
     }
 
-    /// Drain all ready tasks into `scratch`, an empty buffer the caller
-    /// reuses across iterations so a busy executor drains without
-    /// allocating.
-    pub(super) fn drain_into(&self, scratch: &mut Vec<Arc<dyn Erased>>) {
-        let mut queue = self.ready.lock();
-        swap(&mut *queue, scratch);
+    /// Move up to `limit` spawned-task tokens into `scratch`.
+    ///
+    /// Up to `event_quota` event tokens come first. If the normal lane was
+    /// nonempty at the locked snapshot and `limit` is positive, at least one
+    /// normal token is reserved. The normal lane then fills the remaining
+    /// capacity, followed by event tokens beyond the quota when capacity is
+    /// still unused. Tokens retain FIFO order within each lane. Every moved
+    /// token consumes capacity even if polling later finds it stale.
+    ///
+    /// The caller supplies an empty buffer reused across iterations. Tokens
+    /// beyond the combined limit remain shared so [Self::has_ready] prevents
+    /// parking, while retained scratch capacity avoids later allocations.
+    pub(super) fn drain_into(
+        &self,
+        scratch: &mut Vec<Arc<dyn Erased>>,
+        limit: usize,
+        event_quota: usize,
+    ) {
+        debug_assert!(scratch.is_empty());
+        let mut ready = self.ready.lock();
+        let normal_reserve = usize::from(limit > 0 && !ready.normal.is_empty());
+
+        // Reserve normal service before taking the prioritized event prefix.
+        let event_count = event_quota
+            .min(ready.event.len())
+            .min(limit.saturating_sub(normal_reserve));
+        drain_front(&mut ready.event, scratch, event_count);
+
+        let normal_count = (limit - scratch.len()).min(ready.normal.len());
+        drain_front(&mut ready.normal, scratch, normal_count);
+
+        // Fill capacity the normal snapshot could not use. This may exceed
+        // the initial event quota but never the combined task limit.
+        let event_fill = (limit - scratch.len()).min(ready.event.len());
+        drain_front(&mut ready.event, scratch, event_fill);
     }
 
     /// Whether any task (including the root) is ready to be polled.
     pub(super) fn has_ready(&self) -> bool {
-        self.root_ready.load(Ordering::Acquire) || !self.ready.lock().is_empty()
+        if self.root_ready.load(Ordering::Acquire) {
+            return true;
+        }
+        let ready = self.ready.lock();
+        !ready.normal.is_empty() || !ready.event.is_empty()
     }
 
     /// Free a completed task's arena slot.
@@ -326,8 +471,11 @@ impl Tasks {
 
     /// Clear all tasks and reject future registrations.
     pub(super) fn clear(&self) -> Vec<Arc<dyn Erased>> {
-        // Clear ready
-        self.ready.lock().clear();
+        // Clear both ready lanes.
+        let mut ready = self.ready.lock();
+        ready.normal.clear();
+        ready.event.clear();
+        drop(ready);
 
         // Clear running tasks and close the arena so registrations racing
         // teardown are rejected rather than leaked.
@@ -343,10 +491,44 @@ impl Tasks {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::Runner, *};
+    use super::{
+        super::{EVENT_READY_TASKS_PER_TURN, READY_TASKS_PER_TURN, Runner},
+        *,
+    };
     use crate::{Clock as _, Runner as _, Spawner as _, Supervisor as _};
     use commonware_utils::channel::oneshot;
     use std::{task::Waker, time::Duration};
+
+    /// Build an unregistered pending task cell for ready-lane tests.
+    fn pending_cell(
+        tasks: &Arc<Tasks>,
+        slot: usize,
+        queued: bool,
+    ) -> Arc<TaskCell<std::future::Pending<()>>> {
+        Arc::new(TaskCell {
+            slot,
+            tasks: Arc::downgrade(tasks),
+            queued: AtomicBool::new(queued),
+            future: Affine::pinned(
+                std::thread::current().id(),
+                RefCell::new(Some(std::future::pending())),
+            ),
+        })
+    }
+
+    /// Return the slot order represented by a drained token batch.
+    fn slots(tasks: &[Arc<dyn Erased>]) -> Vec<usize> {
+        tasks.iter().map(|task| task.slot()).collect()
+    }
+
+    /// Append an unregistered token to one ready lane without unparking.
+    fn queue_token(tasks: &Tasks, task: Arc<dyn Erased>, lane: ReadyLane) {
+        let mut ready = tasks.ready.lock();
+        match lane {
+            ReadyLane::Normal => ready.normal.push_back(task),
+            ReadyLane::Event => ready.event.push_back(task),
+        }
+    }
 
     /// Separately constructed wakers for one task must retain the task's
     /// pointer identity so callers can use `Waker::will_wake`.
@@ -366,6 +548,300 @@ mod tests {
         let first = waker(Arc::clone(&cell));
         let second = waker(Arc::clone(&cell));
         assert!(first.will_wake(&second));
+    }
+
+    /// The initial event quota is drained first, a normal token present in the
+    /// snapshot is reserved, and unused normal capacity is filled from the
+    /// event lane without crossing the combined limit.
+    #[test]
+    fn test_event_drain_prioritizes_quota_and_reserves_normal() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        for slot in 0..2 {
+            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Normal);
+        }
+        for slot in 10..14 {
+            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Event);
+        }
+
+        let mut scratch = Vec::new();
+        tasks.drain_into(&mut scratch, 4, 1);
+        assert_eq!(slots(&scratch), vec![10, 0, 1, 11]);
+        assert_eq!(scratch.len(), 4);
+
+        scratch.clear();
+        tasks.drain_into(&mut scratch, 4, 1);
+        assert_eq!(slots(&scratch), vec![12, 13]);
+        scratch.clear();
+        assert!(!tasks.has_ready());
+    }
+
+    /// Multiple drains may interleave the lanes, but tokens from each lane
+    /// retain their own arrival order.
+    #[test]
+    fn test_ready_lanes_preserve_fifo_order() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        for slot in 0..3 {
+            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Normal);
+        }
+        for slot in 10..13 {
+            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Event);
+        }
+
+        let mut scratch = Vec::new();
+        tasks.drain_into(&mut scratch, 4, 2);
+        assert_eq!(slots(&scratch), vec![10, 11, 0, 1]);
+        scratch.clear();
+        tasks.drain_into(&mut scratch, 4, 2);
+        assert_eq!(slots(&scratch), vec![12, 2]);
+        scratch.clear();
+        assert!(!tasks.has_ready());
+    }
+
+    /// The production half-turn event quota drains a 64-event burst in two
+    /// snapshots while an older normal backlog advances by the other half of
+    /// each snapshot. This is the burst-tail and starvation contract selected
+    /// by the scheduler benchmark.
+    #[test]
+    fn test_production_event_quota_balances_burst_and_normal_progress() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        for slot in 0..READY_TASKS_PER_TURN * 2 {
+            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Normal);
+        }
+        for slot in 0..READY_TASKS_PER_TURN {
+            queue_token(
+                &tasks,
+                pending_cell(&tasks, 1_000 + slot, true),
+                ReadyLane::Event,
+            );
+        }
+
+        let mut scratch = Vec::with_capacity(READY_TASKS_PER_TURN);
+        tasks.drain_into(
+            &mut scratch,
+            READY_TASKS_PER_TURN,
+            EVENT_READY_TASKS_PER_TURN,
+        );
+        assert_eq!(
+            slots(&scratch),
+            (1_000..1_000 + EVENT_READY_TASKS_PER_TURN)
+                .chain(0..READY_TASKS_PER_TURN - EVENT_READY_TASKS_PER_TURN)
+                .collect::<Vec<_>>()
+        );
+
+        scratch.clear();
+        tasks.drain_into(
+            &mut scratch,
+            READY_TASKS_PER_TURN,
+            EVENT_READY_TASKS_PER_TURN,
+        );
+        assert_eq!(
+            slots(&scratch),
+            (1_000 + EVENT_READY_TASKS_PER_TURN..1_000 + READY_TASKS_PER_TURN)
+                .chain(
+                    READY_TASKS_PER_TURN - EVENT_READY_TASKS_PER_TURN
+                        ..2 * (READY_TASKS_PER_TURN - EVENT_READY_TASKS_PER_TURN),
+                )
+                .collect::<Vec<_>>()
+        );
+
+        scratch.clear();
+        let ready = tasks.ready.lock();
+        assert!(ready.event.is_empty());
+        assert_eq!(ready.normal.len(), READY_TASKS_PER_TURN);
+    }
+
+    /// An event wake cannot promote a token already latched in the normal
+    /// lane because lane selection happens only on the first latch transition.
+    #[test]
+    fn test_event_wake_does_not_promote_queued_normal_token() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let cell = pending_cell(&tasks, 7, true);
+        let task_waker = waker(Arc::clone(&cell));
+        queue_token(&tasks, cell as Arc<dyn Erased>, ReadyLane::Normal);
+
+        {
+            let _event_delivery = tasks.event_delivery();
+            task_waker.wake_by_ref();
+        }
+
+        let ready = tasks.ready.lock();
+        assert_eq!(ready.normal.len(), 1);
+        assert!(ready.event.is_empty());
+        drop(ready);
+        tasks.clear();
+    }
+
+    /// A self-wake published while a spawned task is being polled uses the
+    /// normal lane because task polling is outside event-delivery phases.
+    #[test]
+    fn test_task_poll_self_wake_uses_normal_lane() {
+        struct WakePending;
+
+        impl Future for WakePending {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let cell = Arc::new(TaskCell {
+            slot: 5,
+            tasks: Arc::downgrade(&tasks),
+            queued: AtomicBool::new(true),
+            future: Affine::pinned(std::thread::current().id(), RefCell::new(Some(WakePending))),
+        });
+        queue_token(&tasks, cell as Arc<dyn Erased>, ReadyLane::Normal);
+
+        let mut scratch = Vec::new();
+        tasks.drain_into(&mut scratch, 1, 1);
+        assert!(!scratch.pop().unwrap().poll());
+
+        let ready = tasks.ready.lock();
+        assert_eq!(ready.normal.len(), 1);
+        assert!(ready.event.is_empty());
+        drop(ready);
+        tasks.clear();
+    }
+
+    /// A foreign-thread wake remains normal even while the owner holds an
+    /// event-delivery guard.
+    #[test]
+    fn test_foreign_wake_during_event_delivery_uses_normal_lane() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let cell = pending_cell(&tasks, 3, false);
+        let task_waker = waker(Arc::clone(&cell));
+
+        {
+            let _event_delivery = tasks.event_delivery();
+            std::thread::spawn(move || task_waker.wake())
+                .join()
+                .unwrap();
+        }
+
+        let ready = tasks.ready.lock();
+        assert_eq!(ready.normal.len(), 1);
+        assert!(ready.event.is_empty());
+        drop(ready);
+        tasks.clear();
+    }
+
+    /// Dropping an event-delivery guard during unwinding resets the phase so
+    /// the next owner-thread wake returns to the normal lane.
+    #[test]
+    fn test_event_delivery_phase_resets_after_unwind() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _event_delivery = tasks.event_delivery();
+            panic!("event delivery panic");
+        }));
+        assert!(result.is_err());
+
+        let cell = pending_cell(&tasks, 4, false);
+        ArcWake::wake_by_ref(&cell);
+        let ready = tasks.ready.lock();
+        assert_eq!(ready.normal.len(), 1);
+        assert!(ready.event.is_empty());
+        drop(ready);
+        tasks.clear();
+    }
+
+    /// Repeated event wakes before a poll coalesce into one event token.
+    #[test]
+    fn test_repeated_event_wakes_coalesce() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let cell = pending_cell(&tasks, 6, false);
+
+        {
+            let _event_delivery = tasks.event_delivery();
+            for _ in 0..5 {
+                ArcWake::wake_by_ref(&cell);
+            }
+        }
+
+        let ready = tasks.ready.lock();
+        assert!(ready.normal.is_empty());
+        assert_eq!(ready.event.len(), 1);
+        drop(ready);
+        tasks.clear();
+    }
+
+    /// An event token made stale by completion still consumes its batch slot,
+    /// leaving one of two normal tokens for the next drain.
+    #[test]
+    fn test_stale_event_completion_consumes_batch_budget() {
+        struct WakeThenReady;
+
+        impl Future for WakeThenReady {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                cx.waker().wake_by_ref();
+                Poll::Ready(())
+            }
+        }
+
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let completing = Arc::new(TaskCell {
+            slot: 8,
+            tasks: Arc::downgrade(&tasks),
+            queued: AtomicBool::new(true),
+            future: Affine::pinned(
+                std::thread::current().id(),
+                RefCell::new(Some(WakeThenReady)),
+            ),
+        });
+        queue_token(&tasks, completing as Arc<dyn Erased>, ReadyLane::Normal);
+
+        let mut scratch = Vec::new();
+        tasks.drain_into(&mut scratch, 1, 1);
+        let completing_token = scratch.pop().unwrap();
+        {
+            let _event_delivery = tasks.event_delivery();
+            assert!(completing_token.poll());
+        }
+        queue_token(&tasks, pending_cell(&tasks, 9, true), ReadyLane::Normal);
+        queue_token(&tasks, pending_cell(&tasks, 10, true), ReadyLane::Normal);
+
+        tasks.drain_into(&mut scratch, 2, 1);
+        let stale = scratch.remove(0);
+        assert_eq!(stale.slot(), 8);
+        assert!(!stale.poll());
+        assert_eq!(slots(&scratch), vec![9]);
+        scratch.clear();
+        let ready = tasks.ready.lock();
+        assert_eq!(ready.normal.len(), 1);
+        assert!(ready.event.is_empty());
+        drop(ready);
+        tasks.clear();
+    }
+
+    /// Teardown clears both spawned-task lanes and removes their readiness.
+    #[test]
+    fn test_clear_covers_both_ready_lanes() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        queue_token(&tasks, pending_cell(&tasks, 0, true), ReadyLane::Normal);
+        queue_token(&tasks, pending_cell(&tasks, 1, true), ReadyLane::Event);
+        assert!(tasks.has_ready());
+
+        assert!(tasks.clear().is_empty());
+        let ready = tasks.ready.lock();
+        assert!(ready.normal.is_empty());
+        assert!(ready.event.is_empty());
+        drop(ready);
+        assert!(!tasks.has_ready());
     }
 
     /// Repeated wakes of the same task before its next poll must coalesce
@@ -392,13 +868,103 @@ mod tests {
 
             // The task was polled (it sent the waker) and is idle: repeated
             // wakes must queue it exactly once.
-            let before = executor.tasks.ready.lock().len();
+            let before = {
+                let ready = executor.tasks.ready.lock();
+                ready.normal.len() + ready.event.len()
+            };
             for _ in 0..5 {
                 waker.wake_by_ref();
             }
-            let after = executor.tasks.ready.lock().len();
+            let after = {
+                let ready = executor.tasks.ready.lock();
+                ready.normal.len() + ready.event.len()
+            };
             assert_eq!(after - before, 1, "duplicate wakes must coalesce");
         });
+    }
+
+    /// A bounded drain preserves FIFO order and leaves every token beyond the
+    /// limit in the shared queue, where [Tasks::has_ready] keeps the worker
+    /// from parking. A second drain observes the remainder without loss.
+    #[test]
+    fn test_bounded_fifo_drain_is_lossless_and_remains_ready() {
+        const LIMIT: usize = 64;
+
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        for _ in 0..=LIMIT {
+            assert!(Tasks::register(&tasks, std::future::pending::<()>()));
+        }
+
+        let mut scratch = Vec::new();
+        tasks.drain_into(&mut scratch, LIMIT, 1);
+        assert_eq!(scratch.len(), LIMIT);
+        assert_eq!(
+            scratch.iter().map(|task| task.slot()).collect::<Vec<_>>(),
+            (0..LIMIT).collect::<Vec<_>>()
+        );
+        assert_eq!(tasks.ready.lock().normal.len(), 1);
+        assert!(tasks.has_ready(), "shared remainder must prevent parking");
+
+        scratch.clear();
+        tasks.drain_into(&mut scratch, LIMIT, 1);
+        assert_eq!(scratch.len(), 1);
+        assert_eq!(scratch[0].slot(), LIMIT);
+        assert!(!tasks.has_ready());
+
+        scratch.clear();
+        for task in tasks.clear() {
+            task.clear();
+        }
+    }
+
+    /// A task can wake itself and then complete, leaving one stale token in
+    /// the ready queue. That token consumes a bounded-drain slot and remains
+    /// inert, while a replacement reusing the same arena slot stays queued
+    /// for the next drain.
+    #[test]
+    fn test_stale_self_wake_consumes_batch_budget() {
+        struct WakeThenReady;
+
+        impl Future for WakeThenReady {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                cx.waker().wake_by_ref();
+                Poll::Ready(())
+            }
+        }
+
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        assert!(Tasks::register(&tasks, WakeThenReady));
+
+        let mut scratch = Vec::new();
+        tasks.drain_into(&mut scratch, 1, 1);
+        let task = scratch.pop().unwrap();
+        let slot = task.slot();
+        assert!(task.poll());
+        tasks.remove(slot);
+
+        // The self-wake token precedes this replacement in FIFO order, and
+        // the completed task's arena slot is immediately reused.
+        assert!(Tasks::register(&tasks, std::future::ready(())));
+        assert_eq!(tasks.ready.lock().normal.len(), 2);
+
+        tasks.drain_into(&mut scratch, 1, 1);
+        let stale = scratch.pop().unwrap();
+        assert_eq!(stale.slot(), slot);
+        assert!(!stale.poll(), "completed self-wake must be inert");
+        assert_eq!(tasks.ready.lock().normal.len(), 1);
+        assert!(tasks.has_ready(), "replacement must remain ready");
+
+        tasks.drain_into(&mut scratch, 1, 1);
+        let replacement = scratch.pop().unwrap();
+        assert_eq!(replacement.slot(), slot);
+        assert!(replacement.poll());
+        tasks.remove(slot);
+        assert!(!tasks.has_ready());
+        assert!(tasks.clear().is_empty());
     }
 
     /// A task that wakes itself multiple times per poll (by ref and by
