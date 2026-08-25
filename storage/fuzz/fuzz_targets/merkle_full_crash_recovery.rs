@@ -132,7 +132,7 @@ async fn run_operations<F: MerkleFamily>(
         merkle = match op {
             MerkleOperation::Add { data } => {
                 let batch = merkle.new_batch().add(hasher, data);
-                let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
+                let batch = batch.merkleize(merkle.mem(), hasher);
                 let merkle = merkle.apply_batch(&batch).unwrap();
                 max_size = max_size.max(merkle.size().as_u64());
                 max_leaves = max_leaves.max(merkle.leaves().as_u64());
@@ -330,7 +330,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         // Verify we can add new data after recovery
         let test_data = [0xABu8; DATA_SIZE];
         let batch = merkle.new_batch().add(&hasher, &test_data);
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
         let merkle = merkle.apply_batch(&batch).unwrap();
         merkle.destroy().await.expect("should be able to destroy");
     });

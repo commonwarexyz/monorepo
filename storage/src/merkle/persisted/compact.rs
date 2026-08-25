@@ -73,7 +73,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 /// in-place while no snapshot is alive and copy-on-write otherwise, so a snapshot never
 /// observes later mutations.
 pub struct Merkle<F: Family, D: Digest, S: Strategy> {
-    inner: Arc<Mem<F, D>>,
+    mem: Arc<Mem<F, D>>,
     strategy: S,
 }
 
@@ -81,7 +81,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// Create an empty `Merkle`.
     pub fn new(strategy: S) -> Self {
         Self {
-            inner: Arc::new(Mem::new()),
+            mem: Arc::new(Mem::new()),
             strategy,
         }
     }
@@ -94,7 +94,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     ) -> Result<Self, Error<F>> {
         let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
         Ok(Self {
-            inner: Arc::new(mem),
+            mem: Arc::new(mem),
             strategy,
         })
     }
@@ -129,13 +129,13 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         pinned_nodes: Vec<D>,
     ) -> Result<(), Error<F>> {
         let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
-        self.inner = Arc::new(mem);
+        self.mem = Arc::new(mem);
         Ok(())
     }
 
     /// Discard all retained nodes except the pinned frontier.
     pub(crate) fn prune_to_frontier(&mut self) {
-        Arc::make_mut(&mut self.inner).prune_all();
+        Arc::make_mut(&mut self.mem).prune_all();
     }
 
     /// Hash `element` and append it as a single leaf.
@@ -145,10 +145,10 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         element: &[u8],
     ) -> Result<(), Error<F>> {
         let batch =
-            UnmerkleizedBatch::wrap(self.inner.new_batch_with_strategy(self.strategy.clone()))
+            UnmerkleizedBatch::wrap(self.mem.new_batch_with_strategy(self.strategy.clone()))
                 .add(hasher, element)
-                .merkleize(&self.inner, hasher);
-        Arc::make_mut(&mut self.inner).apply_batch(&batch)
+                .merkleize(&self.mem, hasher);
+        Arc::make_mut(&mut self.mem).apply_batch(&batch)
     }
 
     /// Return the root digest of the current state.
@@ -157,12 +157,12 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, Error<F>> {
-        self.inner.root(hasher, inactive_peaks)
+        self.mem.root(hasher, inactive_peaks)
     }
 
     /// Return the number of leaves in the structure.
     pub fn leaves(&self) -> Location<F> {
-        self.inner.leaves()
+        self.mem.leaves()
     }
 
     /// Return a reference to the merkleization strategy.
@@ -170,33 +170,33 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         &self.strategy
     }
 
-    /// Borrow the in-memory [`Mem`].
-    pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
-        f(&self.inner)
+    /// The in-memory [`Mem`].
+    pub fn mem(&self) -> &Mem<F, D> {
+        &self.mem
     }
 
     /// Return a zero-copy, immutable snapshot of the in-memory [`Mem`].
     ///
     /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
     /// alive. Use this to move committed node fallback into a job running off the calling task;
-    /// prefer [`Merkle::with_mem`] when a borrow suffices.
+    /// prefer [`Merkle::mem()`] when a borrow suffices.
     pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
-        Arc::clone(&self.inner)
+        Arc::clone(&self.mem)
     }
 
     /// Create a new speculative batch with this structure as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, D, S> {
-        UnmerkleizedBatch::wrap(self.inner.new_batch_with_strategy(self.strategy.clone()))
+        UnmerkleizedBatch::wrap(self.mem.new_batch_with_strategy(self.strategy.clone()))
     }
 
     /// Create an owned merkleized batch representing the current state.
     pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        batch::MerkleizedBatch::from_mem_with_strategy(&self.inner, self.strategy.clone())
+        batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
     }
 
     /// Apply a merkleized batch to the in-memory structure.
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
-        Arc::make_mut(&mut self.inner).apply_batch(batch)
+        Arc::make_mut(&mut self.mem).apply_batch(batch)
     }
 }
 
@@ -216,7 +216,7 @@ mod tests {
             for v in values {
                 b = b.add(&hasher, v);
             }
-            merkle.with_mem(|mem| b.merkleize(mem, &hasher))
+            b.merkleize(merkle.mem(), &hasher)
         };
         merkle.apply_batch(&batch).unwrap();
     }
@@ -224,11 +224,10 @@ mod tests {
     fn pinned_nodes<F: Family>(
         merkle: &TestMerkle<F>,
     ) -> Vec<<Sha256 as commonware_cryptography::Hasher>::Digest> {
-        merkle.with_mem(|mem| {
-            F::nodes_to_pin(mem.leaves())
-                .map(|pos| *mem.get_node_unchecked(pos))
-                .collect()
-        })
+        let mem = merkle.mem();
+        F::nodes_to_pin(mem.leaves())
+            .map(|pos| *mem.get_node_unchecked(pos))
+            .collect()
     }
 
     fn assert_reset_to_round_trip<F: Family>() {
