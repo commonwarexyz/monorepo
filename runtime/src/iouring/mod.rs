@@ -200,7 +200,7 @@
 pub(crate) mod driver;
 #[cfg(test)]
 pub(crate) use driver::testing;
-pub(crate) use driver::{AcceptTicket, Driver, Handle, RawSocketAddr};
+pub(crate) use driver::{AcceptTicket, Cache, Driver, Handle, RawSocketAddr};
 pub use driver::{MAX_RING_SIZE, spinner::Config as SpinnerConfig};
 mod runtime;
 pub use runtime::{Config, Context, Runner};

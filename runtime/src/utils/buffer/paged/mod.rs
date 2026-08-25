@@ -27,19 +27,22 @@
 //! physical pages that straddle storage-page boundaries amplify cold random reads, so
 //! [CacheRef::new] logs a warning when configured with one.
 //!
-//! Two checksums are stored so that partial pages can be re-written without overwriting a valid
-//! checksum for its previously committed contents. A checksum over a page is computed over the
-//! first [0,len) bytes in the page, with all other bytes in the page ignored. Ordinary partial-page
-//! payload writes 0-pad the range [len, page_size), but recovery does not depend on bytes outside
-//! [0,len). A checksum with length 0 is never considered valid. If both checksums are valid for the
-//! page, the one with the larger `len` is considered authoritative. Partial-page shrink first makes
-//! the shorter checksum durable in the alternate slot, then invalidates the old longer checksum.
+//! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
+//! for its previously committed contents. Each rewrite covers the whole physical page: the new
+//! checksum lands in the alternate slot, while the committed prefix and its protected checksum
+//! are resubmitted byte-identically, leaving their durable bytes unchanged even if the write
+//! tears. A checksum over a page is computed over the first [0,len) bytes in the page, with all
+//! other bytes in the page ignored. Ordinary partial-page payload writes 0-pad the range
+//! [len, page_size), but recovery does not depend on bytes outside [0,len). A checksum with
+//! length 0 is never considered valid. If both checksums are valid for the page, the one with the
+//! larger `len` is considered authoritative. Partial-page shrink first makes the shorter checksum
+//! durable in the alternate slot, then invalidates the old longer checksum.
 //!
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
 
-use crate::{Blob, Buf, BufMut, Error, IoBuf};
+use crate::{Blob, Buf, BufMut, Error, IoBuf, ReadOptions};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{Crc32, crc32};
 use std::num::NonZeroU16;
@@ -199,17 +202,20 @@ async fn get_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     page_size: u64,
+    read_options: ReadOptions,
 ) -> Result<IoBuf, Error> {
-    let (page, _) = get_page_with_checksum_from_blob(blob, page_num, page_size).await?;
+    let (page, _) =
+        get_page_with_checksum_from_blob(blob, page_num, page_size, read_options).await?;
     Ok(page)
 }
 
-/// Read the designated page and return both its logical bytes and validated checksum record.
+/// Read the designated page and return both its logical bytes and validated checksum.
 async fn get_page_with_checksum_from_blob(
     blob: &impl Blob,
     page_num: u64,
     page_size: u64,
-) -> Result<(IoBuf, Checksum), Error> {
+    read_options: ReadOptions,
+) -> Result<(IoBuf, ActiveChecksum), Error> {
     let physical_page_size = page_size
         .checked_add(CHECKSUM_SIZE)
         .ok_or(Error::OffsetOverflow)?;
@@ -218,20 +224,23 @@ async fn get_page_with_checksum_from_blob(
         .ok_or(Error::OffsetOverflow)?;
 
     let page = blob
-        .read_at(physical_page_start, physical_page_size as usize)
+        .read_at(
+            physical_page_start,
+            physical_page_size as usize,
+            read_options,
+        )
         .await?
         .coalesce();
 
-    let Some(record) = Checksum::validate_page(page.as_ref()) else {
+    let Some(checksum) = Checksum::validate_page(page.as_ref()) else {
         return Err(Error::InvalidChecksum);
     };
-    let (len, _) = record.get_crc();
 
-    Ok((page.freeze().slice(..len as usize), record))
+    Ok((page.freeze().slice(..checksum.len as usize), checksum))
 }
 
 /// One of a page footer's two CRC slots, laid out back to back after the page data.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Slot {
     First,
     Second,
@@ -255,12 +264,24 @@ impl Slot {
     }
 }
 
+/// The checksum covering a page's logical bytes and the footer slot that holds it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActiveChecksum {
+    slot: Slot,
+    len: u16,
+    crc: u32,
+}
+
+impl ActiveChecksum {
+    const fn new(slot: Slot, len: u16, crc: u32) -> Self {
+        Self { slot, len, crc }
+    }
+}
+
 /// Describes a CRC record stored at the end of a page.
 ///
-/// The CRC accompanied by the larger length is the one that should be treated as authoritative for
-/// the page. Two checksums are stored so that partial pages can be written without overwriting a
-/// valid checksum for a previously committed partial page.
-#[derive(Clone)]
+/// The CRC with the larger length is authoritative. Two slots let a partial-page rewrite preserve
+/// the checksum covering the previously committed bytes while writing the new checksum elsewhere.
 struct Checksum {
     len1: u16,
     crc1: u32,
@@ -272,24 +293,11 @@ impl Checksum {
     /// Create a new CRC record with the given length and CRC.
     /// The new CRC is stored in the first slot (len1/crc1), with the second slot zeroed.
     const fn new(len: u16, crc: u32) -> Self {
-        Self::in_slot(Slot::First, len, crc)
-    }
-
-    /// A record carrying `(len, crc)` in `slot`, with the other slot zeroed.
-    const fn in_slot(slot: Slot, len: u16, crc: u32) -> Self {
-        match slot {
-            Slot::First => Self {
-                len1: len,
-                crc1: crc,
-                len2: 0,
-                crc2: 0,
-            },
-            Slot::Second => Self {
-                len1: 0,
-                crc1: 0,
-                len2: len,
-                crc2: crc,
-            },
+        Self {
+            len1: len,
+            crc1: crc,
+            len2: 0,
+            crc2: 0,
         }
     }
 
@@ -302,11 +310,9 @@ impl Checksum {
         }
     }
 
-    /// Return the CRC record for the page if it is valid. The provided slice is assumed to be
-    /// exactly the size of a physical page. The record may not precisely reflect the bytes written
-    /// if what should have been the most recent CRC doesn't validate, in which case it will be
-    /// zeroed and the other CRC used as a fallback.
-    fn validate_page(buf: &[u8]) -> Option<Self> {
+    /// Return the active checksum if the page is valid. The provided slice is assumed to be exactly
+    /// the size of a physical page.
+    fn validate_page(buf: &[u8]) -> Option<ActiveChecksum> {
         let physical_page_size = buf.len() as u64;
         if physical_page_size < CHECKSUM_SIZE {
             error!(
@@ -317,96 +323,62 @@ impl Checksum {
             return None;
         }
 
+        // Decode the CRC record from the page footer. The size guard above guarantees all of its
+        // bytes are present, and every bit pattern decodes, so the read cannot fail.
         let crc_start_idx = (physical_page_size - CHECKSUM_SIZE) as usize;
         let mut crc_bytes = &buf[crc_start_idx..];
-        let mut crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
-        let (len, crc) = crc_record.get_crc();
+        let crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
 
-        // Validate that len is in the valid range [1, page_size].
-        // A page with len=0 is invalid (e.g., all-zero pages from unwritten data).
+        // Prefer the authoritative slot: when both slots are valid, it covers the most recently
+        // committed contents of the page.
+        let authoritative = crc_record.authoritative();
+        if let Some(checksum) = crc_record.validate_slot(authoritative, buf, crc_start_idx) {
+            return Some(checksum);
+        }
+
+        // An interrupted write can corrupt only the slot it was rewriting. The other slot still
+        // covers the page's previously committed contents.
+        debug!("Invalid authoritative CRC, using fallback CRC");
+        let checksum = crc_record.validate_slot(authoritative.other(), buf, crc_start_idx);
+        if checksum.is_none() {
+            debug!("Invalid fallback CRC");
+        }
+        checksum
+    }
+
+    /// Validate one slot independently of the footer's authority ordering.
+    fn validate_slot(
+        &self,
+        slot: Slot,
+        buf: &[u8],
+        crc_start_idx: usize,
+    ) -> Option<ActiveChecksum> {
+        let (len, crc) = self.get_slot(slot);
         let len_usize = len as usize;
+
+        // A zero length marks an inactive checksum slot (committed pages are never empty).
+        // This also rejects zero-filled physical pages from unwritten storage.
         if len_usize == 0 {
-            // Both CRCs have 0 length, so there is no fallback possible.
-            debug!("Invalid CRC: len==0");
             return None;
         }
 
+        // The checksum must cover only logical page bytes, not the checksum footer itself.
         if len_usize > crc_start_idx {
-            // len is too large so this CRC isn't valid. Fall back to the other CRC.
-            debug!("Invalid CRC: len too long. Using fallback CRC");
-            if crc_record.validate_fallback(buf, crc_start_idx) {
-                return Some(crc_record);
-            }
             return None;
         }
 
-        let computed_crc = Crc32::checksum(&buf[..len_usize]);
-        if computed_crc != crc {
-            debug!("Invalid CRC: doesn't match page contents. Using fallback CRC");
-            if crc_record.validate_fallback(buf, crc_start_idx) {
-                return Some(crc_record);
-            }
+        // The recorded checksum must match the claimed logical prefix.
+        if Crc32::checksum(&buf[..len_usize]) != crc {
             return None;
         }
-
-        Some(crc_record)
+        Some(ActiveChecksum::new(slot, len, crc))
     }
 
-    /// Attempts to validate a CRC record based on its fallback CRC because the primary CRC failed
-    /// validation. The primary CRC is zeroed in the process. Returns false if the fallback CRC
-    /// fails validation.
-    fn validate_fallback(&mut self, buf: &[u8], crc_start_idx: usize) -> bool {
-        let (len, crc) = self.get_fallback_crc();
-        if len == 0 {
-            // No fallback available (only one CRC was ever written to this page).
-            debug!("Invalid fallback CRC: len==0");
-            return false;
-        }
-
-        let len_usize = len as usize;
-
-        if len_usize > crc_start_idx {
-            // len is too large so this CRC isn't valid.
-            debug!("Invalid fallback CRC: len too long.");
-            return false;
-        }
-
-        let computed_crc = Crc32::checksum(&buf[..len_usize]);
-        if computed_crc != crc {
-            debug!("Invalid fallback CRC: doesn't match page contents.");
-            return false;
-        }
-
-        true
-    }
-
-    /// Returns the CRC record with the longer (authoritative) length, without performing any
-    /// validation. If they both have the same length (which should only happen due to data
-    /// corruption) return the first.
-    const fn get_crc(&self) -> (u16, u32) {
-        match self.authoritative() {
+    /// Return one checksum slot without considering authority.
+    const fn get_slot(&self, slot: Slot) -> (u16, u32) {
+        match slot {
             Slot::First => (self.len1, self.crc1),
             Slot::Second => (self.len2, self.crc2),
-        }
-    }
-
-    /// Zeroes the primary CRC (because we assumed it failed validation) and returns the other. This
-    /// should only be called if the primary CRC failed validation. After this returns, get_crc will
-    /// no longer return the invalid primary CRC.
-    const fn get_fallback_crc(&mut self) -> (u16, u32) {
-        match self.authoritative() {
-            Slot::First => {
-                // First CRC was primary, and must have been invalid. Zero it and return the second.
-                self.len1 = 0;
-                self.crc1 = 0;
-                (self.len2, self.crc2)
-            }
-            Slot::Second => {
-                // Second CRC was primary, and must have been invalid. Zero it and return the first.
-                self.len2 = 0;
-                self.crc2 = 0;
-                (self.len1, self.crc1)
-            }
         }
     }
 
@@ -418,7 +390,7 @@ impl Checksum {
     /// Encode a whole checksum slot (`[len: u16][crc: u32]`) in its storage representation.
     ///
     /// A page footer holds two slots; recovery treats the one with the larger `len` as
-    /// authoritative (see [`Self::get_crc`]). A `len` of 0 is never authoritative.
+    /// authoritative. A `len` of 0 is never authoritative.
     fn slot_bytes(len: u16, crc: u32) -> [u8; CHECKSUM_SLOT_SIZE] {
         let mut bytes = [0; CHECKSUM_SLOT_SIZE];
         let mut buf = bytes.as_mut_slice();
@@ -582,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn test_crc_record_get_crc_len1_larger() {
+    fn test_crc_record_authoritative_len1_larger() {
         let record = Checksum {
             len1: 200,
             crc1: 0xAAAAAAAA,
@@ -590,13 +562,11 @@ mod tests {
             crc2: 0xBBBBBBBB,
         };
 
-        let (len, crc) = record.get_crc();
-        assert_eq!(len, 200);
-        assert_eq!(crc, 0xAAAAAAAA);
+        assert_eq!(record.authoritative(), Slot::First);
     }
 
     #[test]
-    fn test_crc_record_get_crc_len2_larger() {
+    fn test_crc_record_authoritative_len2_larger() {
         let record = Checksum {
             len1: 100,
             crc1: 0xAAAAAAAA,
@@ -604,14 +574,12 @@ mod tests {
             crc2: 0xBBBBBBBB,
         };
 
-        let (len, crc) = record.get_crc();
-        assert_eq!(len, 200);
-        assert_eq!(crc, 0xBBBBBBBB);
+        assert_eq!(record.authoritative(), Slot::Second);
     }
 
     #[test]
-    fn test_crc_record_get_crc_equal_lengths() {
-        // When lengths are equal, len1/crc1 is returned (first slot wins ties).
+    fn test_crc_record_authoritative_equal_lengths() {
+        // The first slot wins ties.
         let record = Checksum {
             len1: 100,
             crc1: 0xAAAAAAAA,
@@ -619,9 +587,7 @@ mod tests {
             crc2: 0xBBBBBBBB,
         };
 
-        let (len, crc) = record.get_crc();
-        assert_eq!(len, 100);
-        assert_eq!(crc, 0xAAAAAAAA);
+        assert_eq!(record.authoritative(), Slot::First);
     }
 
     #[test]
@@ -642,11 +608,10 @@ mod tests {
         let crc_start = physical_page_size - Checksum::SIZE;
         page[crc_start..].copy_from_slice(&record.to_bytes());
 
-        // Validate - should return Some with the Checksum
+        // Validate - should return the active checksum
         let validated = Checksum::validate_page(&page);
         assert!(validated.is_some());
-        let (len, _) = validated.unwrap().get_crc();
-        assert_eq!(len as usize, data.len());
+        assert_eq!(validated.unwrap().len as usize, data.len());
     }
 
     #[test]
@@ -719,8 +684,7 @@ mod tests {
         // Should validate using len2/crc2 since len2 > len1
         let validated = Checksum::validate_page(&page);
         assert!(validated.is_some());
-        let (len, _) = validated.unwrap().get_crc();
-        assert_eq!(len as usize, data.len());
+        assert_eq!(validated.unwrap().len as usize, data.len());
     }
 
     #[test]
@@ -753,13 +717,10 @@ mod tests {
 
         assert!(validated.is_some(), "Should have validated using fallback");
         let validated = validated.unwrap();
-        let (len, crc) = validated.get_crc();
-        assert_eq!(len, valid_len);
-        assert_eq!(crc, valid_crc);
-
-        // Verify that the invalid primary was zeroed out
-        assert_eq!(validated.len1, 0);
-        assert_eq!(validated.crc1, 0);
+        assert_eq!(
+            validated,
+            ActiveChecksum::new(Slot::Second, valid_len, valid_crc)
+        );
     }
 
     #[test]

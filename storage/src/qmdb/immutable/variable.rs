@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(retained.root(), compact_batch.root());
 
         let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 
@@ -541,6 +541,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_partial_ancestor_commit(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_delayed_merkleize_after_ancestor_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_delayed_merkleize_after_ancestor_apply(ctx, open::<mmr::Family>)
+                .await;
         });
     }
 

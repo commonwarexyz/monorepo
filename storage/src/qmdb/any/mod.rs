@@ -81,7 +81,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{CodecShared, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -110,7 +110,7 @@ where
     F: Family,
     H: Hasher,
     U: Update,
-    Operation<F, U>: Encode,
+    Operation<F, U>: Codec,
 {
     single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
 }
@@ -150,42 +150,40 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J, S>(
+pub async fn init<F, E, U, H, I, J, S>(
     context: E,
-    cfg: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
-    T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
 #[boxed]
-pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
+pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
-    T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     let mut log = authenticated::Journal::<F, E, J, H, S>::new(
         context.child("log"),
@@ -378,15 +376,15 @@ pub(crate) mod test {
         -> impl Future<Output = Result<Self, Error>> + Send;
     }
 
-    impl<E, U, C, I, H, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
+    impl<E, C, I, H, U, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
     where
         E: crate::Context,
-        U: UpdateTrait,
         C: Mutable<Item = AnyOperation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        AnyOperation<mmr::Family, U>: Codec,
+        U: UpdateTrait,
         S: Strategy,
+        AnyOperation<mmr::Family, U>: Codec,
     {
         async fn rewind_to_size(self, size: Location) -> Result<Self, Error> {
             self.rewind(size).await
@@ -2428,7 +2426,7 @@ pub(crate) mod test {
             assert_eq!(db.root(), root_before);
             assert_eq!(db.size(), size_before);
 
-            let too_large_target = Location::new(*size_before + 1);
+            let too_large_target = size_before + 1;
             let Err(too_large_err) = db.rewind(too_large_target).await else {
                 panic!("expected rewind past size to fail");
             };
@@ -2478,7 +2476,7 @@ pub(crate) mod test {
 
             let rewind_target = db.size();
             let target_floor = db.inactivity_floor_loc();
-            let prune_loc = Location::new(*target_floor + (KEYS / 2));
+            let prune_loc = target_floor + (KEYS / 2);
             assert!(
                 rewind_target > *prune_loc,
                 "test setup expected target size > prune_loc; target={rewind_target:?}, floor={target_floor:?}"
@@ -2811,10 +2809,7 @@ mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
     //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the snapshot index variant,
     //! so one variant (`unordered::variable`) suffices as the test bed.
-    use crate::{
-        merkle::Location,
-        qmdb::any::unordered::variable::test::{AnyTest, create_test_config},
-    };
+    use crate::qmdb::any::unordered::variable::test::{AnyTest, create_test_config};
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::{boxed, test_traced};
     use commonware_runtime::{
@@ -2882,9 +2877,7 @@ mod bitmap_tests {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                commit_locs.push(Location::<crate::merkle::mmr::Family>::new(
-                    batch.bounds.total_size - 1,
-                ));
+                commit_locs.push(batch.bounds.tip.size - 1);
                 (db, _) = db.apply_batch(batch).await.unwrap();
             }
             let db = db.commit().await.unwrap();
@@ -2932,7 +2925,7 @@ mod bitmap_tests {
                 .unwrap();
             let (db, _) = db.apply_batch(b1).await.unwrap();
             let db = db.commit().await.unwrap();
-            let size_after_first = Location::new(*db.last_commit_loc + 1);
+            let size_after_first = db.last_commit_loc + 1;
 
             let b2 = db
                 .new_batch()
@@ -3005,7 +2998,7 @@ mod bitmap_tests {
                 .await
                 .unwrap();
             assert!(
-                parent.bounds.total_size > committed_bitmap_len,
+                parent.bounds.tip.size > committed_bitmap_len,
                 "parent must extend past committed bitmap to exercise the tail path",
             );
 
@@ -3020,7 +3013,7 @@ mod bitmap_tests {
             }
             let child = child_batch.merkleize(&db, None).await.unwrap();
             assert!(
-                child.bounds.total_size > committed_bitmap_len,
+                child.bounds.tip.size > committed_bitmap_len,
                 "child must include an uncommitted tail beyond committed bitmap",
             );
             let expected_root = child.root();

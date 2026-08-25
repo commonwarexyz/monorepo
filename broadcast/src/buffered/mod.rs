@@ -56,7 +56,7 @@ mod tests {
         Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, Probability};
     use std::{
         collections::{BTreeMap, VecDeque},
         num::NonZeroU32,
@@ -90,8 +90,8 @@ mod tests {
 
     async fn initialize_simulation(
         context: deterministic::Context,
-        num_peers: u32,
-        success_rate: f64,
+        num_peers: usize,
+        success_rate: Probability,
     ) -> (
         Vec<PublicKey>,
         Registrations,
@@ -101,6 +101,7 @@ mod tests {
             context,
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(num_peers),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -378,7 +379,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 4, 1.0).await;
+                initialize_simulation(context.child("network"), 4, Probability!(1.0)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -435,7 +436,7 @@ mod tests {
         runner.start(|context| async move {
             // Initialize simulation with 1 peer
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 1, 1.0).await;
+                initialize_simulation(context.child("network"), 1, Probability!(1.0)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -489,7 +490,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 1, 1.0).await;
+                initialize_simulation(context.child("network"), 1, Probability!(1.0)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
             let mailbox = mailboxes.get(&peers[0]).unwrap();
@@ -512,7 +513,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 10, 0.1).await;
+                initialize_simulation(context.child("network"), 10, Probability!(0.1)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -558,7 +559,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 2, 1.0).await;
+                initialize_simulation(context.child("network"), 2, Probability!(1.0)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -591,7 +592,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 2, 1.0).await;
+                initialize_simulation(context.child("network"), 2, Probability!(1.0)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -629,7 +630,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 2, 1.0).await;
+                initialize_simulation(context.child("network"), 2, Probability!(1.0)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -673,7 +674,7 @@ mod tests {
         runner.start(|context| async move {
             // Initialize simulation with 3 peers
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 3, 1.0).await;
+                initialize_simulation(context.child("network"), 3, Probability!(1.0)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -734,7 +735,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 4, 1.0).await;
+                initialize_simulation(context.child("network"), 4, Probability!(1.0)).await;
 
             let sender_pk = peers[0].clone();
             let target_peer = peers[1].clone();
@@ -779,7 +780,7 @@ mod tests {
         runner.start(|context| async move {
             // three peers so we can observe from a third
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 3, 1.0).await;
+                initialize_simulation(context.child("network"), 3, Probability!(1.0)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -830,7 +831,7 @@ mod tests {
             let runner = deterministic::Runner::new(config);
             runner.start(|context| async move {
                 let (peers, mut registrations, oracle) =
-                    initialize_simulation(context.child("network"), 1, 1.0).await;
+                    initialize_simulation(context.child("network"), 1, Probability!(1.0)).await;
                 let mailboxes =
                     spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 
@@ -868,7 +869,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 3, 1.0).await;
+                initialize_simulation(context.child("network"), 3, Probability!(1.0)).await;
 
             let attacker = peers[0].clone();
             let honest = peers[1].clone();
@@ -911,7 +912,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 1, 1.0).await;
+                initialize_simulation(context.child("network"), 1, Probability!(1.0)).await;
             let peer = peers[0].clone();
             let (sender, receiver) = registrations.remove(&peer).unwrap();
 
@@ -1026,7 +1027,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 2, 1.0).await;
+                initialize_simulation(context.child("network"), 2, Probability!(1.0)).await;
             let (mut mailboxes, handles) = spawn_peer_engines_with_handles(
                 context.child("peers"),
                 &oracle,
@@ -1081,7 +1082,7 @@ mod tests {
         let runner = deterministic::Runner::new(cfg);
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 2, 1.0).await;
+                initialize_simulation(context.child("network"), 2, Probability!(1.0)).await;
 
             let (mailboxes, handles) = spawn_peer_engines_with_handles(
                 context.child("peers"),
@@ -1145,7 +1146,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 3, 1.0).await;
+                initialize_simulation(context.child("network"), 3, Probability!(1.0)).await;
 
             let peer_a = peers[0].clone();
             let peer_b = peers[1].clone();
@@ -1220,6 +1221,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -1247,7 +1249,7 @@ mod tests {
             let link = Link {
                 latency: NETWORK_SPEED,
                 jitter: Duration::ZERO,
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             for p1 in peers.iter() {
                 for p2 in peers.iter() {
@@ -1348,6 +1350,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1375,7 +1378,7 @@ mod tests {
             let link = Link {
                 latency: NETWORK_SPEED,
                 jitter: Duration::ZERO,
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             for p1 in &peers {
                 for p2 in &peers {
@@ -1447,7 +1450,7 @@ mod tests {
         runner.start(|context| async move {
             // Add a sole peer (self) to the network
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 1, 1.0).await;
+                initialize_simulation(context.child("network"), 1, Probability!(1.0)).await;
             let peer = peers[0].clone();
             let network = registrations.remove(&peer).unwrap();
             let config = Config {
@@ -1486,6 +1489,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1513,7 +1517,7 @@ mod tests {
             let link = Link {
                 latency: NETWORK_SPEED,
                 jitter: Duration::ZERO,
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             for p1 in &peers {
                 for p2 in &peers {
@@ -1587,7 +1591,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 3, 1.0).await;
+                initialize_simulation(context.child("network"), 3, Probability!(1.0)).await;
 
             let peer_a = peers[0].clone();
             let peer_b = peers[1].clone();

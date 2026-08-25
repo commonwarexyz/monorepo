@@ -1,5 +1,6 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    network::Manager,
     reshare::{
         Actor, EpochInfoResponse, Message as MailboxMessage,
         metrics::Phase,
@@ -19,7 +20,7 @@ use commonware_cryptography::{
     certificate::Scheme,
 };
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Manager, Message as NetworkMessage, Receiver, Recipients, Sender};
+use commonware_p2p::{Blocker, Message as NetworkMessage, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
@@ -35,9 +36,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -54,7 +55,7 @@ where
     pub(super) async fn dealing<SE, RE>(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut dealer: Option<&mut Dealer<V, C>>,
         mut player: Option<&mut Player<V, C>>,
         (mut sender, mut receiver): (SE, RE),
@@ -159,7 +160,7 @@ where
     async fn handle_message<SE>(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         dealer: Option<&mut Dealer<V, C>>,
         player: Option<&mut Player<V, C>>,
         sender: &mut SE,
@@ -237,7 +238,7 @@ where
 
     async fn send_dealings<SE>(
         public_key: &C::PublicKey,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         dealer: &mut Dealer<V, C>,
         mut player: Option<&mut Player<V, C>>,
@@ -284,26 +285,17 @@ mod tests {
         tests::mocks::{self, MemorySecretStore},
     };
     use commonware_actor::Feedback;
-    use commonware_consensus::{
-        Reporter,
-        marshal::{self, Start as MarshalStart, core::Actor as MarshalActor},
-        types::{FixedEpocher, ViewDelta},
-    };
-    use commonware_cryptography::{
-        bls12381::primitives::sharing::Mode, certificate::Verifier as _, ed25519,
-    };
+    use commonware_consensus::{Reporter, marshal};
+    use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
     use commonware_p2p::{
         Receiver,
         simulated::{Config as NetworkConfig, Network},
         utils::mocks::inert_channel,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        IoBuf, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-    };
-    use commonware_storage::archive::immutable;
+    use commonware_runtime::{IoBuf, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        Acknowledgement, NZU16, NZU32, NZU64, NZUsize, acknowledgement::Exact, ordered::Set,
+        Acknowledgement, NZU32, NZU64, NZUsize, acknowledgement::Exact, ordered::Set,
     };
     use std::{
         collections::VecDeque,
@@ -316,33 +308,6 @@ mod tests {
     };
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_DEALING_TEST";
-
-    type TestActor = Actor<
-        deterministic::Context,
-        mocks::TestBlock,
-        mocks::TestBlsVariant,
-        mocks::TestSigner,
-        mocks::TestManager,
-        mocks::TestBlocker,
-        StaticParticipants,
-        MemorySecretStore,
-        Sequential,
-        ed25519::Batch,
-        mocks::TestScheme,
-        mocks::TestMarshalVariant,
-        mocks::MockConsumer,
-    >;
-
-    #[derive(Clone)]
-    struct StaticParticipants(Set<mocks::TestPublicKey>);
-
-    impl ParticipantsProvider for StaticParticipants {
-        type PublicKey = mocks::TestPublicKey;
-
-        async fn participants(&mut self, _epoch: Epoch) -> Set<Self::PublicKey> {
-            self.0.clone()
-        }
-    }
 
     #[derive(Debug)]
     struct QueuedReceiver {
@@ -364,79 +329,6 @@ mod tests {
         }
     }
 
-    async fn marshal_mailbox(
-        context: deterministic::Context,
-        signer: &mocks::TestSigner,
-        scheme: mocks::TestScheme,
-    ) -> mocks::TestMarshalMailbox {
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        let finalizations_by_height =
-            immutable::Archive::init(context.child("finalizations_by_height"), {
-                let _: () = mocks::TestScheme::certificate_codec_config_unbounded();
-                archive_config("dealing-priority", "finalizations", page_cache.clone(), ())
-            })
-            .await
-            .expect("finalizations archive");
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            archive_config("dealing-priority", "blocks", page_cache.clone(), ()),
-        )
-        .await
-        .expect("blocks archive");
-
-        let (_actor, mailbox, _) = MarshalActor::<_, _, _, _, _, _, _, Exact>::init(
-            context.child("marshal"),
-            finalizations_by_height,
-            finalized_blocks,
-            marshal::Config {
-                provider: mocks::TestProvider::new(scheme),
-                epocher: FixedEpocher::new(NZU64!(2)),
-                start: MarshalStart::Genesis(mocks::genesis_block(signer.public_key())),
-                partition_prefix: "dealing-priority-marshal".into(),
-                mailbox_size: NZUsize!(16),
-                view_retention: ViewDelta::new(8),
-                prunable_items_per_section: NZU64!(10),
-                page_cache,
-                replay_buffer: NZUsize!(1024),
-                key_write_buffer: NZUsize!(1024),
-                value_write_buffer: NZUsize!(1024),
-                block_codec_config: (),
-                max_repair: NZUsize!(4),
-                max_pending_acks: NZUsize!(4),
-                strategy: Sequential,
-            },
-        )
-        .await;
-        mailbox
-    }
-
-    fn archive_config<C>(
-        prefix: &str,
-        name: &str,
-        page_cache: CacheRef,
-        codec_config: C,
-    ) -> immutable::Config<C> {
-        immutable::Config {
-            metadata_partition: format!("{prefix}-{name}-metadata"),
-            freezer_table_partition: format!("{prefix}-{name}-freezer-table"),
-            freezer_table_initial_size: 64,
-            freezer_table_resize_frequency: 10,
-            freezer_table_resize_chunk_size: 10,
-            freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
-            freezer_value_target_size: 1024,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{prefix}-{name}-ordinal"),
-            items_per_section: NZU64!(10),
-            codec_config,
-            replay_buffer: NZUsize!(1024),
-            freezer_key_write_buffer: NZUsize!(1024),
-            freezer_value_write_buffer: NZUsize!(1024),
-            ordinal_write_buffer: NZUsize!(1024),
-        }
-    }
-
     #[test]
     fn finalized_message_is_acknowledged_before_ready_peer_traffic() {
         let executor = deterministic::Runner::default();
@@ -449,26 +341,29 @@ mod tests {
                 context.child("network"),
                 NetworkConfig {
                     max_size: 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
                 vec![signer.public_key(), peer.clone()],
             )
             .await;
-            let marshal = marshal_mailbox(
+            let marshal = mocks::closed_marshal_mailbox(
                 context.child("marshal"),
                 &signer,
                 fixture.schemes[0].clone(),
+                "dealing-priority",
+                NZU64!(2),
             )
             .await;
             let (fence, _gate) = Fence::new(Epoch::zero());
-            let (mut actor, mut mailbox) = TestActor::new(
+            let (mut actor, mut mailbox) = mocks::TestReshareActor::new(
                 context.child("actor"),
                 Config {
                     signer: signer.clone(),
                     manager: oracle.manager(),
                     blocker: oracle.control(signer.public_key()),
-                    participants_provider: StaticParticipants(participants),
+                    participants_provider: mocks::StaticParticipants(participants),
                     secret_store: MemorySecretStore::default(),
                     strategy: Sequential,
                     registrar: mocks::MockConsumer::default(),

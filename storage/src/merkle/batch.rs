@@ -33,15 +33,16 @@
 //! # Parent chain and memory
 //!
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
-//! plus `Arc` refs to each ancestor's data, collected during
+//! plus `Arc` refs to each retained ancestor's data, collected during
 //! [`UnmerkleizedBatch::merkleize`]. These ancestor batches' data are used by
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
 //! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
 //! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, but their
-//! data is already captured in `ancestor_appended` / `ancestor_overwrites`.
+//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
+//! data in the committed [`Mem`]. `ancestor_base_size` records the position before the
+//! oldest retained ancestor so the remaining suffix is replayed at the correct offset.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
 //! (keeping it alive for the walk), and the `Weak` chain is walked to collect
@@ -137,6 +138,20 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Return a reference to the batch's strategy.
     pub fn strategy(&self) -> &S {
         &self.parent.strategy
+    }
+
+    /// Retain the live parent chain up to the first dropped weak link.
+    ///
+    /// Nodes beyond that link are read from committed state.
+    #[cfg(feature = "std")]
+    pub(crate) fn retain_ancestors(&self) -> Vec<Arc<MerkleizedBatch<F, D, S>>> {
+        let mut ancestors = Vec::new();
+        let mut current = Some(Arc::clone(&self.parent));
+        while let Some(batch) = current {
+            current = batch.parent.as_ref().and_then(Weak::upgrade);
+            ancestors.push(batch);
+        }
+        ancestors
     }
 
     /// The total number of nodes visible through this batch.
@@ -246,7 +261,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Add a run of pre-computed leaf digests, in order.
     #[cfg(feature = "std")]
-    pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+    pub fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let digests = digests.into_iter();
         let n = digests.size_hint().0 as u64;
@@ -372,7 +387,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
 
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
-        let (ancestor_appended, ancestor_overwrites) = collect_ancestor_batches(&self.parent);
+        let (ancestor_base_size, ancestor_appended, ancestor_overwrites) =
+            collect_ancestor_batches(&self.parent);
 
         let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
@@ -381,6 +397,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             overwrites: Arc::new(self.overwrites),
             parent_size,
             base_size: self.parent.base_size,
+            ancestor_base_size,
             pruning_boundary: self.parent.pruning_boundary(),
             ancestor_appended,
             ancestor_overwrites,
@@ -406,8 +423,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         height: u32,
         output: &mut Vec<(Position<F>, D)>,
     ) {
-        let mut pairs = positions.chunks_exact(2);
-        for pair in &mut pairs {
+        let (pairs, remainder) = positions.as_chunks::<2>();
+        for pair in pairs {
             let (left, right) = (pair[0], pair[1]);
             let (ll, lr) = self.child_digests(base, left, height);
             let (rl, rr) = self.child_digests(base, right, height);
@@ -416,7 +433,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             output.push((left, left_digest));
             output.push((right, right_digest));
         }
-        if let [pos] = pairs.remainder() {
+        if let [pos] = remainder {
             let (left, right) = self.child_digests(base, *pos, height);
             output.push((*pos, hasher.node_digest(*pos, &left, &right)));
         }
@@ -459,14 +476,15 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 }
 
 /// Collect ancestor batch data by walking the parent + its Weak chain.
-/// Returns (appended, overwrites) in root-to-tip order. Skips empty batches
-/// (e.g. root batches from `from_mem`).
+/// Returns the size before the oldest retained ancestor followed by its appended nodes and
+/// overwrites in root-to-tip order. Skips empty batches (e.g. root batches from `from_mem`).
 #[allow(clippy::type_complexity)]
 fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     parent: &Arc<MerkleizedBatch<F, D, S>>,
-) -> (Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
+) -> (Position<F>, Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
     let mut appended = Vec::new();
     let mut overwrites = Vec::new();
+    let mut base_size = parent.parent_size;
 
     // Parent is alive (strong Arc held by UnmerkleizedBatch).
     if !parent.appended.is_empty() || !parent.overwrites.is_empty() {
@@ -477,6 +495,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     // Walk Weak chain for grandparents+.
     let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
     while let Some(batch) = current {
+        base_size = batch.parent_size;
         if !batch.appended.is_empty() || !batch.overwrites.is_empty() {
             appended.push(Arc::clone(&batch.appended));
             overwrites.push(Arc::clone(&batch.overwrites));
@@ -486,7 +505,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
 
     appended.reverse();
     overwrites.reverse();
-    (appended, overwrites)
+    (base_size, appended, overwrites)
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +531,9 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// Number of committed nodes when the batch chain was forked. Inherited unchanged
     /// by all descendants. Used by `apply_batch` to detect already-committed ancestors.
     pub(crate) base_size: Position<F>,
+
+    /// Number of nodes before the oldest retained ancestor batch.
+    pub(crate) ancestor_base_size: Position<F>,
 
     /// Pruning boundary of the [`Mem`] when the batch chain was forked. Inherited
     /// unchanged by all descendants, like `base_size`.
@@ -546,7 +568,8 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             overwrites: Arc::new(Overwrites::default()),
             parent_size: mem.size(),
             base_size: mem.size(),
-            pruning_boundary: Readable::pruning_boundary(mem),
+            ancestor_base_size: mem.size(),
+            pruning_boundary: mem.pruning_boundary(),
             ancestor_appended: Vec::new(),
             ancestor_overwrites: Vec::new(),
             strategy,
@@ -676,7 +699,6 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
     type Family = F;
     type Digest = D;
-    type Error = Error<F>;
 
     fn size(&self) -> Position<F> {
         Self::size(self)
@@ -684,10 +706,6 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 
     fn get_node(&self, pos: Position<F>) -> Option<D> {
         Self::get_node(self, pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        Self::pruning_boundary(self)
     }
 }
 
@@ -1288,6 +1306,55 @@ mod tests {
     fn mmb_multiple_forks() {
         multiple_forks::<crate::mmb::Family>();
     }
+
+    /// A structure rebuilt from the pinned nodes at `n - 1` plus the final element generates a
+    /// verifiable proof for that element against the root at `n`.
+    fn tip_proof_from_pins<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            for &n in &[1u64, 2, 3, 8, 100, 199] {
+                let reference = build_reference::<F>(&hasher, n);
+                let boundary = Location::new(n - 1);
+                let pin_map = reference.nodes_to_pin(boundary);
+                let pinned_nodes: Vec<D> =
+                    F::nodes_to_pin(boundary).map(|pos| pin_map[&pos]).collect();
+                let element = hasher.digest(&(n - 1).to_be_bytes());
+
+                let peaks = F::peaks(F::location_to_position(Location::new(n))).count();
+                for inactive_peaks in 0..=peaks.min(2) {
+                    let root = reference.root(&hasher, inactive_peaks).unwrap();
+
+                    let mut rebuilt = Mem::<F, D>::init(crate::merkle::mem::Config {
+                        nodes: Vec::new(),
+                        pruning_boundary: boundary,
+                        pinned_nodes: pinned_nodes.clone(),
+                    })
+                    .unwrap();
+                    let batch = rebuilt
+                        .new_batch()
+                        .add(&hasher, &element)
+                        .merkleize(&rebuilt, &hasher);
+                    rebuilt.apply_batch(&batch).unwrap();
+                    assert_eq!(rebuilt.root(&hasher, inactive_peaks).unwrap(), root);
+
+                    let proof = rebuilt.proof(&hasher, boundary, inactive_peaks).unwrap();
+                    assert!(proof.verify_range_inclusion(&hasher, &[element], boundary, &root));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn mmr_tip_proof_from_pins() {
+        tip_proof_from_pins::<crate::mmr::Family>();
+    }
+
+    #[test]
+    fn mmb_tip_proof_from_pins() {
+        tip_proof_from_pins::<crate::mmb::Family>();
+    }
+
     #[test]
     fn mmb_fork_of_fork_reads() {
         fork_of_fork_reads::<crate::mmb::Family>();

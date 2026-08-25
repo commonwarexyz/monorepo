@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, EncodeSize, Read, ReadExt, Write, varint::UInt};
 use commonware_runtime::{
-    Buf, BufMut, Metrics, Storage,
+    Buf, BufMut, Metrics, ReadOptions, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,7 +100,9 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         let mut intervals = RMap::new();
         let journal = {
             debug!("initializing cache");
-            let mut replay = journal.replay(0, 0, cfg.replay_buffer).await?;
+            let mut replay = journal
+                .replay(0, 0, cfg.replay_buffer, ReadOptions::default())
+                .await?;
             while let Some(result) = replay.next().await {
                 // Extract key from record
                 let (_, offset, _, data) = result?;

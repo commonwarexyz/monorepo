@@ -49,7 +49,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, test_rng, vec::NonEmptyVec};
+use commonware_utils::{NZU16, NZU64, NZUsize, Probability, TestRng, test_rng, vec::NonEmptyVec};
 use futures::StreamExt;
 use rand::{
     RngExt as _,
@@ -88,12 +88,12 @@ pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
 pub const LINK: Link = Link {
     latency: Duration::from_millis(100),
     jitter: Duration::from_millis(1),
-    success_rate: 1.0,
+    success_rate: Probability!(1.0),
 };
 pub const UNRELIABLE_LINK: Link = Link {
     latency: Duration::from_millis(200),
     jitter: Duration::from_millis(50),
-    success_rate: 0.7,
+    success_rate: Probability!(0.7),
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
@@ -139,10 +139,12 @@ pub async fn setup_network_with_participants<I>(
 where
     I: IntoIterator<Item = K>,
 {
+    let participants: Vec<_> = participants.into_iter().collect();
     let (network, oracle) = Network::new_with_peers(
         context.child("network"),
         simulated::Config {
             max_size: 1024 * 1024,
+            max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: true,
             tracked_peer_sets,
         },
@@ -1933,7 +1935,7 @@ impl TestHarness for StandardHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox, height) = Actor::init(
+        let (actor, mailbox, floor) = Actor::init(
             context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -1946,7 +1948,7 @@ impl TestHarness for StandardHarness {
             application,
             mailbox,
             extra: buffer,
-            height,
+            height: floor.height(),
             actor_handle,
         }
     }
@@ -2728,7 +2730,7 @@ impl TestHarness for CodingHarness {
         let network = control.register(2, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
 
-        let (actor, mailbox, height) = Actor::init(
+        let (actor, mailbox, floor) = Actor::init(
             context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -2741,7 +2743,7 @@ impl TestHarness for CodingHarness {
             application,
             mailbox,
             extra: shard_mailbox,
-            height,
+            height: floor.height(),
             actor_handle,
         }
     }
@@ -5081,7 +5083,10 @@ where
             )
             .await
             .unwrap();
-        let blocks = ancestry.collect::<Vec<_>>().await;
+
+        // Consume the known finalized range. The stream may keep waiting for
+        // an older parent while that parent can still become available.
+        let blocks = ancestry.take(5).collect::<Vec<_>>().await;
 
         // Ensure correct delivery order: 5,4,3,2,1
         assert_eq!(blocks.len(), 5);

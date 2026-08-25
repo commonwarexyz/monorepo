@@ -505,7 +505,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set};
+    use commonware_utils::{NZUsize, Probability, ordered::Set};
     use std::{
         num::NonZeroU32,
         time::{Duration, SystemTime},
@@ -514,7 +514,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
         jitter: Duration::from_millis(0),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     };
     const CAPACITY: usize = 5usize;
 
@@ -527,6 +527,7 @@ mod tests {
             context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

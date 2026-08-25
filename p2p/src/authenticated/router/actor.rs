@@ -1,6 +1,6 @@
 use super::{
     Config,
-    ingress::{Mailbox, Message, Messenger},
+    ingress::{Mailbox, Message},
 };
 use crate::{
     Recipients,
@@ -9,14 +9,14 @@ use crate::{
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{BufferPooler, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::channel::ring;
 use futures::Sink;
 use std::{collections::BTreeMap, pin::Pin};
 use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
-pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
+pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
     control: mailbox::UnreliableReceiver<Message<P>>,
@@ -24,14 +24,12 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 }
 
-impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
-    /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
-    /// that can be used to send messages to the router.
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
+    /// Returns a new [Actor] and [Mailbox] for sending router messages.
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>) {
         // Create mailbox
         let (control_sender, control_receiver) =
             mailbox::new_unreliable::<Message<P>>(context.child("mailbox"), cfg.mailbox_size);
-        let pool = context.network_buffer_pool().clone();
 
         // Create actor
         (
@@ -41,8 +39,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                 connections: BTreeMap::new(),
                 open_subscriptions: Vec::new(),
             },
-            Mailbox::new(control_sender.clone()),
-            Messenger::new(pool, Mailbox::new(control_sender)),
+            Mailbox::new(control_sender),
         )
     }
 
@@ -152,7 +149,7 @@ mod tests {
     #[test]
     fn subscribe_retains_only_open_initial_sender() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _, _) = Actor::<deterministic::Context, PublicKey>::new(
+            let (mut actor, _) = Actor::<deterministic::Context, PublicKey>::new(
                 context,
                 Config {
                     mailbox_size: NZUsize!(1),

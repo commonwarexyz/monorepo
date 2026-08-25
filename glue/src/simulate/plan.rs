@@ -16,7 +16,7 @@ use commonware_p2p::{
     simulated::{self, Link, Network},
 };
 use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, deterministic};
-use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set};
+use commonware_utils::{NZUsize, Probability, TryCollect, channel::mpsc, ordered::Set};
 use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
@@ -147,7 +147,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             link: Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(5),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             },
             max_message_size: 1024 * 1024,
             engine,
@@ -473,6 +473,7 @@ impl<D: EngineDefinition> Plan<D> {
             ctx.child("network"),
             simulated::Config {
                 max_size: self.max_message_size,
+                max_peers_per_set: NZUsize!(self.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -978,7 +979,8 @@ mod tests {
             &self,
             ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
         ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
-            let saw_fault = ctx.context.storage_fault_config().read().open_rate == Some(1.0);
+            let saw_fault =
+                ctx.context.storage_fault_config().read().open_rate == Some(Probability!(1.0));
             async move {
                 (
                     FaultObservingNode {
@@ -1085,7 +1087,7 @@ mod tests {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(0),
-            success_rate: 1.0,
+            success_rate: Probability!(1.0),
         };
         let result = PlanBuilder::new(FinalizingEngine::new(1, Duration::from_millis(100), 1))
             .required_finalizations(1)
@@ -1112,7 +1114,7 @@ mod tests {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(0),
-            success_rate: 1.0,
+            success_rate: Probability!(1.0),
         };
         let engine = FinalizingEngine::new(2, Duration::from_millis(100), 2);
         let delayed = engine.participants[0].clone();
@@ -1198,7 +1200,7 @@ mod tests {
     #[test]
     fn storage_fault_is_visible_during_engine_init() {
         PlanBuilder::new(FaultObservingEngine::new(1))
-            .with_storage_fault(deterministic::FaultConfig::default().open(1.0))
+            .with_storage_fault(deterministic::FaultConfig::default().open(Probability!(1.0)))
             .timeout(Duration::from_secs(1))
             .required_finalizations(1)
             .property(AllStatesSawFault)

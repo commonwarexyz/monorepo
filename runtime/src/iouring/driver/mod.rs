@@ -6,7 +6,7 @@
 mod handle;
 pub(crate) use handle::{AcceptTicket, Affine, Handle, Ops};
 mod request;
-pub(crate) use request::RawSocketAddr;
+pub(crate) use request::{Cache, RawSocketAddr};
 mod timeout;
 use timeout::{Tick, TimeoutWheel};
 mod waiter;
@@ -1052,7 +1052,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::{handle::SyncTicket, testing::*, *};
-    use crate::{Error, IoBuf, IoBufMut, IoBufs, telemetry::metrics::Registry};
+    use crate::{Error, IoBuf, IoBufMut, IoBufs, WriteOptions, telemetry::metrics::Registry};
     use futures::task::{ArcWake, waker as arc_waker};
     use std::{
         fs::File,
@@ -1398,10 +1398,12 @@ mod tests {
         let mut harness = TestLoop::new(RingConfig::default());
         let handle = harness.handle.clone();
         let payload = vec![7u8; 1 << 20];
-        let mut write = Box::pin(handle.write_at_sync(
+        let mut write = Box::pin(handle.write_at(
             Arc::new(file),
             0,
             IoBufs::from(IoBuf::from(payload.clone())),
+            WriteOptions::SYNC,
+            Cache::Enabled,
         ));
 
         // Admit the write, then drop the future before it completes.
@@ -1957,10 +1959,12 @@ mod tests {
         });
         let handle = harness.handle.clone();
         let payload = vec![9u8; 1 << 20];
-        let mut write = Box::pin(handle.write_at_sync(
+        let mut write = Box::pin(handle.write_at(
             Arc::new(file),
             0,
             IoBufs::from(IoBuf::from(payload.clone())),
+            WriteOptions::SYNC,
+            Cache::Enabled,
         ));
         assert!(poll_once(&harness, &mut write).is_pending());
 

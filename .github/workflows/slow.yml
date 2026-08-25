@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest]
         partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
           - "--features commonware-runtime/iouring"
@@ -33,13 +33,9 @@ jobs:
           - ""
         exclude:
           # Only run the io_uring runtime on Ubuntu
-          - os: windows-latest
-            flags: "--features commonware-runtime/iouring"
           - os: macos-latest
             flags: "--features commonware-runtime/iouring"
           # Only run --no-default-features on Ubuntu
-          - os: windows-latest
-            flags: "--no-default-features"
           - os: macos-latest
             flags: "--no-default-features"
     steps:
@@ -84,6 +80,9 @@ jobs:
       matrix:
         include:
           - package: commonware-cryptography
+            test_flags: ""
+            lint_flags: ""
+          - package: commonware-cryptography-curve25519
             test_flags: ""
             lint_flags: ""
           - package: commonware-storage
@@ -180,6 +179,7 @@ jobs:
             partition: "1/2"
           - fuzz_dir: cryptography/fuzz
             partition: "2/2"
+          - fuzz_dir: cryptography/curve25519/fuzz
           - fuzz_dir: math/fuzz
           - fuzz_dir: p2p/fuzz
           - fuzz_dir: runtime/fuzz

@@ -1614,8 +1614,9 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, IoBuf, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _,
-        Sink as _, Spawner as _, Storage as _, Strategizer as _, Stream as _, Supervisor as _,
+        Blob as _, IoBuf, Listener as _, Metrics as _, Network as _, ReadOptions, Resolver as _,
+        Runner as _, Sink as _, Spawner as _, Storage as _, Strategizer as _, Stream as _,
+        Supervisor as _, WriteOptions,
     };
     use commonware_parallel::Strategy as _;
     use commonware_utils::{NZUsize, channel::oneshot};
@@ -1728,9 +1729,11 @@ mod tests {
                     .spawn(move |context| async move {
                         let (blob, len) = context.open("partition", b"blob").await.unwrap();
                         assert_eq!(len, 0);
-                        blob.write_at(0, IoBuf::from(b"hello")).await.unwrap();
+                        blob.write_at(0, IoBuf::from(b"hello"), WriteOptions::default())
+                            .await
+                            .unwrap();
                         blob.sync().await.unwrap();
-                        let read = blob.read_at(0, 5).await.unwrap();
+                        let read = blob.read_at(0, 5, ReadOptions::default()).await.unwrap();
                         assert_eq!(read.coalesce(), b"hello");
 
                         let (mut sink, mut stream) = context.dial(addr).await.unwrap();
@@ -1810,7 +1813,7 @@ mod tests {
                 .child("dedicated")
                 .dedicated()
                 .spawn(move |_| async move {
-                    let _ = blob.read_at(0, 1).await;
+                    let _ = blob.read_at(0, 1, ReadOptions::default()).await;
                 });
             assert!(matches!(handle.await, Err(Error::Exited)));
         });
@@ -1898,7 +1901,7 @@ mod tests {
                     .child("dedicated")
                     .dedicated()
                     .spawn(move |_| async move {
-                        let _ = blob.read_at(0, 1).await;
+                        let _ = blob.read_at(0, 1, ReadOptions::default()).await;
                     });
                 let _ = handle.await;
             })
@@ -1913,7 +1916,9 @@ mod tests {
     fn test_start_sync_handle_dropped_on_other_worker() {
         Runner::default().start(|context| async move {
             let (blob, _) = context.open("partition", b"blob").await.unwrap();
-            blob.write_at(0, IoBuf::from(b"hello")).await.unwrap();
+            blob.write_at(0, IoBuf::from(b"hello"), WriteOptions::default())
+                .await
+                .unwrap();
             let sync_handle = blob.start_sync().await;
 
             // Hand the completion handle to a dedicated task, which drops it

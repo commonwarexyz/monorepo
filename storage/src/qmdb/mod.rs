@@ -65,12 +65,12 @@ use crate::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
-    qmdb::operation::Operation,
+    qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
-use commonware_runtime::Spawner;
+use commonware_runtime::{ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     cache::Clock,
@@ -139,11 +139,10 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 pub(crate) async fn find_inactivity_floor_at<F, R>(
     reader: &R,
     op_count: Location<F>,
-    floor_of: impl Fn(&R::Item) -> Option<Location<F>>,
 ) -> Result<Location<F>, Error<F>>
 where
     F: Family,
-    R: Contiguous,
+    R: Contiguous<Item: Floored<F>>,
 {
     let Some(last_op) = op_count.checked_sub(1) else {
         return Err(Error::HistoricalFloorPruned(op_count));
@@ -155,7 +154,9 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = floor_of(&op).ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let floor = op
+        .has_floor()
+        .ok_or(Error::HistoricalFloorPruned(op_count))?;
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
@@ -168,18 +169,17 @@ where
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
     op_count: Location<F>,
-    floor_of: impl Fn(&R::Item) -> Option<Location<F>>,
 ) -> Result<usize, Error<F>>
 where
     F: Family,
-    R: Contiguous,
+    R: Contiguous<Item: Floored<F>>,
 {
     if op_count == Location::new(0) {
         return Ok(0);
     }
 
-    let floor = find_inactivity_floor_at::<F, _>(reader, op_count, floor_of).await?;
-    Ok(F::inactive_peaks(F::location_to_position(op_count), floor))
+    let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
+    Ok(F::inactive_peaks(op_count, floor))
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -223,14 +223,8 @@ pub enum Error<F: Family> {
     /// The batch was created from a different database state than the current one.
     ///
     /// See [`batch_chain`] for more details on staleness detection.
-    #[error(
-        "stale batch: db has {db_size} ops, batch requires {batch_db_size}, {batch_base_size}, or an ancestor boundary"
-    )]
-    StaleBatch {
-        db_size: u64,
-        batch_db_size: u64,
-        batch_base_size: u64,
-    },
+    #[error("stale batch: current database state does not match the batch")]
+    StaleBatch,
 
     /// The batch's inactivity floor is lower than the database's current floor.
     #[error("floor regressed: batch floor {0} < current floor {1}")]
@@ -287,7 +281,9 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    let stream = reader.replay(*inactivity_floor_loc, init_buffer).await?;
+    let stream = reader
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
 
@@ -349,12 +345,13 @@ where
 }
 
 /// Delete `key` at `cursor` (obtained from a `get_mut` lookup of `key`), returning its location if
-/// it was present among the cursor's conflicts.
+/// it was present among the cursor's conflicts. When supplied, the matched location is removed
+/// from `cache` with the snapshot deletion.
 async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -363,10 +360,17 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? else {
+    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
+    else {
         return Ok(None);
     };
+
+    // Cache entries mirror current snapshot locations, so invalidate the matched location with
+    // the authoritative deletion.
     cursor.delete();
+    if let Some(cache) = cache {
+        cache.remove(&*loc);
+    }
 
     Ok(Some(loc))
 }
@@ -395,13 +399,14 @@ where
 
 /// Update `key` to `new_loc` at `cursor` (obtained from a `get_mut_or_insert` lookup of `key`),
 /// returning its old location if it was present among the cursor's conflicts; otherwise `new_loc`
-/// is inserted at the cursor.
+/// is inserted at the cursor. When supplied, the matched old location is removed from `cache` with
+/// the snapshot update.
 async fn update_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -410,9 +415,16 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? {
+    if let Some(loc) =
+        find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
+    {
+        // Removing the superseded cache entry with the snapshot update lets the caller reuse its
+        // slot for `new_loc` instead of evicting another live entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
+        if let Some(cache) = cache {
+            cache.remove(&*loc);
+        }
         return Ok(Some(loc));
     }
 
@@ -443,7 +455,10 @@ where
             let op = reader.read(*loc).await?;
             let k = op.key().expect("operation without key");
             let matches = *k == *key;
-            if let Some(cache) = cache.as_deref_mut() {
+
+            // Every caller immediately mutates a match. Admitting it here could evict a live
+            // candidate before the caller invalidates this location.
+            if !matches && let Some(cache) = cache.as_deref_mut() {
                 cache.put(*loc, k.clone());
             }
             matches
@@ -638,7 +653,9 @@ where
     // leave the workers running detached, retaining the log and their range allocations
     // after init has already failed. The stream is also released before the join.
     let routing_result: Result<(), Error<F>> = async {
-        let stream = log.replay(floor, init_buffer).await?;
+        let stream = log
+            .replay(floor, init_buffer, ReadOptions::default())
+            .await?;
         pin_mut!(stream);
         let mut batches: Vec<RoutedBatch<_>> = (0..workers)
             .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))

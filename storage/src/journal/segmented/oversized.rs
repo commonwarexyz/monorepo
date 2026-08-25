@@ -56,9 +56,9 @@ use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
     glob::{Config as GlobConfig, Glob},
 };
-use crate::journal::Error;
+use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, Storage};
+use commonware_runtime::{Error as RError, Handle, ReadOptions};
 use futures::future::try_join;
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
@@ -112,14 +112,12 @@ pub struct Config<C> {
 /// reader, which returns it via [Replay::finish] once exhausted. Mutations on pruned sections
 /// fail with [Error::AlreadyPrunedToSection]. Check [Oversized::pruned] first to keep the
 /// handle.
-pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
+pub struct Oversized<E: Context, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
 }
 
-impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug
-    for Oversized<E, I, V>
-{
+impl<E: Context, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug for Oversized<E, I, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Oversized")
             .field("oldest_section", &self.oldest_section())
@@ -128,9 +126,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 }
 
-impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared>
-    Oversized<E, I, V>
-{
+impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Initialize with crash recovery.
     ///
     /// `checkpoint` is the durable state recovery restores, as `(section, index size)`.
@@ -479,16 +475,19 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// starting from `start_position` in `start_section`.
     ///
     /// Setup flushes the index journal's buffered pages so the reader observes every
-    /// accepted write.
+    /// accepted write. Every backing index-journal read performed by the returned
+    /// replay uses `read_options`, including reads after advancing to another
+    /// section.
     pub async fn replay(
         self,
         start_section: u64,
         start_position: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<Replay<E, I, V>, Error> {
         let index = self
             .index
-            .replay(start_section, start_position, buffer)
+            .replay(start_section, start_position, buffer, read_options)
             .await?;
         Ok(Replay {
             index,
@@ -670,12 +669,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 /// Yields `(section, position, entry)` in order. Dropping the reader before it is exhausted
 /// destroys the journal: recovery is re-initialization. Call [Replay::finish] on an exhausted
 /// reader to get the journal back.
-pub struct Replay<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
+pub struct Replay<E: Context, I: Record, V: Codec> {
     index: FixedReplay<E, I>,
     values: Glob<E, V>,
 }
 
-impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
+impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
     /// Returns the next `(section, position, entry)`, or `None` once every section is
     /// exhausted.
     ///
@@ -704,8 +703,8 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, Buf, BufMut, BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef,
-        deterministic, mocks::SyncFaultContext,
+        Blob as _, Buf, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
+        buffer::paged::CacheRef, deterministic, mocks::SyncFaultContext,
     };
     use commonware_utils::{NZU16, NZUsize};
 
@@ -1488,7 +1487,11 @@ mod tests {
                 .expect("Failed to open index blob");
             assert_eq!(size, 5 * physical_page);
             index_blob
-                .write_at_sync(2 * physical_page + TestEntry::SIZE as u64, vec![0xFF; 12])
+                .write_at(
+                    2 * physical_page + TestEntry::SIZE as u64,
+                    vec![0xFF; 12],
+                    WriteOptions::SYNC,
+                )
                 .await
                 .expect("Failed to corrupt index page");
             drop(index_blob);
@@ -1500,11 +1503,11 @@ mod tests {
                 .await
                 .expect("Failed to open values blob");
             values_blob
-                .write_at_sync(60, vec![0xFF; 20])
+                .write_at(60, vec![0xFF; 20], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt value");
             values_blob
-                .write_at_sync(80, vec![0xFF; 20])
+                .write_at(80, vec![0xFF; 20], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt value");
             drop(values_blob);
@@ -1681,11 +1684,62 @@ mod tests {
 
             // An empty journal's reader is exhausted from the start
             let replay = oversized
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("Failed to replay");
             let oversized = replay.finish().expect("failed to finish replay");
             oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_replay_propagates_read_options() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
+            let cfg = test_cfg(&context);
+            let page_cache = cfg.index_page_cache.clone();
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg, None)
+                    .await
+                    .expect("Failed to init");
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("Failed to append");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+
+            // Evict the index page so replay must exercise the backing journal read.
+            page_cache.clear();
+            let mut replay = oversized
+                .replay(1, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
+                .await
+                .expect("Failed to replay");
+            recordings.clear();
+
+            // The adapter must preserve the caller's policy on the lazy refill.
+            let (section, position, entry) = replay
+                .next()
+                .await
+                .expect("missing replay item")
+                .expect("Failed to read replay item");
+            assert_eq!((section, position, entry.id), (1, 0, 1));
+
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::DONT_CACHE)
+            );
+
+            assert!(replay.next().await.is_none());
+            replay
+                .finish()
+                .expect("failed to finish replay")
+                .destroy()
+                .await
+                .expect("Failed to destroy");
         });
     }
 
@@ -1705,7 +1759,7 @@ mod tests {
             oversized = oversized.sync(1).await.expect("Failed to sync");
 
             let replay = oversized
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("Failed to replay");
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
@@ -2005,7 +2059,7 @@ mod tests {
             // Last page CRC starts at offset 160 - 12 = 148
             assert_eq!(size, 160);
             let last_page_crc_offset = size - 12;
-            blob.write_at_sync(last_page_crc_offset, vec![0xFF; 12])
+            blob.write_at(last_page_crc_offset, vec![0xFF; 12], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt");
             drop(blob);
@@ -3486,7 +3540,7 @@ mod tests {
 
             // Write 100 bytes of garbage (simulating partial/failed value write)
             let garbage = vec![0xDE; 100];
-            blob.write_at_sync(size, garbage)
+            blob.write_at(size, garbage, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write garbage");
             drop(blob);
@@ -3599,7 +3653,7 @@ mod tests {
             // Write the complete physical page: entry_data + crc_record
             let mut page = entry_data;
             page.extend_from_slice(&crc_record);
-            blob.write_at_sync(0, page)
+            blob.write_at(0, page, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write corrupted page");
             drop(blob);

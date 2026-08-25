@@ -26,7 +26,7 @@
 
 use crate::{
     simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-    types::{Participant, Round, TermLength, View},
+    types::{Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -43,10 +43,11 @@ use std::{marker::PhantomData, time::Duration};
 ///
 /// # Determinism Requirement
 ///
-/// Implementations **must** be deterministic: given the same construction parameters
-/// and the same inputs to [`Elector::elect`], the method must always return
-/// the same leader index. This is critical for consensus correctness - all honest
-/// participants must agree on the leader for each round.
+/// Implementations **must** be deterministic. Honest participants with the same
+/// configuration and participant set must select the same leader for each round.
+/// This is stronger than returning the same output for identical inputs because
+/// honest participants may call [`Elector::elect`] with different certificates for
+/// the same round. See [`Elector`] for the certificate handling requirements.
 pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     /// The initialized elector type.
     type Elector: Elector<S>;
@@ -68,6 +69,8 @@ pub struct Terms {
     length: TermLength,
     /// Term-abandonment timeout (set if and only if `length` exceeds one).
     stall_timeout: Option<Duration>,
+    /// Optimistic intra-term lookahead (zero unless `length` exceeds one).
+    optimistic_views: ViewDelta,
 }
 
 impl Terms {
@@ -77,6 +80,7 @@ impl Terms {
         Self {
             length: TermLength::ONE,
             stall_timeout: None,
+            optimistic_views: ViewDelta::zero(),
         }
     }
 
@@ -98,12 +102,28 @@ impl Terms {
     /// rotation bounds such a stall to one view. With longer terms, this
     /// timeout bounds it instead.
     ///
+    /// `optimistic_views` is how far a participant may optimistically run
+    /// ahead of certified ancestry within a term; zero disables optimistic
+    /// validation entirely, and values wider than `length` are accepted but
+    /// capped by the windows themselves. The voter tracks a round for every
+    /// optimistic view, so memory scales with the smaller of
+    /// `optimistic_views` and `length`. See [Optimistic Validation] for the
+    /// exact window, which anchors at the last directly notarized view. Like
+    /// the stall timeout, this is local policy: mismatched values across
+    /// participants only degrade the optimization, never safety.
+    ///
+    /// [Optimistic Validation]: crate::simplex#optimistic-validation
+    ///
     /// # Panics
     ///
     /// Panics if `length` is 1 or if `stall_timeout` is zero. Single-view
     /// terms are [`Terms::rotating`] (the default), where per-view timeouts
-    /// already bound a stall.
-    pub const fn stable(length: TermLength, stall_timeout: Duration) -> Self {
+    /// already bound a stall and no optimistic window exists.
+    pub const fn stable(
+        length: TermLength,
+        stall_timeout: Duration,
+        optimistic_views: ViewDelta,
+    ) -> Self {
         assert!(
             length.get() > 1,
             "stable leaders require a term length greater than 1"
@@ -115,6 +135,7 @@ impl Terms {
         Self {
             length,
             stall_timeout: Some(stall_timeout),
+            optimistic_views,
         }
     }
 
@@ -137,6 +158,13 @@ impl Terms {
     pub const fn stall_timeout(&self) -> Option<Duration> {
         self.stall_timeout
     }
+
+    /// Returns the optimistic intra-term lookahead (see [`Terms::stable`]).
+    ///
+    /// Always zero when [`Self::length`] is one.
+    pub const fn optimistic_views(&self) -> ViewDelta {
+        self.optimistic_views
+    }
 }
 
 impl Default for Terms {
@@ -156,17 +184,26 @@ impl Default for Terms {
 /// view 1 (the first view after genesis). For all subsequent views, the caller
 /// provides the certificate that unlocked the target view. With stable leaders,
 /// a nullification certificate can skip to the next term start, so this is not
-/// necessarily a certificate from the immediately previous view. Implementations
-/// can use the certificate to derive randomness (like [`RandomElector`]) or
-/// ignore it entirely (like [`RoundRobinElector`]).
+/// necessarily a certificate from the immediately previous view.
 ///
-/// Honest participants may enter the same round holding different certificates
-/// (for example, one via a notarization of the previous view and another via a
-/// nullification), and with `term_length > 1` those certificates may even be
-/// from different views. Implementations that derive the leader from the
-/// certificate must return the same leader for every certificate that can
-/// unlock the round; this is why [`Random`] does not support `term_length > 1`,
-/// where certificates from different views carry different randomness.
+/// Whether certificate data is safe to use for leader selection depends on the
+/// certificate scheme. Certificates are not necessarily canonical: schemes that
+/// retain signer contributions can produce different valid certificates for the
+/// same subject from different quorum subsets. Message reordering or a Byzantine
+/// participant can therefore cause honest participants to call `elect` for the
+/// same round with different certificate values. Implementations must not derive
+/// the leader from a certificate's raw encoding or signer set unless the scheme
+/// guarantees that the result is invariant across every valid representation.
+///
+/// Honest participants may also enter the same round with certificates for
+/// different subjects (for example, one via a notarization of the previous view
+/// and another via a nullification). With `term_length > 1`, those certificates
+/// may even be from different views. Implementations must return the same leader
+/// for every certificate that can unlock the round. [`RoundRobinElector`] meets
+/// this requirement by ignoring the certificate. [`RandomElector`] uses the
+/// recovered threshold seed signature, which is independent of vote type and
+/// quorum subset for a given round. [`Random`] does not support `term_length > 1`
+/// because certificates from different views carry different seed signatures.
 pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// Returns the leadership term structure this elector was built with.
     ///
@@ -181,7 +218,10 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// Implementations **must** return the same leader for every view within a
     /// stable-leader term (as defined by [`Self::terms`]): nullification
     /// coverage, finalize gating, and leader-inactivity tracking all assume the
-    /// leader is constant for the remainder of a term.
+    /// leader is constant for the remainder of a term. This contract is not
+    /// enforced at runtime: once a round's leader is set, the elector is not
+    /// consulted again for that round. A non-conforming implementation leaves
+    /// participants with inconsistent leaders and stalls progress.
     ///
     /// The `certificate` is expected to be `None` only for view 1.
     ///
@@ -227,18 +267,25 @@ impl<H: Hasher> RoundRobin<H> {
     }
 
     /// Enables stable leaders: `term_length` consecutive views share a leader,
-    /// and a term abandoned after `stall_timeout` evicts them (see
+    /// a term abandoned after `stall_timeout` evicts them, and participants
+    /// may run up to `optimistic_views` ahead within a term (see
     /// [`Terms::stable`]).
     ///
     /// The term length is consensus-critical: every participant must configure
-    /// the same value (see [`TermLength`]). The timeout is local policy.
+    /// the same value (see [`TermLength`]). The timeout and lookahead are
+    /// local policy.
     ///
     /// # Panics
     ///
     /// Panics if `term_length` is 1 or `stall_timeout` is zero (see
     /// [`Terms::stable`]).
-    pub const fn with_term(mut self, term_length: TermLength, stall_timeout: Duration) -> Self {
-        self.terms = Terms::stable(term_length, stall_timeout);
+    pub const fn with_term(
+        mut self,
+        term_length: TermLength,
+        stall_timeout: Duration,
+        optimistic_views: ViewDelta,
+    ) -> Self {
+        self.terms = Terms::stable(term_length, stall_timeout, optimistic_views);
         self
     }
 }
@@ -318,9 +365,8 @@ impl Random {
 
         let Some(seed_signature) = seed_signature else {
             // Standard round-robin for view 1
-            return Participant::new(
-                (round.epoch().get().wrapping_add(round.view().get())) as u32 % n,
-            );
+            let idx = round.epoch().get().wrapping_add(round.view().get()) % u64::from(n);
+            return Participant::new(u32::try_from(idx).expect("leader index fits in u32"));
         };
 
         // Use the seed signature as a source of randomness
@@ -403,6 +449,20 @@ mod tests {
         bls12381_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
     #[test]
+    fn stable_terms_preserve_optimistic_views() {
+        let stall = Duration::from_secs(1);
+        let length = TermLength::new(NZU32!(5));
+
+        // The configured lookahead is stored verbatim, including values wider
+        // than the term (bounded by the issuance window, not by config) and
+        // zero (optimistic validation disabled).
+        for requested in [0, 3, 4, 5, 6, u64::MAX] {
+            let terms = Terms::stable(length, stall, ViewDelta::new(requested));
+            assert_eq!(terms.optimistic_views(), ViewDelta::new(requested));
+        }
+    }
+
+    #[test]
     fn round_robin_rotates_through_participants() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
@@ -457,7 +517,11 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(TermLength::new(NZU32!(5)), Duration::from_secs(10))
+            .with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(10),
+                ViewDelta::new(0),
+            )
             .build(&participants);
 
         let round = Round::new(Epoch::new(u64::MAX - 1), View::new(6));
@@ -476,7 +540,11 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
+            .with_term(
+                TermLength::new(NZU32!(3)),
+                Duration::from_secs(10),
+                ViewDelta::new(0),
+            )
             .build(&participants);
         let epoch = Epoch::new(0);
 
@@ -500,7 +568,11 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
+            .with_term(
+                TermLength::new(NZU32!(3)),
+                Duration::from_secs(10),
+                ViewDelta::new(0),
+            )
             .build(&participants);
 
         let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), None);
@@ -630,6 +702,26 @@ mod tests {
     }
 
     #[test]
+    fn random_fallback_does_not_truncate_before_modulo() {
+        // Five participants make truncation observable:
+        // 2^32 % 5 is 1, while (2^32 as u32) % 5 is 0
+        let mut rng = test_rng();
+        let Fixture { participants, .. } =
+            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let random: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let round_robin: RoundRobinElector<ThresholdScheme> =
+            RoundRobin::<Sha256>::default().build(&participants);
+
+        // View 1 exercises Random's round-robin fallback
+        let round = Round::new(Epoch::new(u64::from(u32::MAX)), View::new(1));
+
+        // Both electors must preserve the full u64 sum through the modulo
+        assert_eq!(round_robin.elect(round, None), Participant::new(1));
+        assert_eq!(random.elect(round, None), Participant::new(1));
+    }
+
+    #[test]
     fn random_uses_certificate_randomness() {
         let mut rng = test_rng();
         let Fixture {
@@ -651,9 +743,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert1 = schemes[0]
-            .assemble::<_, N3f1>(attestations1, &Sequential)
-            .unwrap();
+        let cert1 = schemes[0].assemble(attestations1, &Sequential).unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
@@ -665,9 +755,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert2 = schemes[0]
-            .assemble::<_, N3f1>(attestations2, &Sequential)
-            .unwrap();
+        let cert2 = schemes[0].assemble(attestations2, &Sequential).unwrap();
 
         // Same certificate always gives same leader
         let leader1a = elector.elect(round1, Some(&cert1));
@@ -774,9 +862,7 @@ mod tests {
                     .take(quorum)
                     .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
                     .collect();
-                let cert = schemes[0]
-                    .assemble::<_, N3f1>(attestations, &Sequential)
-                    .unwrap();
+                let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
 
                 // Elect leader using the certificate
                 let leader = elector.elect(round, Some(&cert));

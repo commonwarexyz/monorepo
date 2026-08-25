@@ -1,24 +1,22 @@
 use super::Header;
 use crate::{BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
-#[cfg(unix)]
-use std::path::Path;
-use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
+use std::{
+    ops::RangeInclusive,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
 };
 
-#[cfg(not(unix))]
-mod fallback;
-#[cfg(unix)]
-mod unix;
+mod blob;
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly
 /// fsynced.
-#[cfg(unix)]
 async fn sync_dir(path: &Path) -> Result<(), Error> {
     let dir = fs::File::open(path).await.map_err(|e| {
         Error::BlobOpenFailed(
@@ -84,10 +82,7 @@ impl Storage {
 }
 
 impl crate::Storage for Storage {
-    #[cfg(unix)]
-    type Blob = unix::Blob;
-    #[cfg(not(unix))]
-    type Blob = fallback::Blob;
+    type Blob = blob::Blob;
 
     async fn open_versioned(
         &self,
@@ -149,16 +144,9 @@ impl crate::Storage for Storage {
                     // header always implies durable directory entries (an open that
                     // parses a header never re-runs these). The storage directory is
                     // synced unconditionally: the partition directory existing in the
-                    // namespace does not imply its entry is durable. (Windows has no
-                    // notion of syncing a directory entry; see
-                    // https://github.com/commonwarexyz/monorepo/issues/2026.)
-                    #[cfg(unix)]
-                    {
-                        sync_dir(&parent).await?;
-                        sync_dir(&storage_directory).await?;
-                    }
-                    #[cfg(not(unix))]
-                    let _ = (parent, storage_directory);
+                    // namespace does not imply its entry is durable.
+                    sync_dir(&parent).await?;
+                    sync_dir(&storage_directory).await?;
 
                     // Truncate to zero before writing, per the [Header::create] contract.
                     let (region, blob_version) = Header::create(&versions);
@@ -185,7 +173,6 @@ impl crate::Storage for Storage {
         };
 
         // Convert to a blocking std::fs::File
-        #[cfg(unix)]
         let file = file.into_std().await;
 
         // Construct the blob while still holding the filesystem lock.
@@ -209,9 +196,6 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
 
             // Sync the partition directory to ensure the removal is durable.
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
             sync_dir(&path).await?;
         } else {
             fs::remove_dir_all(&path)
@@ -219,9 +203,6 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
 
             // Sync the storage directory to ensure the removal is durable.
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
             sync_dir(&self.cfg.storage_directory).await?;
         }
         Ok(())
@@ -264,7 +245,7 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _,
+        Blob, BufferPoolConfig, ReadOptions, Storage as _, WriteOptions,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -303,7 +284,9 @@ mod tests {
         let storage = Storage::new(config, test_pool());
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Drop the completion receiver immediately.
         drop(blob.start_sync().await);
@@ -314,7 +297,11 @@ mod tests {
 
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 11);
-        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 11, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read.as_ref(), b"hello world");
     }
 
@@ -342,7 +329,9 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at the data offset
         let data = b"hello world";
-        blob.write_at(0, data).await.unwrap();
+        blob.write_at(0, data, WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -361,7 +350,10 @@ mod tests {
         assert_eq!(&raw_content[data_offset as usize..], data);
 
         // Test 3: Read at logical offset 0 returns data from the data offset
-        let read_buf = blob.read_at(0, data.len()).await.unwrap();
+        let read_buf = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
         // Test 4: Resize with logical length
@@ -385,13 +377,15 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(0, b"test data").await.unwrap();
+        blob.write_at(0, b"test data", WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(0, 9).await.unwrap();
+        let read_buf = blob2.read_at(0, 9, ReadOptions::default()).await.unwrap();
         assert_eq!(read_buf.coalesce(), b"test data");
         drop(blob2);
 
@@ -502,14 +496,16 @@ mod tests {
             std::fs::write(&path, &state).unwrap();
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 
             // The healed blob round-trips through a reopen with its data intact.
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
             assert_eq!(size, 4);
-            let read = blob.read_at(0, 4).await.unwrap();
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
             assert_eq!(read.coalesce(), b"data");
             drop(blob);
         }
@@ -585,12 +581,14 @@ mod tests {
             // Retry, write data, and confirm it survives reopen.
             let (blob, size) = storage.open("partition", name).await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
             let (blob, size) = storage.open("partition", name).await.unwrap();
             assert_eq!(size, 4);
-            let read = blob.read_at(0, 4).await.unwrap();
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
             assert_eq!(read.coalesce(), b"data");
             drop(blob);
 
@@ -658,10 +656,15 @@ mod tests {
         let (blob, size) = storage.open("partition", b"v0").await.unwrap();
         assert_eq!(size, payload.len() as u64);
         assert_eq!(
-            blob.read_at(0, payload.len()).await.unwrap().coalesce(),
+            blob.read_at(0, payload.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
             payload
         );
-        blob.write_at(size, b"!".to_vec()).await.unwrap();
+        blob.write_at(size, b"!".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 

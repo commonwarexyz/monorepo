@@ -21,6 +21,7 @@ use commonware_runtime::{
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
+    num::NonZeroUsize,
     sync::Arc,
 };
 use tracing::{Span, info_span};
@@ -259,20 +260,19 @@ pub enum CommitmentFallback {
     /// child may lie about its height.
     ///
     /// The returned block is heightable once decoded, but that is too late for
-    /// the in-flight resolver key or pruning bound.
+    /// the in-flight resolver key or retention bound.
     FetchByRound { round: Round },
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
-    /// Use this only when no certified parent round is available and the caller
-    /// has a locally validated pruning bound, such as repairing a finalized gap
-    /// or walking an accepted ancestry stream. Do not use it for a candidate's
-    /// immediate parent when the consensus context supplies the parent round.
+    /// Use this only when no certified parent round is available. The caller must have a locally
+    /// validated resolver retention bound. Examples include repairing a finalized gap or walking
+    /// an accepted ancestry stream. Do not use it for a candidate's immediate parent when the
+    /// consensus context supplies the parent round.
     ///
-    /// The height is not sent to peers. It is a local pruning hint for request
-    /// retention, not part of response validity: a fetched block is delivered
-    /// if its commitment matches, and certified storage uses the decoded block
-    /// height.
+    /// The height is not sent to peers. It is a local hint for request retention.
+    /// It is not part of response validity. A fetched block is delivered if its
+    /// commitment matches. Certified storage uses the decoded block height.
     FetchByCommitment { height: Height },
 }
 
@@ -614,12 +614,22 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
+    max_pending_acks: usize,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: Sender<Message<S, V>>) -> Self {
-        Self { sender }
+    pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
+        Self {
+            sender,
+            max_pending_acks: max_pending_acks.get(),
+        }
+    }
+
+    /// Returns the maximum number of application blocks marshal can dispatch before
+    /// acknowledgements advance its processed floor.
+    pub const fn max_pending_acks(&self) -> usize {
+        self.max_pending_acks
     }
 
     /// Create an ancestor stream that fetches missing parents by commitment.
@@ -733,6 +743,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// will be notified when the block is available. If the block is not finalized, it's possible
     /// that it may never become available.
     ///
+    /// Resolver fetches and subscriptions have independent lifetimes. The processed floor may deny
+    /// or retire a fetch. The subscription remains open while the block may still arrive through
+    /// local ingress. It closes without delivery only when marshal can no longer obtain the block.
+    ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
     /// Digest-keyed subscriptions only support waiting locally or fetching by round.
     ///
@@ -763,6 +777,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// If the block is not available locally, the subscription will be registered and the caller
     /// will be notified when the block is available. If the block is not finalized, it's possible
     /// that it may never become available.
+    ///
+    /// Resolver fetches and subscriptions have independent lifetimes. The processed floor may deny
+    /// or retire a fetch. The subscription remains open while the block may still arrive through
+    /// local ingress. It closes without delivery only when marshal can no longer obtain the block.
     ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
     ///
@@ -1273,7 +1291,7 @@ mod tests {
         runner.start(|context| async move {
             let (sender, receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender);
+            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1));
             drop(receiver);
 
             let (ack, receiver) = oneshot::channel();

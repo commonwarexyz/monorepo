@@ -50,6 +50,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self.inner.leaves()
     }
 
+    /// Retain the live parent chain up to the first dropped weak link.
+    ///
+    /// Nodes beyond that link are read from committed state.
+    pub(crate) fn retain_ancestors(&self) -> Vec<Arc<batch::MerkleizedBatch<F, D, S>>> {
+        self.inner.retain_ancestors()
+    }
+
     /// Consume this batch and produce an immutable [`batch::MerkleizedBatch`] with computed root.
     pub fn merkleize(
         self,
@@ -130,6 +137,24 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// Discard all retained nodes except the pinned frontier.
     pub(crate) fn prune_to_frontier(&self) {
         Arc::make_mut(&mut *self.inner.write()).prune_all();
+    }
+
+    /// Hash `element` and append it as a single leaf, mutating in place.
+    ///
+    /// The batch is built under a read lock and applied under a write lock, so the caller
+    /// must have exclusive ownership of the db.
+    pub(crate) fn append_leaf(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        element: &[u8],
+    ) -> Result<(), Error<F>> {
+        let batch = {
+            let inner = self.inner.read();
+            UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
+                .add(hasher, element)
+                .merkleize(&inner, hasher)
+        };
+        Arc::make_mut(&mut *self.inner.write()).apply_batch(&batch)
     }
 
     /// Return the root digest of the current state.
@@ -224,7 +249,7 @@ mod tests {
         append(&mut merkle, &[b"a", b"b", b"c"]);
         let root = merkle.root(&hasher, 0).unwrap();
         let leaves = merkle.leaves();
-        let pins = pinned_nodes(&merkle);
+        let pinned_nodes = pinned_nodes(&merkle);
 
         // Pruning to the frontier does not change the root.
         merkle.prune_to_frontier();
@@ -233,7 +258,7 @@ mod tests {
         // A fresh tree reset to the snapshot reproduces the same state.
         let mut restored = TestMerkle::<F>::new(Sequential);
         append(&mut restored, &[b"x"]);
-        restored.reset_to(leaves, pins.clone()).unwrap();
+        restored.reset_to(leaves, pinned_nodes.clone()).unwrap();
         assert_eq!(restored.root(&hasher, 0).unwrap(), root);
         assert_eq!(restored.leaves(), leaves);
 
@@ -246,7 +271,8 @@ mod tests {
         );
 
         // from_compact_state builds the same tree as reset_to.
-        let from_state = TestMerkle::<F>::from_compact_state(Sequential, leaves, pins).unwrap();
+        let from_state =
+            TestMerkle::<F>::from_compact_state(Sequential, leaves, pinned_nodes).unwrap();
         assert_eq!(from_state.root(&hasher, 0).unwrap(), root);
     }
 
@@ -266,14 +292,14 @@ mod tests {
         append(&mut merkle, &[b"a", b"b"]);
         let leaves = merkle.leaves();
 
-        // Wrong pin count.
+        // Wrong pinned-node count.
         assert!(matches!(
             merkle.reset_to(leaves, vec![]),
             Err(Error::InvalidPinnedNodes)
         ));
 
         // Leaf count beyond the family maximum.
-        let too_many = Location::new(mmr::Family::MAX_LEAVES.as_u64() + 1);
+        let too_many = mmr::Family::MAX_LEAVES + 1;
         assert!(matches!(
             merkle.reset_to(too_many, vec![]),
             Err(Error::LocationOverflow(loc)) if loc == too_many

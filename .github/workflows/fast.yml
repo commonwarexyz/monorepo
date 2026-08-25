@@ -31,8 +31,6 @@ jobs:
             flags: "--features commonware-runtime/iouring"
           - os: ubuntu-latest
             flags: ""
-          - os: windows-latest
-            flags: ""
           - os: macos-latest
             flags: ""
     steps:
@@ -103,7 +101,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest]
         partition: [1, 2]
         flags:
           - "--features commonware-runtime/iouring"
@@ -111,13 +109,9 @@ jobs:
           - ""
         exclude:
           # Only run the io_uring runtime on Ubuntu
-          - os: windows-latest
-            flags: "--features commonware-runtime/iouring"
           - os: macos-latest
             flags: "--features commonware-runtime/iouring"
           # Only run --no-default-features on Ubuntu
-          - os: windows-latest
-            flags: "--no-default-features"
           - os: macos-latest
             flags: "--no-default-features"
     steps:
@@ -149,9 +143,6 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            package: commonware-runtime
-            flags: "--features commonware-runtime/external"
-          - os: windows-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
           - os: macos-latest
@@ -364,6 +355,8 @@ jobs:
         sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build cryptography
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
+    - name: Build cryptography-curve25519
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/curve25519/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography_curve25519.wasm"
     - name: Build macros
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
     - name: Build math

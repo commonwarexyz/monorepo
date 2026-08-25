@@ -8,13 +8,15 @@
 //!
 //! The peer handles an arbitrarily large number of concurrent fetches by sending requests
 //! to other peers and processing their responses. It selects peers based on performance, retrying
-//! with another peer if one fails or provides invalid data. Fetches persist until pruned or
-//! fulfilled, delivering data to the `Consumer` for verification.
+//! with another peer if one fails or provides invalid data. Fetches persist until pruned,
+//! fulfilled, or reported as no longer needed by the `Consumer`.
 //!
-//! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
-//! and returns `true` if valid, completing the fetch, or `false` to retry. Pruning a fetch with
-//! in-progress response validation aborts that validation. If the aborted validation would have
-//! returned `false`, the peer is not blocked for that response.
+//! The `Consumer` returns a [`crate::Outcome`], checking data integrity and authenticity unless it
+//! no longer needs the key. A complete response retires its delivered subscribers, an ambiguous
+//! response retries without penalizing the peer, an invalid response retries after blocking the
+//! peer, and an ignored response retires the key without scoring its peer. Pruning a fetch with
+//! in-progress response validation aborts that validation; an invalid outcome produced after
+//! cancellation does not block the peer.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
@@ -35,8 +37,9 @@
 //!   (only if the fetch already has targets, an "all" fetch remains unrestricted)
 //! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
 //!
-//! These modifications only apply to in-progress fetches. Once a fetch completes (success, pruning,
-//! or blocked peer), the targets for that key are cleared automatically.
+//! These modifications only apply to in-progress fetches. Once a fetch succeeds, is pruned, or is
+//! ignored by the consumer, the targets for that key are cleared automatically. Blocking a peer
+//! removes that peer from every target set while leaving other targets available for retries.
 //!
 //! # Subscribers
 //!
@@ -47,6 +50,19 @@
 //! key and currently retained subscribers are supplied to
 //! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
 //! is in progress are delivered the same accepted response locally.
+//!
+//! While a response is being validated, its key remains in flight, so no further request is sent.
+//! New fetches for the key only attach subscribers or targets. A complete outcome retires the
+//! delivered subscribers, an ambiguous outcome retries the key, an invalid outcome retries the key
+//! after blocking the serving peer, and an ignored outcome retires the entire key without scoring
+//! the serving peer. When a peer-visible key admits multiple valid responses, a consumer should
+//! return an ambiguous outcome if the delivered response does not satisfy every subscriber,
+//! allowing the resolver to try another response.
+//!
+//! # Scheduling
+//!
+//! All pending fresh keys are attempted before any pending retries. Fresh keys and retries are
+//! each ordered by their next attempt time.
 //!
 //! # Peer Selection
 //!
@@ -95,7 +111,7 @@ mod tests {
         Config, Engine, Mailbox,
         mocks::{Consumer, Key, Producer},
     };
-    use crate::{Delivery, Fetch, Resolver, TargetedResolver};
+    use crate::{Delivery, Fetch, Outcome, Resolver, TargetedResolver};
     use bytes::Bytes;
     use commonware_cryptography::{
         Signer,
@@ -111,7 +127,7 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        NZU32, NZUsize,
+        NZU32, NZUsize, Probability,
         channel::{
             fallible::{FallibleExt, OneshotExt},
             mpsc, oneshot,
@@ -135,12 +151,12 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     };
     const LINK_UNRELIABLE: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 0.5,
+        success_rate: Probability!(0.5),
     };
 
     fn status_metric_total(metrics: &str, name: &str, status: &str) -> u64 {
@@ -192,6 +208,7 @@ mod tests {
             context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(peer_seeds.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             },
@@ -327,7 +344,7 @@ mod tests {
         mailbox
     }
 
-    type DeliveryGate = (oneshot::Receiver<()>, bool);
+    type DeliveryGate = (oneshot::Receiver<()>, Outcome);
     type DeliveryGates = Arc<Mutex<VecDeque<DeliveryGate>>>;
 
     #[derive(Clone)]
@@ -366,19 +383,22 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = ();
+        type Outcome = Outcome;
 
         fn deliver(
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
+        ) -> oneshot::Receiver<Self::Outcome> {
             let key = delivery.key;
             self.started.send_lossy(key.clone());
-            let (gate, valid) = self
+            let (gate, outcome) = self
                 .gates
                 .lock()
                 .pop_front()
-                .map_or((None, true), |(gate, valid)| (Some(gate), valid));
+                .map_or((None, Outcome::Complete), |(gate, outcome)| {
+                    (Some(gate), outcome)
+                });
             let (mut response, receiver) = oneshot::channel();
             let sender = self.sender.clone();
             self.context.child("delivery").spawn(move |_| async move {
@@ -387,16 +407,16 @@ mod tests {
                         _ = response.closed() => return,
                         result = gate => {
                             if result.is_err() {
-                                let _ = response.send(false);
+                                let _ = response.send(Outcome::Invalid);
                                 return;
                             }
                         },
                     }
                 }
-                if valid {
+                if outcome == Outcome::Complete {
                     sender.send_lossy((key, value));
                 }
-                let _ = response.send(valid);
+                let _ = response.send(outcome);
             });
             receiver
         }
@@ -443,18 +463,21 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = SubscriberTag;
+        type Outcome = Outcome;
 
         fn deliver(
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
+        ) -> oneshot::Receiver<Self::Outcome> {
             self.started.send_lossy(delivery.clone());
-            let (gate, valid) = self
+            let (gate, outcome) = self
                 .gates
                 .lock()
                 .pop_front()
-                .map_or((None, true), |(gate, valid)| (Some(gate), valid));
+                .map_or((None, Outcome::Complete), |(gate, outcome)| {
+                    (Some(gate), outcome)
+                });
             let (mut response, receiver) = oneshot::channel();
             let sender = self.sender.clone();
             self.context.child("delivery").spawn(move |_| async move {
@@ -463,16 +486,16 @@ mod tests {
                         _ = response.closed() => return,
                         result = gate => {
                             if result.is_err() {
-                                let _ = response.send(false);
+                                let _ = response.send(Outcome::Invalid);
                                 return;
                             }
                         },
                     }
                 }
-                if valid {
+                if outcome == Outcome::Complete {
                     sender.send_lossy((delivery, value));
                 }
-                let _ = response.send(valid);
+                let _ = response.send(outcome);
             });
             receiver
         }
@@ -494,6 +517,7 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = SubscriberTag;
+        type Outcome = bool;
 
         fn deliver(
             &mut self,
@@ -585,11 +609,14 @@ mod tests {
     /// letting it resolve verdicts synchronously (without a task yield).
     #[derive(Clone)]
     struct HoldingConsumer {
-        deliveries: mpsc::UnboundedSender<(Key, oneshot::Sender<bool>)>,
+        deliveries: mpsc::UnboundedSender<(Key, oneshot::Sender<Outcome>)>,
     }
 
     impl HoldingConsumer {
-        fn new() -> (Self, mpsc::UnboundedReceiver<(Key, oneshot::Sender<bool>)>) {
+        fn new() -> (
+            Self,
+            mpsc::UnboundedReceiver<(Key, oneshot::Sender<Outcome>)>,
+        ) {
             let (deliveries, receiver) = mpsc::unbounded_channel();
             (Self { deliveries }, receiver)
         }
@@ -599,12 +626,13 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = ();
+        type Outcome = Outcome;
 
         fn deliver(
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
             _: Self::Value,
-        ) -> oneshot::Receiver<bool> {
+        ) -> oneshot::Receiver<Outcome> {
             let (sender, receiver) = oneshot::channel();
             self.deliveries.send_lossy((delivery.key, sender));
             receiver
@@ -657,14 +685,14 @@ mod tests {
             // runs, and it must settle the completion first so the re-fetch
             // starts fresh instead of being deduplicated against the
             // completing key and dropped with it.
-            verdict.send_lossy(true);
+            verdict.send_lossy(Outcome::Complete);
             mailbox1.fetch(key.clone());
 
             select! {
                 delivered = deliveries.recv() => {
                     let (second, verdict) = delivered.unwrap();
                     assert_eq!(second, key);
-                    verdict.send_lossy(true);
+                    verdict.send_lossy(Outcome::Complete);
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("re-fetch was dropped with the completed fetch");
@@ -698,7 +726,10 @@ mod tests {
             let (gate_sender2, gate_receiver2) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
-                vec![(gate_receiver1, true), (gate_receiver2, true)],
+                vec![
+                    (gate_receiver1, Outcome::Complete),
+                    (gate_receiver2, Outcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -778,7 +809,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, true), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, Outcome::Complete),
+                    (second_gate_receiver, Outcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -849,7 +883,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, Outcome::Invalid),
+                    (second_gate_receiver, Outcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -911,6 +948,212 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_ambiguous_delivery_retries_without_blocking_peer() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), data.clone());
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![
+                    (first_gate_receiver, Outcome::Ambiguous),
+                    (second_gate_receiver, Outcome::Complete),
+                ],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod3,
+            );
+
+            mailbox1.fetch_targeted(
+                key.clone(),
+                non_empty_vec![peers[1].clone(), peers[2].clone()],
+            );
+            assert_eq!(started.recv().await.unwrap(), key);
+            first_gate_sender.send(()).unwrap();
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            oracle
+                .remove_link(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(peers[1].clone(), peers[0].clone())
+                .await
+                .unwrap();
+
+            assert_eq!(started.recv().await.unwrap(), key);
+            second_gate_sender.send(()).unwrap();
+            assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
+            assert!(oracle.blocked().await.unwrap().is_empty());
+
+            let metrics = context.encode();
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
+                1
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_ignored_delivery_retires_late_subscribers_without_rating_or_retry() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let first = Bytes::from("obsolete response");
+            let second = Bytes::from("fresh response");
+            let mut producer = SequencedProducer::default();
+            producer.insert(key.clone(), [first, second.clone()]);
+            let producer_observer = producer.clone();
+
+            let (gate_sender, gate_receiver) = oneshot::channel();
+            let (consumer, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
+                context.child("consumer"),
+                vec![(gate_receiver, Outcome::Ignored)],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                consumer,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _responder = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                producer,
+            );
+
+            let first_subscriber = SubscriberTag(1);
+            let late_subscriber = SubscriberTag(2);
+            let fresh_subscriber = SubscriberTag(3);
+            mailbox.fetch(Fetch {
+                key: key.clone(),
+                subscriber: first_subscriber.clone(),
+                span: tracing::Span::none(),
+            });
+            assert_eq!(
+                started.recv().await.expect("delivery did not start"),
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
+                }
+            );
+
+            // A subscriber attached after the delivery snapshot is still retired by
+            // the key-global ignored outcome.
+            mailbox.fetch(Fetch {
+                key: key.clone(),
+                subscriber: late_subscriber,
+                span: tracing::Span::none(),
+            });
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(producer_observer.remaining(&key), vec![second.clone()]);
+            gate_sender.send(()).expect("consumer gate dropped");
+
+            context
+                .sleep(FETCH_RETRY_TIMEOUT + Duration::from_millis(100))
+                .await;
+            assert_eq!(producer_observer.remaining(&key), vec![second.clone()]);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+
+            let metrics = context.encode();
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Dropped"),
+                1
+            );
+            assert!(
+                metrics
+                    .lines()
+                    .filter(|line| line.contains("resolves_count"))
+                    .all(|line| line.ends_with(" 0")),
+                "ignored response was recorded as a peer resolve:\n{metrics}"
+            );
+
+            // A new request for the same key starts cleanly after the ignored fetch is retired.
+            mailbox.fetch(Fetch {
+                key: key.clone(),
+                subscriber: fresh_subscriber.clone(),
+                span: tracing::Span::none(),
+            });
+            assert_eq!(
+                started.recv().await.expect("fresh delivery did not start"),
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![(fresh_subscriber.clone(), tracing::Span::none())],
+                }
+            );
+            assert_eq!(
+                deliveries.recv().await.expect("consumer channel closed"),
+                (
+                    Delivery {
+                        key: key.clone(),
+                        subscribers: non_empty_vec![(fresh_subscriber, tracing::Span::none())],
+                    },
+                    second
+                )
+            );
+            assert!(producer_observer.remaining(&key).is_empty());
+        });
+    }
+
     async fn run_pending_invalid_delivery_race(
         context: &deterministic::Context,
         validation_first: bool,
@@ -925,8 +1168,10 @@ mod tests {
         prod2.insert(key.clone(), Bytes::from("data for key 1"));
 
         let (mut gate_sender, gate_receiver) = oneshot::channel();
-        let (cons1, mut cons_out1, mut started) =
-            BlockingConsumer::new(context.child("consumer"), vec![(gate_receiver, false)]);
+        let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+            context.child("consumer"),
+            vec![(gate_receiver, Outcome::Invalid)],
+        );
 
         let scheme = schemes.remove(0);
         let mut mailbox1 = setup_and_spawn_actor(
@@ -1128,6 +1373,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2318,7 +2564,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, true), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, Outcome::Complete),
+                    (second_gate_receiver, Outcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -2411,6 +2660,239 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_late_targeted_subscriber_joins_retry_after_ambiguous_delivery() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(5);
+            let ambiguous_response = Bytes::from("ambiguous data for key 5");
+            let unexpected_refetch = Bytes::from("unexpected refetch for key 5");
+            let mut prod2 = SequencedProducer::default();
+            prod2.insert(
+                key.clone(),
+                [ambiguous_response, unexpected_refetch.clone()],
+            );
+            let prod2_observer = prod2.clone();
+
+            let valid_response = Bytes::from("valid data for key 5");
+            let mut prod3 = SequencedProducer::default();
+            prod3.insert(key.clone(), [valid_response.clone()]);
+            let prod3_observer = prod3.clone();
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
+                context.child("consumer"),
+                vec![
+                    (first_gate_receiver, Outcome::Ambiguous),
+                    (second_gate_receiver, Outcome::Complete),
+                ],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod3,
+            );
+
+            let first_subscriber = SubscriberTag(49);
+            let second_subscriber = SubscriberTag(50);
+
+            // Start unrestricted repair and park its first response in validation.
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: first_subscriber.clone(),
+                span: tracing::Span::none(),
+            });
+
+            let delivery = started.recv().await.expect("delivery did not start");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
+                }
+            );
+
+            // A targeted objection for the same key attaches to the parked fetch
+            // without issuing another network request.
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key.clone(),
+                    subscriber: second_subscriber.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[2].clone()],
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                prod2_observer.remaining(&key),
+                vec![unexpected_refetch.clone()]
+            );
+            assert_eq!(prod3_observer.remaining(&key), vec![valid_response.clone()]);
+
+            oracle
+                .remove_link(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(peers[1].clone(), peers[0].clone())
+                .await
+                .unwrap();
+
+            // An ambiguous response retries unrestricted repair with both
+            // subscribers and does not penalize the serving peer.
+            first_gate_sender.send(()).unwrap();
+            oracle.manager().track(
+                1,
+                Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+            );
+
+            let delivery = select! {
+                delivery = started.recv() => delivery.expect("retry delivery did not start"),
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("ambiguous response was not retried with the late subscriber");
+                },
+            };
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![
+                        (first_subscriber.clone(), tracing::Span::none()),
+                        (second_subscriber.clone(), tracing::Span::none())
+                    ],
+                }
+            );
+
+            second_gate_sender.send(()).unwrap();
+            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![
+                        (first_subscriber, tracing::Span::none()),
+                        (second_subscriber, tracing::Span::none())
+                    ],
+                }
+            );
+            assert_eq!(value, valid_response);
+            assert_eq!(prod2_observer.remaining(&key), vec![unexpected_refetch]);
+            assert!(prod3_observer.remaining(&key).is_empty());
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_due_retry_precedes_queued_fresh_request() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers_with_rate_limit(
+                    &context,
+                    &[1, 2],
+                    Quota::per_second(NZU32!(2)),
+                )
+                .await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let retry_key = Key(60);
+            let fresh_key = Key(61);
+
+            let (requester_consumer, mut deliveries) = HoldingConsumer::new();
+            let requester = schemes.remove(0);
+            let requester_key = requester.public_key();
+            let (requester_engine, mut requester_mailbox) = Engine::new(
+                context.child("requester"),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(requester_key.clone()),
+                    consumer: requester_consumer,
+                    producer: Producer::<Key, Bytes>::default(),
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(requester_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: Duration::ZERO,
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+
+            let mut producer = Producer::default();
+            producer.insert(retry_key.clone(), Bytes::from("retry"));
+            producer.insert(fresh_key.clone(), Bytes::from("fresh"));
+            let responder = schemes.remove(0);
+            let _responder_mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(responder.public_key()),
+                responder,
+                connections.remove(1),
+                dummy_consumer(),
+                producer,
+            );
+
+            requester_engine.start(connections.remove(0));
+            requester_mailbox.fetch(retry_key.clone());
+
+            let (delivered_key, verdict) =
+                deliveries.recv().await.expect("requester consumer closed");
+            assert_eq!(delivered_key, retry_key);
+
+            // Resolving the delivery makes its retry due before the queued
+            // mailbox request is admitted. The two-token quota admits the
+            // retry and holds the fresh request.
+            requester_mailbox.fetch(fresh_key.clone());
+            verdict.send_lossy(Outcome::Ambiguous);
+
+            let (delivered_key, verdict) =
+                deliveries.recv().await.expect("requester consumer closed");
+            assert_eq!(delivered_key, retry_key);
+            verdict.send_lossy(Outcome::Complete);
+
+            let (delivered_key, verdict) =
+                deliveries.recv().await.expect("requester consumer closed");
+            assert_eq!(delivered_key, fresh_key);
+            verdict.send_lossy(Outcome::Complete);
+        });
+    }
+
+    #[test_traced]
     fn test_late_subscriber_delivery_ignores_unrelated_waiter() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
@@ -2435,7 +2917,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, Outcome::Invalid),
+                    (second_gate_receiver, Outcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -2981,6 +3466,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -3084,6 +3570,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -3214,6 +3701,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -3395,8 +3883,10 @@ mod tests {
             prod2.insert(key.clone(), data);
 
             let (mut gate_sender, gate_receiver) = oneshot::channel();
-            let (cons1, mut cons_out1, mut started) =
-                BlockingConsumer::new(context.child("consumer"), vec![(gate_receiver, true)]);
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![(gate_receiver, Outcome::Complete)],
+            );
 
             let actor_context = context.child("actor");
 

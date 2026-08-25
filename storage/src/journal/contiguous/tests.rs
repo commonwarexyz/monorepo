@@ -4,7 +4,7 @@ use super::{Contiguous, Many, fixed, variable};
 use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as _, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+    Blob as _, ReadOptions, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs},
@@ -34,10 +34,18 @@ pub(super) async fn corrupt_page(
         offset < size - physical_page_size,
         "corruption target must be an interior page"
     );
-    let byte = blob.read_at(offset, 1).await.unwrap().coalesce();
-    blob.write_at(offset, vec![byte.as_ref()[0] ^ 0xFF])
+    let byte = blob
+        .read_at(offset, 1, ReadOptions::default())
         .await
-        .unwrap();
+        .unwrap()
+        .coalesce();
+    blob.write_at(
+        offset,
+        vec![byte.as_ref()[0] ^ 0xFF],
+        WriteOptions::default(),
+    )
+    .await
+    .unwrap();
     blob.sync().await.unwrap();
 }
 
@@ -254,7 +262,10 @@ where
     }
 
     {
-        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(0, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -285,7 +296,10 @@ where
     }
 
     {
-        let stream = journal.replay(7, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(7, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -316,7 +330,10 @@ where
     }
 
     {
-        let stream = journal.replay(13, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(13, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -348,7 +365,10 @@ where
     }
 
     {
-        let stream = journal.replay(0, NZUsize!(9)).await.unwrap();
+        let stream = journal
+            .replay(0, NZUsize!(9), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -435,7 +455,10 @@ where
     {
         // Replay from a position that may or may not be pruned (section-aligned)
         // We replay from position 10 which should be safe
-        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(10, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -514,7 +537,10 @@ where
 
     {
         // Replay from position 10 and verify positions
-        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(10, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -568,7 +594,10 @@ where
     let journal = factory("replay-on-empty".into()).await.unwrap();
 
     {
-        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(0, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -597,7 +626,10 @@ where
     let bounds = journal.bounds();
 
     {
-        let stream = journal.replay(bounds.end, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(bounds.end, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -700,7 +732,10 @@ where
 
         // Replay and verify all items
         {
-            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+            let stream = journal
+                .replay(0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -764,7 +799,10 @@ where
 
         // Replay from position 10 (first non-pruned position)
         {
-            let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+            let stream = journal
+                .replay(10, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -1199,7 +1237,10 @@ where
 
         // Replay should yield no items
         {
-            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+            let stream = journal
+                .replay(0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -1452,6 +1493,53 @@ async fn test_start_sync_overlaps_work<F, Fut, J>(
     journal.destroy().await.unwrap();
 }
 
+/// A new sync waits for the prior sync before starting: the second start_sync call itself
+/// (not its returned handle) stays pending, and no second backend sync starts, until the
+/// prior sync completes.
+#[boxed]
+async fn test_start_sync_waits_for_prior<F, Fut, J>(
+    context: deterministic::Context,
+    pending: PendingSyncs,
+    make: F,
+) where
+    F: Fn(DelayedSyncContext<deterministic::Context>) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = make(DelayedSyncContext {
+        inner: context.child("a"),
+        pending: pending.clone(),
+    })
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        (journal, _) = journal.append(&i).await.unwrap();
+    }
+
+    let first;
+    (journal, first) = journal.start_sync().await.unwrap();
+    let starts_before = pending.starts();
+    (journal, _) = journal.append(&999).await.unwrap();
+
+    let (journal, second) = {
+        let mut call = std::pin::pin!(journal.start_sync());
+        assert!(
+            call.as_mut().now_or_never().is_none(),
+            "start_sync proceeded while the prior sync was pending"
+        );
+        assert_eq!(
+            pending.starts(),
+            starts_before,
+            "a second backend sync started while the prior sync was pending"
+        );
+        pending.unblock();
+        call.await.unwrap()
+    };
+    first.await.unwrap();
+    second.await.unwrap();
+    journal.destroy().await.unwrap();
+}
+
 /// A sync handle completes only once both the tail sync and the predecessor's rollover sync
 /// are durable.
 #[boxed]
@@ -1630,6 +1718,34 @@ fn test_variable_start_sync_overlaps_work() {
         let pending = PendingSyncs::default();
         let cfg = variable_overlap_cfg(&context, "variable-start-sync-overlap");
         test_start_sync_overlaps_work(context, pending, move |ctx| {
+            let cfg = cfg.clone();
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_fixed_start_sync_waits_for_prior() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = fixed_overlap_cfg(&context, "fixed-start-sync-waits");
+        test_start_sync_waits_for_prior(context, pending, move |ctx| {
+            let cfg = cfg.clone();
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_start_sync_waits_for_prior() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let pending = PendingSyncs::default();
+        let cfg = variable_overlap_cfg(&context, "variable-start-sync-waits");
+        test_start_sync_waits_for_prior(context, pending, move |ctx| {
             let cfg = cfg.clone();
             variable::Journal::<_, u64>::init(ctx, cfg)
         })

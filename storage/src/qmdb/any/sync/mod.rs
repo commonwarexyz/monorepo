@@ -39,7 +39,7 @@ use crate::{
             },
         },
         metrics::Metrics,
-        operation::{Committable, Key},
+        operation::Key,
     },
     translator::Translator,
 };
@@ -48,21 +48,21 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
 use commonware_utils::{Array, range::NonEmptyRange};
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU64, NonZeroUsize};
 
 #[cfg(test)]
 pub(crate) mod tests;
 
 /// Shared helper to build a [Db] from sync components.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<F, E, U, I, H, C, T, S>(
+async fn build_db<F, E, U, I, H, C, S>(
     context: E,
     merkle_config: full::Config<S>,
     log: C,
-    translator: T,
+    translator: I::Translator,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
-    apply_batch_size: usize,
+    apply_batch_size: NonZeroU64,
     init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
@@ -70,13 +70,12 @@ async fn build_db<F, E, U, I, H, C, T, S>(
 where
     F: merkle::Family,
     E: Context + Spawner,
-    U: Update + Send + Sync + 'static,
-    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
+    U: Update,
+    I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
-    T: Translator,
     C: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Codec + Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     let hasher = qmdb::hasher::<H>();
 
@@ -96,7 +95,7 @@ where
         merkle,
         log,
         hasher,
-        apply_batch_size as u64,
+        apply_batch_size.get(),
     )
     .await?;
     let snapshot_context = context.child("snapshot");
@@ -146,14 +145,14 @@ macro_rules! impl_sync_database {
                 log: Self::Journal,
                 pinned_nodes: Option<Vec<Self::Digest>>,
                 range: NonEmptyRange<Location<F>>,
-                apply_batch_size: usize,
+                apply_batch_size: NonZeroU64,
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
                 let cache_size = config.init_cache_size;
                 let init_buffer = config.init_buffer;
                 let init_concurrency = config.init_concurrency;
-                build_db::<F, _, $update<K, V>, _, H, _, T, S>(
+                build_db::<F, _, $update<K, V>, _, H, _, S>(
                     context,
                     merkle_config,
                     log,
@@ -168,7 +167,11 @@ macro_rules! impl_sync_database {
                 .await
             }
 
-            async fn local_boundary_nodes(
+            async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+                Ok(self)
+            }
+
+            async fn local_pinned_nodes(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
@@ -181,7 +184,7 @@ macro_rules! impl_sync_database {
                 }
 
                 // The target's range starts at the inactivity floor.
-                qmdb::sync::local_boundary_nodes::<F, _, H, S>(
+                qmdb::sync::local_pinned_nodes::<F, _, H, S>(
                     context,
                     config.merkle_config.clone(),
                     target,

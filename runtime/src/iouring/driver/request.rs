@@ -11,13 +11,52 @@ use std::{
     fs::File,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
-/// Cap iovec batch size: larger iovecs reduce syscall count but increase
-/// per-write kernel setup overhead.
-const IOVEC_BATCH_SIZE: usize = 32;
+/// Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum
+/// so storage writes span as few submissions as possible.
+pub(super) const IOVEC_BATCH_SIZE: usize = 1024;
+
+/// Page-cache policy for a positioned I/O request.
+pub(crate) enum Cache {
+    /// Use the operating system's normal page-cache behavior.
+    Enabled,
+    /// Best-effort bypass of the page cache while the backend supports it.
+    Disabled(Arc<AtomicBool>),
+}
+
+#[allow(clippy::missing_const_for_fn)]
+impl Cache {
+    /// Return the flag for this request, falling back to normal caching if
+    /// another request has already found the hint unsupported.
+    fn rw_flag(&mut self) -> i32 {
+        match self {
+            Self::Disabled(supported) if supported.load(Ordering::Relaxed) => libc::RWF_DONTCACHE,
+            Self::Disabled(_) => {
+                *self = Self::Enabled;
+                0
+            }
+            Self::Enabled => 0,
+        }
+    }
+
+    /// Record that cache bypass is unsupported and use normal caching when
+    /// retried.
+    fn fallback(&mut self) -> bool {
+        match std::mem::replace(self, Self::Enabled) {
+            Self::Disabled(supported) => {
+                supported.store(false, Ordering::Relaxed);
+                true
+            }
+            Self::Enabled => false,
+        }
+    }
+}
 
 /// Normalized write buffer for [SendRequest] and [WriteAtRequest].
 ///
@@ -500,9 +539,21 @@ pub(super) struct ReadAtRequest {
     pub(super) read: usize,
     /// Destination buffer owned by the request.
     pub(super) buf: IoBufMut,
+    /// Page-cache policy for this request.
+    pub(super) cache: Cache,
 }
 
 impl ReadAtRequest {
+    /// Return the flags for the next positioned read.
+    fn rw_flags(&mut self) -> i32 {
+        self.cache.rw_flag()
+    }
+
+    /// Fall back to normal caching when the cache-bypass hint is unsupported.
+    fn retry_cached(&mut self, code: i32) -> bool {
+        code == -libc::EOPNOTSUPP && self.cache.fallback()
+    }
+
     /// Build the next positioned read SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
@@ -514,6 +565,7 @@ impl ReadAtRequest {
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.read) };
         let remaining = self.len - self.read;
         let offset = self.offset + self.read as u64;
+        let rw_flags = self.rw_flags();
         opcode::Read::new(
             fd,
             ptr,
@@ -522,6 +574,7 @@ impl ReadAtRequest {
                 .expect("single-buffer SQE length exceeds u32"),
         )
         .offset(offset)
+        .rw_flags(rw_flags)
         .build()
     }
 
@@ -530,6 +583,7 @@ impl ReadAtRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
+            CqeResult::Error(code) if self.retry_cached(code) => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
             // does, so operators can distinguish failure causes. A shutdown
             // cancellation is not a kernel failure: it surfaces as closed.
@@ -560,6 +614,43 @@ impl ReadAtRequest {
     }
 }
 
+/// Progress and durability policy for one positioned write request.
+#[derive(Eq, PartialEq)]
+pub(super) enum WriteAtState {
+    /// Submit writes without per-write durability.
+    Writing,
+    /// Submit writes with `RWF_DSYNC`.
+    WritingSync,
+    /// Submit plain writes, then issue one trailing data sync.
+    WritingBeforeSync,
+    /// Issue the trailing data sync.
+    Syncing,
+}
+
+/// Build a data-only fsync SQE.
+fn build_datasync_sqe(file: &File) -> SqueueEntry {
+    opcode::Fsync::new(Fd(file.as_raw_fd()))
+        .flags(io_uring::types::FsyncFlags::DATASYNC)
+        .build()
+}
+
+/// Classify one data-sync CQE.
+fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
+    match CqeResult::from_raw(result, state) {
+        CqeResult::Retry => None,
+        CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
+        CqeResult::Cancelled(CancelReason::Deadline) => {
+            let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
+            Some(Err(Error::Io(err.into())))
+        }
+        CqeResult::Error(code) => {
+            let err = std::io::Error::from_raw_os_error(-code);
+            Some(Err(Error::Io(err.into())))
+        }
+        CqeResult::Zero | CqeResult::Positive(_) => Some(Ok(())),
+    }
+}
+
 /// Logical positioned file write request and its in-loop state.
 pub(super) struct WriteAtRequest {
     /// File used by the current write SQE.
@@ -570,18 +661,35 @@ pub(super) struct WriteAtRequest {
     pub(super) written: usize,
     /// Write cursor and buffers that still need to be written.
     pub(super) write: WriteBuffers,
-    /// Whether the write should be durably persisted before completion.
-    pub(super) sync: bool,
+    /// Current write and durability phase.
+    pub(super) state: WriteAtState,
+    /// Page-cache policy for this request.
+    pub(super) cache: Cache,
 }
 
 impl WriteAtRequest {
-    /// Return the flags for this write request, setting `RWF_SYNC` when `sync` is set.
-    const fn rw_flags(&self) -> i32 {
-        if self.sync { libc::RWF_SYNC } else { 0 }
+    /// Use `RWF_DSYNC` because the write contract does not require
+    /// timestamp-only metadata.
+    fn rw_flags(&mut self) -> i32 {
+        let sync = if self.state == WriteAtState::WritingSync {
+            libc::RWF_DSYNC
+        } else {
+            0
+        };
+        sync | self.cache.rw_flag()
+    }
+
+    /// Fall back to normal caching when the cache-bypass hint is unsupported.
+    fn retry_cached(&mut self, code: i32) -> bool {
+        code == -libc::EOPNOTSUPP && self.cache.fallback()
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
+        if self.state == WriteAtState::Syncing {
+            return build_datasync_sqe(&self.file);
+        }
+
         let fd = Fd(self.file.as_raw_fd());
         let offset = self.offset + self.written as u64;
         let rw_flags = self.rw_flags();
@@ -613,8 +721,13 @@ impl WriteAtRequest {
     /// Classify one write CQE and return the terminal result, or `None` when
     /// another SQE is needed.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
+        if self.state == WriteAtState::Syncing {
+            return on_sync_cqe(state, result);
+        }
+
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
+            CqeResult::Error(code) if self.retry_cached(code) => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
             // does. A zero-length write carries no errno and stays the
             // kind-specific failure. A shutdown cancellation is not a kernel
@@ -633,7 +746,12 @@ impl WriteAtRequest {
                 self.written += n;
                 self.write.advance(n);
                 if self.write.is_complete() {
-                    Some(Ok(()))
+                    if self.state == WriteAtState::WritingBeforeSync {
+                        self.state = WriteAtState::Syncing;
+                        None
+                    } else {
+                        Some(Ok(()))
+                    }
                 } else {
                     None
                 }
@@ -895,28 +1013,13 @@ pub(super) struct SyncRequest {
 impl SyncRequest {
     /// Build the fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
-        let fd = Fd(self.file.as_raw_fd());
-        opcode::Fsync::new(fd).build()
+        build_datasync_sqe(&self.file)
     }
 
     /// Classify one fsync CQE and return the terminal result, or `None` when
     /// another SQE is needed.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
-        match CqeResult::from_raw(result, state) {
-            CqeResult::Retry => None,
-            // A shutdown cancellation is not a kernel failure: it surfaces
-            // as closed.
-            CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
-            CqeResult::Cancelled(CancelReason::Deadline) => {
-                let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
-                Some(Err(Error::Io(err.into())))
-            }
-            CqeResult::Error(code) => {
-                let err = std::io::Error::from_raw_os_error(-code);
-                Some(Err(Error::Io(err.into())))
-            }
-            CqeResult::Zero | CqeResult::Positive(_) => Some(Ok(())),
-        }
+        on_sync_cqe(state, result)
     }
 }
 
@@ -941,6 +1044,28 @@ mod tests {
         // SAFETY: `left` is a valid owned fd and is transferred into `File`.
         let file = unsafe { File::from_raw_fd(left.into_raw_fd()) };
         Arc::new(file)
+    }
+
+    fn make_read_request(cache: Cache) -> ReadAtRequest {
+        ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            cache,
+        }
+    }
+
+    fn make_write_request(cache: Cache, state: WriteAtState) -> WriteAtRequest {
+        WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            state,
+            cache,
+        }
     }
 
     fn unwrap_send(output: Output) -> Result<(), Error> {
@@ -1041,6 +1166,7 @@ mod tests {
             len: 4,
             read: 0,
             buf: IoBufMut::with_capacity(4),
+            cache: Cache::Enabled,
         });
         assert_eq!(read.deadline(), None);
         assert!(!read.has_deadline());
@@ -1080,6 +1206,7 @@ mod tests {
                 len: 5,
                 read: 0,
                 buf: IoBufMut::with_capacity(4),
+                cache: Cache::Enabled,
             });
             let _ = request.build_sqe(WaiterId::new(0, 0));
         });
@@ -1092,6 +1219,7 @@ mod tests {
                 len: 4,
                 read: 5,
                 buf: IoBufMut::with_capacity(8),
+                cache: Cache::Enabled,
             });
             let _ = request.build_sqe(WaiterId::new(0, 0));
         });
@@ -1399,6 +1527,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         });
         assert!(
             request
@@ -1413,6 +1542,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         });
         assert!(
             request
@@ -1431,6 +1561,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         });
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, 0)
@@ -1446,6 +1577,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         });
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
@@ -1462,6 +1594,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         });
         let output = request
             .on_cqe(
@@ -1478,16 +1611,90 @@ mod tests {
     }
 
     #[test]
+    fn test_uncached_read_fallback_preserves_progress_and_is_shared_with_writes() {
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut read = make_read_request(Cache::Disabled(supported.clone()));
+
+        assert_eq!(read.rw_flags(), libc::RWF_DONTCACHE);
+        assert!(
+            read.on_cqe(WaiterState::Active { target_tick: None }, 2)
+                .is_none()
+        );
+        assert_eq!(read.read, 2);
+        assert_eq!(read.rw_flags(), libc::RWF_DONTCACHE);
+
+        assert!(
+            read.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
+        assert_eq!(read.read, 2);
+        assert!(!supported.load(Ordering::Relaxed));
+        assert_eq!(read.rw_flags(), 0);
+
+        let mut sibling_write =
+            make_write_request(Cache::Disabled(supported), WriteAtState::Writing);
+        assert_eq!(sibling_write.rw_flags(), 0);
+
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut write =
+            make_write_request(Cache::Disabled(supported.clone()), WriteAtState::Writing);
+        assert_eq!(write.rw_flags(), libc::RWF_DONTCACHE);
+        assert!(
+            write
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
+        let mut sibling_read = make_read_request(Cache::Disabled(supported));
+        assert_eq!(sibling_read.rw_flags(), 0);
+
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut failing_read = make_read_request(Cache::Disabled(supported.clone()));
+        assert_eq!(failing_read.rw_flags(), libc::RWF_DONTCACHE);
+        match failing_read
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
+            .expect("hard read error should be terminal")
+        {
+            Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
+            other => panic!("expected EIO read failure, got {other:?}"),
+        }
+        assert!(supported.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_queued_cache_fallbacks_retry() {
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut first = make_read_request(Cache::Disabled(supported.clone()));
+        let mut second = make_read_request(Cache::Disabled(supported.clone()));
+
+        assert_eq!(first.rw_flags(), libc::RWF_DONTCACHE);
+        assert_eq!(second.rw_flags(), libc::RWF_DONTCACHE);
+        assert!(
+            first
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
+        assert!(
+            second
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
+        assert!(!supported.load(Ordering::Relaxed));
+        assert_eq!(first.rw_flags(), 0);
+        assert_eq!(second.rw_flags(), 0);
+    }
+
+    #[test]
     fn test_active_write_at_paths() {
         // Verify write-at state handling across retry, partial progress, timeout-cancel, and failure.
 
         // Retryable CQEs should requeue the positioned write.
-        let write = WriteAtRequest {
+        let mut write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         };
         assert_eq!(write.rw_flags(), 0);
         let mut request = Request::WriteAt(write);
@@ -1503,7 +1710,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         });
         assert!(
             request
@@ -1524,7 +1732,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: vectored.into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         });
         assert!(
             request
@@ -1542,7 +1751,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         });
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, 0)
@@ -1554,7 +1764,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         });
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
@@ -1564,16 +1775,17 @@ mod tests {
             other => panic!("expected EIO write failure, got {other:?}"),
         }
 
-        // Synchronous writes use the same logical error surface as regular
-        // writes, `sync` only changes the SQE flags.
-        let write = WriteAtRequest {
+        // Single-submission synchronous writes use the same logical error
+        // surface as regular writes and add `RWF_DSYNC` to the SQE flags.
+        let mut write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: true,
+            state: WriteAtState::WritingSync,
+            cache: Cache::Enabled,
         };
-        assert_eq!(write.rw_flags(), libc::RWF_SYNC);
+        assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
         let mut request = Request::WriteAt(write);
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, -libc::EINVAL)
@@ -1589,7 +1801,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         });
         let output = request
             .on_cqe(
@@ -1603,6 +1816,70 @@ mod tests {
             Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
             other => panic!("expected cancelled write failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut request = make_write_request(
+            Cache::Disabled(supported.clone()),
+            WriteAtState::WritingSync,
+        );
+
+        assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
+        assert!(!supported.load(Ordering::Relaxed));
+        request.cache = Cache::Disabled(supported);
+        assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
+        assert!(!request.cache.fallback());
+    }
+
+    #[test]
+    fn test_multi_submission_sync_write_finishes_with_datasync() {
+        let mut bufs = IoBufs::default();
+        for _ in 0..=IOVEC_BATCH_SIZE {
+            bufs.append(IoBuf::from(b"x"));
+        }
+        let mut request = WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: bufs.into(),
+            state: WriteAtState::WritingBeforeSync,
+            cache: Cache::Enabled,
+        };
+
+        let first = request.build_sqe();
+        assert_eq!(first.get_opcode(), u32::from(opcode::Writev::CODE));
+        assert!(
+            request
+                .on_cqe(
+                    WaiterState::Active { target_tick: None },
+                    IOVEC_BATCH_SIZE as i32
+                )
+                .is_none()
+        );
+        assert!(matches!(request.state, WriteAtState::WritingBeforeSync));
+
+        let second = request.build_sqe();
+        assert_eq!(second.get_opcode(), u32::from(opcode::Writev::CODE));
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 1)
+                .is_none()
+        );
+        assert!(matches!(request.state, WriteAtState::Syncing));
+
+        let sync = request.build_sqe();
+        assert_eq!(sync.get_opcode(), u32::from(opcode::Fsync::CODE));
+        assert!(matches!(
+            request.on_cqe(WaiterState::Active { target_tick: None }, 0),
+            Some(Ok(()))
+        ));
     }
 
     #[test]
@@ -1734,6 +2011,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         });
         assert!(matches!(
             unwrap_read_at(request.fail()),
@@ -1745,7 +2023,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         });
         assert!(matches!(
             unwrap_write_at(request.fail()),
@@ -1819,6 +2098,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         });
         assert!(matches!(
             unwrap_read_at(request.timeout()),
@@ -1830,7 +2110,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         });
         assert!(matches!(
             unwrap_write_at(request.timeout()),
@@ -1973,6 +2254,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         };
         assert!(matches!(
             read_at.on_cqe(shutdown, -libc::ECANCELED),
@@ -1985,7 +2267,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         };
         assert!(matches!(
             write_at.on_cqe(shutdown, -libc::ECANCELED),
@@ -2012,6 +2295,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
         };
         assert!(read_at.on_cqe(shutdown, -libc::EAGAIN).is_none());
 
@@ -2020,7 +2304,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         };
         assert!(write_at.on_cqe(shutdown, -libc::EAGAIN).is_none());
 
@@ -2186,7 +2471,8 @@ mod tests {
             offset: 0,
             written: 0,
             write: vectored.into(),
-            sync: false,
+            state: WriteAtState::Writing,
+            cache: Cache::Enabled,
         };
 
         let _ = request.build_sqe();

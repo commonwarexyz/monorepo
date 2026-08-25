@@ -7,7 +7,7 @@ use commonware_p2p::{
     Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait, simulated,
 };
 use commonware_runtime::{Clock, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
 use std::{
@@ -58,8 +58,8 @@ enum Operation {
         latency_ms: u16,
         /// Latency jitter in milliseconds.
         jitter: u16,
-        /// Success rate (0-255 maps to 0.0-1.0).
-        success_rate: u8,
+        /// Probability that a message is delivered successfully.
+        success_rate: Probability,
     },
     /// Remove a network link between two peers.
     RemoveLink {
@@ -82,7 +82,7 @@ struct FuzzInput {
     /// Number of peers to create in the network.
     ///
     /// Must be in the range [MIN_PEERS, MAX_PEERS].
-    num_peers: u8,
+    num_peers: usize,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -93,7 +93,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         for _ in 0..num_operations {
             operations.push(u.arbitrary()?);
         }
-        let num_peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)? as u8;
+        let num_peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)?;
         Ok(FuzzInput {
             seed,
             operations,
@@ -111,6 +111,7 @@ fn fuzz(input: FuzzInput) {
 
     let p2p_cfg = simulated::Config {
         max_size: MAX_MSG_SIZE,
+        max_peers_per_set: NZUsize!(num_peers),
         disconnect_on_block: false,
         tracked_peer_sets: NZUsize!(1),
     };
@@ -278,12 +279,11 @@ fn fuzz(input: FuzzInput) {
                     let from_idx = (from_idx as usize) % peer_pks.len();
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
-                    // Create link with specified characteristics
-                    // success_rate is normalized from u8 (0-255) to f64 (0.0-1.0)
+                    // Create link with specified characteristics.
                     let link = simulated::Link {
                         latency: Duration::from_millis(latency_ms as u64),
                         jitter: Duration::from_millis(jitter as u64),
-                        success_rate: (success_rate as f64) / 255.0,
+                        success_rate,
                     };
                     let _ = oracle
                         .add_link(peer_pks[from_idx].clone(), peer_pks[to_idx].clone(), link)

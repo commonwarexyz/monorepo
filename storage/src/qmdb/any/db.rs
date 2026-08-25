@@ -12,8 +12,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, bitmap::Shared, delete_known_loc, metrics::Metrics,
-        operation::Operation as OperationTrait, update_known_loc,
+        Error, batch_chain::Commitment, bitmap::Shared, delete_known_loc, metrics::Metrics,
+        operation::Floored as _, update_known_loc,
     },
 };
 use commonware_codec::{Codec, CodecShared};
@@ -119,14 +119,14 @@ pub struct Db<
     pub(crate) _update: core::marker::PhantomData<U>,
 }
 
-impl<F, E, U, C, I, H, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -139,14 +139,14 @@ where
 }
 
 // Shared read-only functionality.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -181,13 +181,18 @@ where
         self.root
     }
 
+    /// The [`Commitment`] for the database's current state.
+    pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
+        Commitment::new(self.last_commit_loc + 1, self.root)
+    }
+
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.
     pub(crate) fn inactive_peaks(
         &self,
         leaves: Location<F>,
         inactivity_floor: Location<F>,
     ) -> usize {
-        F::inactive_peaks(F::location_to_position(leaves), inactivity_floor)
+        F::inactive_peaks(leaves, inactivity_floor)
     }
 
     /// Return a reference to the merkleization strategy.
@@ -400,15 +405,15 @@ where
     }
 }
 
-// Functionality requiring Mutable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+// Functionality requiring a mutable journal.
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -506,10 +511,7 @@ where
         }
 
         let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size, |op| {
-                op.has_floor()
-            })
-            .await?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
         let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
@@ -543,7 +545,8 @@ where
     /// from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
+    /// completes.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -701,20 +704,7 @@ where
 
         Ok(self)
     }
-}
 
-// Functionality requiring a mutable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: Family,
-    E: Context,
-    U: Update,
-    C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
     /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
@@ -751,12 +741,9 @@ where
                     .checked_sub(1)
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
-            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &*log,
-                Location::new(bounds.end),
-                |op| op.has_floor(),
-            )
-            .await?;
+            let inactivity_floor_loc =
+                crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
+                    .await?;
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index
@@ -811,10 +798,7 @@ where
             ));
         }
 
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(log.merkle.leaves()),
-            inactivity_floor_loc,
-        );
+        let inactive_peaks = F::inactive_peaks(log.merkle.leaves(), inactivity_floor_loc);
         let root = log.root(inactive_peaks)?;
 
         let db = Self {

@@ -53,9 +53,10 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
-/// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
-/// has more than 2^255 leaves).
-pub const MAX_LEVELS: usize = u8::MAX as usize;
+/// There should never be more than 32 sibling levels in a proof. Because
+/// [Proof::leaf_count] is a `u32`, a tree can have at most `u32::MAX` leaves,
+/// which requires at most `u32::BITS` sibling hashes per proven item.
+pub const MAX_LEVELS: usize = u32::BITS as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
@@ -88,8 +89,16 @@ impl<H: Hasher> Builder<H> {
     /// Adds a leaf to the Binary Merkle Tree.
     ///
     /// When added, the leaf is hashed with its position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tree already has `u32::MAX` leaves.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
+        // The count after this add must fit in Proof::leaf_count, a u32, so the
+        // maximum position is u32::MAX - 1.
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
+        assert!(position < u32::MAX, "too many leaves");
+
         let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
         self.leaves.push(digest);
         position
@@ -569,8 +578,8 @@ impl<D: Digest> Proof<D> {
             }
         }
         let mut sorted: Vec<(u32, D)> = Vec::with_capacity(elements.len());
-        let mut leaf_chunks = elements.chunks_exact(2);
-        for chunk in &mut leaf_chunks {
+        let (leaf_chunks, leaf_remainder) = elements.as_chunks::<2>();
+        for chunk in leaf_chunks {
             let (leaf_a, pos_a) = &chunk[0];
             let (leaf_b, pos_b) = &chunk[1];
             let (digest_a, digest_b) = H::hash_pair(
@@ -580,7 +589,7 @@ impl<D: Digest> Proof<D> {
             sorted.push((*pos_a, digest_a));
             sorted.push((*pos_b, digest_b));
         }
-        for (leaf, position) in leaf_chunks.remainder() {
+        for (leaf, position) in leaf_remainder {
             let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
             sorted.push((*position, digest));
         }
@@ -640,8 +649,8 @@ impl<D: Digest> Proof<D> {
             }
 
             // Second pass: hash independent parent digests two at a time via `hash_pair`.
-            let mut parent_chunks = parents.chunks_exact(2);
-            for chunk in &mut parent_chunks {
+            let (parent_chunks, parent_remainder) = parents.as_chunks::<2>();
+            for chunk in parent_chunks {
                 let (pos_a, left_a, right_a) = chunk[0];
                 let (pos_b, left_b, right_b) = chunk[1];
                 let (digest_a, digest_b) = H::hash_pair(
@@ -651,7 +660,7 @@ impl<D: Digest> Proof<D> {
                 next_level.push((pos_a, digest_a));
                 next_level.push((pos_b, digest_b));
             }
-            for &(pos, left, right) in parent_chunks.remainder() {
+            for &(pos, left, right) in parent_remainder {
                 next_level.push((pos, H::hash(&[left.as_ref(), right.as_ref()])));
             }
             parents.clear();

@@ -38,7 +38,9 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::Header;
-use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, iouring};
+use crate::{
+    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions, iouring,
+};
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
@@ -46,7 +48,7 @@ use std::{
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
@@ -274,6 +276,9 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
+    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
+    dont_cache_supported: Arc<AtomicBool>,
 }
 
 impl Clone for Blob {
@@ -285,6 +290,7 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
+            dont_cache_supported: self.dont_cache_supported.clone(),
         }
     }
 }
@@ -306,13 +312,20 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
+            dont_cache_supported: Arc::new(AtomicBool::new(true)),
         }
     }
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len)).await
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, len, self.pool.alloc(len), options)
+            .await
     }
 
     async fn read_at_buf(
@@ -320,6 +333,7 @@ impl crate::Blob for Blob {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let mut input_bufs = bufs.into();
         // SAFETY: `len` bytes are filled via io_uring read loop below.
@@ -344,9 +358,14 @@ impl crate::Blob for Blob {
             return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
         }
 
+        let cache = if options.contains(ReadOptions::DONT_CACHE) {
+            iouring::Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            iouring::Cache::Enabled
+        };
         let io_buf = self
             .io_handle
-            .read_at(self.file.clone(), offset, len, io_buf)
+            .read_at(self.file.clone(), offset, len, io_buf, cache)
             .await
             .map_err(|(_, err)| err)?;
 
@@ -359,25 +378,11 @@ impl crate::Blob for Blob {
         }
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        self.io_handle
-            .write_at(self.file.clone(), offset, bufs)
-            .await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let offset = offset
@@ -388,8 +393,13 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
+        let cache = if options.contains(WriteOptions::DONT_CACHE) {
+            iouring::Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            iouring::Cache::Enabled
+        };
         self.io_handle
-            .write_at_sync(self.file.clone(), offset, bufs)
+            .write_at(self.file.clone(), offset, bufs, options, cache)
             .await
     }
 
@@ -581,7 +591,9 @@ mod tests {
 
             // Test 2: Logical offset handling - write at offset 0 stores at the data offset
             let data = b"hello world";
-            blob.write_at(0, data.to_vec()).await.unwrap();
+            blob.write_at(0, data.to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
 
             // Verify raw file size
@@ -600,7 +612,11 @@ mod tests {
             assert_eq!(&raw_content[data_offset as usize..], data);
 
             // Test 3: Read at logical offset 0 returns data from the data offset
-            let read_buf = blob.read_at(0, data.len()).await.unwrap().coalesce();
+            let read_buf = blob
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             assert_eq!(read_buf, data);
 
             // Test 4: Resize with logical length
@@ -624,13 +640,19 @@ mod tests {
             );
 
             // Test 5: Reopen existing blob preserves header and returns correct logical size
-            blob.write_at(0, b"test data".to_vec()).await.unwrap();
+            blob.write_at(0, b"test data".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 
             let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
             assert_eq!(size2, 9, "reopened blob should have logical size 9");
-            let read_buf = blob2.read_at(0, 9).await.unwrap().coalesce();
+            let read_buf = blob2
+                .read_at(0, 9, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             assert_eq!(read_buf, b"test data");
             drop(blob2);
 
@@ -739,11 +761,17 @@ mod tests {
             let mut bufs = crate::IoBufs::default();
             bufs.append(crate::IoBuf::from(vec![0xAAu8; 80]));
             bufs.append(crate::IoBuf::from(vec![0xBBu8; 80]));
-            blob.write_at(0, bufs).await.unwrap();
+            blob.write_at(0, bufs, WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
 
             // Read back and verify.
-            let data = blob.read_at(0, 160).await.unwrap().coalesce();
+            let data = blob
+                .read_at(0, 160, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             assert_eq!(&data.as_ref()[..80], &[0xAAu8; 80]);
             assert_eq!(&data.as_ref()[80..], &[0xBBu8; 80]);
 
@@ -760,12 +788,17 @@ mod tests {
             // Persist fewer bytes than the upcoming read requests so the wrapper
             // encounters EOF after the header-adjusted offset has already started reading.
             let (blob, _) = storage.open("partition", b"short").await.unwrap();
-            blob.write_at(0, b"abc".to_vec()).await.unwrap();
+            blob.write_at(0, b"abc".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
 
             // The wrapper should surface this as an insufficient-length error instead
             // of silently returning a short buffer.
-            let err = blob.read_at(0, 5).await.unwrap_err();
+            let err = blob
+                .read_at(0, 5, ReadOptions::DONT_CACHE)
+                .await
+                .unwrap_err();
             assert_eq!(err.to_string(), "blob insufficient length");
 
             drop(blob);
@@ -779,14 +812,19 @@ mod tests {
         let (mut harness, storage, storage_directory) = create_test_storage();
         harness.block_on(async move {
             let (blob, _) = storage.open("partition", b"multichunk").await.unwrap();
-            blob.write_at(0, b"hello world".to_vec()).await.unwrap();
+            blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
 
             // Use a two-chunk destination so the read path must rebuild the original
             // chunk layout after reading through a temporary contiguous buffer.
             let bufs =
                 IoBufsMut::from(vec![IoBufMut::with_capacity(5), IoBufMut::with_capacity(6)]);
-            let read = blob.read_at_buf(0, 11, bufs).await.unwrap();
+            let read = blob
+                .read_at_buf(0, 11, bufs, ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
             // The result should keep the split layout rather than collapsing to one buffer.
             assert!(!read.is_single());
             assert_eq!(read.coalesce(), b"hello world");
@@ -805,13 +843,27 @@ mod tests {
             assert_eq!(size, 0);
 
             // Zero-length operations should succeed immediately and preserve the empty blob.
-            blob.write_at(0, IoBufs::default()).await.unwrap();
-            blob.write_at(0, IoBuf::default()).await.unwrap();
-            blob.write_at(0, Vec::<u8>::new()).await.unwrap();
-            let empty = blob.read_at(0, 0).await.unwrap();
+            blob.write_at(0, IoBufs::default(), WriteOptions::default())
+                .await
+                .unwrap();
+            blob.write_at(0, IoBuf::default(), WriteOptions::default())
+                .await
+                .unwrap();
+            blob.write_at(0, Vec::<u8>::new(), WriteOptions::default())
+                .await
+                .unwrap();
+
+            // A zero-length read beyond EOF retains io_uring's existing success behavior and must
+            // still short-circuit before touching the backend or probing hint support.
+            let empty = blob.read_at(1, 0, ReadOptions::DONT_CACHE).await.unwrap();
             assert!(empty.is_empty());
             let _ = blob
-                .read_at_buf(0, 0, IoBufsMut::from(IoBufMut::with_capacity(8)))
+                .read_at_buf(
+                    0,
+                    0,
+                    IoBufsMut::from(IoBufMut::with_capacity(8)),
+                    ReadOptions::DONT_CACHE,
+                )
                 .await
                 .unwrap();
 
@@ -1000,11 +1052,26 @@ mod tests {
             // Each operation adds the runtime header size internally, so using the
             // maximum logical offset must fail before any request is submitted.
             assert_eq!(
-                blob.read_at(u64::MAX, 1).await.unwrap_err().to_string(),
+                blob.read_at(u64::MAX, 1, ReadOptions::default())
+                    .await
+                    .unwrap_err()
+                    .to_string(),
                 "offset overflow"
             );
             assert_eq!(
-                blob.write_at(u64::MAX, b"x".to_vec())
+                blob.read_at(u64::MAX, 0, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "offset overflow"
+            );
+            assert!(matches!(
+                blob.read_at(i64::MAX as u64, 1, ReadOptions::DONT_CACHE)
+                    .await,
+                Err(Error::Io(_))
+            ));
+            assert_eq!(
+                blob.write_at(u64::MAX, b"x".to_vec(), WriteOptions::default())
                     .await
                     .unwrap_err()
                     .to_string(),
@@ -1046,18 +1113,24 @@ mod tests {
             Layout::V0.data_offset(),
         );
 
+        let empty = harness
+            .block_on(blob.read_at(0, 0, ReadOptions::DONT_CACHE))
+            .unwrap();
+        assert!(empty.is_empty());
+        assert!(blob.dont_cache_supported.load(Ordering::Relaxed));
+
         // Read and write should fail through their wrapper-specific error
         // enums once the driver no longer admits work.
         assert_eq!(
             harness
-                .block_on(blob.read_at(0, 1))
+                .block_on(blob.read_at(0, 1, ReadOptions::default()))
                 .unwrap_err()
                 .to_string(),
             "read failed"
         );
         assert_eq!(
             harness
-                .block_on(blob.write_at(0, b"x".to_vec()))
+                .block_on(blob.write_at(0, b"x".to_vec(), WriteOptions::default()))
                 .unwrap_err()
                 .to_string(),
             "write failed"
@@ -1336,10 +1409,15 @@ mod tests {
             let (blob, size) = storage.open("partition", b"v0").await.unwrap();
             assert_eq!(size, payload.len() as u64);
             assert_eq!(
-                blob.read_at(0, payload.len()).await.unwrap().coalesce(),
+                blob.read_at(0, payload.len(), ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
                 payload
             );
-            blob.write_at(size, b"!".to_vec()).await.unwrap();
+            blob.write_at(size, b"!".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 

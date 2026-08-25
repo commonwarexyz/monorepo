@@ -3,10 +3,12 @@ use commonware_consensus::types::{Epoch, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
+use commonware_utils::Probability;
+use rstest::rstest;
 use std::time::Duration;
 
 mod harness;
-use harness::{EPOCH_LENGTH, ReshareEngine, final_height, height_round};
+use harness::{EPOCH_LENGTH, Network, ReshareEngine, final_height, height_round};
 
 mod properties;
 use properties::{
@@ -126,9 +128,10 @@ fn state_sync_next_player_plan_starting_at(
     let delayed = engine.participants[delayed_index].clone();
     let configured_floor = engine.state_sync_floor();
     let sync_floor = configured_floor.unwrap_or_else(|| {
-        start_height
-            .previous()
-            .expect("start height must have a sync floor")
+        // Entering the delayed round does not prove the preceding height is finalized.
+        FixedEpocher::new(EPOCH_LENGTH)
+            .first(next_player_epoch)
+            .expect("test epoch should be supported")
     });
     let max_sync_floor = configured_floor.unwrap_or_else(|| final_height(next_player_epoch.get()));
     let registrations = engine.registrations.clone();
@@ -158,16 +161,19 @@ fn state_sync_next_player_plan_starting_at(
         ))
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_deterministic() {
-    let first = successful_reshare_plan(ReshareEngine::new(), 1)
+fn reshare_e2e_deterministic(#[case] network: Network) {
+    let first = successful_reshare_plan(ReshareEngine::new(network), 1)
         .run()
         .unwrap()
         .pop()
         .unwrap()
         .state;
-    let second = successful_reshare_plan(ReshareEngine::new(), 1)
+    let second = successful_reshare_plan(ReshareEngine::new(network), 1)
         .run()
         .unwrap()
         .pop()
@@ -176,18 +182,21 @@ fn reshare_e2e_deterministic() {
     assert_eq!(first, second);
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_deterministic_multiple_seeds() {
+fn reshare_e2e_deterministic_multiple_seeds(#[case] network: Network) {
     for seed in 0..3 {
-        let first = successful_reshare_plan(ReshareEngine::new(), 1)
+        let first = successful_reshare_plan(ReshareEngine::new(network), 1)
             .seed(seed)
             .run()
             .unwrap()
             .pop()
             .unwrap()
             .state;
-        let second = successful_reshare_plan(ReshareEngine::new(), 1)
+        let second = successful_reshare_plan(ReshareEngine::new(network), 1)
             .seed(seed)
             .run()
             .unwrap()
@@ -198,27 +207,36 @@ fn reshare_e2e_deterministic_multiple_seeds() {
     }
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_single_participant_two_epochs() {
-    successful_reshare_plan_with_schemes(ReshareEngine::with_committee(1, 1), 1)
+fn reshare_e2e_single_participant_two_epochs(#[case] network: Network) {
+    successful_reshare_plan_with_schemes(ReshareEngine::with_committee(network, 1, 1), 1)
         .run()
         .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_rotates_participants() {
-    successful_reshare_plan_with_schemes(ReshareEngine::new(), 0)
+fn reshare_e2e_rotates_participants(#[case] network: Network) {
+    successful_reshare_plan_with_schemes(ReshareEngine::new(network), 0)
         .run()
         .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_roots_of_unity_output() {
+fn reshare_e2e_roots_of_unity_output(#[case] network: Network) {
     successful_reshare_plan_with_schemes(
-        ReshareEngine::new().with_sharing_mode(Mode::RootsOfUnity),
+        ReshareEngine::new(network).with_sharing_mode(Mode::RootsOfUnity),
         0,
     )
     .property(BoundaryOutputMode::new(
@@ -229,28 +247,37 @@ fn reshare_e2e_roots_of_unity_output() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_multiple_epochs() {
-    successful_reshare_plan_with_schemes(ReshareEngine::new(), 4)
+fn reshare_e2e_multiple_epochs(#[case] network: Network) {
+    successful_reshare_plan_with_schemes(ReshareEngine::new(network), 4)
         .run()
         .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_multiple_epochs_rotating_subset() {
-    successful_reshare_plan_with_schemes(ReshareEngine::with_committee(7, 4), 4)
+fn reshare_e2e_multiple_epochs_rotating_subset(#[case] network: Network) {
+    successful_reshare_plan_with_schemes(ReshareEngine::with_committee(network, 7, 4), 4)
         .timeout(Duration::from_secs(90))
         .run()
         .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_failed_ceremony_carries_committee() {
+fn reshare_e2e_failed_ceremony_carries_committee(#[case] network: Network) {
     failed_carry_over_plan(
-        ReshareEngine::new().with_failures([0]),
+        ReshareEngine::new(network).with_failures([0]),
         0,
         BoundaryEpochInfos::new(1).with_min_successes(0),
         [Epoch::zero()],
@@ -260,11 +287,14 @@ fn reshare_e2e_failed_ceremony_carries_committee() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_consecutive_failed_ceremonies_carry_state() {
+fn reshare_e2e_consecutive_failed_ceremonies_carry_state(#[case] network: Network) {
     failed_carry_over_plan(
-        ReshareEngine::new().with_failures([0, 1]),
+        ReshareEngine::new(network).with_failures([0, 1]),
         2,
         BoundaryEpochInfos::new(3)
             .with_min_successes(1)
@@ -276,11 +306,14 @@ fn reshare_e2e_consecutive_failed_ceremonies_carry_state() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_many_failed_ceremonies_carry_state() {
+fn reshare_e2e_many_failed_ceremonies_carry_state(#[case] network: Network) {
     failed_carry_over_plan(
-        ReshareEngine::with_committees(8, vec![4, 5]).with_failures([0, 2, 3]),
+        ReshareEngine::with_committees(network, 8, vec![4, 5]).with_failures([0, 2, 3]),
         4,
         BoundaryEpochInfos::new(5)
             .with_min_successes(2)
@@ -292,12 +325,18 @@ fn reshare_e2e_many_failed_ceremonies_carry_state() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_four_epochs_changing_size() {
-    successful_reshare_plan_with_schemes(ReshareEngine::with_committees(8, vec![4, 5, 6, 7, 4]), 4)
-        .run()
-        .unwrap();
+fn reshare_e2e_four_epochs_changing_size(#[case] network: Network) {
+    successful_reshare_plan_with_schemes(
+        ReshareEngine::with_committees(network, 8, vec![4, 5, 6, 7, 4]),
+        4,
+    )
+    .run()
+    .unwrap();
 }
 
 fn crash_storm_plan(
@@ -321,12 +360,15 @@ fn crash_storm_plan(
     .timeout(Duration::from_secs(120))
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_multiple_epochs_with_random_crashes() {
+fn reshare_e2e_multiple_epochs_with_random_crashes(#[case] network: Network) {
     for seed in 0..3 {
         crash_storm_plan(
-            ReshareEngine::new(),
+            ReshareEngine::new(network),
             4,
             Crash::Random {
                 frequency: Duration::from_secs(2),
@@ -341,11 +383,14 @@ fn reshare_e2e_multiple_epochs_with_random_crashes() {
     }
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_multiple_epochs_with_many_random_crashes() {
+fn reshare_e2e_multiple_epochs_with_many_random_crashes(#[case] network: Network) {
     crash_storm_plan(
-        ReshareEngine::new(),
+        ReshareEngine::new(network),
         4,
         Crash::Random {
             frequency: Duration::from_secs(2),
@@ -358,11 +403,14 @@ fn reshare_e2e_multiple_epochs_with_many_random_crashes() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_multiple_epochs_with_total_shutdown() {
+fn reshare_e2e_multiple_epochs_with_total_shutdown(#[case] network: Network) {
     crash_storm_plan(
-        ReshareEngine::new(),
+        ReshareEngine::new(network),
         3,
         Crash::Random {
             // Leave more uninterrupted uptime than `certification_timeout` so recovery can make
@@ -377,15 +425,18 @@ fn reshare_e2e_multiple_epochs_with_total_shutdown() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_state_sync_epoch_first_next_player() {
+fn reshare_e2e_state_sync_epoch_first_next_player(#[case] network: Network) {
     let next_player_epoch = Epoch::new(1);
     let state_sync_floor = FixedEpocher::new(EPOCH_LENGTH)
         .first(next_player_epoch)
         .expect("test epoch should be supported");
     state_sync_next_player_plan(
-        ReshareEngine::with_committee(6, 4).with_state_sync_floor(state_sync_floor),
+        ReshareEngine::with_committee(network, 6, 4).with_state_sync_floor(state_sync_floor),
         3,
         5,
         next_player_epoch,
@@ -397,24 +448,26 @@ fn reshare_e2e_state_sync_epoch_first_next_player() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
+fn reshare_e2e_state_sync_restart_before_epoch_boundary(#[case] network: Network) {
     let next_player_epoch = Epoch::new(1);
     let state_sync_floor = FixedEpocher::new(EPOCH_LENGTH)
         .first(next_player_epoch)
         .expect("test epoch should be supported");
     let crash_window_start = state_sync_floor.get() + EPOCH_LENGTH.get() / 2;
-    // The application state sync follows the finalized tip, so the node's
-    // first processed height after sync is bounded only by the next epoch
-    // boundary (block production pauses there, letting sync converge). The
-    // crash window therefore extends to the next epoch's first block, and the
-    // processed hold parks the node at whatever height it lands on so the
-    // crash triggers deterministically instead of sampling a moving value.
+    // The node processes nothing until state sync finishes, and sync converges
+    // only when two fetch round trips fit inside one block interval. The fast
+    // link below guarantees that, so the processed hold, not sync timing, parks
+    // the node at `crash_window_start`.
     let crash_window_end = FixedEpocher::new(EPOCH_LENGTH)
         .first(next_player_epoch.next())
         .expect("test epoch should be supported");
-    let engine = ReshareEngine::with_committee(6, 4).with_state_sync_floor(state_sync_floor);
+    let engine =
+        ReshareEngine::with_committee(network, 6, 4).with_state_sync_floor(state_sync_floor);
     let delayed = engine.participants[5].clone();
     let engine = engine.with_processed_hold(delayed.clone(), Height::new(crash_window_start));
     let state_sync_starts = engine.state_sync_starts.clone();
@@ -427,6 +480,11 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
         next_player_epoch.next(),
         BoundaryEpochInfos::new(4),
     )
+    .link(Link {
+        latency: Duration::from_millis(4),
+        jitter: Duration::from_millis(1),
+        success_rate: Probability!(1.0),
+    })
     .crash(Crash::ProcessedHeight {
         participant: delayed.clone(),
         heights: crash_window_start..=crash_window_end.get(),
@@ -442,9 +500,122 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
     assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_state_sync_epoch_crosses_during_sync() {
+fn reshare_e2e_state_sync_active_player_late_restart(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let state_sync_floor = epocher
+        .first(epoch)
+        .expect("test epoch should be supported");
+    let late_height = epocher
+        .midpoint(epoch)
+        .expect("test epoch should be supported")
+        .next();
+    // Failure in epoch 0 carries the genesis output and share into the synced
+    // epoch, so the delayed node is an active dealer and player after joining.
+    let engine = ReshareEngine::with_committee(network, 4, 4)
+        .with_failures([0])
+        .with_state_sync_floor(state_sync_floor);
+    let delayed = engine.participants[3].clone();
+    let engine = engine.with_processed_hold(delayed.clone(), late_height);
+    let state_syncs = engine.state_syncs.clone();
+    let state_sync_starts = engine.state_sync_starts.clone();
+    let result = reshare_plan_with_boundary(
+        engine,
+        2,
+        BoundaryEpochInfos::new(3).with_expected_failures([0]),
+    )
+    .link(Link {
+        latency: Duration::from_millis(4),
+        jitter: Duration::from_millis(1),
+        success_rate: Probability!(1.0),
+    })
+    .crash(Crash::DelayRound {
+        participants: vec![delayed.clone()],
+        round: height_round(state_sync_floor),
+    })
+    .crash(Crash::ProcessedHeight {
+        participant: delayed.clone(),
+        heights: late_height.get()..=final_height(epoch.get()).get(),
+        downtime: Duration::from_millis(250),
+    })
+    .property(StateSyncedAtHeight::new(
+        delayed.clone(),
+        state_sync_floor,
+        state_sync_floor,
+        state_syncs,
+    ))
+    .property(SchemesRegistered::new(vec![delayed.clone()], epoch.next()))
+    .timeout(Duration::from_secs(120))
+    .run()
+    .unwrap()
+    .pop()
+    .unwrap();
+
+    assert_eq!(result.crashes, 1);
+    assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
+}
+
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_late_state_sync_carries_share_across_failure(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let state_sync_floor = epocher
+        .midpoint(epoch)
+        .expect("test epoch should be supported")
+        .next();
+    let start_height = epocher
+        .last(epoch)
+        .and_then(Height::previous)
+        .expect("test epoch should be supported");
+    let engine = ReshareEngine::with_committee(network, 4, 4)
+        .with_failures([0, 1])
+        .with_state_sync_floor(state_sync_floor);
+    let delayed = engine.participants[3].clone();
+    let state_syncs = engine.state_syncs.clone();
+    let state_sync_starts = engine.state_sync_starts.clone();
+    reshare_plan_with_boundary(
+        engine,
+        2,
+        BoundaryEpochInfos::new(3).with_expected_failures([0, 1]),
+    )
+    .link(Link {
+        latency: Duration::from_millis(4),
+        jitter: Duration::from_millis(1),
+        success_rate: Probability!(1.0),
+    })
+    .crash(Crash::DelayRound {
+        participants: vec![delayed.clone()],
+        round: height_round(start_height),
+    })
+    .property(StateSyncedAtHeight::new(
+        delayed.clone(),
+        state_sync_floor,
+        state_sync_floor,
+        state_syncs,
+    ))
+    .property(SchemesRegistered::new(vec![delayed.clone()], epoch.next()))
+    .timeout(Duration::from_secs(120))
+    .run()
+    .unwrap();
+
+    assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
+}
+
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_state_sync_epoch_crosses_during_sync(#[case] network: Network) {
     // The node probes mid-epoch 1, fixing its floor and epoch info together,
     // then the harness holds bootstrap until the sampled committee finishes
     // epoch 1 so the network crosses an epoch boundary while the node is
@@ -457,7 +628,7 @@ fn reshare_e2e_state_sync_epoch_crosses_during_sync() {
     let start_height = epocher
         .midpoint(probe_epoch)
         .expect("test epoch should be supported");
-    let engine = ReshareEngine::with_committee(6, 4).with_epoch_cross_during_sync();
+    let engine = ReshareEngine::with_committee(network, 6, 4).with_epoch_cross_during_sync();
     let delayed = engine.participants[5].clone();
     let registrations = engine.registrations.clone();
     let state_syncs = engine.state_syncs.clone();
@@ -488,12 +659,15 @@ fn reshare_e2e_state_sync_epoch_crosses_during_sync() {
     assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_state_sync_epoch_zero_next_player() {
+fn reshare_e2e_state_sync_epoch_zero_next_player(#[case] network: Network) {
     let next_player_epoch = Epoch::zero();
     state_sync_next_player_plan(
-        ReshareEngine::new(),
+        ReshareEngine::new(network),
         2,
         4,
         next_player_epoch,
@@ -505,10 +679,13 @@ fn reshare_e2e_state_sync_epoch_zero_next_player() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_state_sync_next_player_after_failed_ceremony() {
-    let engine = ReshareEngine::with_committee(6, 4).with_failures([1]);
+fn reshare_e2e_state_sync_next_player_after_failed_ceremony(#[case] network: Network) {
+    let engine = ReshareEngine::with_committee(network, 6, 4).with_failures([1]);
     let next_player_epoch = Epoch::new(1);
     let schedule = (*engine.schedule).clone();
     state_sync_next_player_plan(
@@ -527,11 +704,14 @@ fn reshare_e2e_state_sync_next_player_after_failed_ceremony() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_state_sync_existing_player_after_failed_ceremony() {
+fn reshare_e2e_state_sync_existing_player_after_failed_ceremony(#[case] network: Network) {
     let failed_epoch = Epoch::zero();
-    let engine = ReshareEngine::new().with_failures([failed_epoch.get()]);
+    let engine = ReshareEngine::new(network).with_failures([failed_epoch.get()]);
     let delayed = engine.participants[1].clone();
     let midpoint = FixedEpocher::new(EPOCH_LENGTH)
         .midpoint(failed_epoch)
@@ -551,19 +731,25 @@ fn reshare_e2e_state_sync_existing_player_after_failed_ceremony() {
     .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_rotating_subset() {
-    successful_reshare_plan_with_schemes(ReshareEngine::with_committee(7, 4), 0)
+fn reshare_e2e_rotating_subset(#[case] network: Network) {
+    successful_reshare_plan_with_schemes(ReshareEngine::with_committee(network, 7, 4), 0)
         .run()
         .unwrap();
 }
 
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_lossy_network() {
+fn reshare_e2e_lossy_network(#[case] network: Network) {
     reshare_plan_with_boundary(
-        ReshareEngine::new(),
+        ReshareEngine::new(network),
         4,
         BoundaryEpochInfos::new(5)
             .with_min_successes(1)
@@ -572,7 +758,7 @@ fn reshare_e2e_lossy_network() {
     .link(Link {
         latency: Duration::from_millis(100),
         jitter: Duration::from_millis(50),
-        success_rate: 0.7,
+        success_rate: Probability!(0.7),
     })
     .timeout(Duration::from_secs(720))
     .run()

@@ -9,9 +9,17 @@
 //! advances the cursor, making it a compact test of the whole `Buf`
 //! implementation rather than one accessor in isolation.
 //!
+//! The `iobuf_bytes` modes decode an external `Bytes`-backed `IoBuf`. The
+//! `iobuf_aligned` modes decode a native heap-backed one (built through
+//! `IoBufMut`), so the pair isolates the owner kind while sharing the same
+//! handle hot path.
+//!
 //! The `Vec<u8>` modes are included as a deep-clone baseline. Comparing them
 //! with `Bytes` and `IoBuf` shows where shared backing storage and atomic
-//! reference counts pay off relative to simply cloning the bytes.
+//! reference counts pay off relative to simply cloning the bytes. The bare
+//! `slice` mode decodes from a borrowed slice of the prebuilt payload without
+//! cloning, giving the no-copy decode floor. `vec_slice` is the same decode
+//! with the deep clone added.
 
 use bytes::{BufMut, Bytes};
 use commonware_codec::DecodeExt as _;
@@ -60,11 +68,11 @@ macro_rules! bench_sizes {
             });
 
             bench_decode_fixed::<$size, _>($c, "vec_cursor", || {
-                FixedBytes::<$size>::decode(Cursor::new(vec.clone())).unwrap()
+                FixedBytes::<$size>::decode(Cursor::new(black_box(vec.clone()))).unwrap()
             });
 
             bench_decode_fixed::<$size, _>($c, "vec_slice", || {
-                let vec = vec.clone();
+                let vec = black_box(vec.clone());
                 FixedBytes::<$size>::decode(vec.as_slice()).unwrap()
             });
 

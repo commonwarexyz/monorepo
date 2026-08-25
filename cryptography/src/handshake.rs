@@ -36,7 +36,7 @@
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
 use crate::{
     PublicKey, Signature, Signer, Verifier,
-    transcript::{Summary, Transcript},
+    transcript::{Summary, Transcript, Version},
 };
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
@@ -59,6 +59,10 @@ const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
 const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
 const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
 const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
+
+// V0 is safe because the application namespace is summarized as a single packet before the
+// handshake commits a fixed sequence of canonical encodings at fixed positions.
+const TRANSCRIPT_VERSION: Version = Version::V0;
 
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.
@@ -225,14 +229,15 @@ pub struct Context<S, P> {
 impl<S, P> Context<S, P> {
     /// Creates a new handshake context.
     pub fn new(
-        base: &Transcript,
+        namespace: &[u8],
         current_time_ms: u64,
         ok_timestamps: Range<u64>,
         my_identity: S,
         peer_identity: P,
     ) -> Self {
+        let transcript = Transcript::new(namespace, TRANSCRIPT_VERSION).fork(NAMESPACE);
         Self {
-            transcript: base.fork(NAMESPACE),
+            transcript,
             current_time: current_time_ms,
             ok_timestamps,
             my_identity,
@@ -392,7 +397,7 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Signer, ed25519::PrivateKey, transcript::Transcript};
+    use crate::{Signer, ed25519::PrivateKey};
     use commonware_codec::{Codec, DecodeExt};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
@@ -410,7 +415,7 @@ mod test {
         let (d_state, msg1) = dial_start(
             &mut rng,
             Context::new(
-                &Transcript::new(b"test_namespace"),
+                b"test_namespace",
                 0,
                 0..1,
                 dialer_crypto.clone(),
@@ -421,7 +426,7 @@ mod test {
         let (l_state, msg2) = listen_start(
             &mut rng,
             Context::new(
-                &Transcript::new(b"test_namespace"),
+                b"test_namespace",
                 0,
                 0..1,
                 listener_crypto,
@@ -457,7 +462,7 @@ mod test {
         let (_, msg1) = dial_start(
             &mut rng,
             Context::new(
-                &Transcript::new(b"namespace_a"),
+                b"namespace_a",
                 0,
                 0..1,
                 dialer_crypto.clone(),
@@ -468,7 +473,7 @@ mod test {
         let result = listen_start(
             &mut rng,
             Context::new(
-                &Transcript::new(b"namespace_b"),
+                b"namespace_b",
                 0,
                 0..1,
                 listener_crypto,

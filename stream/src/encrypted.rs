@@ -63,7 +63,6 @@ use commonware_cryptography::{
         self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
         dial_start, listen_end, listen_start,
     },
-    transcript::Transcript,
 };
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -80,6 +79,9 @@ const TAG_SIZE: u32 = {
     assert!(handshake::TAG_SIZE <= u32::MAX as usize);
     handshake::TAG_SIZE as u32
 };
+
+/// Maximum supported plaintext message size.
+pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
@@ -138,6 +140,8 @@ pub struct Config<S> {
     pub namespace: Vec<u8>,
 
     /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
+    ///
+    /// The largest supported value is [`MAX_SIZE`].
     ///
     /// Fixed-size handshake frames use their protocol-defined sizes instead of
     /// inheriting this limit.
@@ -205,7 +209,7 @@ pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: 
         let (state, syn) = dial_start(
             ctx,
             Context::new(
-                &Transcript::new(&config.namespace),
+                &config.namespace,
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -271,7 +275,7 @@ pub async fn listen<
         let (state, syn_ack) = listen_start(
             ctx,
             Context::new(
-                &Transcript::new(&config.namespace),
+                &config.namespace,
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -545,6 +549,11 @@ mod test {
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
+
+    #[test]
+    fn test_max_message_size_bounds() {
+        assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
+    }
 
     fn transport_config(signing_key: PrivateKey) -> Config<PrivateKey> {
         Config {
@@ -1054,7 +1063,7 @@ mod test {
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
-                    &Transcript::new(&dialer_config.namespace),
+                    &dialer_config.namespace,
                     current_time,
                     ok_timestamps.clone(),
                     dialer_config.signing_key.clone(),
@@ -1064,7 +1073,7 @@ mod test {
             let (_, syn_ack) = listen_start(
                 context.child("listener"),
                 Context::new(
-                    &Transcript::new(&dialer_config.namespace),
+                    &dialer_config.namespace,
                     current_time,
                     ok_timestamps,
                     listener_crypto,

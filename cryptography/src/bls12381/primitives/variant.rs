@@ -103,9 +103,9 @@ impl Variant for MinPk {
     /// `e(hm_i,pk_i) == e(sig_i,G1::one())`,
     /// which is equivalent to checking if `e(hm_i,pk_i) * e(sig_i,-G1::one()) == 1`.
     ///
-    /// To batch verify `n` such equations, we introduce random non-zero scalars `r_i` (for `i=1..n`).
-    /// The batch verification checks if the product of these individual equations, each raised to the power
-    /// of its respective `r_i`, equals one:
+    /// To batch verify `n` such equations, we sample random 128-bit scalars `r_i` from
+    /// `[0, 2^128)` (for `i=1..n`). The batch verification checks if the product of these individual
+    /// equations, each raised to the power of its respective `r_i`, equals one:
     /// `prod_i((e(hm_i,pk_i) * e(sig_i,-G1::one()))^{r_i}) == 1`
     ///
     /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings,
@@ -206,9 +206,9 @@ impl Variant for MinSig {
     /// `e(pk_i,hm_i) == e(G2::one(),sig_i)`,
     /// which is equivalent to checking if `e(pk_i,hm_i) * e(-G2::one(),sig_i) == 1`.
     ///
-    /// To batch verify `n` such equations, we introduce random non-zero scalars `r_i` (for `i=1..n`).
-    /// The batch verification checks if the product of these individual equations, each effectively
-    /// raised to the power of its respective `r_i`, equals one:
+    /// To batch verify `n` such equations, we sample random 128-bit scalars `r_i` from
+    /// `[0, 2^128)` (for `i=1..n`). The batch verification checks if the product of these individual
+    /// equations, each effectively raised to the power of its respective `r_i`, equals one:
     /// `prod_i((e(pk_i,hm_i) * e(-G2::one(),sig_i))^{r_i}) == 1`
     ///
     /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings,

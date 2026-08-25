@@ -16,7 +16,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
-    Blob, Buf, Error, Runner, Storage,
+    Blob, Buf, Error, ReadOptions, Runner, Storage, WriteOptions,
     buffer::paged::{CacheRef, Writer},
     deterministic,
 };
@@ -140,12 +140,16 @@ fn fuzz(input: FuzzInput) {
 
         // Read the byte, flip the bit, write it back.
         let byte_buf = blob
-            .read_at(corrupt_offset, 1)
+            .read_at(corrupt_offset, 1, ReadOptions::default())
             .await
             .expect("cannot read byte to corrupt")
             .coalesce();
         let corrupted_byte = byte_buf.as_ref()[0] ^ (1 << corrupt_bit);
-        blob.write_at(corrupt_offset, vec![corrupted_byte])
+        blob.write_at(
+            corrupt_offset,
+            vec![corrupted_byte],
+            WriteOptions::default(),
+        )
             .await
             .expect("cannot write corrupted byte");
         blob.sync().await.expect("cannot sync corruption");
@@ -194,7 +198,12 @@ fn fuzz(input: FuzzInput) {
             if read_op.use_reader {
                 // Replay is for streaming replay, not random access.
                 // Test integrity via Replay by ensuring bytes and reading.
-                let replay_result = append.replay(NZUsize!(READER_BUFFER_CAPACITY)).await;
+                let replay_result = append
+                    .replay(
+                        NZUsize!(READER_BUFFER_CAPACITY),
+                        ReadOptions::default(),
+                    )
+                    .await;
                 let mut replay = match replay_result {
                     Ok(r) => r,
                     Err(_) => continue, // Replay creation failed due to corruption, skip.

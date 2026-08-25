@@ -7,7 +7,7 @@ use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
     marshal::{
         Identifier,
-        core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant},
+        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Variant},
     },
     simplex::types::Finalization,
     types::Height,
@@ -24,7 +24,7 @@ use rand_core::Rng;
 mod actor;
 pub(crate) use actor::{Config, Syncer};
 
-mod mailbox;
+pub(crate) mod mailbox;
 pub(crate) use mailbox::Mailbox;
 
 mod plan;
@@ -150,7 +150,7 @@ where
     }
 }
 
-/// Resolved state sync floor data derived from the selected finalization.
+/// Resolved state sync floor data derived from the selected finalization and marshal progress.
 pub(crate) struct ResolvedFloor<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -227,10 +227,11 @@ where
         }
     }
 
-    /// Marks state sync as in progress for the resolved floor.
+    /// Marks state sync as in progress for the selected floor.
     ///
     /// This must be persisted before any state sync database mutation begins so the database
     /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
+    /// The storage target may still advance to marshal's durable processed height during startup.
     ///
     /// If an interrupted state sync already stored a floor, the newly selected
     /// floor must resume from the same or a later consensus round.
@@ -284,9 +285,31 @@ where
     }
 }
 
-/// Resolves the selected state sync floor into its anchor and targets.
+/// Returns the archived block that covers marshal's durable processed position.
+///
+/// Glue cannot reopen below this position because marshal will not redeliver acknowledged blocks.
+/// An acknowledgement-derived position retains its own block. Installing a floor instead records
+/// and prunes the anchor's predecessor so marshal redispatches the anchor, leaving `height.next()`
+/// as the block that covers the processed position.
+async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, height: Height) -> V::Block
+where
+    S: Scheme,
+    V: Variant,
+{
+    if let Some(block) = marshal.get_block(Identifier::Height(height)).await {
+        return block;
+    }
+    marshal
+        .get_block(Identifier::Height(height.next()))
+        .await
+        .expect("marshal must return floor anchor after processed height")
+}
+
+/// Resolves a state sync floor that covers both the selected finalization and marshal's
+/// durable processed height.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
+    floor: Floor,
     finalization: &Finalization<S, V::Commitment>,
 ) -> ResolvedFloor<E, A>
 where
@@ -295,20 +318,37 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    // Wait to retrieve the floor block from marshal. We use `Wait` here,
-    // since marshal triggers a fetch for the floor block if it is not
-    // already available.
-    let floor = {
-        let block = marshal
-            .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
-            .await
-            .expect("marshal must yield floor block");
-        V::into_inner_shared(block)
+    // Marshal skips installing a startup floor whose round is already processed. Its block may
+    // have been pruned, so apply the same rule before registering a local-only waiter.
+    let block = if let Some(height) = floor.height()
+        && floor.round() >= finalization.round()
+    {
+        V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+    } else {
+        // Marshal's configured startup floor fetches its anchor when needed. This local-only
+        // subscription observes that result without starting a separate fetch.
+        let selected = {
+            let block = marshal
+                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .await
+                .expect("marshal must yield floor block");
+            V::into_inner_shared(block)
+        };
+
+        // Marshal does not redeliver acknowledged blocks. A newly installed floor is the
+        // exception: its processed position is the predecessor so the retained anchor is
+        // dispatched once.
+        match marshal.get_processed_height().await {
+            Some(height) if height > selected.height() => {
+                V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+            }
+            _ => selected,
+        }
     };
 
     ResolvedFloor {
-        anchor: Anchor::from(floor.as_ref()),
-        targets: A::sync_targets(floor.as_ref()),
+        anchor: Anchor::from(block.as_ref()),
+        targets: A::sync_targets(block.as_ref()),
     }
 }
 
@@ -363,13 +403,20 @@ where
         .chain(processed_height)
         .max()
         .unwrap_or_else(Height::zero);
-    let floor_block = {
-        let marshal_block = marshal
-            .get_block(Identifier::Height(marshal_floor))
-            .await
-            .expect("marshal must return floor block");
-        V::into_inner(marshal_block)
+    let floor_block = if processed_height == Some(marshal_floor) {
+        V::into_inner(processed_anchor(marshal, marshal_floor).await)
+    } else {
+        V::into_inner(
+            marshal
+                .get_block(Identifier::Height(marshal_floor))
+                .await
+                .expect("marshal must return completed state sync block"),
+        )
     };
+    let skip_finalized_until = skip_finalized_until
+        .into_iter()
+        .chain((floor_block.height() > marshal_floor).then_some(floor_block.height()))
+        .max();
 
     let databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
@@ -379,7 +426,8 @@ where
     // we attempt to repair by rewinding the databases back to the marshal floor. If
     // the rewind fails to produce a consistent state, we must crash. This can occur
     // if the databases were corrupted or pruned too aggressively.
-    if databases.committed_targets().await != processed_targets {
+    let committed = databases.committed_targets().await;
+    if committed != processed_targets {
         databases.rewind_to_targets(processed_targets.clone()).await;
         let rewound_targets = databases.committed_targets().await;
         assert!(

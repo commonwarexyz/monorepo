@@ -1,5 +1,6 @@
 use crate::dkg::{
     ReshareBlock,
+    network::Directory,
     reshare::{EpochInfoResponse, Mailbox},
     types::Payload,
 };
@@ -10,6 +11,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_utils::sequence::Unit;
 use rand_core::Rng;
 use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
@@ -19,12 +21,12 @@ use tracing::{debug, field};
 /// Carries the wrapper's upstream input alongside the reshare `payload` selected
 /// and fetched for the block being proposed. The wrapped application attaches
 /// `payload` to the block it builds and uses `upstream` for its own purposes.
-pub struct Input<Upstream, V: Variant, C: Signer> {
+pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
     /// Input forwarded from the application wrapping the reshare wrapper.
     pub upstream: Upstream,
 
     /// The reshare payload selected for this proposal, if any.
-    pub payload: Option<Payload<V, C>>,
+    pub payload: Option<Payload<V, C, D>>,
 }
 
 /// An [`Application`](commonware_consensus::Application) wrapper that enforces the
@@ -33,9 +35,8 @@ pub struct Input<Upstream, V: Variant, C: Signer> {
 /// When the reshare actor tracks an epoch's ceremony, the wrapper rejects a
 /// final block whose payload differs from the independently reconstructed
 /// [`EpochInfo`](crate::dkg::types::EpochInfo). An actor that starts following
-/// mid-epoch lacks the protocol history required for that comparison, so the
-/// wrapper delegates verification to the inner application rather than treating
-/// missing local state as an invalid proposal. The wrapper always rejects stray
+/// mid-epoch lacks the protocol history required for that comparison, so its
+/// final-block verification remains pending. The wrapper always rejects stray
 /// payloads carried by non-final blocks in the early dealing window.
 ///
 /// For proposals, the wrapper selects and fetches the payload for the block being
@@ -52,7 +53,7 @@ pub struct Input<Upstream, V: Variant, C: Signer> {
 /// input-providing application still works.
 pub struct Application<A, B, V, C>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
 {
@@ -63,7 +64,7 @@ where
 
 impl<A, B, V, C> Application<A, B, V, C>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
 {
@@ -91,7 +92,7 @@ where
 impl<A, B, V, C> Clone for Application<A, B, V, C>
 where
     A: Clone,
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
 {
@@ -107,7 +108,7 @@ where
 impl<A, E, B, V, C, I> ConsensusApplication<E> for Application<A, B, V, C>
 where
     E: Rng + Spawner + Metrics + Clock,
-    A: ConsensusApplication<E, Block = B, Input = Input<I, V, C>>,
+    A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
     A::Context: Send,
     B: ReshareBlock<Variant = V, Signer = C> + CertifiableBlock + Clone,
     V: Variant,
@@ -226,13 +227,16 @@ where
                         return false;
                     }
                 }
-                EpochInfoResponse::Pending => {
-                    debug!("verification pending: final block epoch info is not ready");
+                response @ (EpochInfoResponse::Pending | EpochInfoResponse::Following) => {
+                    // Pending or follower state provides no stable validity
+                    // verdict. Keep the request unresolved so consensus
+                    // cancellation owns termination.
+                    debug!(
+                        following = matches!(response, EpochInfoResponse::Following),
+                        "verification pending: final block epoch info cannot be derived locally"
+                    );
                     future::pending::<()>().await;
                     unreachable!("pending future must not resolve");
-                }
-                EpochInfoResponse::Following => {
-                    debug!("verification delegated: follower has no final block epoch info");
                 }
                 EpochInfoResponse::Unavailable => {
                     debug!("verification rejected: final block epoch info is unavailable");
@@ -278,7 +282,7 @@ mod tests {
         sync::Mutex,
     };
     use futures::{
-        FutureExt,
+        FutureExt, StreamExt,
         future::{Either, select},
         pin_mut,
     };
@@ -500,6 +504,7 @@ mod tests {
             output,
             players: Set::default(),
             next_players: Set::default(),
+            directory: Unit,
         })
     }
 
@@ -752,53 +757,58 @@ mod tests {
     }
 
     #[test]
-    fn verification_delegates_when_following_without_epoch_info() {
+    fn verification_stays_pending_without_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for expected in [true, false] {
+            for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
                 let parent = Arc::new(mocks::genesis_block(leader().public_key()));
                 let tip = final_block(&parent, Some(epoch_payload(1)));
-                let mut app = wrapper(&context, EpochInfoResponse::Following);
-                app.inner.verify_result = expected;
-                let inner = app.inner.clone();
+                let expected_tip = tip.digest();
+                let expected_parent = parent.digest();
+                let inner = RecordingApp::accepting();
+                let (sender, mut receiver) = mailbox::new::<
+                    Message<TestBlock, TestBlsVariant, PrivateKey>,
+                >(
+                    context.child("mailbox"), NZUsize!(1)
+                );
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(1));
+                let mut verify = Box::pin(app.verify(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([tip, parent]),
+                ));
 
-                let verified = app
-                    .verify(
-                        (context.child("app"), block_context(&parent, 1)),
-                        ancestry::from_iter([tip, parent]),
-                    )
-                    .await;
-
-                assert_eq!(verified, expected);
-                assert_eq!(inner.verify_count(), 1);
+                assert!(verify.as_mut().now_or_never().is_none());
+                let Some(Message::EpochInfo {
+                    mut ancestry,
+                    response: reply,
+                    ..
+                }) = receiver.recv().await
+                else {
+                    panic!("verification should request final epoch info");
+                };
+                assert_eq!(
+                    ancestry
+                        .next()
+                        .await
+                        .expect("verification ancestry should retain the candidate")
+                        .digest(),
+                    expected_tip
+                );
+                assert_eq!(
+                    ancestry
+                        .next()
+                        .await
+                        .expect("candidate should be followed by its parent")
+                        .digest(),
+                    expected_parent
+                );
+                assert!(reply.send(response).is_ok());
+                assert!(
+                    verify.as_mut().now_or_never().is_none(),
+                    "verification resolved without final epoch info"
+                );
+                assert_eq!(inner.verify_count(), 0);
             }
-        });
-    }
-
-    #[test]
-    fn verification_stays_pending_when_final_epoch_info_not_ready() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
-            let tip = final_block(&parent, Some(epoch_payload(1)));
-            let mut app = wrapper(&context, EpochInfoResponse::Pending);
-            let inner = app.inner.clone();
-
-            let verify = app.verify(
-                (context.child("app"), block_context(&parent, 1)),
-                ancestry::from_iter([tip, parent]),
-            );
-            let timeout = context.sleep(Duration::from_millis(1));
-            pin_mut!(verify);
-            pin_mut!(timeout);
-
-            match select(verify, timeout).await {
-                Either::Left((verified, _)) => {
-                    panic!("verification resolved before epoch info was ready: {verified}");
-                }
-                Either::Right(((), _)) => {}
-            }
-            assert_eq!(inner.verify_count(), 0);
         });
     }
 

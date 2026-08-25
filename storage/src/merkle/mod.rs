@@ -99,10 +99,10 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     ///
     /// A peak is considered entirely inactive if all of its leaves strictly precede the
     /// `inactivity_floor`. These peaks can be safely bagged forward into the `grafted_root`.
-    fn inactive_peaks(size: Position<Self>, inactivity_floor: Location<Self>) -> usize {
+    fn inactive_peaks(size: Location<Self>, inactivity_floor: Location<Self>) -> usize {
         let mut inactive_count = 0;
         let mut leaf_capacity_sum = 0u64;
-        for (_, height) in Self::peaks(size) {
+        for (_, height) in Self::peaks(Self::location_to_position(size)) {
             let capacity = 1u64.checked_shl(height).expect("height excessively large");
             leaf_capacity_sum = leaf_capacity_sum
                 .checked_add(capacity)
@@ -414,10 +414,6 @@ pub enum Error<F: Family> {
     /// Data is corrupted.
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
-
-    /// A required grafted leaf digest is missing.
-    #[error("missing grafted leaf digest: {0}")]
-    MissingGraftedLeaf(Position<F>),
 
     /// Bit offset is out of bounds.
     #[error("bit offset {0} out of bounds (size: {1})")]

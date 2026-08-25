@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, IoBuf, buffer,
+    Blob, Buf, BufMut, BufferPooler, IoBuf, ReadOptions, WriteOptions, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -395,7 +395,7 @@ where
 }
 
 /// The freezer's state, boxed so the public [Freezer] handle stays pointer-sized.
-struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
+struct Inner<E: Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -433,7 +433,7 @@ struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
     resizes: Counter,
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -450,7 +450,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// Read entries from the table blob.
     async fn read_table(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
         let offset = Self::table_offset(table_index);
-        let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
+        let read_buf = blob
+            .read_at(offset, Entry::FULL_SIZE, ReadOptions::default())
+            .await?;
 
         Self::parse_entries(read_buf)
     }
@@ -478,7 +480,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             );
             *entry = Entry::new_empty();
             let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
-            blob.write_at(entry_offset, zero_buf).await?;
+            blob.write_at(entry_offset, zero_buf, WriteOptions::default())
+                .await?;
             Ok(true)
         } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
             // Only track max epoch if we're discovering it (not validating against a known epoch)
@@ -617,6 +620,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .write_at(
                 table_offset + start,
                 update.encode_with_pool_mut(pooler.storage_buffer_pool()),
+                WriteOptions::default(),
             )
             .await
             .map_err(Error::Runtime)
@@ -1011,7 +1015,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
+        let mut read_buf = self
+            .table
+            .read_at(read_offset, chunk_bytes, ReadOptions::default())
+            .await?;
 
         // Process each entry in the chunk
         let mut writes = self.context.storage_buffer_pool().alloc(chunk_bytes);
@@ -1040,9 +1047,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
         // Put the writes into the table.
         let writes = writes.freeze();
-        let old_write = self.table.write_at(read_offset, writes.clone());
+        let old_write = self
+            .table
+            .write_at(read_offset, writes.clone(), WriteOptions::default());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
-        let new_write = self.table.write_at(new_offset, writes);
+        let new_write = self
+            .table
+            .write_at(new_offset, writes, WriteOptions::default());
         try_join(old_write, new_write).await?;
 
         // Update progress
@@ -1131,9 +1142,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 ///
 /// Mutating functions consume the freezer and return it only on success: an error (or a dropped
 /// future) destroys the handle.
-pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
+pub struct Freezer<E: Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Freezer<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> std::fmt::Debug for Freezer<E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Freezer")
             .field("current_section", &self.0.current_section)
@@ -1142,7 +1153,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Fr
     }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Initialize a [Freezer] instance, aligning existing data to a [Checkpoint] when provided.
     ///
     /// Passing `None` or an empty [Checkpoint] deletes any existing freezer data and starts empty.
@@ -1244,7 +1255,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Runner, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner, Storage, Supervisor as _, WriteOptions, buffer::paged::CacheRef, deterministic,
         deterministic::Context,
     };
     use commonware_utils::{
@@ -1324,7 +1335,11 @@ mod tests {
             freezer.close().await.unwrap();
 
             let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
-            let table_data = blob.read_at(0, size as usize).await.unwrap().coalesce();
+            let table_data = blob
+                .read_at(0, size as usize, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
 
             // Verify resize happened (table doubled from 4 to 8)
             let num_entries = size as usize / Entry::FULL_SIZE;
@@ -1384,13 +1399,18 @@ mod tests {
             // Corrupt the CRC in both slots of the table entry
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
-                let entry_data = blob.read_at(0, Entry::FULL_SIZE).await.unwrap();
+                let entry_data = blob
+                    .read_at(0, Entry::FULL_SIZE, ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut corrupted = entry_data.coalesce();
                 // Corrupt CRC of first slot (last 4 bytes of first slot)
                 corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
                 // Corrupt CRC of second slot (last 4 bytes of second slot)
                 corrupted.as_mut()[Entry::FULL_SIZE - 4] ^= 0xFF;
-                blob.write_at_sync(0, corrupted).await.unwrap();
+                blob.write_at(0, corrupted, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reopen to trigger recovery. The bug would set both cleared entries to
@@ -1727,10 +1747,15 @@ mod tests {
                     .open(&cfg.value_partition, &checkpoint.section.to_be_bytes())
                     .await
                     .unwrap();
-                let byte = blob.read_at(len - 1, 1).await.unwrap();
+                let byte = blob
+                    .read_at(len - 1, 1, ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut corrupted = byte.coalesce();
                 corrupted.as_mut()[0] ^= 0xFF;
-                blob.write_at_sync(len - 1, corrupted).await.unwrap();
+                blob.write_at(len - 1, corrupted, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Recovery restores the checkpointed state without probing committed

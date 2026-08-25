@@ -262,7 +262,7 @@ mod test {
                             batch_idx * 10 + j,
                         ));
                 }
-                let new_commit_loc = Location::new(*db.last_commit_loc() + 1 + 3);
+                let new_commit_loc = db.last_commit_loc() + 1 + 3;
                 let merkleized = batch.merkleize(&db, None, new_commit_loc).await;
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
             }
@@ -360,7 +360,7 @@ mod test {
         assert_eq!(retained.root(), compact_batch.root());
 
         let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 
@@ -523,6 +523,14 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
             tests::test_keyless_partial_ancestor_commit(db).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_delayed_merkleize_after_ancestor_apply() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("db")).await;
+            tests::test_keyless_delayed_merkleize_after_ancestor_apply(db).await;
         });
     }
 

@@ -1,5 +1,5 @@
 use crate::{BufferPool, Error, IoBufs};
-use std::{convert::identity, net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
@@ -78,7 +78,7 @@ impl crate::Sink for Sink {
         // Time out if we take too long to write
         let result = timeout(write_timeout, send)
             .await
-            .map_or(Err(Error::Timeout), identity);
+            .unwrap_or(Err(Error::Timeout));
 
         // A failed send leaves the write-half unusable.
         if result.is_err() {
@@ -126,7 +126,7 @@ impl crate::Stream for Stream {
         // Time out if we take too long to read
         let result = timeout(self.read_timeout, recv)
             .await
-            .map_or(Err(Error::Timeout), identity);
+            .unwrap_or(Err(Error::Timeout));
 
         // Unpoison on success.
         if result.is_ok() {

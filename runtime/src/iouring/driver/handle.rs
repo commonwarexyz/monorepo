@@ -26,13 +26,14 @@
 use super::{
     Tick,
     request::{
-        AcceptRequest, ConnectRequest, Output, RawSocketAddr, ReadAtRequest, RecvRequest, Request,
-        SendRequest, SyncRequest, WriteAtRequest,
+        AcceptRequest, Cache, ConnectRequest, IOVEC_BATCH_SIZE, Output, RawSocketAddr,
+        ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest,
+        WriteAtState,
     },
     waiter::{DropOutcome, WaiterId, Waiters},
     waker::Waker as RingWaker,
 };
-use crate::{Error, IoBufMut, IoBufs};
+use crate::{Error, IoBufMut, IoBufs, WriteOptions};
 use commonware_utils::sync::Mutex;
 use std::{
     cell::RefCell,
@@ -461,6 +462,7 @@ impl Handle {
         offset: u64,
         len: usize,
         buf: IoBufMut,
+        cache: Cache,
     ) -> Result<IoBufMut, (IoBufMut, Error)> {
         assert!(len <= buf.capacity(), "read_at len exceeds buffer capacity");
         let request = Request::ReadAt(ReadAtRequest {
@@ -469,6 +471,7 @@ impl Handle {
             len,
             read: 0,
             buf,
+            cache,
         });
         match Op::new(self, request).await {
             Output::ReadAt(result) => result.map_err(|e| *e),
@@ -476,45 +479,34 @@ impl Handle {
         }
     }
 
-    /// Submit a logical positioned write request and wait for its completion.
+    /// Submit a positioned write with the provided options and wait for its
+    /// completion.
+    ///
+    /// A durable write that fits one submission carries `RWF_DSYNC`. A larger
+    /// write is submitted plain and finished with one data sync, avoiding one
+    /// device flush per submission.
     pub(crate) async fn write_at(
         &self,
         file: Arc<File>,
         offset: u64,
         bufs: IoBufs,
+        options: WriteOptions,
+        cache: Cache,
     ) -> Result<(), Error> {
-        self.write_at_inner(file, offset, bufs, false).await
-    }
-
-    /// Submit a logical positioned write with per-write sync and wait for its
-    /// completion.
-    ///
-    /// The kernel executes `RWF_SYNC` writes on its io-wq pool, which
-    /// serializes work per inode: concurrent synced writes to one file run
-    /// one at a time. Callers needing concurrent durable writes to a single
-    /// blob should prefer [Self::write_at] followed by [Self::sync].
-    pub(crate) async fn write_at_sync(
-        &self,
-        file: Arc<File>,
-        offset: u64,
-        bufs: IoBufs,
-    ) -> Result<(), Error> {
-        self.write_at_inner(file, offset, bufs, true).await
-    }
-
-    async fn write_at_inner(
-        &self,
-        file: Arc<File>,
-        offset: u64,
-        bufs: IoBufs,
-        sync: bool,
-    ) -> Result<(), Error> {
+        let state = if !options.contains(WriteOptions::SYNC) {
+            WriteAtState::Writing
+        } else if bufs.chunk_count() <= IOVEC_BATCH_SIZE {
+            WriteAtState::WritingSync
+        } else {
+            WriteAtState::WritingBeforeSync
+        };
         let request = Request::WriteAt(WriteAtRequest {
             file,
             offset,
             written: 0,
             write: bufs.into(),
-            sync,
+            state,
+            cache,
         });
         match Op::new(self, request).await {
             Output::WriteAt(result) => result.map_err(|e| *e),

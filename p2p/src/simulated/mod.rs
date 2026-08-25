@@ -62,7 +62,7 @@
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_utils::{NZU32, NZUsize};
+//! use commonware_utils::{NZU32, NZUsize, Probability};
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -76,6 +76,7 @@
 //! // Configure network
 //! let p2p_cfg = Config {
 //!     max_size: 1024 * 1024, // 1MB
+//!     max_peers_per_set: NZUsize!(4),
 //!     disconnect_on_block: true,
 //!     tracked_peer_sets: NZUsize!(3),
 //! };
@@ -110,7 +111,7 @@
 //!         Link {
 //!             latency: Duration::from_millis(5),
 //!             jitter: Duration::from_millis(2),
-//!             success_rate: 0.75,
+//!             success_rate: Probability!(0.75),
 //!         },
 //!     ).await.unwrap();
 //!
@@ -127,7 +128,7 @@
 //!         Link {
 //!             latency: Duration::from_millis(100),
 //!             jitter: Duration::from_millis(25),
-//!             success_rate: 0.8,
+//!             success_rate: Probability!(0.8),
 //!         },
 //!     ).await.unwrap();
 //!
@@ -157,8 +158,6 @@ pub enum Error {
     LinkExists,
     #[error("link missing")]
     LinkMissing,
-    #[error("invalid success rate (must be in [0, 1]): {0}")]
-    InvalidSuccessRate(f64),
     #[error("send_frame failed")]
     SendFrameFailed,
     #[error("recv_frame failed")]
@@ -175,8 +174,8 @@ pub enum Error {
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{
-    Config, ConnectedPeerProvider, Network, Receiver, Sender, SplitForwarder, SplitOrigin,
-    SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
+    Config, ConnectedPeerProvider, MAX_SIZE, Network, Receiver, Sender, SplitForwarder,
+    SplitOrigin, SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
 };
 
 #[cfg(test)]
@@ -196,7 +195,7 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        NZU32, NZUsize,
+        NZU32, NZUsize, Probability,
         channel::mpsc,
         hostname, ordered,
         ordered::{Map, Set},
@@ -243,6 +242,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(size),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -289,7 +289,7 @@ mod tests {
                             Link {
                                 latency: Duration::from_millis(5),
                                 jitter: Duration::from_millis(2),
-                                success_rate: 0.75,
+                                success_rate: Probability!(0.75),
                             },
                         )
                         .await;
@@ -358,6 +358,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -398,6 +399,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -422,7 +424,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: 0.75,
+                        success_rate: Probability!(0.75),
                     },
                 )
                 .await;
@@ -441,6 +443,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -459,7 +462,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(10),
                         jitter: Duration::from_millis(1),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -471,7 +474,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(10),
                         jitter: Duration::from_millis(1),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -535,55 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_success_rate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.child("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
-            // Register agents
-            let pk1 = PrivateKey::from_seed(0).public_key();
-            let pk2 = PrivateKey::from_seed(1).public_key();
-            oracle
-                .control(pk1.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-            oracle
-                .control(pk2.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            // Attempt to link with invalid success rate
-            let result = oracle
-                .add_link(
-                    pk1,
-                    pk2,
-                    Link {
-                        latency: Duration::from_millis(5),
-                        jitter: Duration::from_millis(2),
-                        success_rate: 1.5,
-                    },
-                )
-                .await;
-
-            // Confirm error is correct
-            assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
-        });
-    }
-
-    #[test]
     fn test_add_link_before_channel_registration() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -596,6 +550,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -612,7 +567,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -648,6 +603,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -691,7 +647,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -703,7 +659,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -734,6 +690,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -765,7 +722,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -794,6 +751,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -825,7 +783,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -837,7 +795,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -868,6 +826,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -916,7 +875,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -928,7 +887,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -1019,7 +978,7 @@ mod tests {
                     // No latency so it doesn't interfere with bandwidth delay calculation
                     latency: Duration::ZERO,
                     jitter: Duration::ZERO,
-                    success_rate: 1.0,
+                    success_rate: Probability!(1.0),
                 },
             )
             .await
@@ -1054,6 +1013,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1153,6 +1113,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(101),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1200,7 +1161,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: 1.0,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1212,7 +1173,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: 1.0,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1303,6 +1264,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1332,7 +1294,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(50),
                         jitter: Duration::from_millis(40),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -1368,6 +1330,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1398,7 +1361,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5_000),
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -1419,7 +1382,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(1),
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -1472,6 +1435,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1521,7 +1485,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: 1.0,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1563,6 +1527,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1610,7 +1575,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: 1.0,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1656,6 +1621,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1706,7 +1672,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: 1.0,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1754,6 +1720,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1802,7 +1769,7 @@ mod tests {
                         Link {
                             latency: Duration::from_millis(1),
                             jitter: Duration::ZERO,
-                            success_rate: 1.0,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1899,6 +1866,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1947,7 +1915,7 @@ mod tests {
                         Link {
                             latency: Duration::from_millis(1),
                             jitter: Duration::ZERO,
-                            success_rate: 1.0,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -2004,6 +1972,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2044,7 +2013,7 @@ mod tests {
                     Link {
                         latency: Duration::from_secs(1), // 1 second latency
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2106,6 +2075,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2134,7 +2104,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(1), // Small latency
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2196,6 +2166,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2224,7 +2195,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2274,6 +2245,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2302,7 +2274,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2352,6 +2324,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2380,6 +2353,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2439,6 +2413,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2477,6 +2452,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2523,6 +2499,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2562,6 +2539,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2599,6 +2577,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2650,6 +2629,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2), // Only track 2 peer sets
                 },
@@ -2699,7 +2679,7 @@ mod tests {
                                 Link {
                                     latency: Duration::from_millis(1),
                                     jitter: Duration::ZERO,
-                                    success_rate: 1.0,
+                                    success_rate: Probability!(1.0),
                                 },
                             )
                             .await
@@ -2758,6 +2738,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -2800,6 +2781,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2838,7 +2820,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(1),
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2911,6 +2893,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -3008,6 +2991,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -3059,6 +3043,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -3152,6 +3137,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -3175,7 +3161,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())
@@ -3221,6 +3207,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -3242,7 +3229,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())
@@ -3285,6 +3272,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -3307,7 +3295,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())
@@ -3364,6 +3352,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -3406,6 +3395,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },

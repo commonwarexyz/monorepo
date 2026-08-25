@@ -1,0 +1,15 @@
+["commonware_cryptography_curve25519::key_exchange::tests::conformance::CodecConformance<PublicKey>"]
+n_cases = 65536
+hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+
+["commonware_cryptography_curve25519::signing::tests::conformance::CodecConformance<Signature>"]
+n_cases = 65536
+hash = "531e2ab4737f7f537ff85f70911ba454a184d90a2b5349eb4488ab81b26f0cfc"
+
+["commonware_cryptography_curve25519::signing::tests::conformance::CodecConformance<SigningKey>"]
+n_cases = 1024
+hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
+
+["commonware_cryptography_curve25519::signing::tests::conformance::CodecConformance<VerifyingKey>"]
+n_cases = 65536
+hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"

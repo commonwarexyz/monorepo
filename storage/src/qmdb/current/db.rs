@@ -25,7 +25,7 @@ use crate::{
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
-        operation::Operation as _,
+        operation::Floored as _,
     },
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
@@ -44,7 +44,6 @@ use commonware_utils::{
     sequence::prefixed_u64::U64,
 };
 use core::{num::NonZeroU64, ops::Range};
-use futures::future::try_join_all;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
 
@@ -53,6 +52,9 @@ const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
+
+/// `(position, digest)` pairs for a grafted tree's pinned nodes, in `Family::nodes_to_pin` order.
+type GraftedPinnedNodes<F, D> = Vec<(Position<F>, D)>;
 
 /// Metrics for the Current layer.
 pub(crate) struct Metrics<E: Context> {
@@ -170,10 +172,10 @@ impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, 
 where
     F: merkle::Graftable,
     E: Context,
-    U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -190,10 +192,10 @@ impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
-    U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -225,6 +227,15 @@ where
         self.any.bounds()
     }
 
+    /// Returns a read-only view of the activity bitmap.
+    ///
+    /// Pruning does not renumber the retained chunks. Only chunks at or after `pruned_chunks()`
+    /// that contain a bit below `len()` are readable. Calling `get_chunk()` or `get_bit()` for a
+    /// pruned or out-of-bounds location panics.
+    pub fn bitmap(&self) -> &impl bitmap::Readable<N> {
+        self.any.bitmap.as_ref()
+    }
+
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
@@ -236,24 +247,13 @@ where
     ) -> bool {
         proof.verify::<H, _, N>(start_loc, ops, chunks, root)
     }
-}
 
-// Functionality requiring non-mutable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Returns a virtual [grafting::Storage] over the grafted tree and ops tree. For positions at
-    /// or above the grafting height, returns the grafted node. For positions below the grafting
-    /// height, the ops tree is used.
-    fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
+    /// Returns a virtual [`crate::merkle::storage::Storage`] view over the grafted tree and ops
+    /// tree.
+    ///
+    /// Positions and `size()` use ops-tree coordinates. Positions at or above the grafting height
+    /// return bitmap-authenticated grafted nodes, while positions below it use the ops tree.
+    pub fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
@@ -395,15 +395,15 @@ where
     }
 }
 
-// Functionality requiring mutable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+// Functionality requiring a mutable journal.
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
-    U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -485,6 +485,25 @@ where
         pair_absorption_threshold::<F, N>(self.any.bitmap.pruned_chunks() as u64)
     }
 
+    /// Read the grafted tree's pinned-node digests for pruning boundary `loc`, in
+    /// `Family::nodes_to_pin` order, as `(position, digest)` pairs.
+    ///
+    /// Errors with [`Error::DataCorrupted`] if any pinned node is absent from the grafted tree.
+    fn grafted_pinned_nodes(
+        &self,
+        loc: Location<F>,
+    ) -> Result<GraftedPinnedNodes<F, H::Digest>, Error<F>> {
+        F::nodes_to_pin(loc)
+            .map(|pos| {
+                let digest = self
+                    .grafted_tree
+                    .get_node(pos)
+                    .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
+                Ok((pos, digest))
+            })
+            .collect()
+    }
+
     /// Prune the grafted tree to match the committed bitmap's pruned chunks.
     fn prune_grafted_tree_to_bitmap(&mut self) -> Result<(), Error<F>> {
         let pruned_chunks = self.any.bitmap.pruned_chunks() as u64;
@@ -501,14 +520,7 @@ where
             .map_err(|_| Error::<F>::DataCorrupted("prune location overflow"))?;
         let size = self.grafted_tree.size();
 
-        let mut pinned = BTreeMap::new();
-        for pos in F::nodes_to_pin(prune_loc) {
-            let digest = self
-                .grafted_tree
-                .get_node(pos)
-                .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
-            pinned.insert(pos, digest);
-        }
+        let pinned: BTreeMap<_, _> = self.grafted_pinned_nodes(prune_loc)?.into_iter().collect();
 
         let mut retained = Vec::with_capacity((*size - *prune_pos) as usize);
         for p in *prune_pos..*size {
@@ -598,7 +610,8 @@ where
     /// this database handle after any `Err` from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
+    /// completes.
     #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
@@ -645,17 +658,12 @@ where
         }
 
         // Extract pinned nodes for the existing pruning boundary from the in-memory grafted tree.
-        let pinned_nodes = if pruned_chunks > 0 {
+        let pinned_nodes: Vec<H::Digest> = if pruned_chunks > 0 {
             let grafted_leaves = Location::<F>::new(pruned_chunks as u64);
-            let mut pinned_nodes = Vec::new();
-            for pos in F::nodes_to_pin(grafted_leaves) {
-                let digest = self
-                    .grafted_tree
-                    .get_node(pos)
-                    .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
-                pinned_nodes.push(digest);
-            }
-            pinned_nodes
+            self.grafted_pinned_nodes(grafted_leaves)?
+                .into_iter()
+                .map(|(_, digest)| digest)
+                .collect()
         } else {
             Vec::new()
         };
@@ -665,30 +673,14 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any = self.any.rewind(size).await?;
 
-        let ops_size = self.any.log.merkle.size();
-        let ops_leaves = Location::<F>::try_from(ops_size)?;
-        let grafted_tree = build_grafted_tree::<F, H, S, N>(
+        // Rebuild the grafted tree and canonical root from the rewound `any` state.
+        let (grafted_tree, root) = rebuild_grafted_tree::<F, H, S, N>(
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
-            ops_leaves,
-            &self.strategy,
-        )
-        .await?;
-        let storage = grafting::Storage::<F, H, _, _>::new(
-            &grafted_tree,
-            grafting::height::<N>(),
-            &self.any.log.merkle,
-        );
-        let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
-        let ops_root = self.any.root();
-        let root = compute_db_root::<F, H, _, _, N>(
-            self.any.bitmap.as_ref(),
-            &storage,
-            ops_leaves,
-            partial_chunk,
             self.any.inactivity_floor_loc,
-            &ops_root,
+            self.any.root(),
+            &self.strategy,
         )
         .await?;
 
@@ -713,11 +705,11 @@ where
 
         // Write the pinned nodes of the grafted tree.
         let pruned_chunks = Location::<F>::new(pruned_chunks_u64);
-        for (i, grafted_pos) in F::nodes_to_pin(pruned_chunks).enumerate() {
-            let digest = self
-                .grafted_tree
-                .get_node(grafted_pos)
-                .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
+        for (i, (_, digest)) in self
+            .grafted_pinned_nodes(pruned_chunks)?
+            .into_iter()
+            .enumerate()
+        {
             let key = U64::new(NODE_PREFIX, i as u64);
             self.metadata.put(key, digest.to_vec());
         }
@@ -725,6 +717,93 @@ where
         self.metadata = self.metadata.sync().await?;
 
         Ok(self)
+    }
+
+    /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup.
+    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
+    /// the prior sync before starting. Failures surface as described on
+    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
+    #[boxed]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        let (any, handle) = self.any.start_sync().await?;
+        self.any = any;
+        Ok((self, handle))
+    }
+
+    /// Durably commit the journal state published by prior [`Db::apply_batch`]
+    /// calls.
+    #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
+    #[boxed]
+    pub async fn commit(mut self) -> Result<Self, Error<F>> {
+        self.any = self.any.commit().await?;
+        Ok(self)
+    }
+
+    /// Sync all database state to disk.
+    #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
+    #[boxed]
+    pub async fn sync(mut self) -> Result<Self, Error<F>> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
+        self.any = self.any.sync().await?;
+
+        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
+        // re-Merkleize the inactive portion up to the inactivity floor.
+        self = self.sync_metadata().await?;
+        self.update_metrics();
+        Ok(self)
+    }
+
+    /// Destroy the db, removing all data from disk.
+    #[boxed]
+    pub async fn destroy(self) -> Result<(), Error<F>> {
+        // Destructure before the await boundary to avoid stack growth from
+        // retaining the entire `self` in the future.
+        let Self { any, metadata, .. } = self;
+        metadata.destroy().await?;
+        any.destroy().await
+    }
+
+    /// Check that `batch` can be applied to the database in its current state, without
+    /// applying it.
+    ///
+    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
+    /// fails; callers that want to reject a bad batch and keep the handle can check first.
+    pub fn validate_batch(
+        &self,
+        batch: &super::batch::MerkleizedBatch<F, H::Digest, U, N, S>,
+    ) -> Result<(), Error<F>> {
+        self.any.validate_batch(&batch.inner)
+    }
+
+    /// Apply a batch to the database, returning the range of written operations.
+    ///
+    /// A batch is valid only if every batch applied to the database since this batch's
+    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// more details).
+    ///
+    /// This publishes the batch to the in-memory Current view and appends it to the journal. Call
+    /// [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to make
+    /// the applied state durable.
+    #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
+    #[boxed]
+    pub async fn apply_batch(
+        mut self,
+        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
+    ) -> Result<(Self, Range<Location<F>>), Error<F>> {
+        let _timer = self.metrics.apply_batch_timer();
+        self.metrics.apply_batch_calls.inc();
+        let range;
+        (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
+        Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
+        self.root = batch.canonical_root;
+        self.update_metrics();
+        Ok((self, range))
     }
 }
 
@@ -782,129 +861,17 @@ fn pair_absorption_threshold<F: Graftable, const N: usize>(chunk_count: u64) -> 
     Some(F::peak_birth_size(pair_pos, grafting_height + 1))
 }
 
-// Functionality requiring mutable + persistable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update,
-    C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
-    ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on startup.
-    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
-    /// the prior sync before starting. Failures surface as described on
-    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
-    #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
-    #[boxed]
-    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        let (any, handle) = self.any.start_sync().await?;
-        self.any = any;
-        Ok((self, handle))
-    }
-
-    /// Durably commit the journal state published by prior [`Db::apply_batch`]
-    /// calls.
-    #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
-    #[boxed]
-    pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        self.any = self.any.commit().await?;
-        Ok(self)
-    }
-
-    /// Sync all database state to disk.
-    #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
-    #[boxed]
-    pub async fn sync(mut self) -> Result<Self, Error<F>> {
-        let _timer = self.metrics.sync_timer();
-        self.metrics.sync_calls.inc();
-        self.any = self.any.sync().await?;
-
-        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
-        // re-Merkleize the inactive portion up to the inactivity floor.
-        self = self.sync_metadata().await?;
-        self.update_metrics();
-        Ok(self)
-    }
-
-    /// Destroy the db, removing all data from disk.
-    #[boxed]
-    pub async fn destroy(self) -> Result<(), Error<F>> {
-        // Destructure before the await boundary to avoid stack growth from
-        // retaining the entire `self` in the future.
-        let Self { any, metadata, .. } = self;
-        metadata.destroy().await?;
-        any.destroy().await
-    }
-}
-
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update + 'static,
-    C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Check that `batch` can be applied to the database in its current state, without
-    /// applying it.
-    ///
-    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
-    /// fails; callers that want to reject a bad batch and keep the handle can check first.
-    pub fn validate_batch(
-        &self,
-        batch: &super::batch::MerkleizedBatch<F, H::Digest, U, N, S>,
-    ) -> Result<(), Error<F>> {
-        self.any.validate_batch(&batch.inner)
-    }
-
-    /// Apply a batch to the database, returning the range of written operations.
-    ///
-    /// A batch is valid only if every batch applied to the database since this batch's
-    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
-    /// more details).
-    ///
-    /// This publishes the batch to the in-memory Current view and appends it to the journal,
-    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
-    /// durability.
-    #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
-    #[boxed]
-    pub async fn apply_batch(
-        mut self,
-        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
-    ) -> Result<(Self, Range<Location<F>>), Error<F>> {
-        let _timer = self.metrics.apply_batch_timer();
-        self.metrics.apply_batch_calls.inc();
-        let range;
-        (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
-        Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
-        self.root = batch.canonical_root;
-        self.update_metrics();
-        Ok((self, range))
-    }
-}
-
-/// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
-/// `None` if all bits fall on complete chunk boundaries.
+/// The bitmap's incomplete trailing chunk and the number of bits in it, or `None` if the bitmap
+/// is empty or its bits end exactly on a chunk boundary.
 pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
 ) -> Option<([u8; N], u64)> {
-    let (last_chunk, next_bit) = bitmap.last_chunk();
-    if next_bit == bitmap::Prunable::<N>::CHUNK_SIZE_BITS {
-        None
-    } else {
-        Some((last_chunk, next_bit))
+    let next_bit = bitmap.len() % bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+    if next_bit == 0 {
+        return None;
     }
+    let (last_chunk, _) = bitmap.last_chunk();
+    Some((last_chunk, next_bit))
 }
 
 /// Return complete and graftable chunk counts, enforcing the pending and pruning invariants.
@@ -1044,6 +1011,40 @@ pub(super) async fn compute_db_root<
     ))
 }
 
+/// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
+/// bitmap. Returns the rebuilt grafted tree and the db root.
+pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
+    bitmap: &impl bitmap::Readable<N>,
+    pinned_nodes: &[H::Digest],
+    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    inactivity_floor: Location<F>,
+    ops_root: H::Digest,
+    strategy: &S,
+) -> Result<(Mem<F, H::Digest>, H::Digest), Error<F>>
+where
+    F: merkle::Graftable,
+    H: Hasher,
+    S: Strategy,
+{
+    let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
+    let grafted_tree =
+        build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
+            .await?;
+    let storage =
+        grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
+    let partial_chunk = partial_chunk(bitmap);
+    let root = compute_db_root::<F, H, _, _, N>(
+        bitmap,
+        &storage,
+        ops_leaves,
+        partial_chunk,
+        inactivity_floor,
+        &ops_root,
+    )
+    .await?;
+    Ok((grafted_tree, root))
+}
+
 /// Compute the root of the grafted structure represented by `storage`.
 ///
 /// Only **graftable** chunks (those whose h=G ancestor has been born in the ops tree) are
@@ -1109,17 +1110,24 @@ pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: 
     let grafting_height = grafting::height::<N>();
 
     // Each graftable chunk has a single h=G ancestor at the deterministic
-    // `subtree_root_position(chunk_idx << G, G)`. Look it up directly.
-    try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
-        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
-        let pos = F::subtree_root_position(leaf_start, grafting_height);
-        let chunk_ops_digest = ops_tree
-            .get_node(pos)
-            .await?
-            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
-        Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest, chunk))
-    }))
-    .await
+    // `subtree_root_position(chunk_idx << G, G)`.
+    let chunks: Vec<(usize, [u8; N])> = chunks.into_iter().collect();
+    let positions: Vec<Position<F>> = chunks
+        .iter()
+        .map(|&(chunk_idx, _)| {
+            let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
+            F::subtree_root_position(leaf_start, grafting_height)
+        })
+        .collect();
+
+    // Chunk indices ascend and subtree roots ascend with their leaf ranges, satisfying
+    // `get_nodes`'s ordering requirement.
+    let nodes = ops_tree.get_nodes(&positions).await?;
+    Ok(chunks
+        .into_iter()
+        .zip(nodes)
+        .map(|((chunk_idx, chunk), chunk_ops_digest)| (chunk_idx, chunk_ops_digest, chunk))
+        .collect())
 }
 
 /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
@@ -1323,6 +1331,21 @@ mod tests {
         assert!(result.is_some());
         let (_chunk, next_bit) = result.unwrap();
         assert_eq!(next_bit, 5);
+    }
+
+    #[test]
+    fn partial_chunk_empty() {
+        // An empty bitmap has no partial chunk, and must not panic on `last_chunk`.
+        let bm = PrunableBitMap::<N>::new();
+        assert!(partial_chunk::<PrunableBitMap<N>, N>(&bm).is_none());
+    }
+
+    #[test]
+    fn partial_chunk_fully_pruned() {
+        // A fully-pruned bitmap is chunk-aligned but its backing store is empty; still no partial
+        // chunk, and must not panic on `last_chunk`.
+        let bm = PrunableBitMap::<N>::new_with_pruned_chunks(1).unwrap();
+        assert!(partial_chunk::<PrunableBitMap<N>, N>(&bm).is_none());
     }
 
     #[test]

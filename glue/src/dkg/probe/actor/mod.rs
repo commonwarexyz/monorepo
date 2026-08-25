@@ -1,13 +1,13 @@
 use super::mailbox::{Mailbox, Message};
 use crate::{
-    dkg::{ReshareBlock, probe::Bootstrap, types::EpochInfo},
+    dkg::{ReshareBlock, network::Manager, probe::Bootstrap, types::EpochInfo},
     stateful::probe::sample::Sample,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
 use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::FixedEpocher};
 use commonware_cryptography::Signer;
-use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::NonZeroDuration;
@@ -22,7 +22,10 @@ mod service;
 pub struct Config<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    M: Manager<PublicKey = S::PublicKey>,
+    M: Manager<
+            PublicKey = S::PublicKey,
+            Directory = <V::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
@@ -36,11 +39,15 @@ where
     /// begins.
     pub manager: M,
     /// The weakly subjective checkpoint to bootstrap from.
-    pub bootstrap: Bootstrap<S::PublicKey>,
+    pub bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
     /// All-epoch certificate verifier built from the constant BLS identity.
     pub verifier: S,
     /// Public epoch information carried by genesis.
-    pub genesis: EpochInfo<<V::ApplicationBlock as ReshareBlock>::Variant, S::PublicKey>,
+    pub genesis: EpochInfo<
+        <V::ApplicationBlock as ReshareBlock>::Variant,
+        S::PublicKey,
+        <V::ApplicationBlock as ReshareBlock>::Directory,
+    >,
     /// Strategy for certificate verification.
     pub strategy: T,
     /// Blocker used to block peers that send invalid bootstrap data.
@@ -59,7 +66,10 @@ where
 pub struct Actor<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    M: Manager<PublicKey = S::PublicKey>,
+    M: Manager<
+            PublicKey = S::PublicKey,
+            Directory = <V::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
@@ -70,9 +80,13 @@ where
     context: ContextCell<E>,
     mailbox: ActorReceiver<Message<S, V>>,
     manager: M,
-    bootstrap: Bootstrap<S::PublicKey>,
+    bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
     verifier: S,
-    genesis: EpochInfo<<V::ApplicationBlock as ReshareBlock>::Variant, S::PublicKey>,
+    genesis: EpochInfo<
+        <V::ApplicationBlock as ReshareBlock>::Variant,
+        S::PublicKey,
+        <V::ApplicationBlock as ReshareBlock>::Directory,
+    >,
     strategy: T,
     blocker: B,
     blocks_per_epoch: NonZeroU64,
@@ -83,7 +97,10 @@ where
 impl<E, M, S, V, T, B> Actor<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    M: Manager<PublicKey = S::PublicKey>,
+    M: Manager<
+            PublicKey = S::PublicKey,
+            Directory = <V::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
@@ -139,6 +156,7 @@ where
             manager: self.manager,
             sample: Sample::new(self.bootstrap.epoch),
             bootstrap_participants: self.bootstrap.participants,
+            bootstrap_directory: self.bootstrap.directory,
             verifier: self.verifier,
             genesis: self.genesis,
             strategy: self.strategy,

@@ -155,7 +155,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, sync::Mutex, test_rng};
+    use commonware_utils::{sync::Mutex, test_rng};
     use std::sync::Arc;
 
     const NAMESPACE: &[u8] = b"test-reporter";
@@ -314,7 +314,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("failed to assemble certificate");
 
         let notarization = Notarization {

@@ -38,7 +38,7 @@
 //! [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
 
 use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
-use crate::transcript::{Summary, Transcript};
+use crate::transcript::{Summary, Transcript, Version};
 use ahash::RandomState;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -191,7 +191,7 @@ impl Verifier {
         n: usize,
         seed: Summary,
     ) -> Result<(), Error> {
-        let mut rng = Transcript::resume(seed).noise(NOISE_BATCH_VERIFY);
+        let mut rng = Transcript::resume(seed, Version::V1).noise(NOISE_BATCH_VERIFY);
 
         // The batch verification equation is
         //

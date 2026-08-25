@@ -2,7 +2,7 @@
 
 use crate::{
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor,
+    ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -501,6 +501,187 @@ macro_rules! forward_context {
     };
 }
 
+/// Snapshot of the options observed by a [RecordingContext] or [RecordingBlob].
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecordingSnapshot {
+    /// Options supplied to read operations, in call order.
+    pub reads: Vec<ReadOptions>,
+    /// Options supplied to write operations, in call order.
+    pub writes: Vec<WriteOptions>,
+}
+
+/// Shared observations produced by recording storage wrappers.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Default)]
+pub struct Recordings {
+    state: Arc<Mutex<RecordingSnapshot>>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Recordings {
+    /// Return a snapshot of all observations recorded so far.
+    pub fn snapshot(&self) -> RecordingSnapshot {
+        self.state.lock().clone()
+    }
+
+    /// Remove all recorded observations.
+    pub fn clear(&self) {
+        *self.state.lock() = RecordingSnapshot::default();
+    }
+
+    fn read(&self, options: ReadOptions) {
+        self.state.lock().reads.push(options);
+    }
+
+    fn write(&self, options: WriteOptions) {
+        self.state.lock().writes.push(options);
+    }
+}
+
+/// Context wrapper that records options supplied to every opened blob.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct RecordingContext<E> {
+    /// Wrapped context.
+    pub inner: E,
+    /// Observations shared by this context and all blobs opened through it.
+    pub recordings: Recordings,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<E> RecordingContext<E> {
+    /// Wrap `inner` and return both the context and its shared observations.
+    pub fn new(inner: E) -> (Self, Recordings) {
+        let recordings = Recordings::default();
+        (
+            Self {
+                inner,
+                recordings: recordings.clone(),
+            },
+            recordings,
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+forward_context!(RecordingContext, recordings);
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<E: Spawner> Spawner for RecordingContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let recordings = self.recordings;
+        self.inner.spawn(move |inner| f(Self { inner, recordings }))
+    }
+
+    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        self.inner.stop(value, timeout).await
+    }
+
+    fn stopped(&self) -> Signal {
+        self.inner.stopped()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<E: Storage> Storage for RecordingContext<E> {
+    type Blob = RecordingBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            RecordingBlob {
+                inner,
+                recordings: self.recordings.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper that records read and write options before delegating each operation.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct RecordingBlob<B> {
+    inner: B,
+    recordings: Recordings,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<B: Blob> Blob for RecordingBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.recordings.read(options);
+        self.inner.read_at_buf(offset, len, bufs, options).await
+    }
+
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.recordings.read(options);
+        self.inner.read_at(offset, len, options).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        self.recordings.write(options);
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
 /// Context wrapper whose blobs defer [Blob::start_sync] and can gate blocking syncs in tests.
 #[derive(Clone)]
 pub struct DelayedSyncContext<E> {
@@ -596,29 +777,33 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.inner.read_at_buf(offset, len, bufs).await
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.inner.read_at(offset, len).await
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len, options).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        if !self.pending.tracking() {
-            return self.inner.write_at_sync(offset, bufs).await;
+        if !options.contains(WriteOptions::SYNC) || !self.pending.tracking() {
+            return self.inner.write_at(offset, bufs, options).await;
         }
-        self.inner.write_at(offset, bufs).await?;
-        self.pending.wait().await?;
-        self.inner.sync().await
+        self.inner
+            .write_at(offset, bufs, options.without(WriteOptions::SYNC))
+            .await?;
+        self.sync().await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -818,7 +1003,7 @@ impl PendingSyncs {
     }
 }
 
-/// Controls a [WriteFaultContext]: while armed, every `write_at`/`write_at_sync` fails with an
+/// Controls a [WriteFaultContext]: while armed, every `write_at` fails with an
 /// injected error. Successful writes are counted.
 #[derive(Clone, Default)]
 pub struct WriteFaults {
@@ -861,7 +1046,7 @@ impl WriteFaults {
     }
 }
 
-/// Context wrapper whose blobs fail `write_at`/`write_at_sync` while the shared [WriteFaults]
+/// Context wrapper whose blobs fail `write_at` while the shared [WriteFaults]
 /// is armed, counting successful writes. Unlike [DelayedSyncContext], this injects failures
 /// into inline writes issued before any blob sync starts.
 #[derive(Clone)]
@@ -901,7 +1086,7 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
     }
 }
 
-/// Blob wrapper that fails `write_at`/`write_at_sync` while its [WriteFaults] is armed.
+/// Blob wrapper that fails `write_at` while its [WriteFaults] is armed.
 #[derive(Clone)]
 pub struct WriteFaultBlob<B> {
     inner: B,
@@ -914,28 +1099,28 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.inner.read_at_buf(offset, len, bufs).await
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.inner.read_at(offset, len).await
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len, options).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.faults.check()?;
-        self.inner.write_at(offset, bufs).await?;
-        self.faults.note();
-        Ok(())
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         self.faults.check()?;
-        self.inner.write_at_sync(offset, bufs).await?;
+        self.inner.write_at(offset, bufs, options).await?;
         self.faults.note();
         Ok(())
     }
@@ -1004,24 +1189,27 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.inner.read_at_buf(offset, len, bufs).await
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.inner.read_at(offset, len).await
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len, options).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        self.inner.write_at_sync(offset, bufs).await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -1047,9 +1235,107 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clock, Runner, Sink, Spawner, Stream, deterministic};
+    use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
+
+    #[test]
+    fn recording_context_preserves_data_and_records_options() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let (blob, _) = context.open("recording", b"blob").await.unwrap();
+
+            blob.write_at(0, b"data", WriteOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            let read = blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+
+            let read = blob
+                .read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(read.coalesce(), b"data");
+
+            assert_eq!(
+                recordings.snapshot(),
+                RecordingSnapshot {
+                    reads: vec![ReadOptions::DONT_CACHE, ReadOptions::default()],
+                    writes: vec![WriteOptions::DONT_CACHE],
+                }
+            );
+            recordings.clear();
+            assert_eq!(recordings.snapshot(), RecordingSnapshot::default());
+        });
+    }
+
+    async fn assert_read_options_forwarded<E: Storage>(
+        context: &E,
+        recordings: &Recordings,
+        partition: &str,
+    ) {
+        let (blob, _) = context.open(partition, b"blob").await.unwrap();
+        blob.write_at(0, b"data", WriteOptions::default())
+            .await
+            .unwrap();
+        recordings.clear();
+
+        let read = blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(read.coalesce(), b"data");
+
+        let read = blob
+            .read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::DONT_CACHE)
+            .await
+            .unwrap();
+        assert_eq!(read.coalesce(), b"data");
+
+        assert_eq!(
+            recordings.snapshot(),
+            RecordingSnapshot {
+                reads: vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE],
+                writes: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn delayed_sync_blob_forwards_read_options() {
+        deterministic::Runner::default().start(|context| async move {
+            let (inner, recordings) = RecordingContext::new(context);
+            let context = DelayedSyncContext {
+                inner,
+                pending: PendingSyncs::default(),
+            };
+
+            assert_read_options_forwarded(&context, &recordings, "delayed_sync").await;
+        });
+    }
+
+    #[test]
+    fn write_fault_blob_forwards_read_options() {
+        deterministic::Runner::default().start(|context| async move {
+            let (inner, recordings) = RecordingContext::new(context);
+            let context = WriteFaultContext {
+                inner,
+                faults: WriteFaults::default(),
+            };
+
+            assert_read_options_forwarded(&context, &recordings, "write_fault").await;
+        });
+    }
+
+    #[test]
+    fn sync_fault_blob_forwards_read_options() {
+        deterministic::Runner::default().start(|context| async move {
+            let (inner, recordings) = RecordingContext::new(context);
+            let context = SyncFaultContext {
+                inner,
+                fail_partition: "sync_fault".to_string(),
+            };
+
+            assert_read_options_forwarded(&context, &recordings, "sync_fault").await;
+        });
+    }
 
     #[test]
     fn test_send_recv() {

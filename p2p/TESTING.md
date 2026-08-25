@@ -7,6 +7,7 @@ let (network, mut oracle) = Network::new(
     context.child("network"),
     Config {
         max_size: 1024 * 1024,
+        max_peers_per_set: NZUsize!(2),
         disconnect_on_block: true,
         tracked_peer_sets: NZUsize!(1),
     },
@@ -27,7 +28,7 @@ let (certificate_sender, certificate_receiver) = oracle
 oracle.add_link(pk1, pk2, Link {
     latency: Duration::from_millis(10),
     jitter: Duration::from_millis(3),
-    success_rate: 0.95,
+    success_rate: commonware_utils::Probability!(0.95),
 }).await.unwrap();
 ```
 

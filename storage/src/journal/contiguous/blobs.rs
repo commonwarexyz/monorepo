@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs,
+    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -73,12 +73,13 @@ impl<E: Context> Partition<E> {
         }
     }
 
-    /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
-    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
-        let stored = Self::scan_names(&self.context, &self.name).await?;
-
+    /// Open every blob in `names` as a [`Writer`], keyed by blob index.
+    pub(super) async fn open_many(
+        &self,
+        names: Vec<Vec<u8>>,
+    ) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
         let mut blobs = BTreeMap::new();
-        for name in stored {
+        for name in names {
             let hex_name = hex(&name);
             let bytes: [u8; 8] = name
                 .try_into()
@@ -89,6 +90,12 @@ impl<E: Context> Partition<E> {
             blobs.insert(index, writer);
         }
         Ok(blobs)
+    }
+
+    /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
+    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+        let names = Self::scan_names(&self.context, &self.name).await?;
+        self.open_many(names).await
     }
 
     /// Remove the given blob.
@@ -110,8 +117,11 @@ impl<E: Context> Partition<E> {
     /// Select the blob partition for `prefix` using legacy-first compatibility rules: the
     /// legacy partition (`prefix` itself) if it contains data, otherwise `{prefix}-blobs`.
     /// Both containing data is corruption.
+    ///
+    /// Returns the chosen partition's name together with the blob names found in it while
+    /// selecting, so the caller can open those blobs without listing the partition a second time.
     // TODO(#2941): Remove legacy partition support
-    pub(super) async fn select(context: &E, prefix: &str) -> Result<String, Error> {
+    pub(super) async fn select(context: &E, prefix: &str) -> Result<(String, Vec<Vec<u8>>), Error> {
         let new_partition = format!("{prefix}-blobs");
         let legacy_blobs = Self::scan_names(context, prefix).await?;
         let new_blobs = Self::scan_names(context, &new_partition).await?;
@@ -123,9 +133,9 @@ impl<E: Context> Partition<E> {
         }
 
         if !legacy_blobs.is_empty() {
-            Ok(prefix.into())
+            Ok((prefix.into(), legacy_blobs))
         } else {
-            Ok(new_partition)
+            Ok((new_partition, new_blobs))
         }
     }
 }
@@ -555,11 +565,12 @@ impl<'a, B: RBlob> Blob<'a, B> {
         self,
         offset: u64,
         buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<Replay<'a, B>, Error> {
         match self {
             Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
             Self::Sealed(sealed) => {
-                let mut replay = sealed.replay(buffer_size)?;
+                let mut replay = sealed.replay(buffer_size, read_options)?;
                 replay.seek_to(offset)?;
                 Ok(Replay::paged(replay))
             }

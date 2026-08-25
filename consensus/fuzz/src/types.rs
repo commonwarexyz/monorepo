@@ -25,6 +25,8 @@ pub struct Nullification {
 
 pub struct Finalization {
     pub payload: Sha256Digest,
+    /// View of the finalized proposal's parent.
+    pub parent: u64,
     /// None for threshold schemes where count is not exposed.
     pub signature_count: Option<usize>,
 }

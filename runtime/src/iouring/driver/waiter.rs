@@ -708,7 +708,7 @@ mod tests {
     use super::*;
     use crate::{
         IoBuf, IoBufMut, IoBufs,
-        iouring::driver::request::{ReadAtRequest, RecvRequest, SendRequest, SyncRequest},
+        iouring::driver::request::{Cache, ReadAtRequest, RecvRequest, SendRequest, SyncRequest},
     };
     use futures::task::noop_waker;
     use std::{
@@ -759,6 +759,7 @@ mod tests {
             len: 8,
             read: 0,
             buf: IoBufMut::with_capacity(8),
+            cache: Cache::Enabled,
         })
     }
 

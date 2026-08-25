@@ -13,7 +13,7 @@
 //! and the page cache.
 
 use super::{CHECKSUM_SIZE, CacheRef, Replay, read::PageReader, view::View};
-use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
+use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -172,8 +172,13 @@ impl<B: Blob> Sealed<B> {
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
     ///
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
-    /// is not async.
-    pub fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
+    /// is not async. Every underlying blob read performed by the returned replay uses
+    /// `read_options`, including refills after seeking.
+    pub fn replay(
+        &self,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<Replay<B>, Error> {
         let page_size = self.inner.cache_ref.page_size();
         let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
         let physical_page_size = page_size
@@ -199,6 +204,7 @@ impl<B: Blob> Sealed<B> {
             logical_blob_size,
             prefetch_pages,
             page_size_nz,
+            read_options,
         );
         Ok(Replay::new(reader))
     }
@@ -259,7 +265,7 @@ mod tests {
             );
             assert_eq!(
                 range_after, range_before,
-                "seal must not invoke Blob::write_at_sync"
+                "seal must not invoke a range-scoped write"
             );
 
             assert_eq!(sealed.size(), 300);
@@ -851,7 +857,9 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             sync.await.unwrap();
 
-            let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            let mut replay = sealed
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
             assert_eq!(replay.blob_size(), total as u64);
 
             // Drain all logical bytes.
@@ -894,7 +902,9 @@ mod tests {
                 .await
                 .unwrap()
                 .coalesce();
-            let mut replay = snapshot.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            let mut replay = snapshot
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
             assert_eq!(replay.blob_size(), original.len() as u64);
 
             writer.append(b"newtail").await.unwrap();
@@ -933,11 +943,13 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
 
             let (_durable, _writes, full_syncs, range_syncs) = blob.snapshot();
-            assert_eq!(full_syncs, 1, "seal must invoke Blob::sync");
-            assert_eq!(range_syncs, 0, "seal must not invoke Blob::write_at_sync");
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
             sync.await.unwrap();
 
-            let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            let mut replay = sealed
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
             assert_eq!(replay.blob_size(), total as u64);
 
             let mut out = Vec::with_capacity(total);
@@ -975,7 +987,9 @@ mod tests {
             let read = sealed.read_at(0, total).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..]);
 
-            let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            let mut replay = sealed
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
             assert_eq!(replay.blob_size(), total as u64);
             let mut replayed = Vec::new();
             while replay.ensure(1).await.unwrap() {

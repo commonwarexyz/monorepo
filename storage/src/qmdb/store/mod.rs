@@ -9,7 +9,7 @@ pub(crate) mod tests {
     use commonware_utils::Array;
     use core::fmt::Debug;
 
-    pub trait TestKey: Array + Copy + Send + Sync {
+    pub trait TestKey: Array + Copy {
         fn from_seed(seed: u64) -> Self;
     }
 
