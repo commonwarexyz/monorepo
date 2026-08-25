@@ -22,7 +22,6 @@ use commonware_consensus::{
         Round, View, ViewDelta, coding::Commitment,
     },
 };
-use commonware_consensus_fuzz::id_mock;
 #[cfg(feature = "mocks")]
 use commonware_consensus_fuzz::simplex_certificate_mock;
 use commonware_cryptography::{
@@ -49,7 +48,6 @@ type Bls12381MultisigMinSig = bls12381_multisig::Scheme<PublicKey, MinSig>;
 type ThresholdSchemeMinPk = bls12381_threshold_vrf::Scheme<PublicKey, MinPk>;
 type ThresholdSchemeMinSig = bls12381_threshold_vrf::Scheme<PublicKey, MinSig>;
 type Secp256r1Scheme = secp256r1::Scheme<PublicKey>;
-type IdScheme = id_mock::Scheme;
 #[cfg(feature = "mocks")]
 type CertificateMockScheme = simplex_certificate_mock::Scheme<PublicKey, false>;
 
@@ -143,13 +141,6 @@ enum FuzzInput {
     // Secp256r1
     Secp256r1Vote(Vec<u8>),
     Secp256r1Certificate {
-        participants: u8,
-        data: Vec<u8>,
-    },
-
-    // ID mock
-    IdVote(Vec<u8>),
-    IdCertificate {
         participants: u8,
         data: Vec<u8>,
     },
@@ -1175,11 +1166,6 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::Secp256r1Vote(data) => roundtrip_vote::<Secp256r1Scheme>(&data),
         FuzzInput::Secp256r1Certificate { participants, data } => {
             roundtrip_certificate::<Secp256r1Scheme>(&data, &participant_cfg(participants))
-        }
-
-        FuzzInput::IdVote(data) => roundtrip_vote::<IdScheme>(&data),
-        FuzzInput::IdCertificate { participants, data } => {
-            roundtrip_certificate::<IdScheme>(&data, &participant_cfg(participants))
         }
 
         #[cfg(feature = "mocks")]

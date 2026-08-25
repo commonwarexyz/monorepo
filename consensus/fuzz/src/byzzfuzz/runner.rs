@@ -118,9 +118,9 @@ where
         Clone + Send + Sync + 'static,
 {
     // Override the harness-wide `input.certify` with ByzzFuzz-specific
-    // sampling. `FuzzInput::arbitrary` uses `Always` because Standard,
-    // FaultyMessaging, and Twins on N4F1C3 cannot survive losing one of three
-    // honest certifiers. ByzzFuzz forces N4F0C4 *and* keeps Byzantine process
+    // sampling. `FuzzInput::arbitrary` uses `Always` because Standard and Twins
+    // on N4F1C3 cannot survive losing one of three honest certifiers. ByzzFuzz
+    // forces N4F0C4 *and* keeps Byzantine process
     // faults active post-GST; `sample_byzzfuzz_certify` pins the single-target
     // variants to the byzantine index so the disabled certifier coincides with
     // the adversary rather than adding a new correct-validator failure.
@@ -627,8 +627,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        BlockFilterChoice, CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
-        strategy::StrategyChoice, utils::Partition,
+        BlockFilterChoice, CertifyChoice, FuzzInput, N4F0C4, ReporterWiring,
+        simplex::SimplexCertificateMock, strategy::StrategyChoice, utils::Partition,
     };
     use commonware_consensus::{simplex::ForwardingPolicy, types::TermLength};
     use std::num::NonZeroUsize;
@@ -646,7 +646,6 @@ mod tests {
             configuration: N4F0C4,
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
-            messaging_faults: Vec::new(),
             mailbox_size: NonZeroUsize::new(1024).unwrap(),
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
@@ -659,7 +658,7 @@ mod tests {
     /// panic so a same-seed liveness violation is still captured identically.
     fn baseline_trace(input: FuzzInput) -> (bool, Vec<String>) {
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run::<SimplexId>(input);
+            run::<SimplexCertificateMock>(input);
         }))
         .is_ok();
         (ok, log::take())

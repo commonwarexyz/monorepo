@@ -10,23 +10,17 @@ pub mod byzzfuzz;
 pub(crate) mod chaos;
 pub mod disrupter;
 pub mod happens_before;
-pub mod id_mock;
 pub mod invariants;
 pub(crate) mod mallory;
 #[cfg(feature = "mocks")]
 pub mod marshal;
 pub mod network;
 #[cfg(feature = "mocks")]
-pub mod ordered_broadcast;
-#[cfg(feature = "mocks")]
-pub mod ordered_broadcast_certificate_mock;
-#[cfg(feature = "mocks")]
 pub mod scenarios;
 pub mod simplex;
 pub(crate) mod simplex_audit;
-#[cfg(feature = "mocks")]
-pub mod simplex_certificate_mock;
-pub mod simplex_node;
+#[cfg(any(feature = "mocks", test))]
+pub use commonware_consensus::simplex::mocks::scheme as simplex_certificate_mock;
 pub mod state_cov;
 pub mod strategy;
 mod twins_network;
@@ -36,11 +30,9 @@ pub mod utils;
 use crate::{
     disrupter::Disrupter,
     network::{
-        ByzantineFirstReceiver, FinalizationOmissionChannel, FinalizationOmissionReceiver,
-        NotarizeOmissionReceiver,
+        FinalizationOmissionChannel, FinalizationOmissionReceiver, NotarizeOmissionReceiver,
     },
     simplex_audit::{RecordingAutomaton, RecordingReporter, summaries},
-    simplex_node::NodeFuzzInput,
     strategy::{
         AnyScope, FutureScope, HeaderScope, SmallScope, SplitHeader, Strategy, StrategyChoice,
     },
@@ -72,19 +64,17 @@ use commonware_runtime::{
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
 };
 use commonware_utils::{
-    FuzzRng, NZU16, NZU32, NZUsize,
+    FuzzRng, NZU16, NZU32, NZUsize, Probability,
     channel::mpsc::{self, Receiver},
     sequence::U64,
     sync::Once,
 };
 use futures::future::join_all;
+#[cfg(any(feature = "mocks", test))]
 pub use simplex::{
-    SimplexBls12381MinPk, SimplexBls12381MinPkCustomRandom, SimplexBls12381MinSig,
-    SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
-    SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
+    SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader,
+    SimplexCertificateMockCustomRoundRobin,
 };
-#[cfg(feature = "mocks")]
-pub use simplex::{SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
@@ -112,16 +102,21 @@ pub(crate) const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 1;
 const MAX_REQUIRED_CONTAINERS: u64 = 30;
-/// Per-view honest-message drop rate range used by `Mode::FaultyMessaging`.
-/// Bounded conservatively so finalization remains reachable across the run -
-/// `FaultyMessaging` waits for finalization (`Partition::Connected` is enforced),
-/// and unbounded loss would let pathological schedules hang the deterministic
-/// runtime. Increase only if a complementary timeout is added to the wait loop.
-pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
-pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
+const MAX_TERM_LENGTH: u32 = 5;
+/// Scripted adversarial rounds a twins campaign generates at most. Each round
+/// is one leader term, so the scripted prefix spans `rounds * term_length`
+/// views before the liveness gate starts counting.
+const TWINS_MAX_ROUNDS: u64 = 8;
 pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 const FUZZ_RUNTIME_TIMEOUT_FLOOR: Duration = Duration::from_secs(360);
-const FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER: Duration = Duration::from_secs(4);
+/// Budget per finalization a liveness gate demands. Sized for stable leaders
+/// facing an equivocating twin, where a nullify inside a term withholds
+/// finalize votes for the rest of that term (see `Same-Term Vote Safety` in
+/// [commonware_consensus::simplex]), so a finalization costs several views.
+const FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER: Duration = Duration::from_secs(14);
+/// Budget per view of a twins run's scripted adversarial prefix, sized for a
+/// term that stalls rather than one that certifies promptly.
+const FUZZ_RUNTIME_TIMEOUT_PER_PREFIX_VIEW: Duration = Duration::from_secs(3);
 /// Bounded pre-GST fault phase: how long network faults stay active before a
 /// run that has not already finished is given a GST transition. Shared by the
 /// ByzzFuzz runner and the marshal multi-node liveness runner.
@@ -130,20 +125,37 @@ const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
 
-fn fuzz_runtime_timeout(required_containers: u64) -> Duration {
-    let work = u32::try_from(required_containers).unwrap_or(u32::MAX);
-    FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER
-        .saturating_mul(work)
+/// Simulated-time deadline for a run, derived from the work it demands: a run
+/// traverses `prefix_views` scripted adversarial views (zero outside twins) and
+/// then waits for `required_containers` finalizations at every checked reporter.
+/// The floor keeps cheap runs at the budget they have always had.
+fn fuzz_runtime_timeout(required_containers: u64, prefix_views: u64) -> Duration {
+    let scale =
+        |unit: Duration, count: u64| unit.saturating_mul(u32::try_from(count).unwrap_or(u32::MAX));
+    scale(FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER, required_containers)
+        .saturating_add(scale(FUZZ_RUNTIME_TIMEOUT_PER_PREFIX_VIEW, prefix_views))
         .max(FUZZ_RUNTIME_TIMEOUT_FLOOR)
+}
+
+/// Views of scripted adversarial prefix a twins run traverses before its
+/// liveness gate opens (see `MockTwinsBackend::framework`).
+fn twins_prefix_views(required_containers: u64, term_length: TermLength) -> u64 {
+    required_containers
+        .clamp(1, TWINS_MAX_ROUNDS)
+        .saturating_mul(term_length.get())
 }
 
 fn bounded_fuzz_runtime_config(
     raw_bytes: &[u8],
     required_containers: u64,
+    prefix_views: u64,
 ) -> deterministic::Config {
     deterministic::Config::new()
         .with_rng(Box::new(FuzzRng::new(raw_bytes.to_vec())))
-        .with_timeout(Some(fuzz_runtime_timeout(required_containers)))
+        .with_timeout(Some(fuzz_runtime_timeout(
+            required_containers,
+            prefix_views,
+        )))
 }
 
 pub(crate) fn fuzz_mailbox_size(
@@ -206,7 +218,7 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: 0.6,
+        success_rate: Probability!(0.6),
     };
     for (peer_idx, peer) in participants.iter().enumerate() {
         if peer_idx == victim_idx {
@@ -414,28 +426,10 @@ impl fmt::Debug for FuzzInputDebug<'_> {
             .field("configuration", &input.configuration)
             .field("partition", &input.partition)
             .field("strategy", &input.strategy)
-            .field("messaging_faults", &input.messaging_faults)
             .field("mailbox_size", &input.mailbox_size)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
             .field("block_filter", &input.block_filter)
-            .field("reporting", &input.reporting)
-            .finish()
-    }
-}
-
-struct NodeFuzzInputDebug<'a>(&'a NodeFuzzInput);
-
-impl fmt::Debug for NodeFuzzInputDebug<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let input = self.0;
-        f.debug_struct("NodeFuzzInput")
-            .field("raw_bytes_len", &input.raw_bytes.len())
-            .field("events", &input.events)
-            .field("term_length", &input.term_length)
-            .field("mailbox_size", &input.mailbox_size)
-            .field("forwarding", &input.forwarding)
-            .field("certify", &input.certify)
             .field("reporting", &input.reporting)
             .finish()
     }
@@ -447,16 +441,6 @@ fn print_fuzz_input<P: simplex::Simplex>(mode: Mode, input: &FuzzInput) {
             "consensus fuzz configuration: mode={mode:?} effective_term_length={:?} input={:?}",
             P::effective_term_length(input.term_length),
             FuzzInputDebug(input)
-        );
-    }
-}
-
-fn print_node_fuzz_input<P: simplex::Simplex>(mode: simplex_node::NodeMode, input: &NodeFuzzInput) {
-    if std::env::var_os(FUZZ_LOG_ENV).is_some() {
-        eprintln!(
-            "consensus node fuzz configuration: mode={mode:?} effective_term_length={:?} input={:?}",
-            P::effective_term_length(input.term_length),
-            NodeFuzzInputDebug(input)
         );
     }
 }
@@ -474,11 +458,6 @@ pub struct FuzzInput {
     pub configuration: Configuration,
     pub partition: Partition,
     pub strategy: StrategyChoice,
-    /// Round-indexed schedule of honest-message drop rates, used only by
-    /// `Mode::FaultyMessaging`. Each entry `(view, rate)` activates an
-    /// `rate%` honest-message drop while the reference reporter is in `view`;
-    /// the rate reverts to 0 outside scheduled views.
-    pub messaging_faults: Vec<(View, u8)>,
     /// Per-iteration mailbox capacity threaded into every honest engine.
     pub mailbox_size: NonZeroUsize,
     /// Per-iteration forwarding policy threaded into every engine the harness
@@ -531,7 +510,7 @@ impl Arbitrary<'_> for FuzzInput {
 
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
-        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
         let optimistic_views =
             ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
         let heterogeneous_optimism = u.arbitrary()?;
@@ -598,10 +577,6 @@ impl Arbitrary<'_> for FuzzInput {
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
 
-        // The messaging-fault schedule (for `Mode::FaultyMessaging`) is generated
-        // at runtime by `Strategy::messaging_faults` from the deterministic
-        // FuzzRng, mirroring the `Adaptive` partition path - keeps schedule
-        // density tied to the chosen byzantine strategy.
         Ok(Self {
             raw_bytes,
             partition,
@@ -612,7 +587,6 @@ impl Arbitrary<'_> for FuzzInput {
             optimistic_views,
             heterogeneous_optimism,
             strategy,
-            messaging_faults: Vec::new(),
             mailbox_size,
             forwarding,
             certify,
@@ -724,7 +698,7 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
     let link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     };
     link_peers(
         &mut oracle,
@@ -1101,71 +1075,8 @@ where
     }
 }
 
-/// Spawn an honest validator with application, reporter, and engine, returning
-/// only its reporter. A thin wrapper over [`build_validator`] preserved so its
-/// many existing callers compile unchanged.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_honest_validator<
-    P,
-    EC,
-    PendingSender,
-    PendingReceiver,
-    RecoveredSender,
-    RecoveredReceiver,
-    ResolverSender,
-    ResolverReceiver,
->(
-    context: deterministic::Context,
-    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
-    participants: &[PublicKeyOf<P>],
-    scheme: P::Scheme,
-    validator: PublicKeyOf<P>,
-    elector: EC,
-    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
-    leader_timeout: Duration,
-    certification_timeout: Duration,
-    mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
-    pending: (PendingSender, PendingReceiver),
-    recovered: (RecoveredSender, RecoveredReceiver),
-    resolver: (ResolverSender, ResolverReceiver),
-    certify: CertifyChoice,
-    wiring: ReporterWiring,
-) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
-where
-    P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
-    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-{
-    build_validator::<P, EC, _, _, _, _, _, _>(
-        context,
-        oracle,
-        participants,
-        scheme,
-        validator,
-        elector,
-        relay,
-        leader_timeout,
-        certification_timeout,
-        mailbox_size,
-        forwarding,
-        pending,
-        recovered,
-        resolver,
-        certify,
-        wiring,
-    )
-    .reporter
-}
-
 /// Build an honest validator (application, reporter, engine) and RETAIN its task
-/// handles in a [`ManagedValidator`], instead of dropping them like
-/// [`spawn_honest_validator`]. The storage partition is `validator.to_string()`,
+/// handles in a [`ManagedValidator`]. The storage partition is `validator.to_string()`,
 /// matching the historical behavior of the dropped-handle path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_validator<
@@ -1793,77 +1704,12 @@ where
     reporter
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
-    context: deterministic::Context,
-    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
-    participants: &[PublicKeyOf<P>],
-    term_length: TermLength,
-    scheme: P::Scheme,
-    validator: PublicKeyOf<P>,
-    byzantine_router: crate::network::Router<PublicKeyOf<P>, deterministic::Context>,
-    relay: Arc<block_relay::Relay<PublicKeyOf<P>>>,
-    leader_timeout: Duration,
-    certification_timeout: Duration,
-    mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
-    channels: NetworkChannels<PublicKeyOf<P>>,
-    certify: CertifyChoice,
-    wiring: ReporterWiring,
-) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
-    let (vote_network, certificate_network, resolver_network) = channels;
-    let (vote_sender, vote_receiver) = vote_network;
-    let (certificate_sender, certificate_receiver) = certificate_network;
-    let (resolver_sender, resolver_receiver) = resolver_network;
-
-    let vote_router = byzantine_router.clone();
-    let (vote_primary, vote_secondary) = vote_receiver
-        .split_with(context.child("byzantine_first_vote"), move |msg| {
-            vote_router.route(msg)
-        });
-    let vote_receiver = ByzantineFirstReceiver::new(vote_primary, vote_secondary);
-
-    let certificate_router = byzantine_router.clone();
-    let (certificate_primary, certificate_secondary) = certificate_receiver
-        .split_with(context.child("byzantine_first_certificate"), move |msg| {
-            certificate_router.route(msg)
-        });
-    let certificate_receiver =
-        ByzantineFirstReceiver::new(certificate_primary, certificate_secondary);
-
-    let resolver_router = byzantine_router;
-    let (resolver_primary, resolver_secondary) = resolver_receiver
-        .split_with(context.child("byzantine_first_resolver"), move |msg| {
-            resolver_router.route(msg)
-        });
-    let resolver_receiver = ByzantineFirstReceiver::new(resolver_primary, resolver_secondary);
-
-    spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
-        context,
-        oracle,
-        participants,
-        scheme,
-        validator,
-        P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
-        relay,
-        leader_timeout,
-        certification_timeout,
-        mailbox_size,
-        forwarding,
-        (vote_sender, vote_receiver),
-        (certificate_sender, certificate_receiver),
-        (resolver_sender, resolver_receiver),
-        certify,
-        wiring,
-    )
-}
-
 /// Default link used by the round-indexed fault scheduler when re-establishing edges.
 fn default_link() -> Link {
     Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     }
 }
 
@@ -1964,76 +1810,6 @@ async fn spawn_network_fault_scheduler<P, R>(
         });
 }
 
-/// Look up the rate scheduled for view 1 (the initial executing view), or `0`
-/// if no entry matches. Used to seed the drop-rate cell synchronously *before*
-/// validators run, so that very early view-1 traffic sees the scheduled rate.
-fn initial_drop_rate(schedule: &[(View, u8)]) -> u8 {
-    schedule
-        .iter()
-        .find_map(|(view, rate)| (*view == View::new(1)).then_some(*rate))
-        .unwrap_or(0)
-}
-
-/// Drives the per-view honest-message drop rate for `Mode::FaultyMessaging`.
-/// Subscribes to the first reporter's view monitor and updates the shared
-/// [`network::DropRateCell`] when the active *executing* view's scheduled rate
-/// differs from the current one. No-op when the schedule is empty or no
-/// reporters were spawned.
-///
-/// `initial_rate` must equal the value the caller already wrote to `drop_rate`
-/// before spawning validators (i.e., the rate for view 1). The scheduler uses
-/// it to seed `active`, avoiding a redundant first-iteration write.
-///
-/// Clock-source note: the reporter's monitor reports the most recent
-/// **finalized** view (see `consensus/src/simplex/mocks/reporter.rs::handle`).
-/// When `monitor` fires with view `k`, the protocol has just finalized `k` and
-/// the validators have already moved on to view `k + 1`. To realize the intent
-/// "fault view v while consensus is executing view v" the lookup uses
-/// `executing_view = finalized_view + 1`. The initial pre-recv lookup with
-/// `finalized_view = 0` therefore covers view 1.
-async fn spawn_messaging_fault_scheduler<P, R>(
-    context: &deterministic::Context,
-    reporters: &mut [(PublicKeyOf<P>, R)],
-    schedule: Vec<(View, u8)>,
-    required_containers: u64,
-    drop_rate: network::DropRateCell,
-    initial_rate: u8,
-) where
-    P: simplex::Simplex,
-    R: Monitor<Index = View>,
-{
-    if schedule.is_empty() || reporters.is_empty() {
-        return;
-    }
-    let Some((mut finalized_view, mut view_rx)) = reporter_view_stream(context, reporters).await
-    else {
-        return;
-    };
-    context
-        .child("messaging_fault_scheduler")
-        .spawn(move |_| async move {
-            let mut active: u8 = initial_rate;
-            loop {
-                let executing_view = finalized_view.saturating_add(1);
-                let target: u8 = schedule
-                    .iter()
-                    .find_map(|(view, rate)| (*view == View::new(executing_view)).then_some(*rate))
-                    .unwrap_or(0);
-                if target != active {
-                    *drop_rate.lock() = target;
-                    active = target;
-                }
-                if executing_view > required_containers {
-                    break;
-                }
-                let Some(next) = view_rx.recv().await else {
-                    break;
-                };
-                finalized_view = finalized_view.max(next);
-            }
-        });
-}
-
 pub(crate) fn network_faults(
     strategy: StrategyChoice,
     required_containers: u64,
@@ -2075,50 +1851,6 @@ pub(crate) fn network_faults(
             fault_rounds_bound,
         }
         .network_faults(required_containers, rng),
-    }
-}
-
-fn messaging_faults(
-    strategy: StrategyChoice,
-    required_containers: u64,
-    rng: &mut impl rand::Rng,
-) -> Vec<(View, u8)> {
-    match strategy {
-        StrategyChoice::SmallScope {
-            fault_rounds,
-            fault_rounds_bound,
-        } => SmallScope {
-            fault_rounds,
-            fault_rounds_bound,
-        }
-        .messaging_faults(required_containers, rng),
-        StrategyChoice::AnyScope => AnyScope.messaging_faults(required_containers, rng),
-        StrategyChoice::FutureScope {
-            fault_rounds,
-            fault_rounds_bound,
-        } => FutureScope {
-            fault_rounds,
-            fault_rounds_bound,
-        }
-        .messaging_faults(required_containers, rng),
-        StrategyChoice::HeaderScope {
-            fault_rounds,
-            fault_rounds_bound,
-            mutation,
-        } => HeaderScope {
-            fault_rounds,
-            fault_rounds_bound,
-            mutation,
-        }
-        .messaging_faults(required_containers, rng),
-        StrategyChoice::SplitHeader {
-            fault_rounds,
-            fault_rounds_bound,
-        } => SplitHeader {
-            fault_rounds,
-            fault_rounds_bound,
-        }
-        .messaging_faults(required_containers, rng),
     }
 }
 
@@ -2297,7 +2029,7 @@ fn run_standard_once<P: simplex::Simplex>(
     happens_before: bool,
     warn_dispatch: Option<Dispatch>,
 ) -> Option<RunAudit> {
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -2551,7 +2283,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
     mut input: FuzzInput,
     notarize_omission: Option<NotarizeOmission>,
 ) -> (bool, bool) {
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers, 0);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(move |mut context| async move {
@@ -2821,155 +2553,6 @@ fn run<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool, happens_befo
     } else {
         let _ = run_standard_once::<P>(input, false, false, false, None);
     }
-}
-
-fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
-    // FaultyMessaging is a transport-layer fault axis; topology is always fully
-    // connected. Network-layer fault axes (`Static` / `Adaptive` partitions,
-    // degraded link) are explicitly disabled here so the only adversarial
-    // delivery effects come from the per-view messaging schedule below.
-    input.partition = Partition::Connected;
-    input.configuration = N4F1C3;
-    input.degraded_network = false;
-    // Three honest certifiers are exactly the finalize quorum here.
-    input.certify = CertifyChoice::Always;
-    input.block_filter = BlockFilterChoice::None;
-
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
-    let executor = deterministic::Runner::new(cfg);
-
-    executor.start(|mut context| async move {
-        // Populate the messaging-fault schedule from the chosen strategy
-        // using the deterministic FuzzRng (mirrors `Adaptive` partition path).
-        input.messaging_faults =
-            messaging_faults(input.strategy, input.required_containers, &mut context);
-
-        let (oracle, participants, schemes, mut registrations) =
-            setup_network::<P>(&mut context, &input).await;
-
-        let relay = Arc::new(block_relay::Relay::new());
-        // A withheld block should hold certification pending only for the
-        // DropRecipient scenario (whose liveness is left unbounded); other
-        // runs certify per the Certifier as the upstream mock does.
-        relay.set_certify_requires_block(matches!(
-            input.block_filter,
-            BlockFilterChoice::DropRecipient { .. }
-        ));
-        configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
-        let mut reporters = Vec::new();
-        let config = input.configuration;
-        let term_length = P::effective_term_length(input.term_length);
-
-        // Per-view drop-rate cell shared with every router. We seed it
-        // SYNCHRONOUSLY with the rate scheduled for view 1 (the initial
-        // executing view) *before* any validator is spawned: validators may
-        // emit view-1 traffic on their first poll, before the async
-        // `messaging_fault_scheduler` task ever runs. The scheduler picks up
-        // from view 2 onward and is told `initial_rate` so it doesn't issue a
-        // redundant write on its first iteration.
-        let drop_rate = network::drop_rate_cell();
-        let initial_rate = initial_drop_rate(&input.messaging_faults);
-        *drop_rate.lock() = initial_rate;
-        let byzantine_router = network::Router::new(
-            context.child("byzantine_router"),
-            participants
-                .iter()
-                .take(config.faults as usize)
-                .cloned()
-                .collect::<Vec<_>>(),
-            drop_rate.clone(),
-        );
-
-        // Spawn Byzantine nodes (Disrupters only)
-        for i in 0..config.faults as usize {
-            let validator = participants[i].clone();
-            let channels = registrations.remove(&validator).unwrap();
-            let ctx = context
-                .child("validator")
-                .with_attribute("public_key", &validator);
-            spawn_disrupter_with_relay::<P>(
-                ctx,
-                schemes[i].clone(),
-                &input,
-                channels,
-                Some(relay.clone()),
-            );
-        }
-
-        // Spawn honest validators
-        for i in (config.faults as usize)..(config.n as usize) {
-            let validator = participants[i].clone();
-            let channels = registrations.remove(&validator).unwrap();
-            let ctx = context
-                .child("validator")
-                .with_attribute("public_key", &validator);
-            let reporter = spawn_honest_validator_in_faulty_messaging::<P>(
-                ctx,
-                &oracle,
-                &participants,
-                term_length,
-                schemes[i].clone(),
-                validator.clone(),
-                byzantine_router.clone(),
-                relay.clone(),
-                Duration::from_secs(1),
-                Duration::from_secs(2),
-                input.mailbox_size,
-                input.forwarding,
-                channels,
-                input.certify,
-                input.reporting,
-            );
-            reporters.push((validator, reporter));
-        }
-
-        // Spawn a per-view messaging-fault scheduler that updates the shared
-        // drop-rate cell as the reference reporter advances.
-        spawn_messaging_fault_scheduler::<P, _>(
-            &context,
-            &mut reporters,
-            input.messaging_faults.clone(),
-            input.required_containers,
-            drop_rate.clone(),
-            initial_rate,
-        )
-        .await;
-
-        // Wait for finalization or timeout
-        if should_bound_standard_liveness(&input) {
-            let mut finalizers = Vec::new();
-            for (validator, reporter) in reporters.iter_mut() {
-                let required_containers = input.required_containers;
-                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-                finalizers.push(
-                    context
-                        .child("finalizer")
-                        .with_attribute("public_key", validator)
-                        .spawn(move |_| async move {
-                            while latest.get() < required_containers {
-                                latest = monitor.recv().await.expect("event missing");
-                            }
-                        }),
-                );
-            }
-            join_all(finalizers).await;
-        } else {
-            context.sleep(MAX_SLEEP_DURATION).await;
-        }
-        if config.is_valid() {
-            let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
-            invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
-            invariants::check_vote_invariants(
-                config.faults as usize,
-                P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
-                Epoch::new(EPOCH),
-                term_length,
-                &reporter_only,
-            );
-            let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config, term_length, states);
-        }
-    });
 }
 
 /// Role of the secondary half in a twin pair.
@@ -3550,7 +3133,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             Action::Update(Link {
                 latency: Duration::from_millis(500),
                 jitter: Duration::from_millis(500),
-                success_rate: 1.0,
+                success_rate: Probability!(1.0),
             }),
             self.input.partition.set_partition(),
         )
@@ -3582,7 +3165,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         twins::Framework {
             participants,
             faults: self.input.configuration.faults as usize,
-            rounds: (self.input.required_containers as usize).clamp(1, 8),
+            rounds: self.input.required_containers.clamp(1, TWINS_MAX_ROUNDS) as usize,
             mode,
             max_cases: 16,
         }
@@ -4011,7 +3594,14 @@ fn run_twins<P: simplex::Simplex>(
     // all-honest configuration would stall this quorum-tight one.
     input.certify = CertifyChoice::Always;
 
-    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
+    let cfg = bounded_fuzz_runtime_config(
+        &input.raw_bytes,
+        input.required_containers,
+        twins_prefix_views(
+            input.required_containers,
+            P::effective_term_length(input.term_length),
+        ),
+    );
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -4051,51 +3641,12 @@ fn run_twins<P: simplex::Simplex>(
     hb_log.as_ref().map(|log| log.summary())
 }
 
-fn run_fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput)
-where
-    PublicKeyOf<P>: Send,
-{
-    let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
-    let executor = deterministic::Runner::new(cfg);
-    let mailbox_size = input.mailbox_size;
-    let forwarding = input.forwarding;
-    let certify = input.certify;
-    let reporting = input.reporting;
-    let term_length = P::effective_term_length(input.term_length);
-
-    match M::MODE {
-        simplex_node::NodeMode::WithoutRecovery => {
-            executor.start(|mut context| async move {
-                let _ = simplex_node::run::<P>(&mut context, &input).await;
-            });
-        }
-        simplex_node::NodeMode::WithRecovery => {
-            let ((participants, schemes), checkpoint) =
-                executor.start_and_recover(|mut context| async move {
-                    simplex_node::run::<P>(&mut context, &input).await
-                });
-            simplex_node::run_recovery::<P>(
-                checkpoint,
-                participants,
-                schemes,
-                term_length,
-                mailbox_size,
-                forwarding,
-                certify,
-                reporting,
-            );
-        }
-    }
-}
-
 /// Selector for which a fuzz harness will dispatch to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
     TwinsMutator,
     TwinsCampaign,
-    FaultyMessaging,
     FaultyNet,
     Byzzfuzz,
     MalloryContainer,
@@ -4189,27 +3740,6 @@ impl FuzzMode for TwinsMutator {
 pub struct TwinsCampaign;
 impl FuzzMode for TwinsCampaign {
     const MODE: Mode = Mode::TwinsCampaign;
-}
-
-/// **FaultyMessaging mode** - message-delivery faults at the transport layer.
-///
-/// Topology is fully connected (`Partition::Connected` is enforced).
-///
-/// Two transport-layer effects are layered on top of the full mesh:
-/// - **Byzantine-first ordering** (uniform, always-on): `ByzantineFirstReceiver`
-///   reorders the receive queue so byzantine-origin messages are processed
-///   before honest ones whenever both are available. This effect does not
-///   vary per view.
-/// - **Honest-message drop rate** (round-indexed): a per-view schedule
-///   generated by `Strategy::messaging_faults` from the deterministic
-///   FuzzRng drives the shared [`network::DropRateCell`] consulted on every
-///   routing decision. Outside scheduled views the rate is 0. The view-1
-///   rate is written synchronously before validators are spawned so the
-///   scheduled rate takes effect from the protocol's first message; the
-///   async scheduler task picks up from view 2 onward.
-pub struct FaultyMessaging;
-impl FuzzMode for FaultyMessaging {
-    const MODE: Mode = Mode::FaultyMessaging;
 }
 
 /// **FaultyNet mode** - round-indexed set-partition faults at the network layer.
@@ -4434,9 +3964,6 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
         })),
-        Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_faulty_messaging::<P>(input)
-        })),
         Mode::FaultyNet => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
         })),
@@ -4579,25 +4106,34 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
     }
 }
 
-pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput) {
-    print_node_fuzz_input::<P>(M::MODE, &input);
-
-    let raw_bytes_for_panic = input.raw_bytes.clone();
-    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run_fuzz_node::<P, M>(input)));
-    if let Err(payload) = run_result {
-        println!("Panicked with raw_bytes: {:?}", raw_bytes_for_panic);
-        panic::resume_unwind(payload);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The deadline must outlast the costliest workload the sampler can draw.
+    /// A twins campaign under stable leaders was measured at ~12s of simulated
+    /// time per demanded finalization, so widening any sampled bound without
+    /// revisiting the per-unit budgets must fail here rather than in the fuzzer.
     #[test]
-    fn fuzz_runtime_timeout_scales_for_large_in_tree_runs() {
-        assert_eq!(fuzz_runtime_timeout(30), FUZZ_RUNTIME_TIMEOUT_FLOOR);
-        assert_eq!(fuzz_runtime_timeout(1_000), Duration::from_secs(4_000));
+    fn fuzz_runtime_timeout_covers_worst_sampled_workload() {
+        assert_eq!(
+            fuzz_runtime_timeout(MIN_REQUIRED_CONTAINERS, 0),
+            FUZZ_RUNTIME_TIMEOUT_FLOOR
+        );
+
+        let prefix_views = twins_prefix_views(
+            MAX_REQUIRED_CONTAINERS,
+            TermLength::new(NZU32!(MAX_TERM_LENGTH)),
+        );
+        let worst = fuzz_runtime_timeout(MAX_REQUIRED_CONTAINERS, prefix_views);
+        assert!(
+            worst > FUZZ_RUNTIME_TIMEOUT_FLOOR,
+            "per-workload scaling never engages inside the sampled input space"
+        );
+        assert!(
+            worst >= Duration::from_secs(12) * MAX_REQUIRED_CONTAINERS as u32,
+            "{worst:?} is below the measured cost of {MAX_REQUIRED_CONTAINERS} finalizations"
+        );
     }
 
     fn audit_input() -> FuzzInput {
@@ -4611,7 +4147,6 @@ mod tests {
             configuration: N4F0C4,
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
-            messaging_faults: Vec::new(),
             mailbox_size: DEFAULT_MAILBOX_SIZE,
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
@@ -4624,11 +4159,16 @@ mod tests {
     fn warn_trace_collection_does_not_perturb_standard_run() {
         let input = audit_input();
 
-        let unwrapped =
-            run_standard_once::<simplex::SimplexId>(input.clone(), false, true, false, None)
-                .expect("valid connected run should produce audit data");
+        let unwrapped = run_standard_once::<simplex::SimplexCertificateMock>(
+            input.clone(),
+            false,
+            true,
+            false,
+            None,
+        )
+        .expect("valid connected run should produce audit data");
         let wrapped = run_with_warn_trace_collection(|_| {
-            run_standard_once::<simplex::SimplexId>(input, false, true, false, None)
+            run_standard_once::<simplex::SimplexCertificateMock>(input, false, true, false, None)
         })
         .expect("valid connected run should produce audit data");
 
@@ -4638,20 +4178,25 @@ mod tests {
 
     #[cfg(feature = "mocks")]
     #[test]
-    fn audited_standard_checks_simplex_id_and_certificate_mock() {
-        assert!(run_audited_standard_once::<simplex::SimplexId>(audit_input()).0);
+    fn audited_standard_checks_certificate_mock() {
         assert!(run_audited_standard_once::<simplex::SimplexCertificateMock>(audit_input()).0);
     }
 
     #[test]
     fn audited_standard_progress_wait_accepts_normal_input() {
-        assert!(run_audited_standard_once::<simplex::SimplexId>(audit_input()).0);
+        assert!(run_audited_standard_once::<simplex::SimplexCertificateMock>(audit_input()).0);
     }
 
     #[test]
     fn audited_twins_checks_campaign_and_mutator() {
         for role in [TwinsRole::Campaign, TwinsRole::Mutator] {
-            let _ = run_twins::<simplex::SimplexId>(audit_input(), role, false, false, true);
+            let _ = run_twins::<simplex::SimplexCertificateMock>(
+                audit_input(),
+                role,
+                false,
+                false,
+                true,
+            );
         }
     }
 
@@ -4664,7 +4209,7 @@ mod tests {
         // the compromised participant at index 0. Rejecting that proposal does
         // not violate any correct proposer's certifiable-by-construction duty.
         input.certify = CertifyChoice::RejectView { view: View::new(3) };
-        let (valid, rejected) = run_audited_standard_once::<simplex::SimplexId>(input);
+        let (valid, rejected) = run_audited_standard_once::<simplex::SimplexCertificateMock>(input);
         assert!(valid, "audit run was not checked");
         assert!(rejected, "audit run did not reach false certification");
     }
@@ -4680,7 +4225,9 @@ mod tests {
         ] {
             let mut input = audit_input();
             input.certify = certify;
-            let audit = run_standard_once::<simplex::SimplexId>(input, false, true, false, None);
+            let audit = run_standard_once::<simplex::SimplexCertificateMock>(
+                input, false, true, false, None,
+            );
             assert!(audit.is_some(), "run with {certify:?} produced no audit");
         }
     }
@@ -4691,7 +4238,7 @@ mod tests {
         input.configuration = N4F1C3;
         input.required_containers = 4;
         input.certify = CertifyChoice::RejectView { view: View::new(3) };
-        let (valid, rejected) = run_audited_standard_once::<simplex::SimplexId>(input);
+        let (valid, rejected) = run_audited_standard_once::<simplex::SimplexCertificateMock>(input);
         assert!(valid, "rejecting one Byzantine-led view prevented recovery");
         assert!(rejected, "the Byzantine-led view was not rejected");
     }
@@ -4701,9 +4248,14 @@ mod tests {
         // N4F1C3 twins compromise one identity (two engines, one key): the
         // three honest validators are captured, twin halves contribute no
         // attributed events, and receives from the twin merge nothing.
-        let summary =
-            run_twins::<simplex::SimplexId>(audit_input(), TwinsRole::Campaign, false, true, false)
-                .expect("happens-before summary");
+        let summary = run_twins::<simplex::SimplexCertificateMock>(
+            audit_input(),
+            TwinsRole::Campaign,
+            false,
+            true,
+            false,
+        )
+        .expect("happens-before summary");
         assert_eq!(summary.node_count(), 3, "only honest validators tracked");
         assert!(!summary.tokens().is_empty());
     }
@@ -4718,8 +4270,11 @@ mod tests {
 
         let executor = deterministic::Runner::seeded(7);
         executor.start(|mut context| async move {
-            let (_, schemes) =
-                <simplex::SimplexId as simplex::Simplex>::setup(&mut context, NAMESPACE, 4);
+            let (_, schemes) = <simplex::SimplexCertificateMock as simplex::Simplex>::setup(
+                &mut context,
+                NAMESPACE,
+                4,
+            );
             let proposal = Proposal::new(
                 Round::new(Epoch::new(EPOCH), View::new(3)),
                 View::new(2),
@@ -4732,17 +4287,15 @@ mod tests {
             let cert = Certificate::Notarization(
                 Notarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap(),
             );
-            let cfg = schemes[0].certificate_codec_config();
-
             let response = ResolverMessage::<U64> {
                 id: 9,
                 payload: ResolverPayload::Response(cert.encode()),
             };
             assert_eq!(
-                sniff_event::<simplex::SimplexId>(
+                sniff_event::<simplex::SimplexCertificateMock>(
                     SniffChannel::Resolver,
                     &IoBuf::from(response.encode()),
-                    &cfg,
+                    &(),
                 ),
                 Some((3, happens_before::EventKind::ReceiveNotarization)),
             );
@@ -4753,10 +4306,10 @@ mod tests {
                 payload: ResolverPayload::Request(U64::from(3u64)),
             };
             assert_eq!(
-                sniff_event::<simplex::SimplexId>(
+                sniff_event::<simplex::SimplexCertificateMock>(
                     SniffChannel::Resolver,
                     &IoBuf::from(request.encode()),
-                    &cfg,
+                    &(),
                 ),
                 None,
             );
@@ -4767,10 +4320,17 @@ mod tests {
     fn happens_before_capture_is_node_attributed_and_deterministic() {
         let input = audit_input();
 
-        let a = run_standard_once::<simplex::SimplexId>(input.clone(), false, true, true, None)
-            .expect("valid connected run should produce audit data");
-        let b = run_standard_once::<simplex::SimplexId>(input, false, true, true, None)
-            .expect("valid connected run should produce audit data");
+        let a = run_standard_once::<simplex::SimplexCertificateMock>(
+            input.clone(),
+            false,
+            true,
+            true,
+            None,
+        )
+        .expect("valid connected run should produce audit data");
+        let b =
+            run_standard_once::<simplex::SimplexCertificateMock>(input, false, true, true, None)
+                .expect("valid connected run should produce audit data");
 
         let summary = a.happens_before.as_ref().expect("hb capture requested");
         // Dispatch propagation attributed events to each honest validator, and each
@@ -4813,7 +4373,7 @@ mod tests {
             let dispatch = warn_trace_dispatch(store.clone());
             let warn_dispatch = happens_before.then(|| dispatch.clone());
             let audit = dispatcher::with_default(&dispatch, || {
-                run_standard_once::<simplex::SimplexId>(
+                run_standard_once::<simplex::SimplexCertificateMock>(
                     input.clone(),
                     false,
                     true,

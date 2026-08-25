@@ -21,7 +21,7 @@ The fuzz harness dispatches into ByzzFuzz through `Mode::Byzzfuzz` and `byzzfuzz
 ByzzFuzz fuzz targets call:
 
 ```rust
-fuzz::<SimplexId, Byzzfuzz, CodeCoverage>(input);
+fuzz::<SimplexCertificateMock, Byzzfuzz, CodeCoverage>(input);
 ```
 
 `fuzz` installs the ByzzFuzz panic hook when `M::MODE == Mode::Byzzfuzz`, then dispatches to `byzzfuzz::run::<P>(input)` inside `panic::catch_unwind`.

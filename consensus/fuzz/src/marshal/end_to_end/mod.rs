@@ -51,8 +51,8 @@ pub use scenario::{
     DropRule, PreGstAction, Role, ScenarioTemplate, fuzz_marshal_standard_scenarios,
 };
 pub use twins::{
-    fuzz_marshal_coding_twins, fuzz_marshal_standard_deferred_id_twins_split_header,
-    fuzz_marshal_standard_inline_id_twins_split_header, fuzz_marshal_standard_twins,
+    fuzz_marshal_coding_twins, fuzz_marshal_standard_deferred_cert_mock_twins_split_header,
+    fuzz_marshal_standard_inline_cert_mock_twins_split_header, fuzz_marshal_standard_twins,
 };
 
 /// Engine p2p channel ids, shared by the honest engines and Byzantine twins.

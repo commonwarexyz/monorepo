@@ -157,27 +157,40 @@ where
 mod tests {
     use super::*;
     use crate::{
-        id_mock,
         marshal::end_to_end::{
             app::{ApplicationChoice, BlockContextRegistry},
             twins::stack::MarshalChoice,
         },
-        simplex::SimplexId,
+        simplex::SimplexCertificateMock,
+        simplex_certificate_mock,
     };
     use commonware_consensus::{
         simplex::types::Context,
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{
+        ed25519::PublicKey as Ed25519PublicKey, sha256::Digest as Sha256Digest,
+    };
+    use commonware_utils::test_rng;
 
     fn digest(byte: u8) -> Sha256Digest {
         Sha256Digest([byte; 32])
     }
 
-    fn context(view: u64, parent: Sha256Digest) -> Ctx<SimplexId, Sha256Digest> {
+    fn leader() -> Ed25519PublicKey {
+        simplex_certificate_mock::fixture_with::<false, true, true, _>(
+            &mut test_rng(),
+            b"marshal-twins-observer",
+            1,
+        )
+        .participants
+        .remove(0)
+    }
+
+    fn context(view: u64, parent: Sha256Digest) -> Ctx<SimplexCertificateMock, Sha256Digest> {
         Context {
             round: Round::new(Epoch::zero(), View::new(view)),
-            leader: id_mock::PublicKey::from_index(0),
+            leader: leader(),
             parent: (View::new(view.saturating_sub(1)), parent),
         }
     }
@@ -187,7 +200,7 @@ mod tests {
         let parent = digest(0xA);
         let requested = context(2, parent);
         let embedded = context(1, digest(0xB));
-        let invariant = HeaderMismatchInvariant::<SimplexId, (), Sha256Digest>::new(
+        let invariant = HeaderMismatchInvariant::<SimplexCertificateMock, (), Sha256Digest>::new(
             ApplicationChoice::AlwaysAccept,
             (),
             |_, _, _| false,

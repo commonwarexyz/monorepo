@@ -261,7 +261,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 });
 stability_scope!(ALPHA {
     pub mod aggregation;
-    pub mod ordered_broadcast;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::Ancestry;

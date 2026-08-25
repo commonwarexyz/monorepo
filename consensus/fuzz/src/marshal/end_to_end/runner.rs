@@ -27,7 +27,7 @@
 //!
 //! Generic over the consensus scheme `P`, so the same driver serves every
 //! certificate scheme (the fuzz targets use the cheap `SimplexCertificateMock`
-//! and `SimplexId` mocks rather than real threshold signatures).
+//! rather than real threshold signatures).
 //!
 //! # Adversary scope
 //!
@@ -90,7 +90,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
+use commonware_utils::{FuzzRng, NZUsize, Probability, sync::Mutex};
 use std::{
     fmt::{self, Write as _},
     num::NonZeroUsize,
@@ -153,7 +153,7 @@ async fn apply_degraded_network<P: Simplex>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: 0.6,
+        success_rate: Probability!(0.6),
     };
     for peer in participants
         .iter()
@@ -701,7 +701,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SimplexId, strategy::StrategyChoice, utils::Partition};
+    use crate::{SimplexCertificateMock, strategy::StrategyChoice, utils::Partition};
     use commonware_consensus::simplex::ForwardingPolicy;
 
     #[cfg(feature = "mocks")]
@@ -727,8 +727,8 @@ mod tests {
     }
 
     #[test]
-    fn coding_disrupter_runs_under_strict_id_certificates() {
-        fuzz_marshal_coding_disrupter::<SimplexId>(MarshalDisrupterInput {
+    fn coding_disrupter_runs_under_certificate_mock() {
+        fuzz_marshal_coding_disrupter::<SimplexCertificateMock>(MarshalDisrupterInput {
             raw_bytes: vec![0],
             required_containers: 1,
             term_length: commonware_consensus::types::TermLength::ONE,

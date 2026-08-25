@@ -1,24 +1,19 @@
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
+use crate::N4F1C3;
+#[cfg(any(feature = "mocks", test))]
 use crate::simplex_certificate_mock as cert_mock;
-use crate::{BYZANTINE_IDX, Configuration, N4F1C3, id_mock};
+use crate::{BYZANTINE_IDX, Configuration};
 use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector, Random, RoundRobin, Terms},
-        scheme::{
-            Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-            secp256r1,
-        },
+        elector::{Config as ElectorConfig, Elector, RoundRobin, Terms},
+        scheme::Scheme,
     },
     types::{Participant, Round, TermLength, View, ViewDelta},
 };
-use commonware_cryptography::{
-    PublicKey, Sha256,
-    bls12381::primitives::variant::{MinPk, MinSig, Variant},
-    certificate,
-    ed25519::PublicKey as Ed25519PublicKey,
-    sha256::Digest as Sha256Digest,
-};
+#[cfg(any(feature = "mocks", test))]
+use commonware_cryptography::ed25519::PublicKey as Ed25519PublicKey;
+use commonware_cryptography::{Sha256, certificate, sha256::Digest as Sha256Digest};
 use commonware_runtime::deterministic;
 use std::time::Duration;
 
@@ -94,8 +89,7 @@ impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for CustomRoundRobinShuffled {
     type Elector = <RoundRobin<Sha256> as ElectorConfig<S>>::Elector;
 
     fn build(self, participants: &commonware_utils::ordered::Set<S::PublicKey>) -> Self::Elector {
-        let seed = b"fuzz_shuffled_seed_round_robin";
-        let config = RoundRobin::<Sha256>::shuffled(seed);
+        let config = RoundRobin::<Sha256>::shuffled(b"fuzz_shuffled_seed_round_robin");
         let config = if self.term_length.get() == 1 {
             config
         } else {
@@ -109,25 +103,6 @@ impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for CustomRoundRobinShuffled {
     }
 }
 
-#[derive(Clone)]
-pub struct CustomRandomSelected;
-
-impl Default for CustomRandomSelected {
-    fn default() -> Self {
-        Self
-    }
-}
-
-impl<P: PublicKey, V: Variant> ElectorConfig<bls12381_threshold_vrf::Scheme<P, V>>
-    for CustomRandomSelected
-{
-    type Elector = <Random as ElectorConfig<bls12381_threshold_vrf::Scheme<P, V>>>::Elector;
-
-    fn build(self, participants: &commonware_utils::ordered::Set<P>) -> Self::Elector {
-        Random.build(participants)
-    }
-}
-
 pub trait Simplex: 'static
 where
     <<Self::Scheme as certificate::Verifier>::Certificate as Read>::Cfg: Default,
@@ -138,9 +113,8 @@ where
 
     /// Term length actually enforced by [`Self::elector`].
     ///
-    /// Electors without stable-leader support (e.g. VRF-random selection)
-    /// always rotate, so they report [`TermLength::ONE`] regardless of the
-    /// fuzzed input; term-window invariants must use this value.
+    /// Implementations that cannot enforce the requested term length can
+    /// override this value for term-window invariants.
     fn effective_term_length(term_length: TermLength) -> TermLength {
         term_length
     }
@@ -163,60 +137,10 @@ where
     }
 }
 
-pub struct SimplexEd25519;
-
-impl Simplex for SimplexEd25519 {
-    type Scheme = ed25519::Scheme;
-    type Elector = RoundRobin;
-
-    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
-        round_robin(term_length, optimistic_views)
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        let fixture = ed25519::fixture(context, namespace, n);
-        (fixture.participants, fixture.schemes)
-    }
-}
-
-pub struct SimplexId;
-
-impl Simplex for SimplexId {
-    type Scheme = id_mock::Scheme;
-
-    type Elector = RoundRobin;
-
-    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
-        round_robin(term_length, optimistic_views)
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        id_mock::fixture(context, namespace, n)
-    }
-
-    fn audit_rejection_view(configuration: Configuration) -> Option<View> {
-        (configuration == N4F1C3).then(|| View::new(3))
-    }
-}
-
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 pub struct SimplexCertificateMock;
 
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 impl Simplex for SimplexCertificateMock {
     type Scheme = cert_mock::Scheme<Ed25519PublicKey, false>;
 
@@ -243,10 +167,67 @@ impl Simplex for SimplexCertificateMock {
     }
 }
 
-#[cfg(feature = "mocks")]
+#[cfg(test)]
+pub(crate) struct SimplexCertificateMockAttributable;
+
+#[cfg(test)]
+impl Simplex for SimplexCertificateMockAttributable {
+    type Scheme = cert_mock::Scheme<Ed25519PublicKey, true>;
+    type Elector = RoundRobin;
+
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
+    }
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = cert_mock::fixture_with::<true, true, true, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+
+    fn audit_rejection_view(configuration: Configuration) -> Option<View> {
+        (configuration == N4F1C3).then(|| View::new(3))
+    }
+}
+
+#[cfg(any(feature = "mocks", test))]
+pub struct SimplexCertificateMockCustomRoundRobin;
+
+#[cfg(any(feature = "mocks", test))]
+impl Simplex for SimplexCertificateMockCustomRoundRobin {
+    type Scheme = cert_mock::Scheme<Ed25519PublicKey, false>;
+    type Elector = CustomRoundRobinShuffled;
+
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        CustomRoundRobinShuffled {
+            term_length,
+            optimistic_views,
+        }
+    }
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = cert_mock::fixture_with::<false, true, true, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+#[cfg(any(feature = "mocks", test))]
 pub struct SimplexCertificateMockByzantineFirstLeader;
 
-#[cfg(feature = "mocks")]
+#[cfg(any(feature = "mocks", test))]
 impl Simplex for SimplexCertificateMockByzantineFirstLeader {
     type Scheme = cert_mock::Scheme<Ed25519PublicKey, false>;
 
@@ -276,185 +257,12 @@ impl Simplex for SimplexCertificateMockByzantineFirstLeader {
     }
 }
 
-pub struct SimplexEd25519CustomRoundRobin;
-
-impl Simplex for SimplexEd25519CustomRoundRobin {
-    type Scheme = ed25519::Scheme;
-    type Elector = CustomRoundRobinShuffled;
-
-    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
-        CustomRoundRobinShuffled {
-            term_length,
-            optimistic_views,
-        }
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        let fixture = ed25519::fixture(context, namespace, n);
-        (fixture.participants, fixture.schemes)
-    }
-}
-
-pub struct SimplexBls12381MultisigMinPk;
-
-impl Simplex for SimplexBls12381MultisigMinPk {
-    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
-    type Elector = RoundRobin;
-
-    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
-        round_robin(term_length, optimistic_views)
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        let fixture = bls12381_multisig::fixture::<MinPk, _>(context, namespace, n);
-        (fixture.participants, fixture.schemes)
-    }
-}
-
-pub struct SimplexBls12381MultisigMinSig;
-
-impl Simplex for SimplexBls12381MultisigMinSig {
-    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
-    type Elector = RoundRobin;
-
-    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
-        round_robin(term_length, optimistic_views)
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        let fixture = bls12381_multisig::fixture::<MinSig, _>(context, namespace, n);
-        (fixture.participants, fixture.schemes)
-    }
-}
-
-pub struct SimplexBls12381MinPk;
-
-impl Simplex for SimplexBls12381MinPk {
-    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
-    type Elector = RoundRobin;
-
-    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
-        round_robin(term_length, optimistic_views)
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
-        (fixture.participants, fixture.schemes)
-    }
-}
-
-pub struct SimplexBls12381MinPkCustomRandom;
-
-impl Simplex for SimplexBls12381MinPkCustomRandom {
-    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
-    type Elector = CustomRandomSelected;
-
-    fn elector(_term_length: TermLength, _optimistic_views: ViewDelta) -> Self::Elector {
-        CustomRandomSelected
-    }
-
-    fn effective_term_length(_term_length: TermLength) -> TermLength {
-        TermLength::ONE
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
-        (fixture.participants, fixture.schemes)
-    }
-}
-
-pub struct SimplexBls12381MinSig;
-
-impl Simplex for SimplexBls12381MinSig {
-    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
-    type Elector = Random;
-
-    fn elector(_term_length: TermLength, _optimistic_views: ViewDelta) -> Self::Elector {
-        Random
-    }
-
-    fn effective_term_length(_term_length: TermLength) -> TermLength {
-        TermLength::ONE
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        let fixture = bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n);
-        (fixture.participants, fixture.schemes)
-    }
-}
-
-pub struct SimplexSecp256r1;
-
-impl Simplex for SimplexSecp256r1 {
-    type Scheme = secp256r1::Scheme<Ed25519PublicKey>;
-    type Elector = RoundRobin;
-
-    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
-        round_robin(term_length, optimistic_views)
-    }
-
-    fn setup(
-        context: &mut deterministic::Context,
-        namespace: &[u8],
-        n: u32,
-    ) -> (
-        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
-        Vec<Self::Scheme>,
-    ) {
-        let fixture = secp256r1::fixture(context, namespace, n);
-        (fixture.participants, fixture.schemes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        BYZANTINE_IDX, BlockFilterChoice, CertifyChoice, CodeCoverage, FaultyMessaging, FuzzInput,
-        N4F1C3, ReporterWiring, Standard, TwinsMutator, fuzz, strategy::StrategyChoice,
-        utils::Partition,
+        BYZANTINE_IDX, BlockFilterChoice, CertifyChoice, CodeCoverage, FuzzInput, N4F1C3,
+        ReporterWiring, Standard, TwinsMutator, fuzz, strategy::StrategyChoice, utils::Partition,
     };
     use commonware_consensus::{
         simplex::{ForwardingPolicy, mocks::application::Certifier},
@@ -510,12 +318,18 @@ mod tests {
 
     #[test]
     fn byzantine_first_leader_round_robin_pins_first_stable_term() {
-        let participants = (0..4)
-            .map(id_mock::PublicKey::from_index)
+        let fixture = cert_mock::fixture_with::<false, true, true, _>(
+            &mut commonware_utils::test_rng(),
+            b"byzantine-first-leader",
+            4,
+        );
+        let participants = fixture
+            .participants
+            .into_iter()
             .try_collect::<Set<_>>()
             .expect("public keys are unique");
         let term_length = TermLength::new(NZU32!(2));
-        let elector: ByzantineFirstLeaderElector<id_mock::Scheme> =
+        let elector: ByzantineFirstLeaderElector<cert_mock::Scheme<Ed25519PublicKey, false>> =
             ByzantineFirstLeaderRoundRobin {
                 term_length,
                 optimistic_views: ViewDelta::zero(),
@@ -553,7 +367,6 @@ mod tests {
             heterogeneous_optimism: true,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
-            messaging_faults: Vec::new(),
             mailbox_size: crate::DEFAULT_MAILBOX_SIZE,
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
@@ -564,8 +377,8 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_ed25519_connected() {
-        fuzz::<SimplexEd25519, Standard, CodeCoverage>(test_input(
+    fn test_certificate_mock_connected() {
+        fuzz::<SimplexCertificateMock, Standard, CodeCoverage>(test_input(
             SEED,
             TEST_CONTAINERS,
             TermLength::ONE,
@@ -574,8 +387,8 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_ed25519_faulty_messaging_connected() {
-        fuzz::<SimplexEd25519, FaultyMessaging, CodeCoverage>(test_input(
+    fn test_certificate_mock_twin_connected() {
+        fuzz::<SimplexCertificateMock, TwinsMutator, CodeCoverage>(test_input(
             SEED,
             TEST_CONTAINERS,
             TermLength::ONE,
@@ -584,93 +397,13 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_ed25519_twin_connected() {
-        fuzz::<SimplexEd25519, TwinsMutator, CodeCoverage>(test_input(
-            SEED,
-            TEST_CONTAINERS,
-            TermLength::ONE,
-        ));
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_ed25519_shuffled_connected() {
-        fuzz::<SimplexEd25519CustomRoundRobin, Standard, CodeCoverage>(test_input(
-            SEED,
-            TEST_CONTAINERS,
-            TermLength::ONE,
-        ));
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_ed25519_stable_leader_connected() {
+    fn test_certificate_mock_stable_leader_connected() {
         // Multi-view terms exercise the stable-leader path, unlike the
         // TermLength::ONE tests above.
-        fuzz::<SimplexEd25519, Standard, CodeCoverage>(test_input(
+        fuzz::<SimplexCertificateMock, Standard, CodeCoverage>(test_input(
             SEED,
             TEST_CONTAINERS,
             TermLength::new(NZU32!(5)),
-        ));
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_secp256r1_connected() {
-        fuzz::<SimplexSecp256r1, Standard, CodeCoverage>(test_input(
-            SEED,
-            TEST_CONTAINERS,
-            TermLength::ONE,
-        ));
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_bls12381_multisig_minpk_connected() {
-        fuzz::<SimplexBls12381MultisigMinPk, Standard, CodeCoverage>(test_input(
-            SEED,
-            TEST_CONTAINERS,
-            TermLength::ONE,
-        ));
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_bls12381_multisig_minsig_connected() {
-        fuzz::<SimplexBls12381MultisigMinSig, Standard, CodeCoverage>(test_input(
-            SEED,
-            TEST_CONTAINERS,
-            TermLength::ONE,
-        ));
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_bls12381_threshold_minpk_connected() {
-        fuzz::<SimplexBls12381MinPk, Standard, CodeCoverage>(test_input(
-            SEED,
-            TEST_CONTAINERS,
-            TermLength::ONE,
-        ));
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_bls12381_threshold_selected_minpk_connected() {
-        fuzz::<SimplexBls12381MinPkCustomRandom, Standard, CodeCoverage>(test_input(
-            SEED,
-            TEST_CONTAINERS,
-            TermLength::ONE,
-        ));
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_bls12381_threshold_minsig_connected() {
-        fuzz::<SimplexBls12381MinSig, Standard, CodeCoverage>(test_input(
-            SEED,
-            TEST_CONTAINERS,
-            TermLength::ONE,
         ));
     }
 
@@ -689,62 +422,14 @@ mod tests {
 
         #[test_group("slow")]
         #[test]
-        fn property_test_ed25519_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519, Standard, CodeCoverage>(input);
+        fn property_test_certificate_mock_connected(input in property_test_strategy()) {
+            fuzz::<SimplexCertificateMock, Standard, CodeCoverage>(input);
         }
 
         #[test_group("slow")]
         #[test]
-        fn property_test_ed25519_faulty_messaging_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519, FaultyMessaging, CodeCoverage>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_ed25519_twins_mutator_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519, TwinsMutator, CodeCoverage>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_ed25519_shuffled_twins_mutator_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519CustomRoundRobin, TwinsMutator, CodeCoverage>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_secp256r1_connected(input in property_test_strategy()) {
-            fuzz::<SimplexSecp256r1, Standard, CodeCoverage>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_multisig_minpk_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MultisigMinPk, Standard, CodeCoverage>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_multisig_minsig_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MultisigMinSig, Standard, CodeCoverage>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_threshold_minpk_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MinPk, Standard, CodeCoverage>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_threshold_selected_minpk_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MinPkCustomRandom, Standard, CodeCoverage>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_threshold_minsig_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MinSig, Standard, CodeCoverage>(input);
+        fn property_test_certificate_mock_twins_mutator_connected(input in property_test_strategy()) {
+            fuzz::<SimplexCertificateMock, TwinsMutator, CodeCoverage>(input);
         }
     }
 }

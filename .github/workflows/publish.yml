@@ -85,6 +85,11 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish cryptography-curve25519
+      run: cargo publish --manifest-path cryptography/curve25519/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish runtime-macros
       run: cargo publish --manifest-path runtime/macros/Cargo.toml
       continue-on-error: true

@@ -668,10 +668,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "mocks")]
-    use crate::simplex::SimplexCertificateMock;
     use crate::{
-        BlockFilterChoice, FuzzInput, ReporterWiring, simplex::SimplexId, strategy::StrategyChoice,
+        BlockFilterChoice, FuzzInput, ReporterWiring, simplex::SimplexCertificateMock,
+        strategy::StrategyChoice,
     };
     use commonware_consensus::simplex::ForwardingPolicy;
     use std::num::NonZeroUsize;
@@ -694,7 +693,6 @@ mod tests {
             heterogeneous_optimism: false,
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
-            messaging_faults: Vec::new(),
             mailbox_size: NonZeroUsize::new(1024).unwrap(),
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
@@ -718,13 +716,13 @@ mod tests {
     #[ignore]
     fn episodes_complete_and_replay_exactly() {
         for seed in [7u64, 21, 42] {
-            run_with::<SimplexId>(chaos_input(seed), TEST_STEPS);
+            run_with::<SimplexCertificateMock>(chaos_input(seed), TEST_STEPS);
             let _ = log::take();
         }
-        run_with::<SimplexId>(chaos_input(11), TEST_STEPS);
+        run_with::<SimplexCertificateMock>(chaos_input(11), TEST_STEPS);
         let first = log::take();
         assert!(!first.is_empty(), "an episode must record its decisions");
-        run_with::<SimplexId>(chaos_input(11), TEST_STEPS);
+        run_with::<SimplexCertificateMock>(chaos_input(11), TEST_STEPS);
         let second = log::take();
         assert_eq!(
             first, second,

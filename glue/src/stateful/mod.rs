@@ -310,10 +310,12 @@ where
     /// Once the database set is ready, the wrapper calls this for every
     /// finalized block it receives from marshal before releasing that block's
     /// marshal acknowledgement. Blocks applied through normal processing are
-    /// reported after [`DatabaseSet::finalize`] succeeds: the block's state is
-    /// readable from the databases, but its flush to disk may still be in
-    /// flight. Blocks already reflected by startup reconciliation or completed
-    /// state sync are reported without reapplying them.
+    /// reported after [`DatabaseSet::apply`] succeeds: the block's state is
+    /// readable from the databases, but durability through that block may still
+    /// be pending. When an earlier database sync is active, the sync covering
+    /// this block may not have started yet. Blocks already reflected by startup
+    /// reconciliation or completed state sync are reported without reapplying
+    /// them.
     ///
     /// During peer state sync, a finalized block may be absorbed into a recorded sync target and
     /// acknowledged without invoking this hook. Blocks still pending when sync completes are
@@ -326,8 +328,9 @@ where
     /// execution, not from this observer.
     ///
     /// For blocks that are reported, this is an at-least-once notification inherited from
-    /// marshal's reporter stream: a crash after this hook runs but before the block's flush and
-    /// the marshal acknowledgement are durable may cause the same block to be reported again.
+    /// marshal's reporter stream: a crash after this hook runs but before a database sync covering
+    /// the block and marshal's processed position are durable may cause the same block to be
+    /// reported again.
     ///
     /// # Panics
     ///

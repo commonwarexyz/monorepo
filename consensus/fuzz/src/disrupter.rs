@@ -645,7 +645,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        id_mock,
+        simplex_certificate_mock as cert_mock,
         strategy::{HeaderMutation, HeaderScope, SmallScope, SplitHeader},
     };
     use commonware_runtime::{Runner as _, Supervisor as _};
@@ -662,7 +662,7 @@ mod tests {
     fn attach_mock_block_preserves_header_strategy_payloads() {
         let executor = commonware_runtime::deterministic::Runner::seeded(17);
         executor.start(|mut context| async move {
-            let (_, schemes) = id_mock::fixture(&mut context, b"disrupter_attach", 4);
+            let schemes = cert_mock::fixture(&mut context, b"disrupter_attach", 4).schemes;
             let payload = Sha256Digest::from([7u8; 32]);
             let proposal = genesis_parent_proposal(payload);
 

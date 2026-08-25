@@ -42,10 +42,11 @@ where
 {
     /// Enter follower mode until the end of the current epoch is observed.
     ///
-    /// This mode is entered when setup has no recoverable public protocol state. The actor cannot
-    /// participate in the active ceremony, so it waits until the final block. It registers the next
-    /// epoch as a signer only when a failed ceremony carries a locally held share forward;
-    /// otherwise, it registers as a verifier.
+    /// This mode is entered when setup lacks the public history required to
+    /// reconstruct the active ceremony, either because boundary information is
+    /// unavailable or state sync skipped part of the inclusion window. The actor
+    /// waits until the final block and registers for the next epoch from its
+    /// outcome.
     pub(super) async fn follow(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,

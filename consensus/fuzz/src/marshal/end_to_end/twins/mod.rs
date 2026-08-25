@@ -21,9 +21,8 @@ use super::{
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
 };
 use crate::{
-    NAMESPACE, NetworkChannels, SimplexCertificateMock, SimplexId, TwinsBackend, TwinsCase,
-    TwinsDisrupter, TwinsSetup, TwinsTopology, run_twins_with_backend, simplex::Simplex,
-    strategy::StrategyChoice,
+    NAMESPACE, NetworkChannels, SimplexCertificateMock, TwinsBackend, TwinsCase, TwinsDisrupter,
+    TwinsSetup, TwinsTopology, run_twins_with_backend, simplex::Simplex, strategy::StrategyChoice,
 };
 pub use coding::fuzz_marshal_coding_twins;
 use commonware_consensus::{
@@ -555,16 +554,17 @@ pub fn fuzz_marshal_standard_twins(input: MarshalTwinsInput) {
     >(input, CasePolicy::General, selection, entropy);
 }
 
-/// Crypto: `SimplexId`. Marshal: standard, deferred. Cluster: `N4F1C3` Twins,
-/// `SplitHeader` strategy. Liveness: checked. App: fixed always-accept.
-pub fn fuzz_marshal_standard_deferred_id_twins_split_header(mut input: MarshalTwinsInput) {
+/// Crypto: `SimplexCertificateMock`. Marshal: standard, deferred. Cluster:
+/// `N4F1C3` Twins, `SplitHeader` strategy. Liveness: checked. App: fixed
+/// always-accept.
+pub fn fuzz_marshal_standard_deferred_cert_mock_twins_split_header(mut input: MarshalTwinsInput) {
     input.strategy = StrategyChoice::SplitHeader {
         fault_rounds: input.rounds.into(),
         fault_rounds_bound: input.rounds.into(),
     };
     fuzz_marshal_twins_with::<
-        SimplexId,
-        AlwaysAcceptBlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>,
+        SimplexCertificateMock,
+        AlwaysAcceptBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
         DeferredMarshal,
     >(
         input.clone(),
@@ -578,18 +578,19 @@ pub fn fuzz_marshal_standard_deferred_id_twins_split_header(mut input: MarshalTw
     );
 }
 
-/// Crypto: `SimplexId`. Marshal: standard, inline. Cluster: `N4F1C3` Twins,
-/// `SplitHeader` strategy. Liveness: checked. App: fixed always-accept.
+/// Crypto: `SimplexCertificateMock`. Marshal: standard, inline. Cluster:
+/// `N4F1C3` Twins, `SplitHeader` strategy. Liveness: checked. App: fixed
+/// always-accept.
 /// Inline certification structurally returns true, so this target covers the
 /// verify-side split-header invariant, not certification poisoning.
-pub fn fuzz_marshal_standard_inline_id_twins_split_header(mut input: MarshalTwinsInput) {
+pub fn fuzz_marshal_standard_inline_cert_mock_twins_split_header(mut input: MarshalTwinsInput) {
     input.strategy = StrategyChoice::SplitHeader {
         fault_rounds: input.rounds.into(),
         fault_rounds_bound: input.rounds.into(),
     };
     fuzz_marshal_twins_with::<
-        SimplexId,
-        AlwaysAcceptBlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>,
+        SimplexCertificateMock,
+        AlwaysAcceptBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
         InlineMarshal,
     >(
         input.clone(),

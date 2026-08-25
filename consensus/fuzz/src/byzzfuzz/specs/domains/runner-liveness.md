@@ -9,7 +9,7 @@ Runner liveness orchestrates a single ByzzFuzz iteration: it coerces the harness
 - `consensus/fuzz/src/byzzfuzz/runner.rs` - ByzzFuzz setup, phase control, GST transition, and invariant checks.
 - `consensus/fuzz/src/byzzfuzz/mod.rs` - exports the entry point and the fixed byzantine index.
 - `consensus/fuzz/src/lib.rs` - mode dispatch, panic hook, and shared network/validator setup helpers.
-- `consensus/fuzz/fuzz_targets/simplex_id_byzzfuzz.rs`, `consensus/fuzz/fuzz_targets/simplex_cert_mock_byzzfuzz.rs` - fuzz targets that select `Mode::Byzzfuzz`.
+- `consensus/fuzz/fuzz_targets/simplex_cert_mock_byzzfuzz.rs` - fuzz target that selects `Mode::Byzzfuzz`.
 
 ## Core Types
 

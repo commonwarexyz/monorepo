@@ -153,7 +153,10 @@ fn fuzz_fixed<F: Family>(input: &FuzzInput, name: &str) {
                     let expected_root = batch.root();
                     let start = db.size();
                     let range;
-                    (db, range) = db.apply_batch(batch).expect("apply fixed compact batch");
+                    (db, range) = db
+                        .apply_batch(batch)
+                        .await
+                        .expect("apply fixed compact batch");
                     assert_eq!(range.start, start);
                     assert_eq!(range.end, db.size());
                     assert_eq!(db.root(), expected_root);
@@ -313,7 +316,10 @@ fn fuzz_variable<F: Family>(input: &FuzzInput, name: &str) {
                     let expected_root = batch.root();
                     let start = db.size();
                     let range;
-                    (db, range) = db.apply_batch(batch).expect("apply variable compact batch");
+                    (db, range) = db
+                        .apply_batch(batch)
+                        .await
+                        .expect("apply variable compact batch");
                     assert_eq!(range.start, start);
                     assert_eq!(range.end, db.size());
                     assert_eq!(db.root(), expected_root);
