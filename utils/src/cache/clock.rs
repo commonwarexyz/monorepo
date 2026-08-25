@@ -52,7 +52,13 @@ impl<K> Policy<K> for Clock {
     }
 
     #[inline]
-    fn insert<I, C>(&mut self, states: &I, _key: &K, has_vacancy: bool, claim: C) -> AtomicBool
+    fn insert<I, C>(
+        &mut self,
+        states: &I,
+        _key: &K,
+        has_vacancy: bool,
+        claim: C,
+    ) -> (Slot, AtomicBool)
     where
         I: Index<Slot, Output = AtomicBool>,
         C: FnOnce(Option<Slot>) -> Claimed<K>,
@@ -60,19 +66,23 @@ impl<K> Policy<K> for Clock {
         if has_vacancy {
             // CLOCK admits into available capacity without scanning. Mark the
             // new resident referenced so it receives a full second chance.
-            let _ = claim(None);
-            return AtomicBool::new(true);
+            let Claimed::Vacant(slot) = claim(None) else {
+                unreachable!("vacancy claim returned an eviction");
+            };
+            return (slot, AtomicBool::new(true));
         }
 
         loop {
             let referenced = &states[self.hand];
             if !referenced.load(Ordering::Relaxed) {
                 let victim = self.hand;
-                let _ = claim(Some(victim));
+                let Claimed::Evicted(_) = claim(Some(victim)) else {
+                    unreachable!("victim claim returned vacant capacity");
+                };
                 // Do not reconsider the new resident until the hand completes
                 // a revolution.
                 self.advance();
-                return AtomicBool::new(true);
+                return (victim, AtomicBool::new(true));
             }
             // A set bit grants one second chance. Clear it and continue from
             // the following slot.
