@@ -35,10 +35,18 @@
 //! The resident index stores only slot IDs and reads keys from the slots. It
 //! reserves space for twice the resident limit at construction, keeping its
 //! backing allocation fixed throughout insertion and eviction. Tombstone
-//! cleanup can still rehash the index in place. This reservation covers index
-//! storage; keys, values, and other metadata can allocate separately.
+//! cleanup can still rehash the index in place. [Clock2QPlus] makes the same
+//! reservation for its independently bounded Ghost index. This reservation
+//! covers index storage; keys, values, and other metadata can allocate separately.
 //!
-//! The [clock] module provides [Clock], the default replacement policy.
+//! # Policies
+//!
+//! The default [Clock] policy provides low-overhead replacement without retaining
+//! evicted keys. It suits workloads with cheap misses or little benefit from
+//! reuse history. [Clock2QPlus] uses bounded history and separate admission and
+//! eviction regions to resist scans and favor recurring entries. Its extra work
+//! and metadata can pay off when avoiding a miss is expensive. Compare policies
+//! using the workload's total cost, including misses and retained memory.
 //!
 //! # Concurrency
 //!
@@ -80,10 +88,12 @@
 //! ```
 
 pub mod clock;
+pub mod clock2qplus;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 pub use clock::Clock;
+pub use clock2qplus::Clock2QPlus;
 use core::{hash::Hash, num::NonZeroUsize, ops::Index};
 use hashbrown::HashTable;
 
@@ -1285,6 +1295,30 @@ mod tests {
             ops in proptest::collection::vec(op_strategy(16), 0..256),
         ) {
             exercise_policy::<Clock, _>(capacity, 16, prefill, ops, |cache| {
+                cache.check_policy_invariants();
+            })?;
+        }
+
+        #[test]
+        fn clock2qplus_invariants_hold(
+            capacity in 1usize..8,
+            prefill in any::<bool>(),
+            ops in proptest::collection::vec(op_strategy(16), 0..256),
+        ) {
+            exercise_policy::<clock2qplus::Clock2QPlus<u8>, _>(capacity, 16, prefill, ops, |cache| {
+                cache.check_policy_invariants();
+            })?;
+        }
+
+        // Small needs at least two slots to exercise demotion, promotion, and
+        // correlation-boundary repair.
+        #[test]
+        fn clock2qplus_invariants_hold_with_wide_small(
+            capacity in 20usize..48,
+            prefill in any::<bool>(),
+            ops in proptest::collection::vec(op_strategy(64), 0..512),
+        ) {
+            exercise_policy::<clock2qplus::Clock2QPlus<u8>, _>(capacity, 64, prefill, ops, |cache| {
                 cache.check_policy_invariants();
             })?;
         }

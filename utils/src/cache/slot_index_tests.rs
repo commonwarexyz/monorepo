@@ -1,10 +1,14 @@
-use super::{Cache, Clock, Policy};
+use super::{Cache, Clock, Clock2QPlus, Policy};
 use core::{
     hash::{Hash, Hasher},
     num::NonZeroUsize,
 };
 use hashbrown::HashTable;
-use std::{cell::Cell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 #[derive(Clone)]
 struct CountingKey {
@@ -46,6 +50,38 @@ fn shared_hashes_without_rehash_steps() {
     let mut clock = Cache::<CountingKey, usize, Clock>::new(NonZeroUsize::new(1).unwrap());
     clock.put(clock_key.clone(), 0);
     assert_eq!(clock_key.hashes(), 1);
+
+    let one = CountingKey::new(1);
+    let two = CountingKey::new(2);
+    let three = CountingKey::new(3);
+    let mut cache =
+        Cache::<CountingKey, usize, Clock2QPlus<CountingKey>>::new(NonZeroUsize::new(2).unwrap());
+
+    // The reserved resident and Ghost tables cannot rehash during this short
+    // sequence, so every count belongs to the key's explicit operation path.
+    cache.put(one.clone(), 1);
+    cache.put(two.clone(), 2);
+    assert_eq!(one.hashes(), 1);
+    assert_eq!(two.hashes(), 1);
+
+    // Key 3 replaces Small's key 1. Each incoming key and the transferred
+    // victim is hashed once across its resident and Ghost operations.
+    cache.put(three.clone(), 3);
+    assert_eq!(one.hashes(), 2);
+    assert_eq!(two.hashes(), 1);
+    assert_eq!(three.hashes(), 1);
+
+    // A nonresident removal shares the resident-miss hash with Ghost discard.
+    assert!(!cache.remove(&one));
+    assert_eq!(one.hashes(), 3);
+
+    // Resident retain and clear operate from canonical table/slot ownership
+    // and do not need a new key hash.
+    cache.retain(|key, _| key.id != 3);
+    assert_eq!(three.hashes(), 1);
+    cache.clear();
+    assert_eq!(two.hashes(), 1);
+    assert_eq!(three.hashes(), 1);
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]
@@ -140,8 +176,124 @@ where
 fn collisions_rehash_and_stable_values_clock() {
     exercise_rehash::<true, Clock>();
 }
+#[test]
+fn collisions_rehash_and_stable_values_clock2qplus() {
+    exercise_rehash::<true, Clock2QPlus<ProbeKey<true>>>();
+}
+
+#[derive(Default)]
+struct Counts {
+    owners: RefCell<HashMap<usize, usize>>,
+    clones: RefCell<Vec<usize>>,
+    values: Cell<usize>,
+}
+struct OwnedKey {
+    id: usize,
+    counts: Rc<Counts>,
+}
+impl OwnedKey {
+    fn new(id: usize, counts: &Rc<Counts>) -> Self {
+        *counts.owners.borrow_mut().entry(id).or_default() += 1;
+        Self {
+            id,
+            counts: Rc::clone(counts),
+        }
+    }
+}
+impl Clone for OwnedKey {
+    fn clone(&self) -> Self {
+        self.counts.clones.borrow_mut().push(self.id);
+        Self::new(self.id, &self.counts)
+    }
+}
+impl PartialEq for OwnedKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for OwnedKey {}
+impl Hash for OwnedKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        0u8.hash(state);
+    }
+}
+impl Drop for OwnedKey {
+    fn drop(&mut self) {
+        *self.counts.owners.borrow_mut().get_mut(&self.id).unwrap() -= 1;
+    }
+}
+struct OwnedValue(Rc<Counts>);
+impl Drop for OwnedValue {
+    fn drop(&mut self) {
+        self.0.values.set(self.0.values.get() + 1);
+    }
+}
+
+#[test]
+fn canonical_key_clone_and_ghost_drop_ownership() {
+    let counts = Rc::new(Counts::default());
+    let mut cache =
+        Cache::<OwnedKey, OwnedValue, Clock2QPlus<OwnedKey>>::new(NonZeroUsize::new(2).unwrap());
+    for id in 0..2 {
+        cache.put(OwnedKey::new(id, &counts), OwnedValue(Rc::clone(&counts)));
+    }
+    assert!(
+        counts.clones.borrow().is_empty(),
+        "vacant insertion owns the incoming key directly"
+    );
+    assert!(counts.owners.borrow().values().all(|&n| n == 1));
+    cache.get_or_insert_mut(OwnedKey::new(2, &counts), || {
+        panic!("eviction must reuse V")
+    });
+    assert_eq!(*counts.clones.borrow(), [0]);
+    assert_eq!(
+        *counts.owners.borrow(),
+        HashMap::from([(0, 1), (1, 1), (2, 1)])
+    );
+
+    // Key 0 is historical: its admission must consume Ghost and evict Main's 1.
+    cache.get_or_insert_mut(OwnedKey::new(0, &counts), || {
+        panic!("Ghost hit must reuse V")
+    });
+    assert_eq!(*counts.clones.borrow(), [0, 1]);
+    assert_eq!(
+        *counts.owners.borrow(),
+        HashMap::from([(0, 1), (1, 0), (2, 1)])
+    );
+    assert!(cache.remove(&OwnedKey::new(2, &counts)));
+    assert_eq!(
+        counts.owners.borrow()[&2],
+        1,
+        "free slots retain their stale key"
+    );
+    cache.get_or_insert_mut(OwnedKey::new(3, &counts), || {
+        panic!("free slot must reuse V")
+    });
+    assert_eq!(
+        *counts.clones.borrow(),
+        [0, 1],
+        "free reuse does not clone either key"
+    );
+    assert_eq!(counts.owners.borrow()[&2], 0);
+    assert_eq!(counts.values.get(), 0);
+    cache.retain(|_, _| false);
+    assert!(cache.is_empty());
+    assert_eq!(counts.values.get(), 0);
+    cache.clear();
+    assert!(counts.owners.borrow().values().all(|&n| n == 0));
+    assert_eq!(counts.values.get(), 2);
+    cache.put(OwnedKey::new(4, &counts), OwnedValue(Rc::clone(&counts)));
+    drop(cache);
+    assert!(counts.owners.borrow().values().all(|&n| n == 0));
+    assert_eq!(counts.values.get(), 3);
+}
 
 #[test]
 fn distinct_hashes_rehash_and_stable_values_clock() {
     exercise_rehash::<false, Clock>();
+}
+
+#[test]
+fn distinct_hashes_rehash_and_stable_values_clock2qplus() {
+    exercise_rehash::<false, Clock2QPlus<ProbeKey<false>>>();
 }
