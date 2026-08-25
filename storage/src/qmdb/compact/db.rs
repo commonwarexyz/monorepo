@@ -23,7 +23,6 @@
 //! full variant. The floor has no effect on pruning or snapshot rebuilding here; all
 //! historical in-memory state is discarded whenever a batch is applied.
 
-use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
 use crate::{
     Context,
@@ -33,6 +32,7 @@ use crate::{
         any::value::ValueEncoding,
         batch_chain::{self, Bounds, Commitment},
         compact::{batch as compact_batch, witness},
+        keyless::Operation,
         sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
 };

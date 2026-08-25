@@ -1,6 +1,7 @@
 //! Shared compact QMDB helpers.
 
 pub(crate) mod batch;
+pub mod db;
 pub(crate) mod witness;
 
 use crate::{

@@ -63,7 +63,7 @@ use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
 pub mod batch;
-mod compact;
+use crate::qmdb::compact::db as compact;
 pub mod fixed;
 mod operation;
 pub(crate) mod sync;
