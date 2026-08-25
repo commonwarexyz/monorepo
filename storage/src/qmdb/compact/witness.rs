@@ -572,24 +572,23 @@ where
     S: Strategy,
 {
     let hasher = qmdb::hasher::<H>();
-    merkle.with_mem(|mem| {
-        let size = mem.leaves();
-        let last_commit_loc = size - 1;
-        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
-        let root = mem.root(&hasher, inactive_peaks)?;
-        let pinned_nodes = F::nodes_to_pin(last_commit_loc)
-            .map(|pos| *mem.get_node_unchecked(pos))
-            .collect::<Vec<_>>();
-        let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
-        Ok(VerifiedWitness {
-            witness: Witness {
-                op_bytes: last_commit_op_bytes,
-                size,
-                pinned_nodes,
-            },
-            root,
-            proof,
-        })
+    let mem = merkle.mem();
+    let size = mem.leaves();
+    let last_commit_loc = size - 1;
+    let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
+    let root = mem.root(&hasher, inactive_peaks)?;
+    let pinned_nodes = F::nodes_to_pin(last_commit_loc)
+        .map(|pos| *mem.get_node_unchecked(pos))
+        .collect::<Vec<_>>();
+    let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
+    Ok(VerifiedWitness {
+        witness: Witness {
+            op_bytes: last_commit_op_bytes,
+            size,
+            pinned_nodes,
+        },
+        root,
+        proof,
     })
 }
 
@@ -716,7 +715,7 @@ where
     let hasher = qmdb::hasher::<H>();
     let batch = {
         let batch = merkle.new_batch().add(&hasher, &last_commit_op_bytes);
-        merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
+        batch.merkleize(merkle.mem(), &hasher)
     };
     merkle.apply_batch(&batch)?;
 

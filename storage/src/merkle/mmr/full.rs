@@ -79,7 +79,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             let mmr = mmr.apply_batch(&batch).unwrap();
             assert_eq!(mmr.root(&hasher, 0).unwrap(), expected_root);
 
@@ -107,7 +107,7 @@ mod tests {
                 c_hasher = next_hasher;
                 batch = batch.add(&hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             mmr = mmr.apply_batch(&batch).unwrap();
 
             // Rewind one node at a time without syncing until empty, confirming the root matches.
@@ -153,7 +153,7 @@ mod tests {
                         break;
                     }
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
                 mmr = mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
@@ -163,7 +163,7 @@ mod tests {
                     c_hasher = next_hasher;
                     batch = batch.add(&hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
             }
 
@@ -194,7 +194,7 @@ mod tests {
                     c_hasher = next_hasher;
                     batch = batch.add(&hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
                 mmr = mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
@@ -204,7 +204,7 @@ mod tests {
                     c_hasher = next_hasher;
                     batch = batch.add(&hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
             }
             let prune_loc = Location::new(50);
@@ -249,7 +249,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             let mmr = mmr.apply_batch(&batch).unwrap();
             let mmr = mmr.sync().await.unwrap();
 
@@ -259,7 +259,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch_a = batch_a.add(&hasher, &element);
             }
-            let merkleized_a = mmr.with_mem(|mem| batch_a.merkleize(mem, &hasher));
+            let merkleized_a = batch_a.merkleize(mmr.mem(), &hasher);
 
             // Batch B on merkleized A: add 5 more elements.
             let mut batch_b = merkleized_a.new_batch();
@@ -267,10 +267,8 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch_b = batch_b.add(&hasher, &element);
             }
-            let merkleized_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &hasher));
-            let expected_root = mmr
-                .with_mem(|mem| merkleized_b.root(mem, &hasher, 0))
-                .unwrap();
+            let merkleized_b = batch_b.merkleize(mmr.mem(), &hasher);
+            let expected_root = merkleized_b.root(mmr.mem(), &hasher, 0).unwrap();
 
             // Apply.
             let mmr = mmr.apply_batch(&merkleized_b).unwrap();
@@ -310,7 +308,7 @@ mod tests {
             for i in 0..5 {
                 batch = batch.add(&hasher, &test_digest(i));
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             let mmr = mmr.apply_batch(&batch).unwrap();
             let mmr = mmr.sync().await.unwrap();
             drop(mmr);
@@ -333,7 +331,7 @@ mod tests {
             for i in 0..100 {
                 batch = batch.add(&hasher, &test_digest(i));
             }
-            let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(ref_mmr.mem(), &hasher);
             let ref_mmr = ref_mmr.apply_batch(&batch).unwrap();
             let expected_size = ref_mmr.size();
             let prune_loc = Location::new(100);
@@ -359,7 +357,7 @@ mod tests {
 
             // Should be able to add new elements without panic.
             let batch = sync_mmr.new_batch().add(&hasher, &test_digest(999));
-            let batch = sync_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(sync_mmr.mem(), &hasher);
             let sync_mmr = sync_mmr.apply_batch(&batch).unwrap();
 
             sync_mmr.destroy().await.unwrap();
