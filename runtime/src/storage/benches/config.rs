@@ -129,6 +129,14 @@ impl fmt::Display for SyncMode {
     }
 }
 
+/// Runtime settings that are actually applied by the selected backend.
+pub(crate) struct EffectiveRuntimeConfig {
+    /// Applied Tokio worker count, or None for io_uring.
+    pub(crate) worker_threads: Option<usize>,
+    /// Applied Tokio global queue interval, or None when unset or unsupported.
+    pub(crate) global_queue_interval: Option<u32>,
+}
+
 /// Parsed and validated benchmark configuration.
 #[derive(Clone, Debug, Parser)]
 #[command(
@@ -221,6 +229,21 @@ impl Config {
     /// Timed run duration.
     pub const fn duration(&self) -> Duration {
         Duration::from_secs(self.duration)
+    }
+
+    /// Return the settings applied by the runtime backend selected at build time.
+    pub(crate) const fn effective_runtime_config(&self) -> EffectiveRuntimeConfig {
+        if cfg!(all(target_os = "linux", feature = "iouring")) {
+            EffectiveRuntimeConfig {
+                worker_threads: None,
+                global_queue_interval: None,
+            }
+        } else {
+            EffectiveRuntimeConfig {
+                worker_threads: Some(self.worker_threads),
+                global_queue_interval: self.global_queue_interval,
+            }
+        }
     }
 
     /// Initial file size (panics if not set, so only call after validation).

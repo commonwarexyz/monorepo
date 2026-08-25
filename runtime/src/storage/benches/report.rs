@@ -145,16 +145,25 @@ impl Report {
             cfg.workload,
             self.elapsed.as_secs_f64(),
         );
-        println!(
-            "io_size={} inflight={} worker_threads={} global_queue_interval={} seed={} output={}",
-            cfg.io_size,
-            cfg.inflight,
-            cfg.worker_threads,
-            cfg.global_queue_interval
-                .map_or_else(|| "default".to_string(), |value| value.to_string()),
-            cfg.seed,
-            cfg.output,
-        );
+        let effective = cfg.effective_runtime_config();
+        if let Some(worker_threads) = effective.worker_threads {
+            println!(
+                "io_size={} inflight={} worker_threads={} global_queue_interval={} seed={} output={}",
+                cfg.io_size,
+                cfg.inflight,
+                worker_threads,
+                effective
+                    .global_queue_interval
+                    .map_or_else(|| "default".to_string(), |value| value.to_string()),
+                cfg.seed,
+                cfg.output,
+            );
+        } else {
+            println!(
+                "io_size={} inflight={} worker_threads=n/a global_queue_interval=n/a seed={} output={}",
+                cfg.io_size, cfg.inflight, cfg.seed, cfg.output,
+            );
+        }
 
         if let Some(file_size) = cfg.file_size {
             println!("file_size={file_size}");
@@ -183,14 +192,15 @@ impl Report {
 
     /// Print a single JSON object for downstream processing.
     pub fn print_json(&self, cfg: &Config) {
+        let effective = cfg.effective_runtime_config();
         let json = json!({
             "backend": backend_name(),
             "workload": cfg.workload.to_string(),
             "duration_seconds": cfg.duration().as_secs(),
             "io_size": cfg.io_size,
             "inflight": cfg.inflight,
-            "worker_threads": cfg.worker_threads,
-            "global_queue_interval": cfg.global_queue_interval,
+            "worker_threads": effective.worker_threads,
+            "global_queue_interval": effective.global_queue_interval,
             "file_size": cfg.file_size,
             "root": cfg.root,
             "cache": cfg.cache.map(|mode| mode.to_string()),
