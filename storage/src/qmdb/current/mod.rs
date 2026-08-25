@@ -481,24 +481,12 @@ where
             ));
         }
 
-        // Join the readers in lane order. On the first failure, abort and join every
-        // remaining reader before surfacing the error, so no reader outlives a failed
-        // init (dropping a guard only signals the abort without awaiting it).
+        // Join the readers in lane order, aborting the rest on the first failure so no
+        // reader outlives a failed init.
+        let lanes = crate::qmdb::join_all_or_abort::<_, _, crate::qmdb::Error<F>>(readers).await?;
         let mut nodes = Vec::with_capacity(positions.len());
-        let mut failure: Option<crate::qmdb::Error<F>> = None;
-        for reader in readers {
-            if failure.is_some() {
-                reader.abort().await;
-                continue;
-            }
-            match reader.join().await {
-                Ok(Ok(lane_nodes)) => nodes.extend(lane_nodes),
-                Ok(Err(err)) => failure = Some(err.into()),
-                Err(err) => failure = Some(err.into()),
-            }
-        }
-        if let Some(err) = failure {
-            return Err(err);
+        for lane in lanes {
+            nodes.extend(lane);
         }
         Ok(nodes)
     };
