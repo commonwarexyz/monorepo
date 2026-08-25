@@ -574,7 +574,7 @@ mod tests {
     type TestCache<K, V> = Cache<K, V, TestPolicy>;
 
     impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
-        fn check_cache_invariants(&self) {
+        pub(super) fn check_cache_invariants(&self) {
             assert!(self.slots.len() <= self.capacity());
             assert_eq!(self.index.len() + self.free.len(), self.slots.len());
 
@@ -652,6 +652,7 @@ mod tests {
         };
 
         assert_eq!(*cache.get_or_insert_with(1, || compute(1)), 100);
+        assert_eq!(calls.get(), 1);
         assert_eq!(*cache.get_or_insert_with(1, || compute(1)), 100);
         assert_eq!(calls.get(), 1);
         cache.check_cache_invariants();
@@ -684,8 +685,11 @@ mod tests {
             20
         });
         assert_eq!(makes.get(), 2);
+        assert_eq!(cache.slots.len(), 2);
 
         assert!(cache.remove(&1));
+        assert!(!cache.contains(&1));
+        assert_eq!(cache.len(), 1);
         *cache
             .get_or_insert_mut(3, || {
                 makes.set(makes.get() + 1);
@@ -748,6 +752,7 @@ mod tests {
         assert_eq!(makes.get(), 3);
         assert_eq!(cache.slots.len(), 3);
         assert!(cache.is_empty());
+        cache.check_cache_invariants();
 
         for key in 0..100u64 {
             *cache
@@ -759,6 +764,7 @@ mod tests {
         }
         assert_eq!(makes.get(), 3);
         assert_eq!(cache.slots.len(), 3);
+        assert_eq!(cache.len(), 3);
         cache.check_cache_invariants();
     }
 
@@ -770,6 +776,7 @@ mod tests {
         }
         cache.clear();
         assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
         cache.put(9, 9);
         assert_eq!(cache.get(&9).copied(), Some(9));
         cache.check_cache_invariants();
@@ -791,6 +798,7 @@ mod tests {
         for key in 0..2u64 {
             cache.put(key, Tracked(drops.clone()));
         }
+        assert_eq!(drops.get(), 0);
         cache.put(2, Tracked(drops.clone()));
         assert_eq!(drops.get(), 1);
 
@@ -1019,14 +1027,17 @@ mod tests {
                     Op::Put(key, value) => {
                         cache.put(key, value);
                         model.insert(key, value);
+                        prop_assert_eq!(cache.peek(&key).copied(), Some(value));
                     }
                     Op::GetOrInsert(key, value) => {
                         let stored = *cache.get_or_insert_with(key, || value);
                         model.insert(key, stored);
+                        prop_assert_eq!(cache.peek(&key).copied(), Some(stored));
                     }
                     Op::GetOrInsertMut(key, value) => {
                         *cache.get_or_insert_mut(key, || value).1 = value;
                         model.insert(key, value);
+                        prop_assert_eq!(cache.peek(&key).copied(), Some(value));
                     }
                     Op::GetMut(key, value) => {
                         if let Some(stored) = cache.get_mut(&key) {
@@ -1038,10 +1049,12 @@ mod tests {
                         let present = cache.contains(&key);
                         prop_assert_eq!(cache.remove(&key), present);
                         model.remove(&key);
+                        prop_assert!(!cache.contains(&key));
                     }
                     Op::Retain(key) => {
                         cache.retain(|resident, _| *resident < key);
                         model.retain(|resident, _| *resident < key);
+                        prop_assert!(cache.len() <= usize::from(key).min(capacity));
                     }
                 }
 
