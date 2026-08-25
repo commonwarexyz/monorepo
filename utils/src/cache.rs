@@ -33,7 +33,46 @@
 //! as [Cache::put] replace and drop displaced values as usual.
 //!
 //! Replacement policies are provided in submodules. [Cache] uses [Clock] by
-//! default. See the [clock] module for its behavior and concurrency properties.
+//! default. See the [clock] module for its behavior.
+//!
+//! # Concurrency
+//!
+//! [Cache] performs no internal locking. Shared lookups record use through
+//! [Policy::hit], whose contract permits concurrent calls through shared
+//! references. Mutating operations, including insertion after a miss, require
+//! `&mut self`. A cache can therefore be wrapped in a reader-writer lock and
+//! queried concurrently on the hit path:
+//!
+//! ```
+//! use commonware_utils::cache::Cache;
+//! use core::num::NonZeroUsize;
+//! use std::sync::RwLock;
+//!
+//! let cache = RwLock::new(Cache::<u64, u64>::new(NonZeroUsize::new(4).unwrap()));
+//!
+//! // Hit path: shared read lock, runs concurrently with other readers.
+//! if cache.read().unwrap().get(&7).is_none() {
+//!     // Miss path: exclusive write lock, computes and inserts the value once.
+//!     cache.write().unwrap().get_or_insert_with(7, || 7 * 7);
+//! }
+//! assert_eq!(cache.read().unwrap().get(&7).copied(), Some(49));
+//! ```
+//!
+//! # Example
+//!
+//! ```
+//! use commonware_utils::cache::Cache;
+//! use core::num::NonZeroUsize;
+//!
+//! let mut cache = Cache::<u64, u64>::new(NonZeroUsize::new(2).unwrap());
+//!
+//! // Compute an expensive value only on a miss.
+//! let value = *cache.get_or_insert_with(1, || 1 * 1000);
+//! assert_eq!(value, 1000);
+//!
+//! // A second lookup is served from the cache.
+//! assert_eq!(cache.get(&1).copied(), Some(1000));
+//! ```
 
 pub mod clock;
 
@@ -69,8 +108,7 @@ pub enum Claimed<K> {
 pub trait Policy<K> {
     /// Policy state stored inline with each cache slot.
     ///
-    /// A policy that keeps all slot-indexed state in its own arrays may use
-    /// `()`.
+    /// A policy that needs no per-slot state may use `()`.
     type SlotState;
 
     /// Creates empty policy state for `capacity` residents.
