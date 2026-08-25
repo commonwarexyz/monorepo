@@ -1,12 +1,26 @@
 //! The Clock2Q+ cache replacement policy.
 //!
+//! Clock2Q+ separates resident entries into two partitions:
+//!
+//! - Small is a first-in, first-out probation queue where new entries wait for
+//!   evidence of reuse.
+//! - Main is a CLOCK ring that protects the established working set. A sweep
+//!   gives referenced entries a second chance and evicts the first unreferenced
+//!   entry.
+//!
+//! The policy also keeps a bounded Ghost queue containing only the keys of
+//! entries recently evicted from Small. Ghost does not hold values or consume
+//! resident cache capacity. Finding a requested key in Ghost demonstrates reuse
+//! after eviction, so the key bypasses Small and enters Main. Keys seen only
+//! once pass through Small and leave bounded history in Ghost without
+//! displacing the established Main working set.
+//!
 //! # Admission and Eviction
 //!
-//! Clock2Q+ divides resident entries between a small FIFO queue and a main
-//! CLOCK. New entries normally enter Small. Entries seen in bounded Ghost
-//! history enter Main instead. When an entry reaches the tail of Small, an
-//! unreferenced entry is evicted to Ghost while a referenced entry is promoted
-//! to Main.
+//! New entries normally enter the head of Small. When an entry reaches the
+//! Small tail, an unreferenced entry is evicted and its key is recorded in
+//! Ghost, while a referenced entry is promoted to Main. A Ghost hit enters Main
+//! directly and consumes the matching history entry.
 //!
 //! # Correlation Filtering
 //!
@@ -22,10 +36,9 @@
 //! capacity `C`, Small is `max(C / 10, 1)` when `C > 1`, Main gets the
 //! remainder, and Ghost is `C / 2`. The correlation window is half of Small,
 //! rounded up. A capacity of one uses Main only. Resident keys and values
-//! remain in stable [super::Cache] slots. Queue topology and Ghost history are
+//! remain in stable [super::Cache] slots. Resident topology and Ghost history are
 //! policy-owned, while each slot's correlation marker and reference bit are
-//! stored inline as [Policy::SlotState]. Ghost history is consulted and
-//! consumed when insertion commits.
+//! stored inline as [Policy::SlotState].
 //!
 //! # References
 //!
@@ -61,7 +74,7 @@ const fn linked(slot: usize) -> Option<usize> {
 enum Location {
     /// The cache slot is not attached to either resident partition.
     Free,
-    /// An entry in the Small FIFO.
+    /// An entry in the Small queue.
     Small,
     /// An entry in the Main CLOCK ring.
     Main,
@@ -91,20 +104,10 @@ impl Default for ResidentSlot {
     }
 }
 
-/// A key-only entry in the bounded Ghost FIFO.
-struct GhostSlot<K> {
-    /// Historical key, or `None` when this slot is available for reuse.
-    key: Option<K>,
-    /// Previous entry toward the Ghost head.
-    prev: usize,
-    /// Next entry toward the Ghost tail.
-    next: usize,
-}
-
 /// Resident partition selected for an incoming key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Admission {
-    /// Admit at the head of the Small FIFO.
+    /// Admit at the head of the Small queue.
     Small,
     /// Admit immediately before the hand in the Main CLOCK ring.
     Main,
@@ -204,7 +207,7 @@ impl SlotState {
     }
 }
 
-/// State and endpoints for the Small FIFO.
+/// State and endpoints for the Small queue.
 struct SmallQueue {
     /// Maximum number of Small residents.
     capacity: usize,
@@ -223,7 +226,7 @@ struct SmallQueue {
 }
 
 impl SmallQueue {
-    /// Constructs an empty Small FIFO with its derived correlation window.
+    /// Constructs an empty Small queue with its derived correlation window.
     const fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -236,9 +239,9 @@ impl SmallQueue {
         }
     }
 
-    /// Attaches a free stable slot at the FIFO head.
+    /// Attaches a free stable slot at the queue head.
     #[inline]
-    fn push_head<I: Index<Slot, Output = SlotState>>(
+    fn push<I: Index<Slot, Output = SlotState>>(
         &mut self,
         states: &I,
         slots: &mut [ResidentSlot],
@@ -267,6 +270,7 @@ impl SmallQueue {
         self.len += 1;
 
         let demoted = *self.young_tail.get_or_insert(slot);
+
         // Only the oldest correlated survivor can leave the window after one
         // new admission because Small preserves admission order.
         let age = self.admissions.wrapping_sub(slots[demoted].admitted_at);
@@ -276,6 +280,7 @@ impl SmallQueue {
 
         let new_boundary = slots[demoted].prev;
         assert_ne!(new_boundary, UNLINKED);
+
         // Discard references made inside the correlation window. Only a hit
         // after the entry becomes old should promote it to Main.
         states[demoted].reset();
@@ -283,7 +288,7 @@ impl SmallQueue {
         self.young_tail = Some(new_boundary);
     }
 
-    /// Detaches a resident and repairs the FIFO and correlation boundary.
+    /// Detaches a resident and repairs the queue and correlation boundary.
     #[inline]
     fn unlink(&mut self, slots: &mut [ResidentSlot], slot: Slot) {
         assert_eq!(slots[slot].location, Location::Small);
@@ -301,6 +306,7 @@ impl SmallQueue {
         }
 
         self.len -= 1;
+
         // Removing the correlation boundary shrinks the live window without
         // making any older resident young again.
         if self.young_tail == Some(slot) {
@@ -319,7 +325,10 @@ impl SmallQueue {
     }
 }
 
-/// State and hand for the Main CLOCK ring.
+/// Circular resident topology and replacement hand for Main.
+///
+/// Unlike the Small and Ghost queues, Main has no head or tail. Its entries
+/// form a ring, and the CLOCK hand sweeps that ring for an unreferenced victim.
 struct MainRing {
     /// Maximum number of Main residents.
     capacity: usize,
@@ -360,7 +369,7 @@ impl MainRing {
 
     /// Attaches a free slot immediately before the hand.
     #[inline]
-    fn insert(&mut self, slots: &mut [ResidentSlot], slot: Slot) {
+    fn push(&mut self, slots: &mut [ResidentSlot], slot: Slot) {
         assert!(self.len < self.capacity);
         let Some(hand) = self.hand else {
             // A one-entry ring links the resident to itself and points the hand
@@ -421,9 +430,25 @@ impl MainRing {
     }
 }
 
-/// Exact bounded history of keys evicted from Small.
-struct GhostFifo<K> {
-    /// Exact key membership mapped to FIFO positions.
+/// A key-only entry in the bounded Ghost queue.
+struct GhostSlot<K> {
+    /// Historical key, or `None` when this slot is available for reuse.
+    key: Option<K>,
+    /// Previous entry toward the Ghost head.
+    prev: usize,
+    /// Next entry toward the Ghost tail.
+    next: usize,
+}
+
+/// Exact bounded history of keys recently evicted from Small.
+///
+/// Ghost stores keys without values, so it records recent eviction history
+/// without consuming resident cache capacity. A later request for a recorded
+/// key demonstrates reuse and admits the key directly to Main. The hash index
+/// provides exact membership checks, while the linked queue discards the oldest
+/// history when it reaches its bound.
+struct GhostQueue<K> {
+    /// Exact key membership mapped to queue positions.
     index: HashMap<K, usize, Hasher>,
     /// Storage for linked historical entries.
     slots: Vec<GhostSlot<K>>,
@@ -437,7 +462,7 @@ struct GhostFifo<K> {
     capacity: usize,
 }
 
-impl<K: Hash + Eq + Clone> GhostFifo<K> {
+impl<K: Hash + Eq + Clone> GhostQueue<K> {
     /// Constructs empty exact history bounded by `capacity`.
     fn new(capacity: usize) -> Self {
         Self {
@@ -450,12 +475,13 @@ impl<K: Hash + Eq + Clone> GhostFifo<K> {
         }
     }
 
-    /// Adds an evicted Small key at the FIFO head.
+    /// Adds an evicted Small key at the queue head.
     #[inline]
     fn push(&mut self, key: K) {
         if self.capacity == 0 {
             return;
         }
+
         // Prefer recycled storage, then grow to the Ghost bound, then reuse
         // the oldest live slot after removing its previous key.
         let slot = if let Some(slot) = self.free.pop() {
@@ -480,7 +506,8 @@ impl<K: Hash + Eq + Clone> GhostFifo<K> {
         {
             let entry = &mut self.slots[slot];
             assert!(entry.key.is_none());
-            // Ghost keeps one key in its hash index and one in its FIFO slot,
+
+            // Ghost keeps one key in its hash index and one in its queue slot,
             // which avoids per-entry shared ownership between the structures.
             entry.key = Some(key.clone());
             entry.prev = UNLINKED;
@@ -546,20 +573,20 @@ impl<K: Hash + Eq + Clone> GhostFifo<K> {
 
 /// Clock2Q+ admission and eviction policy.
 ///
-/// Clock2Q+ divides residents between a Small FIFO and a Main CLOCK ring. New
+/// Clock2Q+ divides residents between a Small queue and a Main CLOCK ring. New
 /// keys enter Small, while keys found in bounded Ghost history enter Main.
 /// Hits to the newest portion of Small are ignored to filter correlated access.
 /// An eligible Small hit marks the resident for promotion when it reaches the
-/// FIFO tail.
+/// queue tail.
 ///
-/// The policy owns queue topology, partition sizes, the Main clock hand, and
+/// The policy owns resident topology, partition sizes, the Main CLOCK hand, and
 /// exact bounded Ghost history. Resident keys and values remain in [Cache].
 /// The target proportions are 10% Small, 90% Main, and 50% Ghost, with a
 /// correlation window covering half of Small. Integer sizes use floor division,
 /// except that Small receives at least one slot when total capacity exceeds
 /// one. A capacity of one uses Main as a one-entry CLOCK.
 ///
-/// Resident values stay in stable cache slots while queue links remain in the
+/// Resident values stay in stable cache slots while resident links remain in the
 /// policy. Hits mutate only relaxed atomic slot state, so readers can share the
 /// cache behind a reader-writer lock without serializing.
 ///
@@ -579,7 +606,7 @@ impl<K: Hash + Eq + Clone> GhostFifo<K> {
 /// assert_eq!(cache.get(&7), Some(&49));
 /// ```
 pub struct Clock2QPlus<K> {
-    /// Queue topology and admission age indexed by the cache's stable slots.
+    /// Resident topology and admission age indexed by the cache's stable slots.
     ///
     /// The cache owns keys, values, and inline [`SlotState`]. This parallel
     /// array is required for policy-owned links that must also be available to
@@ -590,13 +617,14 @@ pub struct Clock2QPlus<K> {
     /// Eviction ring and CLOCK hand.
     main: MainRing,
     /// Exact bounded history used for scan-resistant admission.
-    ghost: GhostFifo<K>,
+    ghost: GhostQueue<K>,
 }
 
 impl<K: Hash + Eq + Clone> Clock2QPlus<K> {
     /// Constructs empty policy metadata for `capacity` resident slots.
     fn with_capacity(capacity: NonZeroUsize) -> Self {
         let capacity = capacity.get();
+
         // Keep tiny caches usable while approaching the paper's target ratios
         // with integer arithmetic at normal capacities.
         let small_capacity = if capacity == 1 {
@@ -611,7 +639,7 @@ impl<K: Hash + Eq + Clone> Clock2QPlus<K> {
             slots: vec![ResidentSlot::default(); capacity],
             small: SmallQueue::new(small_capacity),
             main: MainRing::new(main_capacity),
-            ghost: GhostFifo::new(ghost_capacity),
+            ghost: GhostQueue::new(ghost_capacity),
         }
     }
 
@@ -676,8 +704,8 @@ impl<K: Hash + Eq + Clone> Clock2QPlus<K> {
         admission: Admission,
     ) {
         match admission {
-            Admission::Small => self.small.push_head(states, &mut self.slots, slot),
-            Admission::Main => self.main.insert(&mut self.slots, slot),
+            Admission::Small => self.small.push(states, &mut self.slots, slot),
+            Admission::Main => self.main.push(&mut self.slots, slot),
         }
     }
 
@@ -737,6 +765,7 @@ impl<K: Hash + Eq + Clone> Policy<K> for Clock2QPlus<K> {
                 Claimed::Evicted(key),
             ) => {
                 let location = self.unlink_resident(victim);
+
                 // Only Small evictions become Ghost evidence. Main victims
                 // have already passed the admission filter.
                 if location == Location::Small {
@@ -754,7 +783,7 @@ impl<K: Hash + Eq + Clone> Policy<K> for Clock2QPlus<K> {
             // Small tail into the resulting Main vacancy.
             self.small.unlink(&mut self.slots, promoted);
             states[promoted].reset();
-            self.main.insert(&mut self.slots, promoted);
+            self.main.push(&mut self.slots, promoted);
         }
         self.attach(states, slot, admission);
         (slot, SlotState::new(admission))
@@ -802,7 +831,6 @@ mod tests {
         thread,
     };
 
-    /// Cache specialization exercised by the Clock2Q+ tests.
     type TestCache<K, V> = Cache<K, V, Clock2QPlus<K>>;
 
     /// Returns the number of residents attached to either partition.
@@ -996,7 +1024,7 @@ mod tests {
             }
         }
 
-        /// Adds a key to the bounded model Ghost FIFO.
+        /// Adds a key to the bounded model Ghost queue.
         fn push_ghost(&mut self, key: u8) {
             assert!(!self.ghost.contains(&key));
             if self.ghost.len() == self.ghost_capacity {
@@ -1264,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn partitions_round_for_tiny_capacities() {
+    fn test_partitions_round_for_tiny_capacities() {
         // Ratio-derived partitions round down. Capacities above one still keep
         // at least one Small slot, while capacity one uses Main alone.
         let expected = [
@@ -1296,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_one_behaves_as_clock() {
+    fn test_capacity_one_behaves_as_clock() {
         // With no Small or Ghost capacity, the only Main slot is replaced on
         // each cold insertion.
         let mut cache = TestCache::new(NZUsize!(1));
@@ -1310,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn warmup_fills_small_then_main_with_cold_entries() {
+    fn test_warmup_fills_small_then_main_with_cold_entries() {
         // Warm-up fills the 10% Small partition first, then uses the remaining
         // vacant slots for unreferenced Main residents.
         let mut cache = TestCache::new(NZUsize!(20));
@@ -1328,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_empty_state_includes_precise_ghost_history() {
+    fn test_policy_empty_state_includes_precise_ghost_history() {
         // Resident filtering does not erase unrelated Ghost evidence. The
         // policy may therefore retain useful history with no live residents.
         let mut cache = TestCache::new(NZUsize!(2));
@@ -1349,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn correlation_window_ignores_only_young_hits() {
+    fn test_correlation_window_ignores_only_young_hits() {
         // Key 4 is at the Small head, inside the two-entry correlation window.
         // Its hit must not set the bit, so a scan ages and evicts it to Ghost.
         let mut correlated = TestCache::new(NZUsize!(40));
@@ -1385,7 +1413,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_younger_entry_does_not_rewind_correlation_age() {
+    fn test_removing_younger_entry_does_not_rewind_correlation_age() {
         let mut cache = TestCache::new(NZUsize!(20));
         for key in 0..20u64 {
             cache.put(key, key);
@@ -1407,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_younger_entry_does_not_delay_correlation_age() {
+    fn test_removing_younger_entry_does_not_delay_correlation_age() {
         let mut cache = TestCache::new(NZUsize!(40));
         for key in 0..40u64 {
             cache.put(key, key);
@@ -1431,8 +1459,8 @@ mod tests {
     }
 
     #[test]
-    fn ghost_history_is_bounded_and_promotes_reuse() {
-        // Cold churn fills the ten-entry Ghost FIFO and drops its oldest key.
+    fn test_ghost_history_is_bounded_and_promotes_reuse() {
+        // Cold churn fills the ten-entry Ghost queue and drops its oldest key.
         let mut cache = TestCache::new(NZUsize!(20));
         for key in 0..=30u64 {
             cache.put(key, key);
@@ -1467,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn main_evicts_despite_an_offered_vacancy() {
+    fn test_main_evicts_despite_an_offered_vacancy() {
         // Removing the Small resident leaves a globally vacant slot while Main
         // remains full and key 1 remains in Ghost.
         let mut cache = TestCache::new(NZUsize!(2));
@@ -1490,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn promoting_small_replaces_from_full_main() {
+    fn test_promoting_small_replaces_from_full_main() {
         // Reference the original Small tail so the next cold miss promotes it
         // while keeping both fixed-size resident partitions full.
         let mut cache = TestCache::new(NZUsize!(20));
@@ -1523,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn slot_stays_stable_on_promotion_and_goes_stale_on_reuse() {
+    fn test_slot_stays_stable_on_promotion_and_goes_stale_on_reuse() {
         // Promotion changes only policy topology, so key 1 keeps its original
         // slot and the existing lookup hint remains valid.
         let mut cache = TestCache::new(NZUsize!(40));
@@ -1553,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_does_not_displace_main() {
+    fn test_scan_does_not_displace_main() {
         // Warm-up places keys 1 through 9 in Main. A one-cache-capacity scan is
         // absorbed by Small and leaves that Main working set intact.
         let mut clock2qplus = TestCache::new(NZUsize!(10));
@@ -1584,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn prefill_reuses_values_through_churn() {
+    fn test_prefill_reuses_values_through_churn() {
         // Prefill allocates every value once. Policy churn must keep reusing
         // those same stable slots without invoking the factory again.
         let mut makes = 0usize;
@@ -1605,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_retain_and_clear_repair_resident_state() {
+    fn test_remove_retain_and_clear_repair_resident_state() {
         // Exercise removal from Main and Ghost, then prove a removed Ghost key
         // returns as cold instead of receiving stale Main admission.
         let mut cache = TestCache::new(NZUsize!(20));
@@ -1643,7 +1671,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_hits_are_concurrent() {
+    fn test_shared_hits_are_concurrent() {
         // Shared lookups race only on the relaxed per-slot reference bit. The
         // accumulated hit must still protect key 1 on the next insertion.
         let mut cache = TestCache::new(NZUsize!(40));
@@ -1677,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn fallible_factory_error_leaves_policy_unchanged() {
+    fn test_fallible_factory_error_leaves_policy_unchanged() {
         // Key 1 is in Ghost. A failed factory must return before policy
         // insertion consumes that evidence or changes resident topology.
         let mut cache = TestCache::new(NZUsize!(2));
@@ -1697,7 +1725,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn pure_accesses_match_queue_level_reference(
+        fn test_pure_accesses_match_queue_level_reference(
             capacity in 1usize..33,
             accesses in prop::collection::vec(0u8..64, 0..400),
         ) {
@@ -1722,7 +1750,7 @@ mod tests {
         }
 
         #[test]
-        fn mutations_match_queue_level_reference(
+        fn test_mutations_match_queue_level_reference(
             capacity in 1usize..33,
             operations in prop::collection::vec(reference_op_strategy(), 0..400),
         ) {
@@ -1730,7 +1758,7 @@ mod tests {
             let mut reference = ReferenceClock2QPlus::new(capacity);
 
             // Removal and retention must not rewind monotonic correlation age
-            // or disturb the Main hand and Ghost FIFO.
+            // or disturb the Main hand and Ghost queue.
             for operation in operations {
                 match operation {
                     ReferenceOp::Access(key) => {
@@ -1762,7 +1790,7 @@ mod tests {
         }
 
         #[test]
-        fn arbitrary_operations_preserve_invariants(
+        fn test_arbitrary_operations_preserve_invariants(
             capacity in 1usize..17,
             operations in prop::collection::vec((0u8..8, 0u8..24, any::<u16>()), 0..300),
         ) {
