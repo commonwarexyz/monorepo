@@ -141,8 +141,9 @@
 //! 2. Cancellation SQEs for timed-out or drop-cancelled requests.
 //! 3. Staged-queue requests, until SQ capacity is hit.
 //!
-//! When the waiter slab is full, op futures park on a capacity wait list and are all
-//! woken whenever a slot frees (a woken future re-registers if it loses the race).
+//! When the waiter slab is full, op futures park on a FIFO capacity wait list. Each freed
+//! slot is reserved for the oldest queued admission until that task consumes or cancels
+//! its grant. Fresh submissions cannot barge ahead of queued or granted admissions.
 //!
 //! ## Wake Handling
 //!
@@ -170,11 +171,11 @@
 //! ## Liveness Model
 //!
 //! This loop enforces a configured upper bound on in-flight requests. New submissions
-//! park on a capacity wait list when the slab is full. Freeing a slot wakes every
-//! parked admission at once and losers re-register, so ordering among admissions is
-//! unspecified (a fresh submission may barge ahead of a long-parked one), and
-//! already-admitted requests may be restaged ahead of fresh admissions according to
-//! the submission policy above.
+//! park on a FIFO capacity wait list when the slab is full. Freeing slots grants them
+//! to queued admissions in order, and each grant stays reserved until its owner polls
+//! or cancels. Fresh submissions cannot consume capacity reserved for older attempts.
+//! Already-admitted requests may still be restaged ahead of fresh admissions according
+//! to the submission policy above.
 //!
 //! This implies a bounded-liveness caveat: if all in-flight requests are waiting on operations
 //! that are still queued behind the capacity limit, the loop cannot make progress until some

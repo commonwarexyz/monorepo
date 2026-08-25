@@ -24,6 +24,34 @@
 //! through the [OrphanMailbox] and wound down by the loop on its next turn.
 //! Ring-bound resources may therefore be dropped from any thread, even
 //! though they must only be used on their owning worker.
+//!
+//! Capacity and terminal ownership move through these states:
+//!
+//! ```text
+//! full waiter slab
+//!       |
+//!       v
+//! Queued CapacityId --slot freed--> Granted CapacityId
+//!       |                                  |
+//!       | drop                             | owner repolls
+//!       v                                  v
+//!     Free <-------------------------- waiter owns request
+//!                                          |
+//!                    +---------------------+---------------------+
+//!                    |                                           |
+//!                 Op Ready                               Ticket Pending
+//!                    |                                           |
+//!                    v                                           v
+//!             recycle waiter                    publish Ticket Ready
+//!                                                        |
+//!                                                        v
+//!                                                 recycle waiter
+//! ```
+//!
+//! Every state transition completes while [Ops] is borrowed. Stored waker
+//! drops and callbacks are detached into [WakerAction] values, then processed
+//! after releasing that borrow. This lets callback panics propagate without
+//! exposing partially published capacity or completion state.
 
 use super::{
     Tick,
@@ -120,8 +148,9 @@ pub(crate) struct Ops {
     pub(super) backlog: VecDeque<WaiterId>,
     /// Waiter ids needing an async-cancel SQE.
     pub(super) pending_cancels: VecDeque<WaiterId>,
-    /// Wheel ticks released by dropped tickets, awaiting removal by the loop
-    /// (the timeout wheel is loop-owned, so drop paths cannot touch it).
+    /// Wheel ticks released by dropped observers, including ordinary op
+    /// futures and detached tickets, awaiting removal by the loop. The timeout
+    /// wheel is loop-owned, so drop paths cannot touch it.
     pub(super) released_deadlines: Vec<Tick>,
     /// FIFO of tasks waiting for a free waiter slot, including grants reserved
     /// for tasks that have been woken but have not repolled yet.
@@ -144,17 +173,22 @@ impl Ops {
 pub(super) enum WakerAction {
     /// Drop a stored waker after its owner state is disarmed.
     Drop(Waker),
+    /// Resume a panic caught while committing owner state.
+    Panic(Box<dyn std::any::Any + Send>),
     /// Invoke a waker after the state change it observes is committed.
     Wake(Waker),
 }
 
 /// Append-only destination for detached capacity waker actions.
 ///
-/// The driver uses its reusable action vector. Future poll and drop paths use
-/// a fixed batch because one state transition can drop at most one stored
-/// waker and transfer at most one permit.
+/// The driver uses its reusable action vector. Future poll and drop paths keep
+/// the ordinary one or two actions inline and allocate only when adversarial
+/// callbacks force a larger recovery batch.
 pub(super) trait CapacityActionSink {
+    /// Ensure room for actions that must be recorded after a state transition.
     fn reserve(&mut self, additional: usize);
+
+    /// Append one action whose callback must run after owner state is released.
     fn push(&mut self, action: WakerAction);
 }
 
@@ -168,47 +202,64 @@ impl CapacityActionSink for Vec<WakerAction> {
     }
 }
 
-/// Allocation-free waker batch for one capacity transition.
+/// Deferred actions produced by one capacity transition.
+///
+/// Ordinary admission, cancellation, and grant paths produce at most two
+/// actions, so they remain allocation-free. A clone-panicking FIFO head can
+/// produce an additional recovery action while reconciliation continues, and
+/// only that adversarial overflow uses the heap.
 pub(super) struct CapacityActions {
-    actions: [Option<WakerAction>; 2],
-    len: usize,
+    /// Allocation-free storage for the ordinary action count.
+    inline: [Option<WakerAction>; 2],
+    /// Number of initialized entries at the start of `inline`.
+    inline_len: usize,
+    /// Actions beyond the ordinary two-action bound.
+    overflow: Vec<WakerAction>,
 }
 
 impl CapacityActions {
+    /// Construct an empty batch without allocating.
     pub(super) const fn new() -> Self {
         Self {
-            actions: [None, None],
-            len: 0,
+            inline: [None, None],
+            inline_len: 0,
+            overflow: Vec::new(),
         }
     }
 }
 
 impl CapacityActionSink for CapacityActions {
     fn reserve(&mut self, additional: usize) {
-        assert!(
-            self.len + additional <= self.actions.len(),
-            "capacity action batch overflow"
-        );
+        let inline_available = self.inline.len() - self.inline_len;
+        self.overflow
+            .reserve(additional.saturating_sub(inline_available));
     }
 
     fn push(&mut self, action: WakerAction) {
         self.reserve(1);
-        self.actions[self.len] = Some(action);
-        self.len += 1;
+        if self.inline_len < self.inline.len() {
+            self.inline[self.inline_len] = Some(action);
+            self.inline_len += 1;
+        } else {
+            self.overflow.push(action);
+        }
     }
 }
 
 impl IntoIterator for CapacityActions {
     type Item = WakerAction;
-    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<WakerAction>, 2>>;
+    type IntoIter = std::iter::Chain<
+        std::iter::Flatten<std::array::IntoIter<Option<WakerAction>, 2>>,
+        std::vec::IntoIter<WakerAction>,
+    >;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.actions.into_iter().flatten()
+        self.inline.into_iter().flatten().chain(self.overflow)
     }
 }
 
-/// Run every detached waker action, then resume the first panic if any action
-/// panicked.
+/// Run every detached waker action, then resume the earliest state panic or,
+/// if none was recorded, the earliest callback panic.
 ///
 /// Capacity state changes are committed before their wakers leave [Ops]. A
 /// panic from an earlier callback must therefore not strand later callbacks
@@ -216,23 +267,52 @@ impl IntoIterator for CapacityActions {
 /// user RawWaker code on drop, so their destruction follows the same ordering
 /// and unwind isolation.
 pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
-    let mut first_panic = None;
+    let mut first_state_panic = None;
+    let mut first_callback_panic = None;
     for action in actions {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || match action {
-            WakerAction::Drop(waker) => drop(waker),
-            WakerAction::Wake(waker) => waker.wake(),
-        }));
-        if let Err(payload) = result {
-            if first_panic.is_none() {
-                first_panic = Some(payload);
-            } else {
-                // Dropping an adversarial secondary payload could panic and
-                // prevent the remaining actions from running.
-                std::mem::forget(payload);
+        match action {
+            WakerAction::Panic(payload) => {
+                if first_state_panic.is_none() {
+                    first_state_panic = Some(payload);
+                } else {
+                    // Dropping an adversarial secondary payload could panic
+                    // and prevent the remaining callbacks from running.
+                    std::mem::forget(payload);
+                }
+            }
+            WakerAction::Drop(waker) => {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    drop(waker);
+                }));
+                if let Err(payload) = result {
+                    if first_callback_panic.is_none() {
+                        first_callback_panic = Some(payload);
+                    } else {
+                        std::mem::forget(payload);
+                    }
+                }
+            }
+            WakerAction::Wake(waker) => {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    waker.wake();
+                }));
+                if let Err(payload) = result {
+                    if first_callback_panic.is_none() {
+                        first_callback_panic = Some(payload);
+                    } else {
+                        std::mem::forget(payload);
+                    }
+                }
             }
         }
     }
-    if let Some(payload) = first_panic {
+    if let Some(payload) = first_state_panic {
+        if let Some(callback_payload) = first_callback_panic {
+            std::mem::forget(callback_payload);
+        }
+        std::panic::resume_unwind(payload);
+    }
+    if let Some(payload) = first_callback_panic {
         std::panic::resume_unwind(payload);
     }
 }
@@ -246,50 +326,98 @@ pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
 /// their allocation, keeping polling allocation-free after the arena and
 /// action-vector high-water marks.
 pub(super) struct CapacityWaiters {
+    /// Generational arena holding live registrations and recyclable slots.
     nodes: Vec<CapacityNode>,
+    /// Oldest queued registration, or `None` when the FIFO is empty.
     head: Option<usize>,
+    /// Newest queued registration, or `None` when the FIFO is empty.
     tail: Option<usize>,
+    /// Head of the singly linked recyclable-slot list.
     free: Option<usize>,
     /// Number of live [CapacityState::Granted] nodes.
     reserved: usize,
-    /// Reusable clone buffer for transactional FIFO grant publication.
-    scratch_wakes: Vec<Waker>,
 }
 
 /// Generation-validated registration in [CapacityWaiters].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CapacityId {
+    /// Arena slot containing this registration.
     index: usize,
+    /// Slot generation captured when the registration was created.
     generation: u64,
 }
 
+/// One slot in the capacity registration arena.
 struct CapacityNode {
+    /// Generation incremented whenever a live registration is removed.
     generation: u64,
+    /// Current ownership and linkage of the slot.
     state: CapacityState,
 }
 
+/// Lifecycle of one capacity arena slot.
 enum CapacityState {
+    /// Recyclable slot not owned by an admission attempt.
     Free {
+        /// Next recyclable arena slot.
         next: Option<usize>,
     },
+    /// Live registration waiting in the intrusive FIFO.
     Queued {
+        /// Older queued registration.
         prev: Option<usize>,
+        /// Newer queued registration.
         next: Option<usize>,
+        /// Owner waker retained until grant, cancellation, or close.
         waker: Waker,
     },
+    /// Live registration holding one reserved waiter-table slot.
     Granted {
+        /// Owner waker retained until the grant is consumed or cancelled.
         waker: Waker,
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Result of one atomic capacity-admission transition.
+///
+/// Successful variants carry the observer waker cloned before the transition
+/// consumed either a direct free slot or a reserved grant. The caller can then
+/// publish the waiter and retain the observer without a second external clone.
 enum CapacityAdmission {
-    Direct,
-    Granted,
+    /// Admit directly from an unreserved authoritative free slot.
+    Direct(Waker),
+    /// Consume the caller's previously reserved FIFO grant.
+    Granted(Waker),
+    /// Keep or create a FIFO registration and wait for a grant.
     Queued,
 }
 
+/// Payload-free admission result used by capacity state-machine tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CapacityAdmissionKind {
+    /// The poll admitted directly from a free slot.
+    Direct,
+    /// The poll consumed a reserved grant.
+    Granted,
+    /// The poll remains registered in the FIFO.
+    Queued,
+}
+
+#[cfg(test)]
+impl CapacityAdmission {
+    /// Return the payload-free result for state-machine assertions.
+    const fn kind(&self) -> CapacityAdmissionKind {
+        match self {
+            Self::Direct(_) => CapacityAdmissionKind::Direct,
+            Self::Granted(_) => CapacityAdmissionKind::Granted,
+            Self::Queued => CapacityAdmissionKind::Queued,
+        }
+    }
+}
+
 impl CapacityWaiters {
+    /// Construct an empty FIFO and arena without allocating.
     const fn new() -> Self {
         Self {
             nodes: Vec::new(),
@@ -297,21 +425,6 @@ impl CapacityWaiters {
             tail: None,
             free: None,
             reserved: 0,
-            scratch_wakes: Vec::new(),
-        }
-    }
-
-    /// Return whether this poll can consume capacity without queue mutation.
-    fn can_admit(&self, registration: Option<CapacityId>, free_len: usize) -> bool {
-        assert!(
-            self.reserved <= free_len,
-            "capacity reservations exceed waiter free slots"
-        );
-        match registration.and_then(|id| self.live_state(id)) {
-            Some(CapacityState::Granted { .. }) => true,
-            Some(CapacityState::Queued { .. }) => false,
-            Some(CapacityState::Free { .. }) => unreachable!("free capacity node reported live"),
-            None => self.head.is_none() && self.reserved < free_len,
         }
     }
 
@@ -349,8 +462,11 @@ impl CapacityWaiters {
                     return CapacityAdmission::Queued;
                 }
                 CapacityState::Granted { .. } => {
+                    // Clone the observer before consuming the reservation. A
+                    // RawWaker panic must leave the grant available to retry.
                     actions.reserve(1);
-                    let CapacityState::Granted { waker } = self
+                    let observer = waker.clone();
+                    let CapacityState::Granted { waker: stored } = self
                         .take_live(id)
                         .expect("validated capacity grant disappeared")
                     else {
@@ -361,15 +477,15 @@ impl CapacityWaiters {
                         .checked_sub(1)
                         .expect("capacity reservation underflow");
                     *registration = None;
-                    actions.push(WakerAction::Drop(waker));
-                    return CapacityAdmission::Granted;
+                    actions.push(WakerAction::Drop(stored));
+                    return CapacityAdmission::Granted(observer);
                 }
                 CapacityState::Free { .. } => unreachable!("free capacity node reported live"),
             }
         }
 
         if self.head.is_none() && self.reserved < free_len {
-            return CapacityAdmission::Direct;
+            return CapacityAdmission::Direct(waker.clone());
         }
 
         let id = self.push_back(waker.clone());
@@ -413,89 +529,82 @@ impl CapacityWaiters {
         }
     }
 
-    /// Reserve authoritative free slots for FIFO heads and collect their wakes.
+    /// Reserve authoritative free slots for FIFO heads and defer their effects.
+    ///
+    /// Heads are processed individually so each successful clone is followed
+    /// immediately by the matching `Queued` to `Granted` transition. A panic
+    /// from externally controlled `RawWaker::clone` generation-removes only
+    /// that head, defers both its stored wake and the panic, then continues
+    /// granting every authoritative free slot. The caller runs the resulting
+    /// callbacks before [wake_batch] resumes the earliest recorded state panic.
     pub(super) fn reconcile(&mut self, free_len: usize, actions: &mut impl CapacityActionSink) {
         assert!(
             self.reserved <= free_len,
             "capacity reservations exceed waiter free slots"
         );
-        let mut grants = 0;
-        let mut cursor = self.head;
-        while grants < free_len - self.reserved {
-            let Some(index) = cursor else {
+        while self.reserved < free_len {
+            let Some(index) = self.head else {
                 break;
             };
-            let CapacityState::Queued { next, .. } = &self.nodes[index].state else {
-                panic!("capacity FIFO contains a non-queued node")
+            // Reserve before cloning so the successful transition cannot be
+            // followed by action-buffer growth while it is half-published.
+            actions.reserve(1);
+            let clone = {
+                let CapacityState::Queued { waker, .. } = &self.nodes[index].state else {
+                    panic!("capacity FIFO contains a non-queued node")
+                };
+                // RawWaker clone is the only externally controlled operation
+                // in this state transition, so isolate it before mutation.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.clone()))
             };
-            cursor = *next;
-            grants += 1;
-        }
-        actions.reserve(grants);
-        assert!(self.scratch_wakes.is_empty());
-        self.scratch_wakes.reserve(grants);
-        let mut cursor = self.head;
-        for _ in 0..grants {
-            let index = cursor.expect("counted capacity FIFO head disappeared");
-            let CapacityState::Queued { next, waker, .. } = &self.nodes[index].state else {
-                panic!("capacity FIFO contains a non-queued node")
-            };
-            let clone = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.clone()));
-            match clone {
-                Ok(waker) => self.scratch_wakes.push(waker),
-                Err(payload) => {
-                    while let Some(waker) = self.scratch_wakes.pop() {
-                        if let Err(drop_payload) =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)))
-                        {
-                            // Preserve the clone panic without allowing an
-                            // adversarial cleanup payload to replace it.
-                            std::mem::forget(drop_payload);
-                        }
-                    }
-                    std::panic::resume_unwind(payload);
-                }
-            }
-            cursor = *next;
-        }
 
-        // Pop cloned wakes in FIFO order only after the complete prefix is
-        // clone-safe. No externally controlled callback can interrupt commit.
-        self.scratch_wakes.reverse();
-        for _ in 0..grants {
-            let Some(index) = self.head else {
-                unreachable!("counted capacity FIFO head disappeared")
-            };
-            let wake = self
-                .scratch_wakes
-                .pop()
-                .expect("capacity wake clone disappeared before commit");
-            let CapacityState::Queued { next, waker, .. } = std::mem::replace(
-                &mut self.nodes[index].state,
-                CapacityState::Free { next: None },
-            ) else {
-                unreachable!("capacity FIFO head changed state")
-            };
-            self.head = next;
-            match next {
-                Some(next) => {
-                    let CapacityState::Queued { prev, .. } = &mut self.nodes[next].state else {
-                        panic!("capacity FIFO successor is not queued")
+            match clone {
+                Ok(wake) => {
+                    let CapacityState::Queued { prev, next, waker } = std::mem::replace(
+                        &mut self.nodes[index].state,
+                        CapacityState::Free { next: None },
+                    ) else {
+                        unreachable!("capacity FIFO head changed state")
                     };
-                    *prev = None;
+                    assert!(prev.is_none(), "capacity FIFO head has a predecessor");
+                    self.unlink(prev, next);
+                    // Preserve the registration generation while changing the
+                    // FIFO head into its owner-only reserved state.
+                    self.nodes[index].state = CapacityState::Granted { waker };
+                    self.reserved += 1;
+                    actions.push(WakerAction::Wake(wake));
                 }
-                None => self.tail = None,
+                Err(payload) => {
+                    // The head can no longer be granted through its stored
+                    // waker. Generation-remove it, wake its owner to obtain a
+                    // fresh registration, and keep granting from the same
+                    // authoritative free-slot count before resuming the panic.
+                    actions.reserve(2);
+                    let id = CapacityId {
+                        index,
+                        generation: self.nodes[index].generation,
+                    };
+                    let CapacityState::Queued { prev, next, waker } = self
+                        .take_live(id)
+                        .expect("capacity FIFO head disappeared after clone panic")
+                    else {
+                        unreachable!("capacity FIFO head changed state after clone panic")
+                    };
+                    assert!(prev.is_none(), "capacity FIFO head has a predecessor");
+                    self.unlink(prev, next);
+                    actions.push(WakerAction::Wake(waker));
+                    actions.push(WakerAction::Panic(payload));
+                }
             }
-            self.nodes[index].state = CapacityState::Granted { waker };
-            self.reserved += 1;
-            actions.push(WakerAction::Wake(wake));
         }
-        assert!(self.scratch_wakes.is_empty());
     }
 
     /// Invalidate every live registration and return all stored wakers.
     fn close(&mut self) -> Vec<Waker> {
-        let mut wakers = Vec::with_capacity(self.registered());
+        // The arena retains its high-water mark, which can greatly exceed the
+        // live set after cancellation churn. Grow only for live wakers during
+        // this one-time shutdown path instead of reserving for recycled slots.
+        let mut wakers = Vec::new();
         self.head = None;
         self.tail = None;
         self.free = None;
@@ -519,6 +628,7 @@ impl CapacityWaiters {
         wakers
     }
 
+    /// Return the live state identified by an exact slot generation.
     fn live_state(&self, id: CapacityId) -> Option<&CapacityState> {
         let node = self.nodes.get(id.index)?;
         if node.generation != id.generation || matches!(node.state, CapacityState::Free { .. }) {
@@ -527,6 +637,7 @@ impl CapacityWaiters {
         Some(&node.state)
     }
 
+    /// Generation-remove a live registration and recycle its arena slot.
     fn take_live(&mut self, id: CapacityId) -> Option<CapacityState> {
         let node = self.nodes.get_mut(id.index)?;
         if node.generation != id.generation || matches!(node.state, CapacityState::Free { .. }) {
@@ -542,6 +653,7 @@ impl CapacityWaiters {
         Some(state)
     }
 
+    /// Append a new registration to the FIFO, reusing an arena slot if possible.
     fn push_back(&mut self, waker: Waker) -> CapacityId {
         let index = match self.free {
             Some(index) => {
@@ -582,6 +694,7 @@ impl CapacityWaiters {
         id
     }
 
+    /// Remove a queued node between `prev` and `next` from the intrusive FIFO.
     fn unlink(&mut self, prev: Option<usize>, next: Option<usize>) {
         match prev {
             Some(prev) => {
@@ -611,6 +724,7 @@ impl CapacityWaiters {
     }
 
     /// Number of live registrations.
+    #[cfg(test)]
     pub(super) fn registered(&self) -> usize {
         self.nodes
             .iter()
@@ -618,6 +732,7 @@ impl CapacityWaiters {
             .count()
     }
 
+    /// Number of registrations still waiting in the FIFO.
     #[cfg(test)]
     pub(super) fn queued(&self) -> usize {
         self.nodes
@@ -626,6 +741,7 @@ impl CapacityWaiters {
             .count()
     }
 
+    /// Number of waiter-table slots reserved for granted registrations.
     #[cfg(test)]
     pub(super) const fn reserved(&self) -> usize {
         self.reserved
@@ -642,15 +758,20 @@ impl CapacityWaiters {
 ///
 /// The slot is cleared on admission or closed-driver resolution (inside the
 /// admission poll) and cancelled when the attempt is dropped while parked. A
-/// foreign-thread drop cannot clear its slot (drop must not panic), so the
-/// entry is discarded by the next drain, consistent with the documented
-/// policy that op futures must not move to other threads.
+/// foreign-thread drop cannot touch the thread-affine arena, so it transfers
+/// the generation-tagged ID through [OrphanMailbox]. The loop cancels that ID
+/// and transfers any released permit on its next turn. A generation removed
+/// during clone-panic recovery is already cancelled, so a later owner or
+/// mailbox drop is a no-op.
 struct Registration<'a> {
+    /// Affine driver state and cross-thread orphan mailbox.
     handle: &'a Handle,
+    /// Live capacity registration, if the admission is queued or granted.
     slot: Option<CapacityId>,
 }
 
 impl<'a> Registration<'a> {
+    /// Construct an unregistered guard for one admission future.
     const fn new(handle: &'a Handle) -> Self {
         Self { handle, slot: None }
     }
@@ -977,27 +1098,17 @@ fn poll_admission(
             }
             return Admission::Closed;
         }
-        // Clone the observer before a grant is consumed. An adversarial
-        // RawWaker clone panic must leave the CapacityId and reservation live
-        // so the same admission can retry without losing its FIFO permit.
-        let observer_waker = ops
-            .capacity
-            .can_admit(registration.slot, ops.waiters.free_len())
-            .then(|| cx.waker().clone());
-        match ops.capacity.poll(
+        let observer_waker = match ops.capacity.poll(
             &mut registration.slot,
             ops.waiters.free_len(),
             cx.waker(),
             &mut actions,
         ) {
             CapacityAdmission::Queued => return Admission::Full,
-            CapacityAdmission::Direct | CapacityAdmission::Granted => {}
-        }
+            CapacityAdmission::Direct(waker) | CapacityAdmission::Granted(waker) => waker,
+        };
         let request = request.take().expect("request consumed before admission");
-        let id = ops.waiters.insert(
-            request,
-            observer_waker.expect("admission missing precloned observer waker"),
-        );
+        let id = ops.waiters.insert(request, observer_waker);
         assert!(ops.capacity.reserved <= ops.waiters.free_len());
         ops.backlog.push_back(id);
         Admission::Admitted(id)
@@ -1033,25 +1144,21 @@ fn poll_ticket_admission(
             }
             return TicketAdmission::Closed;
         }
-        let observer_waker = ops
-            .capacity
-            .can_admit(registration.slot, ops.waiters.free_len())
-            .then(|| cx.waker().clone());
-        match ops.capacity.poll(
+        let observer_waker = match ops.capacity.poll(
             &mut registration.slot,
             ops.waiters.free_len(),
             cx.waker(),
             &mut actions,
         ) {
             CapacityAdmission::Queued => return TicketAdmission::Full,
-            CapacityAdmission::Direct | CapacityAdmission::Granted => {}
-        }
+            CapacityAdmission::Direct(waker) | CapacityAdmission::Granted(waker) => waker,
+        };
         let request = request.take().expect("request consumed before admission");
         let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
-        let (completion_id, waiter_id) = completions.insert_pending(
-            observer_waker.expect("ticket admission missing precloned observer waker"),
-            |completion_id| waiters.insert_ticket(request, completion_id),
-        );
+        let (completion_id, waiter_id) = completions
+            .insert_pending(observer_waker, |completion_id| {
+                waiters.insert_ticket(request, completion_id)
+            });
         assert!(ops.capacity.reserved <= ops.waiters.free_len());
         ops.backlog.push_back(waiter_id);
         TicketAdmission::Admitted(completion_id)
@@ -1069,22 +1176,12 @@ fn poll_ticket_admission(
 
 /// Poll for the parked result of an admitted request.
 ///
-/// Taking a result frees a slot, so capacity waiters are released (outside
-/// the state borrow). A pending poll refreshes the stored task waker.
-fn poll_op_completion(
-    handle: &Handle,
-    id: WaiterId,
-    cx: &mut Context<'_>,
-) -> Poll<(Output, CapacityActions)> {
-    let (output, actions) = handle.with(|ops| {
-        let mut actions = CapacityActions::new();
-        let output = ops.waiters.poll_take(id, cx.waker());
-        if output.is_some() {
-            ops.capacity.reconcile(ops.waiters.free_len(), &mut actions);
-        }
-        (output, actions)
-    });
-    output.map_or(Poll::Pending, |output| Poll::Ready((output, actions)))
+/// A pending poll refreshes the stored task waker. Taking a result frees its
+/// slot, but the caller reconciles capacity only after publishing local Done.
+fn poll_op_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<Output> {
+    handle
+        .with(|ops| ops.waiters.poll_take(id, cx.waker()))
+        .map_or(Poll::Pending, Poll::Ready)
 }
 
 /// Poll a detached ticket's completion entry.
@@ -1189,7 +1286,8 @@ enum TicketAdmission {
 enum OpState {
     /// Not yet admitted: the future still owns the request and its buffers.
     Queued(Option<Request>),
-    /// Admitted: the slot owns the request, the future holds the reservation.
+    /// Admitted: the waiter slot owns the request. Any capacity registration
+    /// or reserved grant was consumed and cleared before entering this state.
     Waiting(WaiterId),
     /// The output was delivered.
     Done,
@@ -1210,6 +1308,7 @@ struct Op<'a> {
 }
 
 impl<'a> Op<'a> {
+    /// Construct a queued op whose future owns `request` until admission.
     const fn new(handle: &'a Handle, request: Request) -> Self {
         Self {
             handle,
@@ -1249,8 +1348,13 @@ impl Future for Op<'_> {
                 }
             }
             OpState::Waiting(id) => {
-                let (output, actions) = std::task::ready!(poll_op_completion(this.handle, *id, cx));
+                let output = std::task::ready!(poll_op_completion(this.handle, *id, cx));
                 this.state = OpState::Done;
+                let actions = this.handle.with(|ops| {
+                    let mut actions = CapacityActions::new();
+                    ops.capacity.reconcile(ops.waiters.free_len(), &mut actions);
+                    actions
+                });
                 wake_batch(actions);
                 Poll::Ready(output)
             }
@@ -1296,7 +1400,11 @@ struct Ticket {
 }
 
 impl Ticket {
-    /// Admit `request`, parking on slab capacity, and return the reservation.
+    /// Admit `request`, parking on waiter capacity, and return its detached
+    /// completion ticket.
+    ///
+    /// After admission the ticket retains only its completion ID, not a
+    /// capacity registration or reserved grant.
     async fn admit(handle: &Handle, request: Request) -> Self {
         let mut request = Some(request);
         // The guard lives outside the poll closure so cancelling this future
@@ -1442,11 +1550,11 @@ mod tests {
         registration: &mut Option<CapacityId>,
         free_len: usize,
         waker: &Waker,
-    ) -> CapacityAdmission {
+    ) -> CapacityAdmissionKind {
         let mut actions = Vec::new();
         let admission = capacity.poll(registration, free_len, waker, &mut actions);
         wake_batch(actions);
-        admission
+        admission.kind()
     }
 
     fn reconcile_capacity(capacity: &mut CapacityWaiters, free_len: usize) {
@@ -1482,11 +1590,11 @@ mod tests {
 
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[0], 0, &wakers[0]),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[1], 0, &wakers[1]),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         reconcile_capacity(&mut capacity, 1);
         assert_eq!(capacity.reserved(), 1);
@@ -1495,12 +1603,12 @@ mod tests {
         // joins behind the remaining queued waiter instead of taking it.
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[2], 1, &wakers[2]),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         assert_eq!(capacity.queued(), 2);
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[0], 1, &wakers[0]),
-            CapacityAdmission::Granted
+            CapacityAdmissionKind::Granted
         );
 
         // Simulate insertion consuming the free waiter, then two terminal
@@ -1508,12 +1616,12 @@ mod tests {
         reconcile_capacity(&mut capacity, 1);
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[1], 1, &wakers[1]),
-            CapacityAdmission::Granted
+            CapacityAdmissionKind::Granted
         );
         reconcile_capacity(&mut capacity, 1);
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[2], 1, &wakers[2]),
-            CapacityAdmission::Granted
+            CapacityAdmissionKind::Granted
         );
         assert_eq!(*log.lock(), vec![0, 1, 2]);
         assert_eq!(capacity.registered(), 0);
@@ -1531,7 +1639,7 @@ mod tests {
         for (registration, waker) in registrations.iter_mut().zip(&wakers) {
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 0, waker),
-                CapacityAdmission::Queued
+                CapacityAdmissionKind::Queued
             );
         }
 
@@ -1559,51 +1667,83 @@ mod tests {
         noop_drop,
     );
 
+    /// Clone-panic recovery removes one generation and continues FIFO grants.
     #[test]
-    fn test_capacity_reconcile_second_clone_panic_is_transactional() {
+    fn test_capacity_reconcile_clone_panic_removes_head_and_grants_next() {
         let clone_count = AtomicUsize::new(0);
         // SAFETY: clone_count outlives the original waker, the capacity arena,
         // and every clone. The vtable treats its pointer as an AtomicUsize.
-        let second_waker = unsafe {
+        let first_waker = unsafe {
             Waker::from_raw(RawWaker::new(
                 std::ptr::from_ref(&clone_count).cast(),
                 &PANIC_ON_SECOND_CLONE_VTABLE,
             ))
         };
         let mut capacity = CapacityWaiters::new();
-        let first_waker = futures::task::noop_waker();
+        let second_flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+        let second_waker = arc_waker(Arc::clone(&second_flag));
         let mut first = None;
         let mut second = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut first, 0, &first_waker),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         assert_eq!(
             poll_capacity(&mut capacity, &mut second, 0, &second_waker),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
 
-        let mut actions = Vec::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            capacity.reconcile(2, &mut actions);
-        }));
-        assert!(result.is_err());
-        assert!(actions.is_empty());
+        let stale = first.expect("first registration missing");
+        let second_id = second.expect("second registration missing");
+        let mut actions = CapacityActions::new();
+        capacity.reconcile(1, &mut actions);
+        assert_eq!(actions.inline_len, 2);
+        assert_eq!(actions.overflow.len(), 1);
+        assert!(capacity.live_state(stale).is_none());
+        assert_eq!(
+            capacity.nodes[stale.index].generation,
+            stale.generation.checked_add(1).unwrap()
+        );
         assert!(matches!(
-            capacity.live_state(first.unwrap()),
-            Some(CapacityState::Queued { .. })
+            capacity.live_state(second_id),
+            Some(CapacityState::Granted { .. })
         ));
-        assert!(matches!(
-            capacity.live_state(second.unwrap()),
-            Some(CapacityState::Queued { .. })
-        ));
-        assert_eq!(capacity.reserved(), 0);
-        assert_eq!(capacity.queued(), 2);
-
-        capacity.reconcile(2, &mut actions);
-        wake_batch(actions);
-        assert_eq!(capacity.reserved(), 2);
+        assert_eq!(capacity.reserved(), 1);
         assert_eq!(capacity.queued(), 0);
+        assert_eq!(capacity.registered(), 1);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wake_batch(actions);
+        }));
+        let payload = result.expect_err("clone panic was not resumed");
+        assert_eq!(
+            payload.downcast_ref::<&'static str>(),
+            Some(&"second waker clone panic")
+        );
+        assert!(second_flag.0.load(Ordering::Acquire));
+        assert_eq!(clone_count.load(Ordering::Acquire), 2);
+
+        // Repolling the generation-removed head cannot barge ahead of the
+        // already granted successor. It receives a fresh generation and
+        // queues behind that reservation.
+        assert_eq!(
+            poll_capacity(&mut capacity, &mut first, 1, &first_waker),
+            CapacityAdmissionKind::Queued
+        );
+        let current = first.expect("first registration was not refreshed");
+        assert_eq!(current.index, stale.index);
+        assert_ne!(current.generation, stale.generation);
+        assert_eq!(capacity.reserved(), 1);
+        assert_eq!(capacity.queued(), 1);
+        assert_eq!(capacity.registered(), 2);
+
+        assert_eq!(
+            poll_capacity(&mut capacity, &mut second, 1, &second_waker),
+            CapacityAdmissionKind::Granted
+        );
+        cancel_capacity(&mut capacity, current, 0);
+        assert_eq!(capacity.registered(), 0);
+        assert_eq!(capacity.reserved(), 0);
     }
 
     #[test]
@@ -1616,11 +1756,11 @@ mod tests {
         let mut second = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut first, 0, &first_waker),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         assert_eq!(
             poll_capacity(&mut capacity, &mut second, 0, &second_waker),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
 
         reconcile_capacity(&mut capacity, 1);
@@ -1631,7 +1771,7 @@ mod tests {
         assert_eq!(capacity.registered(), 1);
         assert_eq!(
             poll_capacity(&mut capacity, &mut second, 1, &second_waker),
-            CapacityAdmission::Granted
+            CapacityAdmissionKind::Granted
         );
     }
 
@@ -1646,7 +1786,7 @@ mod tests {
         for (registration, waker) in registrations.iter_mut().zip(&wakers) {
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 0, waker),
-                CapacityAdmission::Queued
+                CapacityAdmissionKind::Queued
             );
         }
 
@@ -1668,7 +1808,7 @@ mod tests {
         let mut old = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut old, 0, &old_waker),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         let stale = old.unwrap();
         cancel_capacity(&mut capacity, stale, 0);
@@ -1676,7 +1816,7 @@ mod tests {
         let mut new = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut new, 0, &new_waker),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         let current = new.unwrap();
         assert_eq!(stale.index, current.index);
@@ -1703,11 +1843,11 @@ mod tests {
         let mut registration = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut registration, 0, &old_waker),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         assert_eq!(
             poll_capacity(&mut capacity, &mut registration, 0, &new_waker),
-            CapacityAdmission::Queued
+            CapacityAdmissionKind::Queued
         );
         assert_eq!(capacity.queued(), 1);
         reconcile_capacity(&mut capacity, 1);
@@ -1726,7 +1866,7 @@ mod tests {
         for (registration, waker) in registrations.iter_mut().zip(&wakers) {
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 0, waker),
-                CapacityAdmission::Queued
+                CapacityAdmissionKind::Queued
             );
         }
         let mut grant_actions = Vec::new();
@@ -1768,7 +1908,7 @@ mod tests {
         for registration in &mut registrations {
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 0, &waker),
-                CapacityAdmission::Queued
+                CapacityAdmissionKind::Queued
             );
         }
 
@@ -1776,7 +1916,7 @@ mod tests {
             reconcile_capacity(&mut capacity, 1);
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 1, &waker),
-                CapacityAdmission::Granted
+                CapacityAdmissionKind::Granted
             );
         }
         assert_eq!(count.0.load(Ordering::Acquire), WAITERS);
@@ -1909,12 +2049,16 @@ mod tests {
         let mut second_registration = None;
         let mut actions = Vec::new();
         assert_eq!(
-            capacity.poll(&mut first_registration, 0, &first_waker, &mut actions),
-            CapacityAdmission::Queued
+            capacity
+                .poll(&mut first_registration, 0, &first_waker, &mut actions)
+                .kind(),
+            CapacityAdmissionKind::Queued
         );
         assert_eq!(
-            capacity.poll(&mut second_registration, 0, &second_waker, &mut actions),
-            CapacityAdmission::Queued
+            capacity
+                .poll(&mut second_registration, 0, &second_waker, &mut actions)
+                .kind(),
+            CapacityAdmissionKind::Queued
         );
         std::mem::forget(first_waker);
         capacity.reconcile(1, &mut actions);
@@ -1931,7 +2075,7 @@ mod tests {
         assert_eq!(capacity.reserved(), 1);
         assert_eq!(
             poll_capacity(&mut capacity, &mut second_registration, 1, &second_waker),
-            CapacityAdmission::Granted
+            CapacityAdmissionKind::Granted
         );
     }
 
@@ -1965,5 +2109,26 @@ mod tests {
         assert!(result.is_err());
         assert!(flag.0.load(Ordering::Acquire));
         std::mem::forget(result.expect_err("wake batch should resume first panic"));
+    }
+
+    /// State panics outrank callback panics after every callback has run.
+    #[test]
+    fn test_wake_batch_state_panic_outranks_callbacks_and_runs_them_all() {
+        let flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+        let actions = [
+            WakerAction::Wake(arc_waker(Arc::new(PayloadPanicWaker))),
+            WakerAction::Panic(Box::new("first state panic")),
+            WakerAction::Wake(arc_waker(Arc::clone(&flag))),
+            WakerAction::Panic(Box::new("second state panic")),
+        ];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wake_batch(actions);
+        }));
+        let payload = result.expect_err("state panic was not resumed");
+        assert_eq!(
+            payload.downcast_ref::<&'static str>(),
+            Some(&"first state panic")
+        );
+        assert!(flag.0.load(Ordering::Acquire));
     }
 }
