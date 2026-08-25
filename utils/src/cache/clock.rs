@@ -48,7 +48,7 @@ impl<K> Policy<K> for Clock {
 
     #[inline]
     fn hit_mut(&mut self, _slot: Slot, state: &mut AtomicBool) {
-        state.store(true, Ordering::Relaxed);
+        *state.get_mut() = true;
     }
 
     #[inline]

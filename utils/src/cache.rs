@@ -362,13 +362,29 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
             return (slot, &mut self.slots[slot].value);
         }
         let mut value = None;
-        let mut make = Some(make);
         let (slot, state) = self.claim_slot(&key, |growing| {
             if growing {
-                value = Some(make.take().expect("value factory must be available")());
+                value = Some(make());
             }
         });
-        self.install(slot, key, state, value);
+        let index_key = key.clone();
+        if slot == self.slots.len() {
+            self.slots.push(Entry {
+                key,
+                value: value.expect("a new slot requires a value"),
+                state,
+                live: true,
+            });
+        } else {
+            let resident = self
+                .slots
+                .get_mut(slot)
+                .expect("policy selected a slot outside the cache");
+            resident.key = key;
+            resident.state = state;
+            resident.live = true;
+        }
+        let _ = self.index.insert(index_key, slot);
         (slot, &mut self.slots[slot].value)
     }
 
@@ -413,30 +429,6 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
         });
     }
 
-    /// Retains resident entries and policy history accepted by `keep`.
-    ///
-    /// This key-only form is useful when nonresident admission history must be
-    /// invalidated by the same predicate as resident entries.
-    pub fn retain_keys<F: FnMut(&K) -> bool>(&mut self, mut keep: F) {
-        let Self {
-            index,
-            slots,
-            free,
-            policy,
-            ..
-        } = self;
-        index.retain(|key, &mut slot| {
-            let keep = keep(key);
-            if !keep {
-                policy.remove(Some(slot), key);
-                slots[slot].live = false;
-                free.push(slot);
-            }
-            keep
-        });
-        policy.retain(keep);
-    }
-
     /// Removes all entries, dropping their values and retaining the allocated
     /// capacity of the index and slot vector.
     pub fn clear(&mut self) {
@@ -449,17 +441,11 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// Inserts `value` for a `key` known to be absent, returning its slot.
     fn insert_value(&mut self, key: K, value: V) -> Slot {
         let (slot, state) = self.claim_slot(&key, |_| {});
-        self.install(slot, key, state, Some(value));
-        slot
-    }
-
-    fn install(&mut self, slot: Slot, key: K, state: P::SlotState, value: Option<V>) {
         let index_key = key.clone();
         if slot == self.slots.len() {
-            debug_assert!(slot < self.capacity, "cache cannot grow beyond capacity");
             self.slots.push(Entry {
                 key,
-                value: value.expect("a new slot requires a value"),
+                value,
                 state,
                 live: true,
             });
@@ -469,14 +455,12 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
                 .get_mut(slot)
                 .expect("policy selected a slot outside the cache");
             resident.key = key;
-            if let Some(value) = value {
-                resident.value = value;
-            }
+            resident.value = value;
             resident.state = state;
             resident.live = true;
         }
-        let replaced = self.index.insert(index_key, slot);
-        debug_assert!(replaced.is_none(), "an incoming key must not be resident");
+        let _ = self.index.insert(index_key, slot);
+        slot
     }
 
     /// Claims storage for an incoming key and returns its slot and initial
@@ -506,7 +490,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
                     let (evicted, indexed_slot) = index
                         .remove_entry(&resident.key)
                         .expect("a live victim must be indexed");
-                    debug_assert_eq!(indexed_slot, slot, "resident index must match its slot");
+                    assert_eq!(indexed_slot, slot, "resident index must match its slot");
                     (slot, Claimed::Evicted(evicted))
                 },
             );
@@ -1024,7 +1008,8 @@ mod tests {
         cache.put(3, 30);
         cache.put(4, 40);
         assert_eq!(cache.policy.history, vec![2, 3]);
-        cache.retain_keys(|key| *key >= 3);
+        cache.retain(|key, _| *key >= 3);
+        cache.policy.retain(|key| *key >= 3);
         assert_eq!(cache.policy.history, vec![3]);
 
         cache.clear();
