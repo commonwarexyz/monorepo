@@ -357,34 +357,25 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// callers can record it in an external index and resolve later reads with
     /// [Self::get_at] instead of a hash lookup.
     pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> (Slot, &mut V) {
-        if let Some(&slot) = self.index.get(&key) {
-            self.policy.hit_mut(slot, &mut self.slots[slot].state);
-            return (slot, &mut self.slots[slot].value);
-        }
-        let mut value = None;
-        let (slot, state) = self.claim_slot(&key, |growing| {
-            if growing {
-                value = Some(make());
+        let slot = match self.index.get(&key) {
+            Some(&slot) => {
+                self.policy.hit_mut(slot, &mut self.slots[slot].state);
+                slot
             }
-        });
-        let index_key = key.clone();
-        if slot == self.slots.len() {
-            self.slots.push(Entry {
-                key,
-                value: value.expect("a new slot requires a value"),
-                state,
-                live: true,
-            });
-        } else {
-            let resident = self
-                .slots
-                .get_mut(slot)
-                .expect("policy selected a slot outside the cache");
-            resident.key = key;
-            resident.state = state;
-            resident.live = true;
-        }
-        let _ = self.index.insert(index_key, slot);
+            None => {
+                let (slot, state) = self.claim_slot(&key);
+                match slot {
+                    Some(slot) => {
+                        self.slots[slot].key = key.clone();
+                        self.slots[slot].state = state;
+                        self.slots[slot].live = true;
+                        self.index.insert(key, slot);
+                        slot
+                    }
+                    None => self.grow(key, make(), state),
+                }
+            }
+        };
         (slot, &mut self.slots[slot].value)
     }
 
@@ -438,34 +429,40 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
         self.policy.clear();
     }
 
-    /// Inserts `value` for a `key` known to be absent, returning its slot.
-    fn insert_value(&mut self, key: K, value: V) -> Slot {
-        let (slot, state) = self.claim_slot(&key, |_| {});
-        let index_key = key.clone();
-        if slot == self.slots.len() {
-            self.slots.push(Entry {
-                key,
-                value,
-                state,
-                live: true,
-            });
-        } else {
-            let resident = self
-                .slots
-                .get_mut(slot)
-                .expect("policy selected a slot outside the cache");
-            resident.key = key;
-            resident.value = value;
-            resident.state = state;
-            resident.live = true;
-        }
-        let _ = self.index.insert(index_key, slot);
+    /// Pushes a brand new slot holding `(key, value)` and returns its index.
+    ///
+    /// Only called while the cache is below capacity.
+    fn grow(&mut self, key: K, value: V, state: P::SlotState) -> Slot {
+        let slot = self.slots.len();
+        self.index.insert(key.clone(), slot);
+        self.slots.push(Entry {
+            key,
+            value,
+            state,
+            live: true,
+        });
         slot
     }
 
-    /// Claims storage for an incoming key and returns its slot and initial
-    /// policy state. `on_claim` runs before the policy observes the result.
-    fn claim_slot<F: FnOnce(bool)>(&mut self, key: &K, on_claim: F) -> (Slot, P::SlotState) {
+    /// Inserts `value` for a `key` known to be absent, returning its slot.
+    fn insert_value(&mut self, key: K, value: V) -> Slot {
+        let (slot, state) = self.claim_slot(&key);
+        match slot {
+            Some(slot) => {
+                self.slots[slot].key = key.clone();
+                self.slots[slot].value = value;
+                self.slots[slot].state = state;
+                self.slots[slot].live = true;
+                self.index.insert(key, slot);
+                slot
+            }
+            None => self.grow(key, value, state),
+        }
+    }
+
+    /// Claims storage for an incoming key and returns a reusable slot and its
+    /// initial policy state. A missing slot means the cache should grow.
+    fn claim_slot(&mut self, key: &K) -> (Option<Slot>, P::SlotState) {
         let Self {
             index,
             slots,
@@ -494,8 +491,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
                     (slot, Claimed::Evicted(evicted))
                 },
             );
-            on_claim(slot == slots.len());
-            claimed_slot = Some(slot);
+            claimed_slot = Some((slot != slots.len()).then_some(slot));
             claimed
         });
         let slot = claimed_slot.expect("policy must claim storage exactly once");
