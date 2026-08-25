@@ -277,9 +277,9 @@ where
                 .map(|(archive, handle)| (Self(Backend::Prunable(archive)), handle))
                 .map_err(Into::into),
             Backend::Immutable(archive) => archive
-                .sync()
+                .start_sync()
                 .await
-                .map(|archive| (Self(Backend::Immutable(archive)), Handle::ready(Ok(()))))
+                .map(|(archive, handle)| (Self(Backend::Immutable(archive)), handle))
                 .map_err(Into::into),
         }
     }

@@ -93,7 +93,7 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+        Blob, Handle, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
             fail_pending_syncs, release_pending_syncs,
@@ -213,6 +213,99 @@ mod tests {
             // and fails, consuming the store, without writing the only durable copy.
             metadata.put(U64::new(1), vec![4]);
             assert!(metadata.start_sync().await.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_after_dependency_failure_fails_next_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                context.child("metadata"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                },
+            )
+            .await
+            .unwrap();
+            metadata.put(U64::new(1), vec![3; 10]);
+            metadata.put(U64::new(2), vec![4; 10]);
+            metadata = metadata.sync().await.unwrap();
+            metadata = metadata.sync().await.unwrap();
+
+            metadata.put(U64::new(1), vec![5; 10]);
+
+            let dependency = Handle::ready(Err(commonware_runtime::Error::Closed));
+            let (mut metadata, handle) = metadata.start_sync_after(dependency).await.unwrap();
+            assert!(handle.await.is_err());
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 0"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 100"),
+                "{buffer}"
+            );
+
+            metadata.put(U64::new(1), vec![6; 10]);
+            assert!(metadata.start_sync().await.is_err());
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 100"),
+                "{buffer}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_after_preserves_delta_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            metadata.put(U64::new(1), vec![1; 10]);
+            metadata.put(U64::new(2), vec![2; 10]);
+            metadata = metadata.sync().await.unwrap();
+            metadata = metadata.sync().await.unwrap();
+
+            metadata.put(U64::new(1), vec![3; 10]);
+            let (mut metadata, handle) = metadata
+                .start_sync_after(Handle::ready(Ok(())))
+                .await
+                .unwrap();
+            handle.await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 1"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 123"),
+                "{buffer}"
+            );
+
+            metadata.put(U64::new(1), vec![4; 20]);
+            let (metadata, handle) = metadata
+                .start_sync_after(Handle::ready(Ok(())))
+                .await
+                .unwrap();
+            handle.await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 3"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 1"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 183"),
+                "{buffer}"
+            );
+
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&vec![4; 20]));
+            assert_eq!(metadata.get(&U64::new(2)), Some(&vec![2; 10]));
         });
     }
 

@@ -3,7 +3,7 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, Buf, BufMut, Error as RError, Handle, IoBufMut, WriteOptions,
+    Blob, Buf, BufMut, Error as RError, Handle, IoBuf, IoBufMut, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -11,6 +11,7 @@ use futures::{FutureExt as _, future::try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     num::NonZeroUsize,
+    ops::Range,
 };
 use tracing::{debug, warn};
 
@@ -37,6 +38,88 @@ struct Wrapper<B: Blob, K: Span> {
     lengths: HashMap<K, Info>,
     modified: BTreeSet<K>,
     data: IoBufMut,
+}
+
+/// A prepared mutation of one metadata blob.
+enum PreparedWrite<B: Blob> {
+    Overwrite {
+        blob: B,
+        data: IoBuf,
+        ranges: Vec<Range<usize>>,
+    },
+    Rewrite {
+        blob: B,
+        data: IoBuf,
+        shrinking: bool,
+    },
+}
+
+impl<B: Blob> PreparedWrite<B> {
+    const fn is_overwrite(&self) -> bool {
+        matches!(self, Self::Overwrite { .. })
+    }
+
+    const fn data(&self) -> &IoBuf {
+        match self {
+            Self::Overwrite { data, .. } | Self::Rewrite { data, .. } => data,
+        }
+    }
+
+    /// Execute the prepared writes and return the immutable mirror once no write borrows it.
+    async fn execute(self, pipelined: bool) -> Result<(Option<Handle<()>>, IoBuf), RError> {
+        match self {
+            Self::Overwrite { blob, data, ranges } => {
+                let writes = ranges.into_iter().map(|range| {
+                    blob.write_at(
+                        range.start as u64,
+                        data.slice(range),
+                        WriteOptions::default(),
+                    )
+                });
+                try_join_all(writes).await?;
+                let sync = if pipelined {
+                    Some(blob.start_sync().await)
+                } else {
+                    blob.sync().await?;
+                    None
+                };
+                Ok((sync, data))
+            }
+            Self::Rewrite {
+                blob,
+                data,
+                shrinking,
+            } => {
+                let sync = if pipelined {
+                    blob.write_at(0, data.clone(), WriteOptions::default())
+                        .await?;
+                    if shrinking {
+                        blob.resize(data.len() as u64).await?;
+                    }
+                    Some(blob.start_sync().await)
+                } else if shrinking {
+                    blob.write_at(0, data.clone(), WriteOptions::default())
+                        .await?;
+                    blob.resize(data.len() as u64).await?;
+                    blob.sync().await?;
+                    None
+                } else {
+                    blob.write_at(0, data.clone(), WriteOptions::SYNC)
+                        .await?;
+                    None
+                };
+                Ok((sync, data))
+            }
+        }
+    }
+}
+
+/// A started sync retained until its result is observed.
+struct PendingSync {
+    completion: SyncCompletion,
+    /// A deferred write owns the immutable snapshot until it completes. This mirror restores the
+    /// target wrapper before another sync computes deltas against it.
+    mirror: Option<(usize, IoBuf)>,
 }
 
 impl<B: Blob, K: Span> Wrapper<B, K> {
@@ -73,7 +156,7 @@ struct State<B: Blob, K: Span> {
     ///
     /// At most one sync is ever in flight: a new sync always targets the copy the pending sync
     /// left as last-known-durable, so it must first prove the pending sync completed.
-    pending: Option<SyncCompletion>,
+    pending: Option<PendingSync>,
 }
 
 /// The store's state, boxed so the public [Metadata] handle stays pointer-sized.
@@ -387,26 +470,37 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let Some(completion) = &self.state.pending else {
             return Ok(());
         };
-        completion.clone().await?;
-        self.state.pending = None;
+        completion.completion.clone().await?;
+        let pending = self.state.pending.take().expect("pending sync must exist");
+        if let Some((cursor, data)) = pending.mirror {
+            debug_assert!(self.state.blobs[cursor].data.is_empty());
+            self.state.blobs[cursor].data =
+                data.into_mut_with_pool(self.context.storage_buffer_pool());
+        }
         Ok(())
     }
 
     /// See [Metadata::sync].
     async fn sync(&mut self) -> Result<(), RError> {
         self.wait_for_pending().await?;
-        self.write_next_version(false).await?;
+        self.write_next_version(false, None).await?;
         Ok(())
     }
 
     /// See [Metadata::start_sync].
     async fn start_sync(&mut self) -> Result<Handle<()>, RError> {
         self.wait_for_pending().await?;
-        self.write_next_version(true).await
+        self.write_next_version(true, None).await
     }
 
-    /// Write and persist the next version of the store to the target blob.
-    async fn write_next_version(&mut self, pipelined: bool) -> Result<Handle<()>, RError> {
+    /// Commit an exact snapshot after `dependency` completes successfully.
+    async fn start_sync_after(&mut self, dependency: Handle<()>) -> Result<Handle<()>, RError> {
+        self.wait_for_pending().await?;
+        self.write_next_version(true, Some(dependency)).await
+    }
+
+    /// Prepare the next version against the older blob.
+    fn prepare_next_version(&mut self) -> Option<(usize, PreparedWrite<E::Blob>)> {
         // Extract values we need
         let cursor = self.state.cursor;
         let next_version = self.state.next_version;
@@ -428,7 +522,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // cursor already points at a durable copy of the latest state and
         // writing another version would only rotate blobs.
         if key_order_changed < past_version && self.state.blobs[target_cursor].modified.is_empty() {
-            return Ok(Handle::ready(Ok(())));
+            return None;
         }
 
         // Update the state.
@@ -463,7 +557,6 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             overwrite = false;
         }
 
-        // Overwrite existing data
         if overwrite {
             // Update version
             (&mut target.data.as_mut()[0..u64::SIZE]).put_u64(next_version);
@@ -473,51 +566,31 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             let checksum = Crc32::checksum(&target.data.as_ref()[..checksum_index]);
             (&mut target.data.as_mut()[checksum_index..]).put_u32(checksum);
 
-            // Freeze the mirror so async writes can hold zero-copy slices, then recover the
-            // mutable mirror after all writes complete.
-            let data = std::mem::take(&mut target.data).freeze();
+            let mut ranges = Vec::with_capacity(target.modified.len() + 2);
+            for key in &target.modified {
+                let info = target.lengths.get(key).expect("key must exist");
+                ranges.push(info.start..info.start + info.length);
+            }
+            ranges.extend([
+                0..u64::SIZE,
+                checksum_index..checksum_index + crc32::Digest::SIZE,
+            ]);
 
-            // Write each modified value from the frozen mirror, followed by the
-            // version and checksum.
-            let writes = target
-                .modified
-                .iter()
-                .map(|key| {
-                    let info = target.lengths.get(key).expect("key must exist");
-                    let start = info.start;
-                    let end = start + info.length;
-                    target.blob.write_at(
-                        start as u64,
-                        data.slice(start..end),
-                        WriteOptions::default(),
-                    )
-                })
-                .chain([
-                    target
-                        .blob
-                        .write_at(0, data.slice(0..u64::SIZE), WriteOptions::default()),
-                    target.blob.write_at(
-                        checksum_index as u64,
-                        data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
-                        WriteOptions::default(),
-                    ),
-                ]);
-            try_join_all(writes).await?;
-            let sync = if pipelined {
-                Some(target.blob.start_sync().await)
-            } else {
-                target.blob.sync().await?;
-                None
-            };
+            let data = std::mem::take(&mut target.data).freeze();
 
             // Clear modified keys to avoid writing the same data
             target.modified.clear();
 
             // Update state
             target.version = next_version;
-            target.data = data.into_mut_with_pool(self.context.storage_buffer_pool());
-            self.sync_overwrites.inc();
-            return Ok(self.record_pending(sync));
+            return Some((
+                target_cursor,
+                PreparedWrite::Overwrite {
+                    blob: target.blob.clone(),
+                    data,
+                    ranges,
+                },
+            ));
         }
 
         // Clear modified keys to avoid writing the same data
@@ -557,60 +630,92 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         }
         next_data.put_u32(Crc32::checksum(next_data.as_ref()));
 
-        // Shrinking rewrites must also persist the resize, so they need a full sync.
         let next_data = next_data.freeze();
         let shrinking = next_data.len() < target_data_len;
-        let sync = if pipelined {
-            target
-                .blob
-                .write_at(0, next_data.clone(), WriteOptions::default())
-                .await?;
-            if shrinking {
-                target.blob.resize(next_data.len() as u64).await?;
-            }
-            Some(target.blob.start_sync().await)
-        } else if shrinking {
-            target
-                .blob
-                .write_at(0, next_data.clone(), WriteOptions::default())
-                .await?;
-            target.blob.resize(next_data.len() as u64).await?;
-            target.blob.sync().await?;
-            None
-        } else {
-            // Non-shrinking rewrites are a single write and can use range-scoped
-            // durability.
-            target
-                .blob
-                .write_at(0, next_data.clone(), WriteOptions::SYNC)
-                .await?;
-            None
-        };
 
         // Update blob state
         target.version = next_version;
         target.lengths = lengths;
-        target.data = next_data.into_mut_with_pool(self.context.storage_buffer_pool());
+        target.data = IoBufMut::default();
 
-        self.sync_rewrites.inc();
-        Ok(self.record_pending(sync))
+        Some((
+            target_cursor,
+            PreparedWrite::Rewrite {
+                blob: target.blob.clone(),
+                data: next_data,
+                shrinking,
+            },
+        ))
+    }
+
+    /// Write and persist the next version of the store to the target blob.
+    async fn write_next_version(
+        &mut self,
+        pipelined: bool,
+        dependency: Option<Handle<()>>,
+    ) -> Result<Handle<()>, RError> {
+        let prepared = self.prepare_next_version();
+
+        if let Some(dependency) = dependency {
+            debug_assert!(pipelined);
+            let Some((target_cursor, write)) = prepared else {
+                return Ok(self.record_pending(Some(dependency), None));
+            };
+            let mirror = write.data().clone();
+            let counter = if write.is_overwrite() {
+                self.sync_overwrites.clone()
+            } else {
+                self.sync_rewrites.clone()
+            };
+            let completion = Handle::from_future(async move {
+                dependency.await?;
+                let (_, data) = write.execute(false).await?;
+                drop(data);
+                counter.inc();
+                Ok(())
+            });
+            return Ok(self.record_pending(
+                Some(completion),
+                Some((target_cursor, mirror)),
+            ));
+        }
+
+        let Some((target_cursor, write)) = prepared else {
+            return Ok(Handle::ready(Ok(())));
+        };
+        let overwrite = write.is_overwrite();
+        let (sync, data) = write.execute(pipelined).await?;
+        self.state.blobs[target_cursor].data =
+            data.into_mut_with_pool(self.context.storage_buffer_pool());
+        if overwrite {
+            self.sync_overwrites.inc();
+        } else {
+            self.sync_rewrites.inc();
+        }
+
+        Ok(self.record_pending(sync, None))
     }
 
     /// Record a started blob sync (if any) as the pending sync and return its observer handle.
-    fn record_pending(&mut self, sync: Option<Handle<()>>) -> Handle<()> {
+    fn record_pending(
+        &mut self,
+        sync: Option<Handle<()>>,
+        mirror: Option<(usize, IoBuf)>,
+    ) -> Handle<()> {
         let Some(sync) = sync else {
+            debug_assert!(mirror.is_none());
             return Handle::ready(Ok(()));
         };
         let completion: SyncCompletion = sync.boxed().shared();
         let handle = Handle::from_future(completion.clone());
-        self.state.pending = Some(completion);
+        self.state.pending = Some(PendingSync { completion, mirror });
         handle
     }
 
     /// See [Metadata::destroy].
     async fn destroy(mut self) -> Result<(), Error> {
         if let Some(pending) = self.state.pending.take() {
-            let _ = pending.await;
+            let _ = pending.completion.await;
         }
         let state = self.state;
         for (i, wrapper) in state.blobs.into_iter().enumerate() {
@@ -748,6 +853,15 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     /// failure.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let handle = self.0.start_sync().await?;
+        Ok((self, handle))
+    }
+
+    /// Commit the current state after a lower-layer durability dependency succeeds.
+    pub(crate) async fn start_sync_after(
+        mut self,
+        dependency: Handle<()>,
+    ) -> Result<(Self, Handle<()>), Error> {
+        let handle = self.0.start_sync_after(dependency).await?;
         Ok((self, handle))
     }
 

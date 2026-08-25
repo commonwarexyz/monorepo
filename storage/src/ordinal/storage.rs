@@ -4,12 +4,12 @@ use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Buf, BufMut, Error as RError, WriteOptions,
+    Blob, Buf, BufMut, Error as RError, Handle, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::bitmap::BitMap;
-use futures::future::try_join_all;
+use futures::future::{join_all, try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
@@ -415,24 +415,24 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
 
     /// See [Ordinal::sync].
     async fn sync(&mut self) -> Result<(), Error> {
+        self.start_sync().await.await?;
+        Ok(())
+    }
+
+    /// See [Ordinal::start_sync].
+    async fn start_sync(&mut self) -> Handle<()> {
         self.syncs.inc();
 
-        if self.pending.is_empty() {
-            return Ok(());
-        }
-
-        let futures: Vec<_> = self
+        let futures = self
             .blobs
             .iter_mut()
             .filter(|(section, _)| self.pending.contains(section))
-            .map(|(_, blob)| blob.sync())
-            .collect();
-        try_join_all(futures).await?;
-
-        // Clear pending sections.
+            .map(|(_, blob)| blob.start_sync())
+            .collect::<Vec<_>>();
+        let handles = join_all(futures).await;
         self.pending.clear();
 
-        Ok(())
+        Handle::from_future(async move { try_join_all(handles).await.map(|_| ()) })
     }
 
     /// See [Ordinal::destroy].
@@ -550,6 +550,12 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.0.sync().await?;
         Ok(self)
+    }
+
+    /// Begin syncing pending entries and return ownership before durability completes.
+    pub(crate) async fn start_sync(mut self) -> (Self, Handle<()>) {
+        let handle = self.0.start_sync().await;
+        (self, handle)
     }
 
     /// Destroy [Ordinal] and remove all data.
