@@ -40,8 +40,6 @@ const fn same_position(a: &(usize, u64), b: &(usize, u64)) -> bool {
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
 
-pub(crate) use crate::qmdb::AbortOnDrop;
-
 /// Snapshot mutation needed to undo one operation while rewinding.
 enum SnapshotUndo<F: Family, K> {
     Replace {
@@ -799,7 +797,10 @@ where
         // and the overlap task have dropped every clone.
         let log = Arc::new(log);
         let overlap = overlap(log.clone());
-        let overlap = AbortOnDrop::new(context.child("init_overlap").spawn(move |_| overlap));
+        let overlap = context
+            .child("init_overlap")
+            .spawn(move |_| overlap)
+            .abort_on_drop();
         let built = async {
             let bounds = log.bounds();
             if bounds.end == 0 {
