@@ -97,6 +97,12 @@ harness = false
 path = "src/storage/benches/main.rs"
 
 [[bench]]
+name = "iouring_scheduler"
+harness = false
+path = "src/iouring/benches/bench.rs"
+required-features = ["iouring"]
+
+[[bench]]
 name = "buffer_paged"
 harness = false
 path = "src/utils/buffer/benches/bench.rs"
