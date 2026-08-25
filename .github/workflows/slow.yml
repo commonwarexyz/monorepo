@@ -152,7 +152,7 @@ jobs:
       run: |
         set -euo pipefail
         out=$(cargo bench -p commonware-runtime --bench storage --features iouring -- \
-          --workload read_rand --file-size 4096 --cache warm --inflight 67108865 2>&1) \
+          --workload read_rand --file-size 4096 --cache warm --inflight 16385 2>&1) \
           && { echo "expected validation failure"; exit 1; } || true
         echo "$out" | grep -F -- "--inflight requires an io_uring ring larger than MAX_RING_SIZE"
 

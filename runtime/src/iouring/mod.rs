@@ -138,11 +138,6 @@
 //!   is not set
 //! - A dedicated signalled bit coalesces repeated wake attempts while a wait is armed
 //!
-//! The wake word also carries a packed submission-sequence protocol (publish and
-//! recheck) that this runtime no longer exercises: submissions are staged on the loop
-//! thread itself, so no cross-thread submission edge exists. The protocol is retained
-//! for a future cross-thread submission path.
-//!
 //! ## Shutdown Process
 //!
 //! At teardown (after every task has been dropped, which eagerly cancels their
@@ -214,8 +209,9 @@ pub struct RingConfig {
     ///
     /// This value is rounded up to the next power of two when constructing
     /// the event loop, so the configured in-flight waiter capacity matches the
-    /// effective ring sizing behavior. After rounding, the maximum allowed size
-    /// is [`MAX_RING_SIZE`], larger rounded sizes panic during construction.
+    /// effective ring sizing behavior. Linux permits at most 32,768 submission
+    /// queue entries, so the rounded size must not exceed [`MAX_RING_SIZE`].
+    /// Larger rounded sizes panic during construction.
     pub size: u32,
     /// If true, use IOPOLL mode.
     ///

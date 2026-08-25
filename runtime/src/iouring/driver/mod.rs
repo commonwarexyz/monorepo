@@ -12,7 +12,7 @@ use timeout::{Tick, TimeoutWheel};
 mod waiter;
 use waiter::{CompletionOutcome, StageOutcome, WaiterId};
 pub(crate) mod waker;
-use waker::{HALF_SUBMISSION_SEQUENCE_DOMAIN, WAKE_USER_DATA, Waker};
+use waker::{WAKE_USER_DATA, Waker};
 pub(crate) mod spinner;
 use super::RingConfig;
 use crate::telemetry::metrics::{Gauge, GaugeValue, Register, raw};
@@ -31,8 +31,23 @@ use std::{
 
 /// Maximum rounded ring size accepted by [`RingConfig::size`].
 ///
-/// Requested sizes are rounded up to the next power of two before validation.
-pub const MAX_RING_SIZE: u32 = HALF_SUBMISSION_SEQUENCE_DOMAIN / 2;
+/// Linux limits an io_uring submission queue to 32,768 entries. Requested
+/// sizes are rounded up to the next power of two before validation.
+pub const MAX_RING_SIZE: u32 = 32_768;
+
+/// Round and validate a requested submission queue size before any
+/// size-proportional driver state is allocated.
+fn validated_ring_size(size: u32) -> u32 {
+    let size = size
+        .checked_next_power_of_two()
+        .expect("ring size exceeds u32::MAX");
+    assert!(
+        size <= MAX_RING_SIZE,
+        "rounded ring size must be at most {}",
+        MAX_RING_SIZE
+    );
+    size
+}
 
 /// Packed `io_uring` `user_data` value.
 type UserData = u64;
@@ -108,10 +123,6 @@ pub(crate) struct IoUringLoop {
     idle_spinner: Spinner,
     waker: Waker,
     wake_rearm_needed: bool,
-    /// Sequence position of the retained (currently unexercised) submission
-    /// publish protocol. Stays at zero: submissions are staged on the loop
-    /// thread itself, so no producer ever publishes ahead.
-    processed_seq: u32,
     /// Scratch list of task wakers collected under the state borrow and
     /// invoked after it is released.
     pending_wakers: Vec<TaskWaker>,
@@ -162,7 +173,10 @@ impl IoUringLoop {
     ///
     /// The loop allocates its own metrics and internal `eventfd` wake source.
     /// The calling thread becomes the handle's owning (runtime) thread.
-    pub(crate) fn new(mut cfg: RingConfig, registry: &mut impl Register) -> (Handle, Self) {
+    pub(crate) fn new(
+        mut cfg: RingConfig,
+        registry: &mut impl Register,
+    ) -> Result<(IoUring, Handle, Self), std::io::Error> {
         assert!(
             !cfg.max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"
@@ -171,19 +185,11 @@ impl IoUringLoop {
             !cfg.timeout_wheel_tick.is_zero(),
             "timeout_wheel_tick must be non-zero for timeout wheel"
         );
-        cfg.size = cfg
-            .size
-            .checked_next_power_of_two()
-            .expect("ring size exceeds u32::MAX");
-        // The retained wake protocol's `pending()` interprets packed
-        // submission-sequence deltas with half-range modular ordering. After
-        // rounding to a power of two, that means the maximum admissible ring
-        // size is `MAX_RING_SIZE`.
-        assert!(
-            cfg.size <= MAX_RING_SIZE,
-            "rounded ring size must be at most {}",
-            MAX_RING_SIZE
-        );
+        cfg.size = validated_ring_size(cfg.size);
+
+        // Ask the kernel to construct the ring before allocating the waiter
+        // table whose capacity is proportional to the requested ring size.
+        let ring = new_ring(&cfg)?;
         let size = cfg.size as usize;
         let metrics = Metrics::new(registry);
         let waker = Waker::new().expect("unable to create wake eventfd");
@@ -192,10 +198,11 @@ impl IoUringLoop {
             cfg.timeout_wheel_tick,
             Instant::now(),
         );
-        let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.pending(0));
+        let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.signalled());
         let handle = Handle::new(size, waker.clone());
 
-        (
+        Ok((
+            ring,
             handle.clone(),
             Self {
                 cfg,
@@ -205,10 +212,9 @@ impl IoUringLoop {
                 idle_spinner,
                 waker,
                 wake_rearm_needed: true,
-                processed_seq: 0,
                 pending_wakers: Vec::new(),
             },
-        )
+        ))
     }
 
     /// Invoke every collected task waker.
@@ -347,12 +353,9 @@ impl IoUringLoop {
             // post-arm snapshot then consumes the latch without a futex round
             // trip. The spin must not skip `park_idle` on a hit: only the
             // arm-and-clear cycle consumes the latch, and leaving it set
-            // would make every subsequent idle park return instantly. The
-            // published-sequence check rides along for the dormant
-            // cross-thread submission protocol.
-            self.idle_spinner
-                .spin(|| self.waker.signalled() || self.waker.pending(self.processed_seq));
-            if let Some(park_duration) = self.waker.park_idle(self.processed_seq) {
+            // would make every subsequent idle park return instantly.
+            self.idle_spinner.spin(|| self.waker.signalled());
+            if let Some(park_duration) = self.waker.park_idle() {
                 self.idle_spinner.on_wake(park_duration);
             }
             return;
@@ -363,7 +366,7 @@ impl IoUringLoop {
         // completions free capacity, so block unless an out-of-band wake
         // (e.g. a task wake) is latched. Otherwise block only if the post-arm
         // snapshot still looks idle (no latched wake).
-        let arm = self.waker.arm(self.processed_seq);
+        let arm = self.waker.arm();
         let may_block = if waiters_full {
             !arm.wake_latched()
         } else {
@@ -740,7 +743,7 @@ impl IoUringLoop {
             // When a wake is already latched, skip blocking and let the next
             // iteration process the mailbox. The guard's drop consumes the
             // latch either way.
-            let arm = self.waker.arm(self.processed_seq);
+            let arm = self.waker.arm();
             if !arm.wake_latched() {
                 let start = Instant::now();
                 self.submit_and_wait(ring, 1, timeout)
@@ -866,8 +869,7 @@ impl Driver {
         cfg: RingConfig,
         registry: &mut impl Register,
     ) -> Result<(Self, Handle), std::io::Error> {
-        let (handle, inner) = IoUringLoop::new(cfg, registry);
-        let ring = new_ring(&inner.cfg)?;
+        let (ring, handle, inner) = IoUringLoop::new(cfg, registry)?;
         Ok((Self { ring, inner }, handle))
     }
 
@@ -1077,19 +1079,22 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
-        let (_driver, ioloop) = IoUringLoop::new(cfg, &mut registry);
+        let (_ring, _handle, ioloop) =
+            IoUringLoop::new(cfg, &mut registry).expect("io_uring creation should succeed");
         assert_eq!(ioloop.cfg.size, 128);
     }
 
     #[test]
-    fn test_iouring_loop_rejects_sizes_that_exceed_max_ring_size() {
-        let cfg = RingConfig {
-            size: MAX_RING_SIZE + 1,
-            ..Default::default()
-        };
-        let mut registry = Registry::default();
+    fn test_ring_size_accepts_linux_limit_after_rounding() {
+        assert_eq!(MAX_RING_SIZE, 32_768);
+        assert_eq!(validated_ring_size(MAX_RING_SIZE / 2 + 1), MAX_RING_SIZE);
+        assert_eq!(validated_ring_size(MAX_RING_SIZE), MAX_RING_SIZE);
+    }
+
+    #[test]
+    fn test_ring_size_rejects_rounded_size_above_linux_limit() {
         let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = IoUringLoop::new(cfg, &mut registry);
+            validated_ring_size(MAX_RING_SIZE + 1);
         }));
         assert!(rejected.is_err());
     }

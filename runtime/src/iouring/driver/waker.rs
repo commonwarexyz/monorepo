@@ -22,27 +22,10 @@
 //! transition that armed the wait target) still shows no latched wake, so a
 //! wake racing the sleep transition is never lost.
 //!
-//! The packed atomic state combines:
+//! The atomic state combines:
 //! - bit 0: waiting on futex
 //! - bit 1: waiting on eventfd
 //! - bit 2: wake already signalled
-//! - bits 3..: submitted sequence
-//!
-//! # Retained dormant submission sequence
-//!
-//! The sequence half of the state word belongs to a cross-thread submission
-//! protocol this runtime does not currently exercise: submissions are staged
-//! on the loop thread itself, so production producers only ever call
-//! [`Waker::wake`], and [`Waker::publish`] is called only by this file's
-//! tests and loom models. The loop's idle spin still probes
-//! [`Waker::pending`], but the sequence it reads never advances in
-//! production. The protocol is retained for a future cross-thread submission
-//! path, where a producer would increment the sequence with `publish` after
-//! enqueueing work and the loop would compare the published sequence against
-//! its own `processed_seq` using half-range modular ordering.
-//! [`MAX_RING_SIZE`](super::MAX_RING_SIZE) derives from that ordering: the
-//! rounded ring size stays strictly below half the sequence domain so the
-//! modular delta remains directional.
 
 use super::UserData;
 use io_uring::squeue::SubmissionQueue;
@@ -69,29 +52,16 @@ use tracing::warn;
 /// Reserved `user_data` value for internal wake poll completions.
 pub const WAKE_USER_DATA: UserData = UserData::MAX;
 
-/// Number of low bits reserved for wake-state flags.
-const STATE_BITS: u32 = 3;
 /// Bit used when the loop is sleeping on a futex.
 const WAITING_ON_FUTEX_BIT: u32 = 1;
 /// Bit used when the loop is blocked in `submit_and_wait` and wakeable via eventfd.
 const WAITING_ON_EVENTFD_BIT: u32 = 1 << 1;
 /// Bit used once a wake has already been signalled for the current wait.
 const WAKE_SIGNALLED_BIT: u32 = 1 << 2;
-/// Mask covering all non-sequence wake-state flags.
+/// Mask covering all wake-state flags.
 const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_SIGNALLED_BIT;
 /// Mask covering just the current wait target bits.
 const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
-/// Packed-state increment for one submitted operation (low bits are reserved).
-///
-/// The runtime stages submissions on the loop thread itself, so the publish
-/// protocol is currently exercised only by tests and loom models. It is
-/// retained for a future cross-thread submission path.
-#[allow(dead_code)]
-const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
-/// Full sequence domain used by the packed submission counter (state >> 3).
-pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
-/// Maximum live published-minus-processed gap that keeps modular order directional.
-pub const HALF_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK.div_ceil(2);
 
 /// RAII guard returned by [`Waker::arm`] for a `submit_and_wait` blocking section.
 ///
@@ -99,16 +69,14 @@ pub const HALF_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK.div_ceil(2)
 /// wake if producers publish new work or the final handle disconnects.
 pub struct ArmGuard<'a> {
     waker: &'a Waker,
-    still_idle: bool,
     wake_latched: bool,
 }
 
 impl ArmGuard<'_> {
     /// Return whether the post-arm snapshot still looked idle, meaning no
-    /// wake was latched and the published sequence still matched the loop's
-    /// `processed_seq`.
+    /// wake was latched.
     pub const fn still_idle(&self) -> bool {
-        self.still_idle
+        !self.wake_latched
     }
 
     /// Return whether a wake was already latched before or during arming.
@@ -125,15 +93,8 @@ impl Drop for ArmGuard<'_> {
 
 /// Shared wake state used by submitters and the io_uring loop.
 ///
-/// `state` packs two values:
-/// - bits 0..2: wait target and wake state
-/// - bits 3..: submitted sequence (`submitted_seq`)
-///
-/// The sequence bits belong to the retained (currently unexercised)
-/// cross-thread submission protocol: a producer would increment
-/// `submitted_seq` after publishing work, and the loop would track how much
-/// it has drained (`processed_seq`, stored in loop-local state). Today's
-/// producers (the executor's `Tasks::queue` and `queue_root`,
+/// `state` stores the wait target and sticky wake latch. Producers (the
+/// executor's `Tasks::queue` and `queue_root`,
 /// `register_alarm`, and the driver's orphan mailbox) publish through their
 /// own synchronized containers and use only the out-of-band
 /// `WAKE_SIGNALLED_BIT` latch via [`Waker::wake`], the task and alarm
@@ -141,30 +102,23 @@ impl Drop for ArmGuard<'_> {
 /// are observed by the executor's pre-park rechecks) and the orphan mailbox
 /// unconditionally. After arming a wait
 /// target, the loop blocks only if the same post-arm snapshot still shows no
-/// latched wake and still carries the exact `submitted_seq == processed_seq`
-/// snapshot the loop armed against.
-///
-/// The loop bounds the rounded ring size strictly below half the packed
-/// sequence domain. That makes the modular delta `submitted_seq - processed_seq`
-/// directional: any non-zero delta smaller than half the domain means
-/// `submitted_seq` is ahead, while larger deltas mean the visible submission
-/// sequence is lagging behind requests the loop has already drained.
+/// latched wake.
 ///
 /// Blocking follows an arm-and-recheck protocol:
-/// - The loop first checks for a published-ahead delta, then arms a wait target.
-/// - The loop blocks only if the post-arm snapshot still looks idle after that
-///   same atomic state transition.
-/// - Submitters signal the currently armed wait target exactly once.
+/// - The loop arms a wait target.
+/// - The loop blocks only if the same atomic transition's post-arm snapshot
+///   still looks idle.
+/// - Producers signal the currently armed wait target exactly once.
 /// - Out-of-band notifications latch one wake even while unarmed, so the next
 ///   arm-and-recheck cycle skips blocking once.
 ///
-/// This makes submissions racing with the sleep transition observable either by
-/// sequence mismatch in the loop or by a futex/eventfd wakeup.
+/// This makes notifications racing with the sleep transition observable by a
+/// futex or eventfd wakeup.
 #[cfg(not(feature = "loom"))]
 struct WakerInner {
     /// Non-blocking eventfd monitored by the loop's multishot wake poll.
     wake_fd: OwnedFd,
-    /// Packed wait-target, wake-latch, and submitted-sequence state.
+    /// Wait-target and wake-latch state.
     state: AtomicU32,
 }
 
@@ -178,7 +132,7 @@ struct WakerInner {
 /// ordering, `io_uring_enter`, or wake-poll rearm behavior.
 #[cfg(feature = "loom")]
 struct WakerInner {
-    /// Packed wait-target, wake-latch, and submitted-sequence state.
+    /// Wait-target and wake-latch state.
     state: AtomicU32,
     /// Mutex standing in for the kernel futex bucket lock.
     futex_bucket: Mutex<()>,
@@ -199,16 +153,9 @@ struct WakerInner {
 /// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
 /// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
 /// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
-/// - Test whether published work is still pending via [`Waker::pending`]
-///   (probed by the loop's idle spin, though the sequence never advances in
-///   production)
-/// - Publish submissions via [`Waker::publish`] (the retained dormant
-///   sequence protocol, exercised only by tests and loom models)
 ///
-/// This type intentionally separates:
-/// - sequence publication (`state` high bits)
-/// - wait gating (`state` low bits)
-/// - kernel readiness consumption (`eventfd` read path)
+/// This type intentionally separates wait gating in `state` from kernel
+/// readiness consumption in the `eventfd` read path.
 ///
 /// Keeping these concerns separate makes the wake protocol explicit and avoids
 /// coupling correctness to exact eventfd coalescing behavior.
@@ -263,14 +210,13 @@ impl Waker {
     /// wake. Subsequent callers do nothing until the loop disarms and clears
     /// the bit.
     ///
-    /// All claimed wakes flow through this path, whether they come from
-    /// `publish()` on an armed epoch or from an out-of-band caller (a task
+    /// All claimed wakes flow through this path, whether they come from a task
     /// enqueue, an alarm registration, or an orphan-mailbox push from a
-    /// foreign thread).
+    /// foreign thread.
     pub fn wake(&self) {
-        // Out-of-band wakes carry no submission-sequence bump: their payload
-        // lives in a separately synchronized container (the ready queue, the
-        // alarm heap, or the orphan mailbox). The `Release` here pairs with
+        // The wake payload lives in a separately synchronized container (the
+        // ready queue, the alarm heap, or the orphan mailbox). The `Release`
+        // here pairs with
         // `clear_wait()`'s `Acquire` so that once the loop resumes, its next
         // pass over those containers cannot observe the wake without also
         // observing the state change that caused it.
@@ -297,58 +243,6 @@ impl Waker {
         }
     }
 
-    /// Publish one submitted operation and optionally wake the currently armed
-    /// wait target.
-    ///
-    /// A future cross-thread submitter must invoke this only after its work
-    /// is visible to the loop's staging pass.
-    ///
-    /// The common unarmed path performs only one `fetch_add`. When a wait is
-    /// armed and no wake has yet been claimed for that epoch, this caller
-    /// claims `WAKE_SIGNALLED_BIT` with a follow-up atomic update and then
-    /// signals the armed wait target.
-    /// The runtime stages submissions on the loop thread itself, so this is
-    /// currently exercised only by tests and loom models. It is retained for
-    /// a future cross-thread submission path.
-    #[allow(dead_code)]
-    #[inline]
-    pub fn publish(&self) {
-        // Use `Release` so that when `pending()` later observes a published-ahead
-        // sequence delta with its `Acquire` load, the loop's following pass
-        // over the (future) cross-thread submission container must observe
-        // the corresponding request.
-        let prev = self
-            .inner
-            .state
-            .fetch_add(SUBMISSION_INCREMENT, Ordering::Release);
-
-        let waiting = prev & WAITING_MASK;
-
-        // Fast path: the loop is not waiting, or another publisher already
-        // claimed the wake for the current armed epoch.
-        if waiting == 0 || (prev & WAKE_SIGNALLED_BIT) != 0 {
-            return;
-        }
-
-        self.wake();
-    }
-
-    /// Return whether any published submissions are still pending relative to
-    /// `processed_seq`, i.e. whether the published sequence is currently ahead
-    /// of that drained sequence.
-    #[inline]
-    pub fn pending(&self, processed_seq: u32) -> bool {
-        // Pair this `Acquire` with `publish()`'s `Release`. The rounded ring
-        // size is kept strictly below half the packed sequence domain, so a
-        // non-zero modular delta smaller than that half-range unambiguously
-        // means `published_seq` is ahead of `processed_seq`.
-        let published_seq =
-            (self.inner.state.load(Ordering::Acquire) >> STATE_BITS) & SUBMISSION_SEQ_MASK;
-
-        let delta = published_seq.wrapping_sub(processed_seq) & SUBMISSION_SEQ_MASK;
-        delta != 0 && delta < HALF_SUBMISSION_SEQUENCE_DOMAIN
-    }
-
     /// Return whether an out-of-band wake is currently latched.
     ///
     /// This is a hint for opportunistic checks (e.g. the idle spinner): the
@@ -368,12 +262,12 @@ impl Waker {
     ///
     /// Returns `Some(duration)` only if `futex_wait` actually blocked in the
     /// kernel and later resumed. Returns `None` if the armed snapshot already
-    /// showed published work or a latched wake, or if a concurrent state
-    /// change rejected the snapshot before the thread could sleep.
-    pub fn park_idle(&self, processed_seq: u32) -> Option<Duration> {
-        // Arming only updates the packed wake state machine. It does not
-        // publish queue memory or consume any out-of-band wake publication, so
-        // `Relaxed` is sufficient on this RMW.
+    /// showed a latched wake, or if a concurrent state change rejected the
+    /// snapshot before the thread could sleep.
+    pub fn park_idle(&self) -> Option<Duration> {
+        // Arming only updates the wake state machine. It does not publish queue
+        // memory or consume any wake publication, so `Relaxed` is sufficient
+        // on this RMW.
         let prev = self
             .inner
             .state
@@ -389,9 +283,7 @@ impl Waker {
 
         // Only block if the post-arm snapshot still looks idle. When that is
         // true, futex-wait on the same packed state word that was just armed.
-        if (snapshot & WAKE_SIGNALLED_BIT) == 0
-            && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq
-        {
+        if (snapshot & WAKE_SIGNALLED_BIT) == 0 {
             let before = Instant::now();
             let slept = self.futex_wait(snapshot);
             self.clear_wait();
@@ -407,12 +299,11 @@ impl Waker {
     /// The returned guard automatically clears the current wait state on drop.
     /// Call [`ArmGuard::still_idle`] to decide whether the loop may block on
     /// the normal "still idle" path, or [`ArmGuard::wake_latched`] to detect
-    /// an already-latched wake without conflating it with published-ahead
-    /// sequence progress.
-    pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
-        // Arming only updates the packed wake state machine. It does not
-        // publish queue memory or consume any out-of-band wake publication, so
-        // `Relaxed` is sufficient on this RMW.
+    /// an already-latched wake.
+    pub fn arm(&self) -> ArmGuard<'_> {
+        // Arming only updates the wake state machine. It does not publish queue
+        // memory or consume any wake publication, so `Relaxed` is sufficient
+        // on this RMW.
         let prev = self
             .inner
             .state
@@ -426,12 +317,8 @@ impl Waker {
 
         let snapshot = prev | WAITING_ON_EVENTFD_BIT;
         let wake_latched = (snapshot & WAKE_SIGNALLED_BIT) != 0;
-        let still_idle =
-            !wake_latched && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq;
-
         ArmGuard {
             waker: self,
-            still_idle,
             wake_latched,
         }
     }
@@ -599,7 +486,7 @@ impl Waker {
     /// Wake one thread sleeping on the fully-idle futex path.
     ///
     /// This is used only when the loop has no active ring waiters and is
-    /// blocked in [`Waker::futex_wait`] on the packed wake-state word.
+    /// blocked in [`Waker::futex_wait`] on the wake-state word.
     #[cfg(not(feature = "loom"))]
     fn futex_wake(&self) {
         loop {
@@ -647,7 +534,7 @@ impl Waker {
         self.inner.futex_waiters.notify_one();
     }
 
-    /// Sleep on the packed wake-state word for the fully-idle path.
+    /// Sleep on the wake-state word for the fully-idle path.
     ///
     /// The caller must pass the exact post-arm snapshot from the same atomic
     /// transition that set `WAITING_ON_FUTEX_BIT`. `FUTEX_WAIT` only blocks
@@ -731,10 +618,6 @@ pub mod tests {
         waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
     }
 
-    pub fn submitted_seq(waker: &Waker) -> u32 {
-        (waker.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK
-    }
-
     pub fn eventfd_count(waker: &Waker) -> u64 {
         #[cfg(not(feature = "loom"))]
         {
@@ -762,119 +645,35 @@ pub mod tests {
     }
 
     #[test]
-    fn test_publish_arm_guard_and_submitted() {
-        // Verify the packed wake state tracks submission sequence separately
-        // from the blocking wake state across the normal publish and
-        // acknowledge flow.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        assert_eq!(submitted_seq(&waker), 0);
+    fn test_park_idle_handles_concurrent_wake_races() {
+        // Stress the real concurrent idle-path race. The notifier thread waits
+        // until `WAITING_ON_FUTEX_BIT` is visible and then races `wake()`
+        // against the parked thread's equality check, futex syscall, and
+        // eventual `clear_wait()`.
+        for _ in 0..64 {
+            let waker = Waker::new().expect("eventfd creation should succeed");
+            let notifier_waker = waker.clone();
 
-        // Publish without an armed wait target only advances sequence.
-        waker.publish();
-        assert_eq!(submitted_seq(&waker), 1);
+            let handle = std::thread::spawn(move || {
+                while state_bits(&notifier_waker) & WAITING_ON_FUTEX_BIT == 0 {
+                    std::hint::spin_loop();
+                }
+                notifier_waker.wake();
+            });
 
-        // Arm and publish should trigger an eventfd wake, and acknowledge drains it.
-        let arm = waker.arm(1);
-        assert!(arm.still_idle());
-        assert!(!arm.wake_latched());
-        waker.publish();
-        assert_eq!(submitted_seq(&waker), 2);
-
-        // Acknowledge and guard drop are wake-gating operations and must not change
-        // the submitted sequence domain.
-        waker.acknowledge();
-        assert_eq!(submitted_seq(&waker), 2);
-        drop(arm);
-        assert_eq!(submitted_seq(&waker), 2);
-        assert_eq!(state_bits(&waker), 0);
-
-        // Re-arming should observe the same submitted snapshot while idle.
-        let arm = waker.arm(2);
-        assert!(arm.still_idle());
-        assert!(!arm.wake_latched());
-        drop(arm);
-    }
-
-    #[test]
-    fn test_pending_uses_directional_half_range_compare() {
-        // Verify `pending()` only reports work when the published sequence is
-        // directionally ahead within the half-range window.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-
-        // A one-step published-ahead delta is pending for `processed_seq = 0`,
-        // but not once the loop has caught up.
-        waker.inner.state.store(1 << STATE_BITS, Ordering::Relaxed);
-        assert!(waker.pending(0));
-        assert!(!waker.pending(1));
-
-        // A visible published sequence that lags behind `processed_seq` must
-        // not be treated as pending work.
-        waker.inner.state.store(0, Ordering::Relaxed);
-        assert!(!waker.pending(1));
-
-        // Exactly half the domain is ambiguous and therefore not directional.
-        waker.inner.state.store(
-            HALF_SUBMISSION_SEQUENCE_DOMAIN << STATE_BITS,
-            Ordering::Relaxed,
-        );
-        assert!(!waker.pending(0));
-
-        // Wrapping by one still counts as a published-ahead delta.
-        waker.inner.state.store(0, Ordering::Relaxed);
-        assert!(waker.pending(SUBMISSION_SEQ_MASK));
-    }
-
-    #[test]
-    fn test_park_idle_handles_concurrent_publish_and_wake_races() {
-        #[derive(Clone, Copy, Debug)]
-        enum Notifier {
-            Wake,
-            Publish,
-        }
-
-        // Stress the real concurrent idle-path races rather than only the
-        // single-threaded stale-snapshot path. The notifier thread waits until
-        // `WAITING_ON_FUTEX_BIT` is visible and then races a `wake()` or
-        // `publish()` against the parked thread's equality check, futex
-        // syscall, and eventual `clear_wait()`.
-        for notifier in [Notifier::Wake, Notifier::Publish] {
-            for _ in 0..64 {
-                let waker = Waker::new().expect("eventfd creation should succeed");
-                let before = submitted_seq(&waker);
-                let notifier_waker = waker.clone();
-
-                let handle = std::thread::spawn(move || {
-                    while state_bits(&notifier_waker) & WAITING_ON_FUTEX_BIT == 0 {
-                        std::hint::spin_loop();
-                    }
-                    match notifier {
-                        Notifier::Wake => notifier_waker.wake(),
-                        Notifier::Publish => notifier_waker.publish(),
-                    }
-                });
-
-                let _ = waker.park_idle(before);
-                handle.join().expect("idle notifier thread panicked");
-
-                let expected = match notifier {
-                    Notifier::Wake => before,
-                    Notifier::Publish => before.wrapping_add(1) & SUBMISSION_SEQ_MASK,
-                };
-
-                assert_eq!(submitted_seq(&waker), expected, "{notifier:?}");
-                assert_eq!(state_bits(&waker), 0, "{notifier:?}");
-            }
+            let _ = waker.park_idle();
+            handle.join().expect("idle notifier thread panicked");
+            assert_eq!(state_bits(&waker), 0);
         }
     }
 
     #[test]
-    fn test_wake_without_idle_wait_keeps_sequence_stable() {
-        // Verify out-of-band notifications without an idle wait do not perturb
-        // submission sequence.
+    fn test_wake_without_idle_wait_latches_signal() {
+        // Verify a notification without an idle wait remains sticky until the
+        // next arm-and-clear cycle.
         let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
         waker.wake();
-        assert_eq!(submitted_seq(&waker), before);
+        assert_eq!(state_bits(&waker), WAKE_SIGNALLED_BIT);
     }
 
     #[test]
@@ -882,120 +681,26 @@ pub mod tests {
         // Verify an out-of-band wake latched before idle arming makes the next
         // idle park return immediately instead of sleeping.
         let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
 
         waker.wake();
-        let duration = waker.park_idle(before);
+        let duration = waker.park_idle();
 
         assert!(duration.is_none(), "should not have slept");
-        assert_eq!(submitted_seq(&waker), before);
         assert_eq!(state_bits(&waker), 0);
-    }
-
-    #[test]
-    fn test_publish_before_park_idle_skips_sleep() {
-        // Verify a sequence published before idle arming makes the next idle
-        // park return immediately without manufacturing a wake.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-
-        waker.publish();
-        assert!(waker.park_idle(0).is_none());
-
-        assert_eq!(submitted_seq(&waker), 1);
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 0);
-    }
-
-    #[test]
-    fn test_publish_after_futex_arm_rejects_stale_snapshot() {
-        // Verify the futex idle path tolerates a publish that lands after
-        // WAITING_ON_FUTEX_BIT is armed but before the armed thread commits to
-        // a stable futex wait on that snapshot.
-        //
-        // This models the race that `park_idle()` closes:
-        // 1. idle path arms WAITING_ON_FUTEX_BIT and computes a snapshot
-        // 2. producer publishes, changing the packed state word
-        // 3. a futex wait on the stale snapshot must return immediately
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
-
-        // Manually split `park_idle()` into "arm" and "wait" so the publish
-        // can be injected exactly between those two steps.
-        let prev = waker
-            .inner
-            .state
-            .fetch_or(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
-        assert_eq!(prev & WAITING_MASK, 0);
-        let snapshot = prev | WAITING_ON_FUTEX_BIT;
-
-        // This publish changes the packed word after arming, so a futex wait
-        // on the stale snapshot must now return immediately.
-        waker.publish();
-        assert_eq!(
-            submitted_seq(&waker),
-            before.wrapping_add(1) & SUBMISSION_SEQ_MASK
-        );
-
-        // If the stale snapshot were incorrectly accepted, this call could
-        // block indefinitely. Returning here proves the userspace equality
-        // check / futex EAGAIN path rejected the outdated snapshot without
-        // ever committing to a real futex sleep.
-        assert!(!waker.futex_wait(snapshot));
-        waker.clear_wait();
-
-        // The publish should remain visible and the wait bits should be fully
-        // cleared on exit, matching `park_idle()`'s contract.
-        assert_eq!(
-            submitted_seq(&waker),
-            before.wrapping_add(1) & SUBMISSION_SEQ_MASK
-        );
-        assert_eq!(state_bits(&waker), 0);
-    }
-
-    #[test]
-    fn test_publish_deduplicates_eventfd_wakes() {
-        // Verify contended publishes while the same eventfd wait is armed only
-        // queue one wake write, while still advancing the sequence for every
-        // publisher that raced in this epoch.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let barrier = Arc::new(std::sync::Barrier::new(5));
-        let mut handles = Vec::new();
-
-        let arm = waker.arm(0);
-        assert!(arm.still_idle());
-        assert!(!arm.wake_latched());
-        for _ in 0..4 {
-            let publisher = waker.clone();
-            let barrier = barrier.clone();
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                publisher.publish();
-            }));
-        }
-        barrier.wait();
-        for handle in handles {
-            handle.join().expect("publish thread panicked");
-        }
-
-        assert_eq!(submitted_seq(&waker), 4);
-        assert_eq!(eventfd_count(&waker), 1);
-        drop(arm);
     }
 
     #[test]
     fn test_arm_after_sticky_wake_skips_blocking() {
         // Verify a wake latched before arming makes the next blocking section
-        // skip the normal idle-based blocking decision, and surface that the
-        // reason was an out-of-band wake rather than published-ahead work.
+        // skip the normal idle-based blocking decision.
         let waker = Waker::new().expect("eventfd creation should succeed");
 
         waker.wake();
-        let arm = waker.arm(0);
+        let arm = waker.arm();
         assert!(!arm.still_idle());
         assert!(arm.wake_latched());
         drop(arm);
 
-        assert_eq!(submitted_seq(&waker), 0);
         assert_eq!(state_bits(&waker), 0);
     }
 
@@ -1006,63 +711,33 @@ pub mod tests {
         let waker = Waker::new().expect("eventfd creation should succeed");
 
         waker.wake();
-        let arm = waker.arm(0);
+        let arm = waker.arm();
         assert!(!arm.still_idle());
         assert!(arm.wake_latched());
         drop(arm);
 
-        assert_eq!(submitted_seq(&waker), 0);
         assert_eq!(state_bits(&waker), 0);
         assert_eq!(eventfd_count(&waker), 0);
 
         waker.wake();
-        let arm = waker.arm(0);
-        assert!(!arm.still_idle());
-        assert!(arm.wake_latched());
-        drop(arm);
-
-        assert_eq!(submitted_seq(&waker), 0);
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 0);
-
-        waker.publish();
-        waker.wake();
-        assert_eq!(submitted_seq(&waker), 1);
-        assert_eq!(eventfd_count(&waker), 0);
-        let arm = waker.arm(1);
+        let arm = waker.arm();
         assert!(!arm.still_idle());
         assert!(arm.wake_latched());
         drop(arm);
 
         assert_eq!(state_bits(&waker), 0);
         assert_eq!(eventfd_count(&waker), 0);
-    }
-
-    #[test]
-    fn test_arm_after_publish_skips_blocking() {
-        // Verify arming with a stale processed sequence notices the newly
-        // published submission and skips blocking.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-
-        waker.publish();
-        let arm = waker.arm(0);
-        assert!(!arm.still_idle());
-        assert!(!arm.wake_latched());
-        drop(arm);
-
-        assert_eq!(submitted_seq(&waker), 1);
-        assert_eq!(state_bits(&waker), 0);
     }
 
     #[test]
     fn test_wake_deduplicates_eventfd_wakes() {
         // Verify contended out-of-band notifications while the same eventfd
-        // wait is armed only queue one wake write and do not perturb sequence.
+        // wait is armed only queue one wake write.
         let waker = Waker::new().expect("eventfd creation should succeed");
         let barrier = Arc::new(std::sync::Barrier::new(5));
         let mut handles = Vec::new();
 
-        let arm = waker.arm(0);
+        let arm = waker.arm();
         assert!(arm.still_idle());
         assert!(!arm.wake_latched());
         for _ in 0..4 {
@@ -1078,17 +753,14 @@ pub mod tests {
             handle.join().expect("wake thread panicked");
         }
 
-        assert_eq!(submitted_seq(&waker), 0);
         assert_eq!(eventfd_count(&waker), 1);
         drop(arm);
     }
 
     #[test]
-    fn test_eventfd_wake_and_acknowledge_empty_paths_keep_sequence_stable() {
-        // Verify eventfd wake and drain do not perturb the
-        // logical submission sequence, even when the counter is already empty.
+    fn test_eventfd_wake_and_acknowledge_empty_paths() {
+        // Verify eventfd wake and drain, including an already empty counter.
         let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
 
         // Drive one normal wake cycle, then immediately drain again to hit the
         // non-blocking empty-read path.
@@ -1096,8 +768,6 @@ pub mod tests {
         waker.acknowledge();
         // Second acknowledge should take the non-blocking empty path.
         waker.acknowledge();
-
-        assert_eq!(submitted_seq(&waker), before);
     }
 
     #[test]
@@ -1133,10 +803,8 @@ pub mod tests {
     #[cfg(not(feature = "loom"))]
     #[test]
     fn test_eventfd_wake_and_acknowledge_error_branches() {
-        // Verify the explicit EAGAIN and generic error branches leave the
-        // logical submission sequence unchanged.
+        // Verify the explicit EAGAIN and generic error branches.
         let mut waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
 
         // Saturate the eventfd counter near its maximum so `eventfd_wake` takes the
         // non-blocking EAGAIN path and `acknowledge` drains the queued wake.
@@ -1175,19 +843,15 @@ pub mod tests {
             })
         };
         std::mem::forget(old);
-
-        // Direct eventfd read/write error paths should not perturb sequence tracking.
-        assert_eq!(submitted_seq(&waker), before);
     }
 }
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{
-        tests::{eventfd_count, state_bits, submitted_seq},
+        tests::{eventfd_count, state_bits},
         *,
     };
-    use commonware_utils::TestRng;
     use loom::{
         sync::{
             Arc,
@@ -1195,25 +859,20 @@ mod loom_tests {
         },
         thread,
     };
-    use rand::{Rng, RngExt as _};
-    use rstest::rstest;
 
-    // This module uses loom to model the waker's producer/loop protocol over
-    // the packed atomic state word. The model keeps the production sequence and
-    // wait-bit state machine, but replaces kernel wake surfaces with
-    // loom-visible userspace models: the futex path uses a mutex and condvar to
-    // preserve the atomic compare-and-park property of `FUTEX_WAIT`, and the
-    // eventfd path uses a durable readiness counter plus a condvar to model
-    // both persistent wake readiness and a blocked `submit_and_wait` returning
-    // after a wake CQE.
+    // This module uses loom to model the waker's wait-bit state machine while
+    // replacing kernel wake surfaces with loom-visible userspace models. The
+    // futex path uses a mutex and condvar to preserve the atomic
+    // compare-and-park property of `FUTEX_WAIT`. The eventfd path uses a
+    // durable readiness counter plus a condvar to model persistent wake
+    // readiness and a blocked `submit_and_wait` returning after a wake CQE.
     //
     // The tests keep schedules small while exercising the important races and
-    // invariants: publish versus arm-and-recheck, futex idle parking, eventfd
-    // wake coalescing, sticky out-of-band wakes, sequence wraparound, and the
-    // Release/Acquire edges that make producer state visible after `pending()`
-    // or `clear_wait()`. The model intentionally stops at this userspace
-    // protocol boundary. It does not validate kernel CQE ordering,
-    // `io_uring_enter`, wake-poll rearming, or syscall error handling.
+    // invariants: futex idle parking, eventfd wake coalescing, sticky wakes,
+    // and the Release/Acquire edge that makes producer state visible after
+    // `clear_wait()`. The model intentionally stops at this userspace protocol
+    // boundary. It does not validate kernel CQE ordering, `io_uring_enter`,
+    // wake-poll rearming, or syscall error handling.
 
     // Minimal model of the inbound request queue that feeds the ring.
     //
@@ -1263,154 +922,14 @@ mod loom_tests {
         }
     }
 
-    // Finish any wake epoch left over after a loop-simulator test has already
-    // observed the sequence progress it cares about.
-    //
-    // A producer can claim `WAKE_SIGNALLED_BIT` and queue modeled eventfd
-    // readiness while the simulated loop is also able to make progress by
-    // observing `pending()`. At that point the leftover wake is cleanup noise,
-    // not the property under test. Tests that care about exact wake coalescing
-    // should assert the modeled eventfd counter before calling this helper.
-    fn finish_leftover_wake(waker: &Waker) {
-        assert_eq!(state_bits(waker) & WAITING_MASK, 0);
-        if (state_bits(waker) & WAKE_SIGNALLED_BIT) != 0 {
-            let guard = waker.arm(submitted_seq(waker));
-            assert!(guard.wake_latched());
-            drop(guard);
-        }
-        // A raced publisher can queue eventfd readiness after the loop has
-        // already observed its sequence bump. Finish that modeled wake CQE so
-        // cleanup assertions do not confuse it with the unarmed-wake cases.
-        waker.acknowledge();
-        assert_eq!(state_bits(waker), 0);
-        assert_eq!(eventfd_count(waker), 0);
-    }
-
-    // Simulate the loop's eventfd-backed wait path until it has observed
-    // `target` published submissions. This is not modeling the request queue
-    // itself, only the waker-side control flow: check `pending()`, arm the
-    // eventfd target, block only if the post-arm snapshot is still idle, then
-    // drop the guard and acknowledge modeled eventfd readiness.
-    //
-    // The final `acknowledge()` is model cleanup for any wake CQE readiness
-    // produced during the brief arm window. It may be a no-op when the loop did
-    // not actually block, so tests that validate exact wake counts assert the
-    // counter directly instead of relying on this helper.
-    fn simulate_eventfd_loop_until(waker: &Waker, mut processed: u32, target: u32) -> u32 {
-        while processed != target {
-            if waker.pending(processed) {
-                processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
-                continue;
-            }
-
-            let guard = waker.arm(processed);
-            if guard.still_idle() {
-                wait_for_eventfd_readiness(waker);
-                assert!(
-                    eventfd_count(waker) > 0,
-                    "blocking eventfd wait must observe queued readiness before cleanup",
-                );
-            }
-            drop(guard);
-            waker.acknowledge();
-        }
-        processed
-    }
-
-    // Simulate the loop's fully-idle futex path until it has observed `target`
-    // published submissions. Like the eventfd loop simulator, this models only
-    // waker-side control flow: check `pending()`, otherwise call `park_idle()`
-    // to arm the futex wait target and perform the stale-snapshot recheck.
-    fn simulate_futex_loop_until(waker: &Waker, mut processed: u32, target: u32) -> u32 {
-        while processed != target {
-            if waker.pending(processed) {
-                processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
-                continue;
-            }
-            let _ = waker.park_idle(processed);
-        }
-        processed
-    }
-
-    /// Producer operation used by the deterministic generated loom tests.
-    ///
-    /// Each generated program is built before entering `loom::model`, then run
-    /// by a producer thread. `Publish` models a producer making one request
-    /// visible to the loop, while `Wake` models an out-of-band notification that
-    /// must not affect submission sequence accounting.
-    #[derive(Clone, Copy, Debug)]
-    enum ProducerOp {
-        /// Publish one request to the waker.
-        Publish,
-        /// Notify the loop without publishing a request.
-        Wake,
-    }
-
-    impl ProducerOp {
-        // Generate a deterministic publish/wake program for loom exploration.
-        fn generate_program(rng: &mut impl Rng, len: usize) -> Vec<Self> {
-            (0..len)
-                .map(|_| {
-                    if rng.random_bool(0.5) {
-                        Self::Publish
-                    } else {
-                        Self::Wake
-                    }
-                })
-                .collect()
-        }
-
-        // Execute one generated producer operation.
-        fn execute(self, waker: &Waker, publishes: &AtomicU32) {
-            match self {
-                Self::Publish => {
-                    waker.publish();
-                    publishes.fetch_add(1, Ordering::Relaxed);
-                }
-                Self::Wake => waker.wake(),
-            }
-        }
-    }
-
     #[test]
-    fn publish_pending_pairing() {
-        // `publish` must make the producer's earlier enqueue-side write visible
-        // to a loop that observes the published sequence through `pending()`.
-        // The loop deliberately spins on `pending()` before joining the producer
-        // so the only intended synchronization is publish Release to pending
-        // Acquire.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let queued = Arc::new(QueuedRequest::empty());
-
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                let queued = queued.clone();
-                move || {
-                    queued.enqueue(42);
-                    waker.publish();
-                }
-            });
-
-            while !waker.pending(0) {
-                thread::yield_now();
-            }
-
-            assert_eq!(queued.read(), 42);
-            producer.join().unwrap();
-            assert_eq!(submitted_seq(&waker), 1);
-        });
-    }
-
-    #[test]
-    fn wake_clear_wait_pairing() {
+    fn test_wake_clear_wait_pairing() {
         // `wake` is used by out-of-band callers such as final-handle drop. It
-        // must publish the caller's earlier state change to the loop even though
-        // it does not advance the submitted sequence.
+        // must publish the caller's earlier state change to the loop.
         //
-        // The loop waits for the wake bit before joining the notifier, arms
-        // against the current sequence, and drops the guard so `clear_wait()`'s
-        // Acquire can pair with `wake()`'s Release.
+        // The loop waits for the wake bit before joining the notifier and drops
+        // the arm guard so `clear_wait()`'s Acquire can pair with `wake()`'s
+        // Release.
         loom::model(|| {
             let waker = Waker::new().unwrap();
             let queued = Arc::new(QueuedRequest::empty());
@@ -1427,7 +946,7 @@ mod loom_tests {
             wait_for_wake_signal(&waker);
 
             assert_eq!(eventfd_count(&waker), 0);
-            let guard = waker.arm(0);
+            let guard = waker.arm();
             assert!(guard.wake_latched());
             drop(guard);
 
@@ -1438,7 +957,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn concurrent_unarmed_wakes_coalesce() {
+    fn test_concurrent_unarmed_wakes_coalesce() {
         // Concurrent out-of-band wakes that arrive before the loop arms should
         // coalesce to one sticky wake bit without queuing eventfd readiness.
         loom::model(|| {
@@ -1457,90 +976,25 @@ mod loom_tests {
             b.join().unwrap();
 
             assert_eq!(eventfd_count(&waker), 0);
-            let guard = waker.arm(0);
+            let guard = waker.arm();
             assert!(!guard.still_idle());
             assert!(guard.wake_latched());
             drop(guard);
 
-            assert_eq!(submitted_seq(&waker), 0);
             assert_eq!(state_bits(&waker), 0);
             assert_eq!(eventfd_count(&waker), 0);
         });
     }
 
     #[test]
-    fn arm_and_recheck_eventfd_race() {
-        // A publish racing with the eventfd-backed arm path must be visible
-        // either in the post-arm sequence snapshot or through a modeled eventfd
-        // wake. After the blocking section exits, guard drop clears wait state
-        // and `acknowledge` drains the eventfd counter.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                move || waker.publish()
-            });
-
-            let guard = waker.arm(0);
-            if guard.still_idle() {
-                wait_for_eventfd_readiness(&waker);
-            }
-
-            drop(guard);
-            waker.acknowledge();
-            producer.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn publish_clear_wait_pairing_when_armed() {
-        // When a producer publishes into an armed eventfd epoch, the loop can
-        // resume without first observing `pending()`. `clear_wait()` must still
-        // acquire the producer's enqueue-side writes before the loop checks the
-        // queue after waking.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let queued = Arc::new(QueuedRequest::empty());
-            let guard = waker.arm(0);
-            assert!(guard.still_idle());
-
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                let queued = queued.clone();
-                move || {
-                    queued.enqueue(42);
-                    waker.publish();
-                }
-            });
-
-            wait_for_wake_signal(&waker);
-
-            drop(guard);
-            assert_eq!(queued.read(), 42);
-            producer.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 1);
-            waker.acknowledge();
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn wake_clear_wait_pairing_when_armed() {
+    fn test_wake_clear_wait_pairing_when_armed() {
         // When an out-of-band wake lands in an armed eventfd epoch, the loop
-        // resumes without any sequence progress. `clear_wait()` must still
-        // acquire the notifier's earlier state change before the loop checks for
-        // disconnect or shutdown state after waking.
+        // resumes and `clear_wait()` must acquire the notifier's earlier state
+        // change before the loop checks for disconnect or shutdown state.
         loom::model(|| {
             let waker = Waker::new().unwrap();
             let queued = Arc::new(QueuedRequest::empty());
-            let guard = waker.arm(0);
+            let guard = waker.arm();
             assert!(guard.still_idle());
 
             let notifier = thread::spawn({
@@ -1558,7 +1012,6 @@ mod loom_tests {
             assert_eq!(queued.read(), 42);
             notifier.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), 0);
             assert_eq!(state_bits(&waker), 0);
             assert_eq!(eventfd_count(&waker), 1);
             waker.acknowledge();
@@ -1567,136 +1020,10 @@ mod loom_tests {
     }
 
     #[test]
-    fn arm_and_recheck_futex_race() {
-        // The fully-idle path arms a futex wait target on the same state word
-        // that producers update. A racing publish must either change the
-        // post-arm snapshot before sleep or wake the modeled futex waiter.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                move || waker.publish()
-            });
-
-            let _ = waker.park_idle(0);
-            producer.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 1);
-            finish_leftover_wake(&waker);
-        });
-    }
-
-    #[test]
-    fn publishers_dedup_eventfd_wake() {
-        // Two publishers in one armed eventfd epoch must both advance the
-        // submitted sequence, but only the first wake claimant should increment
-        // the modeled eventfd counter.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let guard = waker.arm(0);
-            assert!(guard.still_idle());
-
-            let a = thread::spawn({
-                let waker = waker.clone();
-                move || waker.publish()
-            });
-            let b = thread::spawn({
-                let waker = waker.clone();
-                move || waker.publish()
-            });
-
-            a.join().unwrap();
-            b.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 2);
-            assert_eq!(eventfd_count(&waker), 1);
-
-            drop(guard);
-            waker.acknowledge();
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn mixed_publish_and_wake_dedup() {
-        // A publish and an out-of-band wake racing in the same armed eventfd
-        // epoch should coalesce to one eventfd signal while still preserving the
-        // publish's sequence increment.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let guard = waker.arm(0);
-            assert!(guard.still_idle());
-
-            let publisher = thread::spawn({
-                let waker = waker.clone();
-                move || waker.publish()
-            });
-            let notifier = thread::spawn({
-                let waker = waker.clone();
-                move || waker.wake()
-            });
-
-            publisher.join().unwrap();
-            notifier.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(eventfd_count(&waker), 1);
-
-            drop(guard);
-            waker.acknowledge();
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn mixed_publish_and_wake_futex_arm() {
-        // A publish and an out-of-band wake racing in the same futex-armed epoch
-        // should coalesce through the shared wake latch while preserving the
-        // publish's sequence increment. Unlike the eventfd path, there is no
-        // durable counter to inspect, so this splits `park_idle()` at the arm
-        // point and verifies the stale futex snapshot is rejected after the
-        // state changes.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let prev = waker
-                .inner
-                .state
-                .fetch_or(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
-            assert_eq!(prev & WAITING_MASK, 0);
-            let snapshot = prev | WAITING_ON_FUTEX_BIT;
-
-            let publisher = thread::spawn({
-                let waker = waker.clone();
-                move || waker.publish()
-            });
-            let notifier = thread::spawn({
-                let waker = waker.clone();
-                move || waker.wake()
-            });
-
-            publisher.join().unwrap();
-            notifier.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(eventfd_count(&waker), 0);
-            assert_eq!(
-                state_bits(&waker),
-                WAITING_ON_FUTEX_BIT | WAKE_SIGNALLED_BIT
-            );
-            assert!(!waker.futex_wait(snapshot));
-            waker.clear_wait();
-            assert_eq!(state_bits(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn drop_wake() {
+    fn test_drop_wake() {
         // An out-of-band wake racing with the eventfd arm path must wake the
-        // loop without advancing the submitted sequence. If it arrives before
-        // arming, `wake_latched` skips the wait, otherwise the modeled eventfd
-        // signal releases the loop.
+        // loop. If it arrives before arming, `wake_latched` skips the wait.
+        // Otherwise the modeled eventfd signal releases the loop.
         loom::model(|| {
             let waker = Waker::new().unwrap();
             let notifier = thread::spawn({
@@ -1704,7 +1031,7 @@ mod loom_tests {
                 move || waker.wake()
             });
 
-            let guard = waker.arm(0);
+            let guard = waker.arm();
             if guard.still_idle() {
                 wait_for_eventfd_readiness(&waker);
             }
@@ -1713,112 +1040,16 @@ mod loom_tests {
             waker.acknowledge();
             notifier.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), 0);
             assert_eq!(state_bits(&waker), 0);
             assert_eq!(eventfd_count(&waker), 0);
         });
     }
 
     #[test]
-    fn sequence_wraparound() {
-        // Preload the sequence to the last representable value, then publish
-        // twice so the visible sequence wraps through zero to one. The
-        // half-range modular `pending()` check must remain directional across
-        // that boundary.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            waker
-                .inner
-                .state
-                .store(SUBMISSION_SEQ_MASK << STATE_BITS, Ordering::Relaxed);
-
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                move || {
-                    waker.publish();
-                    waker.publish();
-                }
-            });
-
-            assert_eq!(
-                simulate_eventfd_loop_until(&waker, SUBMISSION_SEQ_MASK, 1),
-                1
-            );
-            producer.join().unwrap();
-            assert_eq!(submitted_seq(&waker), 1);
-            finish_leftover_wake(&waker);
-        });
-    }
-
-    #[test]
-    fn two_producers_mixed_ops() {
-        // Producer-only mixed publish/wake programs should preserve submitted
-        // sequence conservation and must not queue eventfd readiness while the
-        // loop is unarmed. A sticky wake bit may remain for the next arm cycle.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let publishes = Arc::new(AtomicU32::new(0));
-
-            let a = thread::spawn({
-                let waker = waker.clone();
-                let publishes = publishes.clone();
-                move || {
-                    waker.publish();
-                    publishes.fetch_add(1, Ordering::Relaxed);
-                    waker.wake();
-                    waker.publish();
-                    publishes.fetch_add(1, Ordering::Relaxed);
-                }
-            });
-
-            let b = thread::spawn({
-                let waker = waker.clone();
-                let publishes = publishes.clone();
-                move || {
-                    waker.wake();
-                    waker.publish();
-                    publishes.fetch_add(1, Ordering::Relaxed);
-                }
-            });
-
-            a.join().unwrap();
-            b.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), publishes.load(Ordering::Relaxed));
-            assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn producer_with_draining_loop() {
-        // A minimal loop simulator must drain both publishes from one producer
-        // using the eventfd arm-and-recheck path whenever no sequence progress
-        // is currently visible.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                move || {
-                    waker.publish();
-                    waker.publish();
-                }
-            });
-
-            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
-            producer.join().unwrap();
-
-            assert_eq!(processed, 2);
-            assert_eq!(submitted_seq(&waker), 2);
-            finish_leftover_wake(&waker);
-        });
-    }
-
-    #[test]
-    fn park_idle_with_concurrent_wake() {
+    fn test_park_idle_with_concurrent_wake() {
         // The fully-idle futex path must also handle pure out-of-band wakes.
         // The loop either sees the wake bit before sleeping or is resumed by the
-        // modeled futex wake. No submission sequence bump is involved.
+        // modeled futex wake.
         loom::model(|| {
             let waker = Waker::new().unwrap();
             let notifier = thread::spawn({
@@ -1826,251 +1057,12 @@ mod loom_tests {
                 move || waker.wake()
             });
 
-            let _ = waker.park_idle(0);
+            let _ = waker.park_idle();
             notifier.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), 0);
             assert_eq!(state_bits(&waker), 0);
             assert_eq!(eventfd_count(&waker), 0);
         });
     }
 
-    #[test]
-    fn two_cycle_drain_with_interleaved_wake() {
-        // A drain loop must survive an explicit wake between two publishes. The
-        // wake may be consumed as a sticky bit or as eventfd readiness, but both
-        // publishes must still be processed exactly once.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                move || {
-                    waker.publish();
-                    waker.wake();
-                    waker.publish();
-                }
-            });
-
-            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
-            producer.join().unwrap();
-
-            assert_eq!(processed, 2);
-            assert_eq!(submitted_seq(&waker), 2);
-            finish_leftover_wake(&waker);
-        });
-    }
-
-    #[test]
-    fn multiple_park_idle_cycles() {
-        // Repeated fully-idle futex park cycles must continue to observe
-        // publishes. This uses `park_idle()` instead of the eventfd arm path
-        // whenever no sequence progress is currently visible.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                move || {
-                    waker.publish();
-                    waker.publish();
-                }
-            });
-
-            let processed = simulate_futex_loop_until(&waker, 0, 2);
-            producer.join().unwrap();
-
-            assert_eq!(processed, 2);
-            assert_eq!(submitted_seq(&waker), 2);
-            finish_leftover_wake(&waker);
-        });
-    }
-
-    #[test]
-    fn three_thread_stress() {
-        // Two producers publishing concurrently with one loop simulator should
-        // still preserve conservation and progress. This adds one more producer
-        // thread to the eventfd drain shape.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let a = thread::spawn({
-                let waker = waker.clone();
-                move || waker.publish()
-            });
-            let b = thread::spawn({
-                let waker = waker.clone();
-                move || waker.publish()
-            });
-
-            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
-            a.join().unwrap();
-            b.join().unwrap();
-
-            assert_eq!(processed, 2);
-            assert_eq!(submitted_seq(&waker), 2);
-            finish_leftover_wake(&waker);
-        });
-    }
-
-    #[rstest]
-    #[case(8, 0)]
-    #[case(8, 1)]
-    #[case(8, 2)]
-    fn generated_producer_only_programs(#[case] cases: usize, #[case] seed: u64) {
-        // Generate deterministic producer-only programs before entering loom,
-        // then model each case with two concurrent producers. Each producer
-        // runs a short sequence of `publish()` and out-of-band `wake()` calls
-        // without any loop thread consuming them.
-        //
-        // The invariant is producer-side conservation: every generated `Publish`
-        // must be reflected in the submitted sequence exactly once, while
-        // generated `Wake`s must not affect the sequence. Since the waker is
-        // never armed in this test, producers must also leave no wait target
-        // armed and must not queue modeled eventfd readiness. A sticky wake bit
-        // may remain because there is intentionally no loop to consume it.
-        const OPS_PER_PROGRAM: usize = 5;
-
-        let mut rng = TestRng::new(seed);
-        let programs = (0..cases)
-            .map(|_| {
-                [
-                    ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
-                    ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
-                ]
-            })
-            .collect::<Vec<_>>();
-
-        for (iter, programs) in programs.into_iter().enumerate() {
-            loom::model(move || {
-                let waker = Waker::new().unwrap();
-                let publishes = Arc::new(AtomicU32::new(0));
-
-                let handles = programs
-                    .iter()
-                    .map(|program| {
-                        let program = program.clone();
-                        let waker = waker.clone();
-                        let publishes = publishes.clone();
-                        thread::spawn(move || {
-                            for &op in program.iter() {
-                                op.execute(&waker, &publishes);
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-
-                for handle in handles {
-                    handle.join().unwrap();
-                }
-
-                let expected = publishes.load(Ordering::Relaxed);
-                let got = submitted_seq(&waker);
-                assert_eq!(
-                    got, expected,
-                    "publish conservation failed: iter={iter} programs={programs:?}",
-                );
-                assert_eq!(
-                    state_bits(&waker) & WAITING_MASK,
-                    0,
-                    "wait target remained armed: iter={iter} programs={programs:?}",
-                );
-                assert_eq!(
-                    eventfd_count(&waker),
-                    0,
-                    "eventfd readiness queued while unarmed: iter={iter} programs={programs:?}",
-                );
-            });
-        }
-    }
-
-    fn generated_loop_programs(
-        cases: usize,
-        ops_per_program: usize,
-        seed: u64,
-        simulate_loop_until: fn(&Waker, u32, u32) -> u32,
-    ) {
-        let mut rng = TestRng::new(seed);
-        let programs = (0..cases)
-            .map(|_| ProducerOp::generate_program(&mut rng, ops_per_program))
-            .collect::<Vec<_>>();
-
-        for (iter, program) in programs.into_iter().enumerate() {
-            let publish_count = program
-                .iter()
-                .filter(|op| matches!(op, ProducerOp::Publish))
-                .count() as u32;
-
-            loom::model(move || {
-                let waker = Waker::new().unwrap();
-                let publishes = Arc::new(AtomicU32::new(0));
-
-                let producer = thread::spawn({
-                    let program = program.clone();
-                    let waker = waker.clone();
-                    let publishes = publishes.clone();
-                    move || {
-                        for &op in program.iter() {
-                            op.execute(&waker, &publishes);
-                        }
-                    }
-                });
-
-                let processed = simulate_loop_until(&waker, 0, publish_count);
-                producer.join().unwrap();
-
-                assert_eq!(
-                    processed, publish_count,
-                    "loop progress failed: iter={iter} program={program:?}",
-                );
-                assert_eq!(
-                    submitted_seq(&waker),
-                    publish_count,
-                    "publish conservation failed: iter={iter} program={program:?}",
-                );
-                assert_eq!(
-                    publishes.load(Ordering::Relaxed),
-                    publish_count,
-                    "producer accounting failed: iter={iter} program={program:?}",
-                );
-                finish_leftover_wake(&waker);
-            });
-        }
-    }
-
-    #[rstest]
-    #[case(32, 10)]
-    #[case(32, 11)]
-    #[case(32, 12)]
-    fn generated_eventfd_loop_programs(#[case] cases: usize, #[case] seed: u64) {
-        // Generate deterministic single-producer programs before entering loom,
-        // then model each case with one producer and the eventfd loop simulator.
-        // The producer may interleave out-of-band `wake()` calls before,
-        // between, or after its generated `publish()` calls.
-        //
-        // The loop simulator must eventually observe exactly the generated
-        // publish count, regardless of whether progress arrives through
-        // `pending()` or through the arm, eventfd readiness, and `clear_wait()`
-        // path. Pure wakes are allowed to resume the loop, but they must not
-        // create sequence progress or disturb producer accounting.
-        const OPS_PER_PROGRAM: usize = 3;
-
-        generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_eventfd_loop_until);
-    }
-
-    #[rstest]
-    #[case(6, 20)]
-    #[case(5, 21)]
-    #[case(5, 22)]
-    fn generated_futex_loop_programs(#[case] cases: usize, #[case] seed: u64) {
-        // Generate deterministic single-producer programs before entering loom,
-        // then model each case with one producer and the futex idle loop
-        // simulator. The producer may interleave out-of-band `wake()` calls
-        // before, between, or after its generated `publish()` calls.
-        //
-        // This is the futex-path counterpart to `generated_eventfd_loop_programs`.
-        // The loop simulator must drain exactly the generated publish count
-        // through `pending()` or `park_idle()`, while pure wakes may resume the
-        // futex wait without creating sequence progress.
-        const OPS_PER_PROGRAM: usize = 3;
-
-        generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_futex_loop_until);
-    }
 }

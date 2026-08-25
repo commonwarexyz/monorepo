@@ -32,7 +32,7 @@ pub fn iouring_ring_size(inflight: usize, max_ring_size: u32) -> Result<u32, Str
     Ok(size)
 }
 
-/// Mirror of the runtime's `MAX_RING_SIZE` (2^27) for the boundary tests
+/// Mirror of the runtime's `MAX_RING_SIZE` (2^15) for the boundary tests
 /// below. A literal is required because this file compiles both into the
 /// bench binary and into the library, whose paths to the runtime crate
 /// differ. The drift test beside the inclusion in `runtime/src/storage/mod.rs`
@@ -43,7 +43,7 @@ pub fn iouring_ring_size(inflight: usize, max_ring_size: u32) -> Result<u32, Str
 /// this constant are stripped there.
 #[cfg(test)]
 #[allow(dead_code)]
-pub const MIRRORED_MAX_RING_SIZE: u32 = 1 << 27;
+pub const MIRRORED_MAX_RING_SIZE: u32 = 1 << 15;
 
 #[cfg(test)]
 mod tests {
@@ -71,6 +71,7 @@ mod tests {
     #[test]
     fn test_ring_size_accepts_half_limit() {
         let inflight = (MAX_RING_SIZE / 2) as usize;
+        assert_eq!(inflight, 16_384);
         assert_eq!(
             iouring_ring_size(inflight, MAX_RING_SIZE),
             Ok(MAX_RING_SIZE)
@@ -84,6 +85,7 @@ mod tests {
     #[test]
     fn test_ring_size_rejects_half_limit_plus_one() {
         let inflight = (MAX_RING_SIZE / 2) as usize + 1;
+        assert_eq!(inflight, 16_385);
         assert_eq!(
             iouring_ring_size(inflight, MAX_RING_SIZE),
             Err("--inflight requires an io_uring ring larger than MAX_RING_SIZE".to_string())
