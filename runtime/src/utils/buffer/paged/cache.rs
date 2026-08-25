@@ -328,6 +328,49 @@ impl CacheRef {
         Ok(())
     }
 
+    /// Like [`Self::read`], but a cache miss reads the page directly from `blob` without
+    /// admitting it into the page cache. Suited to bulk scans of pages that will not be
+    /// read again soon: admission would churn the cache and serialize concurrent scanning
+    /// tasks on its lock.
+    pub(super) async fn read_uncached<B: Blob>(
+        &self,
+        blob: &B,
+        blob_id: u64,
+        mut buf: &mut [u8],
+        mut offset: u64,
+    ) -> Result<(), Error> {
+        while !buf.is_empty() {
+            // Serve what we can from pages already cached.
+            {
+                let page_cache = self.cache.read();
+                let count = page_cache.read_at(blob_id, buf, offset);
+                if count != 0 {
+                    offset += count as u64;
+                    buf = &mut buf[count..];
+                    continue;
+                }
+            }
+
+            // Read the faulted page directly, leaving the cache untouched.
+            let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
+            let offset_in_page = offset_in_page as usize;
+            let page =
+                super::get_page_from_blob(blob, page_num, self.page_size, ReadOptions::default())
+                    .await?;
+            let page = page.as_ref();
+            assert!(
+                page.len() > offset_in_page,
+                "read past the blob's last valid page"
+            );
+            let count = (page.len() - offset_in_page).min(buf.len());
+            buf[..count].copy_from_slice(&page[offset_in_page..offset_in_page + count]);
+            offset += count as u64;
+            buf = &mut buf[count..];
+        }
+
+        Ok(())
+    }
+
     /// Fetch the requested page after encountering a page fault, which may involve retrieving it
     /// from `blob` & caching the result in the page cache. Returns the number of bytes read, which
     /// should always be non-zero.
