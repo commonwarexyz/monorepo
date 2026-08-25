@@ -53,10 +53,11 @@ type UserData = u64;
 #[derive(Debug)]
 pub(crate) struct Metrics {
     /// Number of logical requests retained by the driver. Internal SQEs (the
-    /// wake poll and async cancels) are not counted. Active waiters and Ready
+    /// wake poll and async cancels) are not counted. Tracked waiters and Ready
     /// detached ticket completions count once each.
     /// This is updated in the main loop and at shutdown drain exit, so it may
-    /// temporarily vary from the exact in-flight count between update points.
+    /// temporarily vary from the exact retained-operation count between update
+    /// points.
     pending_operations: PendingOperations,
 }
 
@@ -170,6 +171,20 @@ impl IoUringLoop {
     ///
     /// The loop allocates its own metrics and internal `eventfd` wake source.
     /// The calling thread becomes the handle's owning (runtime) thread.
+    /// Ring creation completes before the waiter table and queues whose
+    /// capacities are proportional to the effective ring size are allocated.
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel error if the io_uring instance cannot be created.
+    /// In that case, no ring-sized waiter or queue state is allocated.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either timeout duration is zero, the requested ring size
+    /// overflows when rounded or rounds above [`MAX_RING_SIZE`], the timeout
+    /// wheel exceeds its slot limit, the wake `eventfd` cannot be created, or
+    /// the spinner budget exceeds its configured maximum.
     pub(crate) fn new(
         mut cfg: RingConfig,
         registry: &mut impl Register,
@@ -185,7 +200,7 @@ impl IoUringLoop {
         cfg.size = validated_ring_size(cfg.size);
 
         // Ask the kernel to construct the ring before allocating the waiter
-        // table whose capacity is proportional to the requested ring size.
+        // table whose capacity is proportional to the effective ring size.
         let ring = new_ring(&cfg)?;
         let size = cfg.size as usize;
         let metrics = Metrics::new(registry);
@@ -604,9 +619,10 @@ impl IoUringLoop {
 
     /// Transfer a terminal detached-ticket output away from its waiter.
     ///
-    /// State publication, timeout removal, and waiter recycling all precede
-    /// collection of ticket and capacity wakers. The wakers themselves run
-    /// only after the surrounding op-state borrow is released.
+    /// The output is published, timeout accounting removed, and the waiter
+    /// recycled before capacity reservations are reconciled. Ticket and
+    /// capacity callbacks are detached during that transition, then run only
+    /// after the surrounding op-state borrow is released.
     fn complete_ticket(
         &mut self,
         ops: &mut Ops,
@@ -615,15 +631,27 @@ impl IoUringLoop {
         output: request::Output,
         target_tick: Option<Tick>,
     ) {
+        // Publish Ready while the completion still links to this waiter. The
+        // ticket can then observe its output independently of waiter reuse.
         let waker = ops
             .completions
             .publish_ready(completion_id, waiter_id, output);
+
+        // Remove active timeout accounting after publication, while the
+        // generation-stamped waiter identity is still current.
         if let Some(tick) = target_tick {
             self.timeout_wheel.remove(tick);
         }
+
+        // Recycle the waiter only after the completion arena owns the output.
         ops.waiters.finish_ticket(waiter_id, completion_id);
+
+        // Queue the ticket callback ahead of capacity callbacks to preserve
+        // callback order, without executing it under the Ops borrow.
         self.pending_waker_actions
             .extend(waker.map(handle::WakerAction::Wake));
+
+        // Reconcile reservations against the waiter's authoritative free list.
         self.notify_capacity(ops);
     }
 
@@ -686,9 +714,9 @@ impl IoUringLoop {
 
     /// Drain in-flight requests during shutdown.
     ///
-    /// Keeps draining CQEs until all progressing waiters finish. Parked
-    /// results owned by escaped tickets hold no kernel resources and are left
-    /// in place: they are reclaimed when their ticket is polled or dropped.
+    /// Keeps draining CQEs until all progressing waiters finish. Ready results
+    /// retained by escaped tickets hold no kernel resources or waiter slots and
+    /// remain in the completion arena until their ticket is polled or dropped.
     ///
     /// If `shutdown_timeout` is `None`, this waits until all waiters complete
     /// or are cancelled by their own deadlines. If `shutdown_timeout` is

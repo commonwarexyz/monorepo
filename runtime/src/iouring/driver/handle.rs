@@ -134,7 +134,7 @@ impl<T> Affine<T> {
     }
 }
 
-/// The in-flight op table shared between futures and the event loop.
+/// Shared operation state for futures, detached tickets, and the event loop.
 pub(crate) struct Ops {
     /// Slot table tracking every admitted logical request. Slots own all
     /// operation resources (buffers, FDs) for the request lifetime.

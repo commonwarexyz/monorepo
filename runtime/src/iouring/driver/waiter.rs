@@ -106,28 +106,36 @@ impl WaiterId {
 /// its request through the kernel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompletionId {
+    /// Completion-arena slot index.
     index: u32,
+    /// Generation of the completion-arena slot at allocation time.
+    ///
+    /// Recycled slots advance this value so a stale ticket cannot address a
+    /// later completion that uses the same index.
     generation: u32,
 }
 
 impl CompletionId {
-    /// Build a completion ID from its slot and generation.
+    /// Build a completion ID from its slot index and generation.
     const fn new(index: u32, generation: u32) -> Self {
         Self { index, generation }
     }
 
-    /// Return the slot index.
+    /// Return the completion-arena slot index.
     const fn index(self) -> u32 {
         self.index
     }
 
-    /// Return the generation.
+    /// Return the generation captured by this ID.
     #[cfg(test)]
     const fn generation(self) -> u32 {
         self.generation
     }
 
     /// Advance the generation for a recycled completion slot.
+    ///
+    /// The index remains reusable, but the old ID no longer validates against
+    /// the replacement entry. Generation arithmetic wraps at `u32::MAX`.
     const fn next_generation(self) -> Self {
         Self::new(self.index, self.generation.wrapping_add(1))
     }
@@ -206,11 +214,11 @@ enum Observer {
     /// An ordinary op future. Its waker stays with the waiter because its
     /// result is consumed from that same slot.
     Op(Option<Waker>),
-    /// A detached ticket. Its waker and terminal output live in the separate
-    /// completion arena.
+    /// A detached ticket. Its waker lives in the separate completion arena,
+    /// and terminal output moves there when the waiter completes.
     Ticket(CompletionId),
-    /// The observer was dropped. Accept requests cancel, while sync requests
-    /// detach, according to the request's orphan policy.
+    /// The observer was dropped. Requests whose orphan policy stops progress
+    /// cancel, while storage writes and syncs detach and keep running.
     Orphaned,
 }
 
@@ -335,18 +343,22 @@ pub enum CompletionDropOutcome {
 
 /// Lifecycle of a detached ticket completion.
 enum Completion {
-    /// The waiter still owns the active request.
+    /// The waiter still owns the active request and its kernel resources.
     Pending {
+        /// Waiter slot that owns the request until terminal completion.
         waiter_id: WaiterId,
+        /// Ticket task waker retained until the output is published or dropped.
         waker: Option<Waker>,
     },
-    /// Terminal userspace-owned output, independent from any waiter slot.
+    /// Terminal userspace-owned output, independent from the recycled waiter slot.
     Ready(Output),
 }
 
 /// One detached ticket completion entry.
 struct TicketCompletion {
+    /// Generation-stamped identity used to reject stale ticket operations.
     id: CompletionId,
+    /// Pending or ready lifecycle state for this completion.
     completion: Completion,
 }
 
@@ -355,13 +367,20 @@ struct TicketCompletion {
 /// The arena grows only to its high-water mark. Dropped or consumed entries
 /// return to a free list and reuse their existing vector storage.
 pub struct TicketCompletions {
+    /// Completion entries indexed by [`CompletionId::index`]. A live entry is
+    /// `Pending` while its waiter owns the request, then `Ready` while this
+    /// arena owns the terminal output.
     entries: Vec<Option<TicketCompletion>>,
+    /// Stack of generation-advanced IDs for recycled completion slots. Full-ID
+    /// validation rejects tickets from an older generation of the same slot.
     free: Vec<CompletionId>,
+    /// Number of entries in the `Ready` state. Pending entries are represented
+    /// by their waiter and therefore are not counted here.
     ready: usize,
 }
 
 impl TicketCompletions {
-    /// Create an empty completion arena.
+    /// Create an empty completion arena with no allocated slots.
     pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -372,9 +391,13 @@ impl TicketCompletions {
 
     /// Allocate a pending completion and admit its associated waiter.
     ///
-    /// `insert_waiter` receives the completion ID before the waiter is
-    /// inserted, allowing the waiter to retain the reverse link without a
-    /// temporary partially initialized completion entry.
+    /// `insert_waiter` receives the generation-stamped completion ID before
+    /// the completion entry is installed. It must insert a waiter that stores
+    /// that ID as its reverse link. The waiter owns the request while the
+    /// completion entry owns the ticket waker until publication or drop.
+    ///
+    /// A recycled slot keeps its vector allocation and receives its next
+    /// generation. A fresh slot starts at generation zero.
     pub fn insert_pending(
         &mut self,
         waker: Waker,
@@ -409,9 +432,13 @@ impl TicketCompletions {
 
     /// Publish a ticket's terminal output and return its task waker.
     ///
-    /// The associated waiter remains tracked until the caller has removed
-    /// deadline accounting. The caller then recycles it before invoking the
-    /// returned waker.
+    /// The entry changes from `Pending` to `Ready`, transferring output
+    /// ownership from the waiter to this arena. The associated waiter remains
+    /// tracked until the caller removes deadline accounting and recycles it
+    /// before invoking the returned waker.
+    ///
+    /// Panics if `completion_id` is stale or untracked, if the entry is already
+    /// ready, or if its linked waiter does not equal `waiter_id`.
     pub fn publish_ready(
         &mut self,
         completion_id: CompletionId,
@@ -440,6 +467,12 @@ impl TicketCompletions {
     }
 
     /// Take a ready output, or refresh the pending ticket waker.
+    ///
+    /// Taking a ready output recycles its completion slot and advances its
+    /// generation. A pending entry remains linked to its waiter and stores the
+    /// latest task waker. Returns `None` while pending.
+    ///
+    /// Panics if `completion_id` is stale or untracked.
     pub fn poll_take(&mut self, completion_id: CompletionId, waker: &Waker) -> Option<Output> {
         let index = completion_id.index() as usize;
         let entry = self.entry_mut(completion_id, "poll_take");
@@ -464,7 +497,10 @@ impl TicketCompletions {
     ///
     /// A Pending entry returns its stored waker so the caller can first
     /// commit the linked waiter's orphan transition, then drop the waker
-    /// outside the owner-state borrow.
+    /// outside the owner-state borrow. A Ready entry drops its output and
+    /// returns `Ready`.
+    ///
+    /// Panics if `completion_id` is stale or untracked.
     pub fn mark_orphaned(&mut self, completion_id: CompletionId) -> CompletionDropOutcome {
         let index = completion_id.index() as usize;
         let _ = self.entry(completion_id, "mark_orphaned");
@@ -487,6 +523,10 @@ impl TicketCompletions {
         self.entries.len()
     }
 
+    /// Look up a live completion after validating its full generation-stamped ID.
+    ///
+    /// `operation` is included in invariant-failure messages. Panics when the
+    /// slot is empty, out of bounds, or belongs to another generation.
     fn entry(&self, id: CompletionId, operation: &str) -> &TicketCompletion {
         let entry = self
             .entries
@@ -497,6 +537,10 @@ impl TicketCompletions {
         entry
     }
 
+    /// Mutably look up a live completion after validating its full ID.
+    ///
+    /// `operation` is included in invariant-failure messages. Panics when the
+    /// slot is empty, out of bounds, or belongs to another generation.
     fn entry_mut(&mut self, id: CompletionId, operation: &str) -> &mut TicketCompletion {
         let entry = self
             .entries
@@ -507,6 +551,11 @@ impl TicketCompletions {
         entry
     }
 
+    /// Remove a live entry by arena index and recycle its next-generation ID.
+    ///
+    /// The caller must validate the generation with [`Self::entry`] or
+    /// [`Self::entry_mut`] first. This helper decrements the ready count when
+    /// needed and panics if `index` is out of bounds or empty.
     fn take(&mut self, index: usize) -> Completion {
         let entry = self.entries[index]
             .take()
@@ -525,7 +574,8 @@ pub struct Waiters {
     ///
     /// Free slots have no waiter (`None`).
     entries: Vec<Option<Waiter>>,
-    /// Stack of reusable waiter ids.
+    /// Stack of reusable waiter IDs. Removing a slot advances its generation
+    /// before the ID is returned here, rejecting late CQEs for its old owner.
     free: Vec<WaiterId>,
     /// Number of tracked waiters currently stored in `entries`.
     len: usize,
@@ -588,10 +638,11 @@ impl Waiters {
         self.free.len()
     }
 
-    /// Insert a request and return its assigned id.
+    /// Insert an ordinary request and return its generation-stamped waiter ID.
     ///
-    /// The waker is stored eagerly so a completion always has an observer to
-    /// wake. Deadline scheduling happens separately at first staging.
+    /// The waiter owns the request and the supplied task waker. Deadline
+    /// scheduling happens separately at first staging, and terminal output is
+    /// parked in this waiter until the same op future takes it.
     ///
     /// Panics if no free slot is available.
     #[inline]
@@ -600,10 +651,24 @@ impl Waiters {
     }
 
     /// Insert a request owned by a detached ticket.
+    ///
+    /// The waiter stores `completion_id` as its reverse link. The ticket waker
+    /// remains in [`TicketCompletions`] while pending, and terminal output is
+    /// transferred there before this waiter slot is recycled.
+    ///
+    /// Panics if no free slot is available.
     pub fn insert_ticket(&mut self, request: Request, completion_id: CompletionId) -> WaiterId {
         self.insert_with_observer(request, Observer::Ticket(completion_id))
     }
 
+    /// Insert a pending request with the observer that will own its output.
+    ///
+    /// The next generation-stamped free slot starts active, without an SQE in
+    /// flight, and with a pending request lifecycle. This shared helper also
+    /// updates the tracked and progressing counts used by capacity and drain
+    /// accounting.
+    ///
+    /// Panics if no free slot is available.
     fn insert_with_observer(&mut self, request: Request, observer: Observer) -> WaiterId {
         let id = self
             .free
@@ -741,6 +806,8 @@ impl Waiters {
     /// - [`StageOutcome::Submit`] leaves the waiter tracked and yields the next SQE.
     /// - [`StageOutcome::Complete`] completes the waiter locally (deadline
     ///   expiry, shutdown, or orphan retirement) without emitting an SQE.
+    /// - [`StageOutcome::Ticket`] returns terminal ticket output for publication
+    ///   before its waiter is recycled.
     ///
     /// When this returns [`StageOutcome::Submit`], the waiter is marked as having an
     /// operation SQE outstanding immediately, so [`Waiters::is_in_flight`] will return
