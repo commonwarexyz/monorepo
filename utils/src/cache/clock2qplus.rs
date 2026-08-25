@@ -111,7 +111,7 @@ enum Admission {
 }
 
 /// Storage action selected for one confirmed-miss insertion.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 enum InsertionPlan {
     /// Claim unused cache capacity.
     Vacant,
@@ -502,6 +502,9 @@ impl<K: Hash + Eq + Clone> GhostFifo<K> {
             return false;
         };
         let _historical = self.unlink(slot);
+
+        // Recycle the position before dropping the key, so a panicking
+        // destructor cannot strand the detached slot outside the free list.
         self.free.push(slot);
         true
     }
@@ -669,7 +672,7 @@ impl<K: Hash + Eq + Clone> Clock2QPlus<K> {
     fn attach<I: Index<Slot, Output = SlotState>>(
         &mut self,
         states: &I,
-        slot: usize,
+        slot: Slot,
         admission: Admission,
     ) {
         match admission {
