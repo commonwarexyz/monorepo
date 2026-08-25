@@ -58,24 +58,6 @@ impl<F: Family, E: Context, V: VariableValue, H: Hasher, S: Strategy> Db<F, E, V
     }
 }
 
-impl<
-    F: Family,
-    E: Context,
-    V: VariableValue,
-    H: Hasher,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-> CompactDb<F, E, V, H, C, S>
-where
-    Operation<F, V>: Read<Cfg = C>,
-{
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let journal = variable::Journal::init(context.child("witness"), cfg.witness).await?;
-        Self::init_from_journal(cfg.strategy, journal, cfg.commit_codec_config).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

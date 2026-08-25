@@ -63,13 +63,13 @@ use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
 pub mod batch;
-use crate::qmdb::compact::db as compact;
+mod compact;
 pub mod fixed;
 mod operation;
 pub(crate) mod sync;
 pub mod variable;
 pub use compact::{
-    Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
+    Append, Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
