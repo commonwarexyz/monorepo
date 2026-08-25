@@ -580,6 +580,14 @@ impl Waiters {
         self.len == self.entries.len()
     }
 
+    /// Return the authoritative number of free waiter slots.
+    ///
+    /// Capacity reservations reconcile against this value after every waiter
+    /// removal so userspace grants cannot drift from the slab.
+    pub const fn free_len(&self) -> usize {
+        self.free.len()
+    }
+
     /// Insert a request and return its assigned id.
     ///
     /// The waker is stored eagerly so a completion always has an observer to

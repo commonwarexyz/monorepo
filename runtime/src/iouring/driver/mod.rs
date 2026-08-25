@@ -225,13 +225,13 @@ impl IoUringLoop {
         handle::wake_batch(self.pending_waker_actions.drain(..));
     }
 
-    /// Release every task waiting for a free waiter slot.
+    /// Reconcile FIFO capacity grants against the waiter table.
     ///
-    /// Called whenever a slot frees. Woken futures re-register if they lose
-    /// the admission race.
+    /// Called after every actual waiter removal. Each granted task owns its
+    /// permit until admission or cancellation, so later polls cannot barge.
     fn notify_capacity(&mut self, ops: &mut Ops) {
         ops.capacity
-            .drain_into(&mut self.pending_waker_actions, handle::WakerAction::Wake);
+            .reconcile(ops.waiters.free_len(), &mut self.pending_waker_actions);
     }
 
     /// Wind down work dropped on a foreign thread (see
@@ -242,19 +242,20 @@ impl IoUringLoop {
         for orphan in self.handle.orphans.take() {
             match orphan {
                 handle::Orphan::Waiter(id) => {
-                    if handle::wind_down_orphan(ops, id) {
-                        self.notify_capacity(ops);
-                    }
+                    handle::wind_down_orphan(ops, id, &mut self.pending_waker_actions);
                 }
                 handle::Orphan::Completion(id) => {
-                    let (waker, freed) = handle::wind_down_ticket(ops, id);
+                    let mut capacity_actions = handle::CapacityActions::new();
+                    let waker = handle::wind_down_ticket(ops, id, &mut capacity_actions);
                     self.pending_waker_actions
                         .extend(waker.map(handle::WakerAction::Drop));
-                    if freed {
-                        self.notify_capacity(ops);
-                    }
+                    self.pending_waker_actions.extend(capacity_actions);
                 }
-                handle::Orphan::Capacity(slot) => ops.capacity.cancel(slot),
+                handle::Orphan::Capacity(slot) => ops.capacity.cancel(
+                    slot,
+                    ops.waiters.free_len(),
+                    &mut self.pending_waker_actions,
+                ),
             }
         }
     }
@@ -1065,9 +1066,7 @@ pub(crate) mod testing {
             // Mirror the runtime's teardown: a waker panic must not skip the
             // drain (drain panics abort inside [Driver::drain]).
             let wakers = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                for waker in driver.close() {
-                    waker.wake();
-                }
+                handle::wake_batch(driver.close().into_iter().map(handle::WakerAction::Wake));
             }));
             driver.drain();
             if let Err(payload) = wakers {
@@ -1473,9 +1472,8 @@ mod tests {
     }
 
     #[test]
-    fn test_capacity_wake_all_admits_waiting_op() {
-        // Verify an op parked on the capacity wait list admits once a slot
-        // frees.
+    fn test_capacity_fifo_grant_admits_waiting_op() {
+        // Verify a FIFO-granted op admits once its reserved slot frees.
         let mut harness = TestLoop::new(RingConfig {
             size: 1,
             ..Default::default()
@@ -1790,6 +1788,82 @@ mod tests {
             .with(|ops| assert_eq!(ops.capacity.registered(), 0));
     }
 
+    #[test]
+    fn test_off_thread_drop_transfers_granted_capacity_slot() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+
+        let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(handle.recv(
+            Arc::new(blocker_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut blocker).is_pending());
+
+        let first_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let first_waker = arc_waker(Arc::clone(&first_count));
+        let mut first_cx = Context::from_waker(&first_waker);
+        let (first_left, _first_right) = UnixStream::pair().unwrap();
+        let mut first = Box::pin(handle.recv(
+            Arc::new(first_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(first.as_mut().poll(&mut first_cx).is_pending());
+
+        // The blocker is still in the backlog. Its owner drop and the next
+        // turn retire it locally, granting the released slot to `first`.
+        drop(blocker);
+        harness.driver().turn();
+        assert_eq!(first_count.0.load(Ordering::Acquire), 1);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.waiters.len(), 0);
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+
+        let second_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let second_waker = arc_waker(Arc::clone(&second_count));
+        let mut second_cx = Context::from_waker(&second_waker);
+        let (second_left, _second_right) = UnixStream::pair().unwrap();
+        let mut second = Box::pin(handle.recv(
+            Arc::new(second_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(second.as_mut().poll(&mut second_cx).is_pending());
+        assert_eq!(second_count.0.load(Ordering::Acquire), 0);
+
+        // A foreign drop routes the granted CapacityId through the mailbox.
+        // Cancelling it transfers the reserved permit to the queued head.
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(first)).join().unwrap();
+        });
+        harness.driver().turn();
+        assert_eq!(second_count.0.load(Ordering::Acquire), 1);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+        drop(second);
+        assert_eq!(harness.tracked(), 0);
+    }
+
     /// Park a completed sync ticket's terminal result in its independent
     /// completion entry while retaining the ticket.
     ///
@@ -1853,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retained_completed_ticket_frees_size_one_capacity() {
+    fn test_ready_ticket_poll_does_not_double_release_capacity() {
         let mut harness = TestLoop::new(RingConfig {
             size: 1,
             max_request_timeout: Duration::from_secs(60),
@@ -1895,17 +1969,55 @@ mod tests {
             assert_eq!(ops.waiters.len(), 0);
             assert_eq!(ops.completions.ready(), 1);
             assert_eq!(ops.operation_count(), 1);
-            assert_eq!(ops.capacity.registered(), 0);
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
         });
         assert!(flag.0.load(Ordering::Acquire));
 
-        // The woken request immediately reuses the waiter while the original
-        // ticket output remains Ready.
+        // The only free waiter is reserved for `second`, so a later poll
+        // queues behind it.
+        let third_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let third_waker = arc_waker(Arc::clone(&third_count));
+        let mut third_cx = Context::from_waker(&third_waker);
+        let (third_left, _third_right) = UnixStream::pair().unwrap();
+        let mut third = Box::pin(handle.recv(
+            Arc::new(third_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(third.as_mut().poll(&mut third_cx).is_pending());
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 2);
+            assert_eq!(ops.capacity.queued(), 1);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+
+        // Polling the independently stored Ready output removes no waiter and
+        // therefore cannot create or transfer another capacity permit.
+        assert!(harness.block_on(ticket).is_err());
+        assert_eq!(third_count.0.load(Ordering::Acquire), 0);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.waiters.len(), 0);
+            assert_eq!(ops.completions.ready(), 0);
+            assert_eq!(ops.capacity.registered(), 2);
+            assert_eq!(ops.capacity.queued(), 1);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+
+        // The granted request reuses the waiter. Its later terminal removal,
+        // not the Ready ticket poll, transfers capacity to `third`.
         assert!(second.as_mut().poll(&mut cx).is_pending());
         harness.handle.with(|ops| {
             assert_eq!(ops.waiters.len(), 1);
-            assert_eq!(ops.completions.ready(), 1);
-            assert_eq!(ops.operation_count(), 2);
+            assert_eq!(ops.completions.ready(), 0);
+            assert_eq!(ops.operation_count(), 1);
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 1);
+            assert_eq!(ops.capacity.reserved(), 0);
         });
 
         drop(second);
@@ -1918,22 +2030,84 @@ mod tests {
             harness.driver().turn();
             harness.driver().park(Some(Duration::from_millis(10)));
         }
-        assert!(harness.block_on(ticket).is_err());
+        assert_eq!(third_count.0.load(Ordering::Acquire), 1);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+        drop(third);
         assert_eq!(harness.tracked(), 0);
     }
 
     #[test]
-    fn test_ready_ticket_owner_drop_recycles_only_completion() {
-        let mut harness = TestLoop::new(RingConfig::default());
+    fn test_ready_ticket_drop_does_not_double_release_capacity() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
         let handle = harness.handle.clone();
-        let ticket = park_sync_ticket(&mut harness, &handle);
+        let (sync_left, _sync_right) = UnixStream::pair().unwrap();
+        // SAFETY: `sync_left` is a valid owned fd and is transferred into
+        // `File`.
+        let file = unsafe { File::from_raw_fd(sync_left.into_raw_fd()) };
+        let ticket = harness.block_on(handle.start_sync(Arc::new(file)));
+
+        let (second_left, _second_right) = UnixStream::pair().unwrap();
+        let mut second = Box::pin(handle.recv(
+            Arc::new(second_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut second).is_pending());
+        while harness.pending() != 0 {
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
+        }
+
+        let third_count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let third_waker = arc_waker(Arc::clone(&third_count));
+        let mut third_cx = Context::from_waker(&third_waker);
+        let (third_left, _third_right) = UnixStream::pair().unwrap();
+        let mut third = Box::pin(handle.recv(
+            Arc::new(third_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(third.as_mut().poll(&mut third_cx).is_pending());
+        harness.handle.with(|ops| {
+            assert_eq!(ops.completions.ready(), 1);
+            assert_eq!(ops.capacity.registered(), 2);
+            assert_eq!(ops.capacity.queued(), 1);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+
         drop(ticket);
         harness.handle.with(|ops| {
             assert_eq!(ops.waiters.len(), 0);
             assert_eq!(ops.completions.ready(), 0);
             assert_eq!(ops.completions.arena_len(), 1);
             assert_eq!(ops.operation_count(), 0);
+            assert_eq!(ops.capacity.registered(), 2);
+            assert_eq!(ops.capacity.queued(), 1);
+            assert_eq!(ops.capacity.reserved(), 1);
         });
+        assert_eq!(third_count.0.load(Ordering::Acquire), 0);
+
+        drop(second);
+        assert_eq!(third_count.0.load(Ordering::Acquire), 1);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+        drop(third);
     }
 
     #[test]
@@ -2117,11 +2291,13 @@ mod tests {
             assert_eq!(ops.waiters.len(), 0);
             assert_eq!(ops.completions.ready(), 0);
             assert_eq!(ops.operation_count(), 0);
-            assert_eq!(ops.capacity.registered(), 0);
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
         });
         assert_eq!(count.0.load(Ordering::Acquire), 1);
 
-        // Extra loop work cannot notify the invalidated registration again.
+        // Extra loop work cannot notify the granted registration again.
         harness.driver().turn();
         assert_eq!(count.0.load(Ordering::Acquire), 1);
         drop(waiting);
@@ -2259,8 +2435,8 @@ mod tests {
         assert!(Pin::new(&mut ticket).poll(&mut cx).is_pending());
 
         // Register a capacity waiter after the panicking ticket waker. Its
-        // registration is invalidated when the ticket completion frees the
-        // only waiter, so it must still be invoked before the panic resumes.
+        // grant is committed when ticket completion frees the only waiter, so
+        // it must still be invoked before the panic resumes.
         let (waiting_left, _waiting_right) = UnixStream::pair().unwrap();
         let mut waiting = Box::pin(handle.recv(
             Arc::new(waiting_left.into()),
@@ -2292,6 +2468,9 @@ mod tests {
         harness.handle.with(|ops| {
             assert_eq!(ops.waiters.len(), 0);
             assert_eq!(ops.completions.ready(), 1);
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
         });
 
         // Drop observes Ready by CompletionId. It must not touch the recycled
@@ -2334,9 +2513,8 @@ mod tests {
         }
         assert_eq!(harness.handle.with(|ops| ops.waiters.len()), 1);
 
-        // Register two admissions in order. The first capacity waker panics,
-        // but the second has already had its registration invalidated and
-        // must still run before that panic resumes.
+        // Register two admissions in order. Only the FIFO head receives the
+        // released permit, and its capacity waker panics.
         let (second_left, _second_right) = UnixStream::pair().unwrap();
         let mut second = Box::pin(handle.recv(
             Arc::new(second_left.into()),
@@ -2374,10 +2552,24 @@ mod tests {
             let _ = first.as_mut().poll(&mut cx);
         }));
         assert!(completed.is_err());
-        assert!(flag.0.load(Ordering::SeqCst));
+        assert!(!flag.0.load(Ordering::SeqCst));
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 2);
+            assert_eq!(ops.capacity.queued(), 1);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
         let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(first)));
         assert!(dropped.is_ok());
+
+        // Cancelling the granted head transfers its permit to the next FIFO
+        // node and wakes that task exactly once.
         drop(second);
+        assert!(flag.0.load(Ordering::SeqCst));
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
         drop(third);
         assert_eq!(harness.tracked(), 0);
     }
@@ -2449,8 +2641,8 @@ mod tests {
             .handle
             .with(|ops| assert_eq!(ops.capacity.arena_len(), 1));
 
-        // A registration invalidated by a drain is ignored by a later cancel
-        // (stale epoch) instead of corrupting another attempt's slot.
+        // A registration invalidated by close is ignored by a later cancel
+        // through its stale generation.
         let (left, _right) = UnixStream::pair().unwrap();
         let mut parked = Box::pin(handle.recv(
             Arc::new(left.into()),
