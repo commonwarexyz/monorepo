@@ -154,7 +154,7 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place
     /// while no snapshot is alive and copy-on-write otherwise, so a snapshot never observes
     /// later mutations.
-    pub(crate) mem: Arc<Mem<F, D>>,
+    mem: Arc<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
     /// pruned.
