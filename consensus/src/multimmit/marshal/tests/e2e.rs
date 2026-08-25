@@ -7,8 +7,9 @@ use crate::{
         config::Limits,
         machine::Artifact,
         marshal::{
-            ArchiveConfig, ArchiveMode, Config, FloorCheckpoint, LqcVerifier, Mailbox, OutputIndex,
-            Progress, Prune, Running, Start, Update, actors::catalog::CatalogClient, open,
+            ArchiveConfig, ArchiveMode, Config, Error as MailboxError, FloorCheckpoint,
+            LqcVerifier, Mailbox, OutputIndex, Progress, Prune, Running, Start, Update,
+            actors::catalog::CatalogClient, open,
         },
         mocks::{
             Committee,
@@ -1138,26 +1139,18 @@ fn saturated_router_backpressures_requests_until_capacity_returns() {
                     .spawn(move |_| async move { mailbox.progress().await }),
             );
         }
-        for _ in 0..WAIT_STEPS {
-            if metric_total(
-                &harness.context.encode(),
-                "router_mailbox_backoff_total",
-            ) > 0.0
-            {
-                break;
-            }
-            harness.context.sleep(WAIT_STEP).await;
+        let rejected = commonware_macros::select! {
+            result = progress.next() => result,
+            _ = harness.context.sleep(Duration::from_secs(1)) => {
+                panic!("router did not reject work beyond its ingress capacity")
+            },
         }
-        assert!(
-            metric_total(
-                &harness.context.encode(),
-                "router_mailbox_backoff_total",
-            ) > 0.0,
-            "one request reaches overflow after the bounded mailbox fills"
-        );
+        .expect("one progress task remains")
+        .expect("progress task remains alive");
+        assert!(matches!(rejected, Err(MailboxError::Busy)));
         commonware_macros::select! {
             result = progress.next() => {
-                panic!("router completed a request while its execution pool remained full: {result:?}")
+                panic!("router completed an accepted request while its execution pool remained full: {result:?}")
             },
             _ = harness.context.sleep(WAIT_STEP) => {},
         }
@@ -1179,6 +1172,7 @@ fn saturated_router_backpressures_requests_until_capacity_returns() {
                     .is_ok()
             );
         }
+        assert!(target.progress().await.is_ok());
         harness.shutdown().await;
     });
 }

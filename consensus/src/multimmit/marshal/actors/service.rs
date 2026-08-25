@@ -217,7 +217,7 @@ where
     bodies: promoter::Bodies<H, V, B>,
     resolver: resolver::Client<H, V, B>,
     synchronizer: synchronizer::Client<V, H::Digest>,
-    commands: commonware_actor::mailbox::Receiver<Command<H, V, B>>,
+    commands: commonware_actor::mailbox::UnreliableReceiver<Command<H, V, B>>,
     jobs: Pool<JobResult>,
     subscriptions: Subscriptions<H, B>,
     subscription_completions: AbortablePool<SubscriptionCompletion<H, B>>,

@@ -8,8 +8,8 @@ use crate::{
     },
 };
 use commonware_actor::{
-    Feedback,
-    mailbox::{self as actor_mailbox, Policy},
+    Feedback, Unreliable,
+    mailbox::{self as actor_mailbox, UnreliablePolicy},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{
@@ -25,6 +25,9 @@ use tracing::Span;
 /// A public marshal request failed.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
+    /// The marshal service has reached its configured ingress capacity.
+    #[error("marshal service is busy")]
+    Busy,
     /// The marshal service is no longer accepting work.
     #[error("marshal service is closed")]
     Closed,
@@ -195,7 +198,7 @@ where
     }
 }
 
-impl<H, V, B> Policy for Command<H, V, B>
+impl<H, V, B> UnreliablePolicy for Command<H, V, B>
 where
     H: Hasher,
     V: Variant,
@@ -203,15 +206,11 @@ where
 {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut Self::Overflow, command: Self) {
-        match command.request {
-            // Reporter hints are advisory: missing history is recovered through backfill.
-            Request::Hint(_) => {}
-            request => overflow.push_back(Self {
-                span: command.span,
-                request,
-            }),
-        }
+    fn handle(_overflow: &mut Self::Overflow, command: Self) -> bool {
+        // Reporter hints are advisory: missing history is recovered through backfill. Exact
+        // requests must be retried by their caller rather than retained beyond the configured
+        // ingress capacity.
+        matches!(command.request, Request::Hint(_))
     }
 }
 
@@ -223,7 +222,7 @@ where
     B: Codec + Digestible<Digest = H::Digest>,
     P: PublicKey,
 {
-    sender: actor_mailbox::Sender<Command<H, V, B>>,
+    sender: actor_mailbox::UnreliableSender<Command<H, V, B>>,
     broadcast: broadcast::Mailbox<P, TransactionBlock<H, B>>,
 }
 
@@ -250,7 +249,7 @@ where
     P: PublicKey,
 {
     pub(super) const fn new(
-        sender: actor_mailbox::Sender<Command<H, V, B>>,
+        sender: actor_mailbox::UnreliableSender<Command<H, V, B>>,
         broadcast: broadcast::Mailbox<P, TransactionBlock<H, B>>,
     ) -> Self {
         Self { sender, broadcast }
@@ -261,8 +260,10 @@ where
         request: impl FnOnce(Reply<T>) -> Request<H, V, B>,
     ) -> Result<T, Error> {
         let (reply, receiver) = oneshot::channel();
-        if self.sender.enqueue(Command::new(request(reply))) == Feedback::Closed {
-            return Err(Error::Closed);
+        match self.sender.enqueue(Command::new(request(reply))) {
+            Unreliable::Rejected => return Err(Error::Busy),
+            Unreliable::Outcome(Feedback::Closed) => return Err(Error::Closed),
+            Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {}
         }
         receiver.await.unwrap_or(Err(Error::Closed))
     }
@@ -405,6 +406,7 @@ where
             },
             result = &mut admitted => match result {
                 Ok(block) => Ok(block),
+                Err(Error::Busy) => Err(Error::Busy),
                 Err(error) => match buffered.await {
                     Some(block) => {
                         self.put_block(Arc::clone(&block)).await?;
@@ -484,13 +486,13 @@ where
     B: Codec + Digestible<Digest = H::Digest>,
     P: PublicKey,
 {
-    let (sender, receiver) = actor_mailbox::new(metrics, capacity);
+    let (sender, receiver) = actor_mailbox::new_unreliable(metrics, capacity);
     (Mailbox::new(sender, broadcast), receiver)
 }
 
 type Channel<H, V, B, P> = (
     Mailbox<H, V, B, P>,
-    actor_mailbox::Receiver<Command<H, V, B>>,
+    actor_mailbox::UnreliableReceiver<Command<H, V, B>>,
 );
 
 impl<H, V, B, P> Reporter for Mailbox<H, V, B, P>
@@ -505,7 +507,10 @@ where
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let span = tracing::info_span!("multimmit.marshal.mailbox.report");
         let _guard = span.enter();
-        self.sender.enqueue(Command::new(Request::Hint(activity)))
+        match self.sender.enqueue(Command::new(Request::Hint(activity))) {
+            Unreliable::Outcome(feedback) => feedback,
+            Unreliable::Rejected => Feedback::Backoff,
+        }
     }
 }
 
@@ -518,23 +523,20 @@ mod tests {
     type TestCommand = Command<Sha256, MinPk, EmptyBlock<Sha256>>;
 
     #[test]
-    fn pressure_retains_requests() {
+    fn pressure_rejects_requests() {
         let (reply, mut response) = oneshot::channel();
         let reference = BlockRef::new(ChainId::new(0), Height::new(1), Sha256::hash(&[b"block"]));
         let mut overflow = VecDeque::new();
-        <TestCommand as Policy>::handle(
+        let handled = <TestCommand as UnreliablePolicy>::handle(
             &mut overflow,
             TestCommand::new(Request::SubscribeBlock(reference, reply)),
         );
 
-        assert_eq!(overflow.len(), 1);
-        assert!(matches!(
-            overflow.front(),
-            Some(TestCommand { request: Request::SubscribeBlock(found, _), .. }) if *found == reference
-        ));
+        assert!(!handled);
+        assert!(overflow.is_empty());
         assert!(matches!(
             response.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
+            Err(oneshot::error::TryRecvError::Closed)
         ));
     }
 }
