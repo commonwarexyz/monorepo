@@ -1104,9 +1104,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
 
         let blob = Blob::new(
             "partition".into(),
@@ -1169,9 +1167,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
 
         let blob = Blob::new(
             "partition".into(),
@@ -1200,9 +1196,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
 
         let blob = Blob::new(
             "partition".into(),

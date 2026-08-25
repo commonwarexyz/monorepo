@@ -1140,9 +1140,7 @@ mod tests {
     fn test_zero_length_send_short_circuits_before_submit() {
         // Verify empty sends return locally without staging any request.
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
 
         // Construct a sink whose driver would fail immediately if the wrapper
         // tried to hand work to the loop.
@@ -1236,9 +1234,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
 
         // Send should fail locally once the driver no longer admits work.
         let (send_left, _send_right) = UnixStream::pair().unwrap();
@@ -1285,9 +1281,7 @@ mod tests {
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
 
         // The public accept surface is Closed, not the internal fallback.
         assert!(matches!(

@@ -24,10 +24,7 @@ use io_uring::{
     types::{SubmitArgs, Timespec},
 };
 use spinner::Spinner;
-use std::{
-    task::Waker as TaskWaker,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 /// Maximum rounded ring size accepted by [`RingConfig::size`].
 ///
@@ -940,11 +937,13 @@ impl Driver {
         self.inner.park(&mut self.ring, limit);
     }
 
-    /// Close the shared op state so late admissions fail with their
-    /// kind-specific error. Returns the capacity waiters so the caller can
-    /// wake them outside the borrow.
-    pub(crate) fn close(&self) -> Vec<TaskWaker> {
-        self.inner.handle.close()
+    /// Close the shared op state and wake every parked admission.
+    ///
+    /// The state is invalidated before callbacks run. All callbacks are
+    /// attempted even if one panics, then the earliest panic is resumed.
+    pub(crate) fn close(&self) {
+        let wakers = self.inner.handle.close();
+        handle::wake_batch(wakers.into_iter().map(handle::WakerAction::Wake));
     }
 
     /// Drain in-flight ring work so kernel-owned buffers and descriptors are
@@ -1035,7 +1034,7 @@ pub(crate) mod testing {
         /// Build a waker that latches the loop's out-of-band wake, or a noop
         /// waker once the driver is drained (parked results resolve without
         /// one).
-        fn waker(&self) -> TaskWaker {
+        fn waker(&self) -> std::task::Waker {
             self.driver
                 .as_ref()
                 .map_or_else(futures::task::noop_waker, |driver| {
@@ -1065,9 +1064,8 @@ pub(crate) mod testing {
             };
             // Mirror the runtime's teardown: a waker panic must not skip the
             // drain (drain panics abort inside [Driver::drain]).
-            let wakers = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                handle::wake_batch(driver.close().into_iter().map(handle::WakerAction::Wake));
-            }));
+            let wakers =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.close()));
             driver.drain();
             if let Err(payload) = wakers {
                 std::panic::resume_unwind(payload);
@@ -1117,7 +1115,7 @@ mod tests {
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
-        task::{Context, Poll, RawWaker, RawWakerVTable},
+        task::{Context, Poll, RawWaker, RawWakerVTable, Waker as TaskWaker},
         time::{Duration, Instant},
     };
 
@@ -1555,9 +1553,7 @@ mod tests {
         // Close and drain A: the parked result survives the drain, but
         // destroying the driver removes its contribution from the shared
         // gauge.
-        for waker in driver_a.close() {
-            waker.wake();
-        }
+        driver_a.close();
         driver_a.drain();
         assert_eq!(gauge.get(), 0);
 
@@ -1640,9 +1636,7 @@ mod tests {
         ));
         driver.turn();
         assert_eq!(gauge.get(), 0);
-        for waker in driver.close() {
-            waker.wake();
-        }
+        driver.close();
         driver.drain();
     }
 
@@ -1678,9 +1672,7 @@ mod tests {
         });
 
         let start = Instant::now();
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
         harness.shutdown();
         assert!(
             start.elapsed() < Duration::from_secs(30),
@@ -1727,9 +1719,7 @@ mod tests {
             });
 
             let start = Instant::now();
-            for waker in harness.driver().close() {
-                waker.wake();
-            }
+            harness.driver().close();
             harness.shutdown();
             assert!(
                 start.elapsed() < Duration::from_secs(30),
@@ -2955,9 +2945,7 @@ mod tests {
             Instant::now() + Duration::from_secs(60),
         ));
         assert!(poll_once(&harness, &mut parked).is_pending());
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
         harness
             .handle
             .with(|ops| assert_eq!(ops.capacity.registered(), 0));
@@ -2969,9 +2957,7 @@ mod tests {
         // Verify ops staged after close resolve with their kind-specific
         // failures without touching the ring.
         let mut harness = TestLoop::new(RingConfig::default());
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
 
         let (left, _right) = UnixStream::pair().unwrap();
         let handle = harness.handle.clone();
@@ -3433,9 +3419,7 @@ mod tests {
         assert!(poll_once(&harness, &mut recv_b).is_pending());
 
         // Close the driver: the parked admission must fail on its next poll.
-        for waker in harness.driver().close() {
-            waker.wake();
-        }
+        harness.driver().close();
         match poll_once(&harness, &mut recv_b) {
             Poll::Ready(Err((_, Error::RecvFailed))) => {}
             other => panic!("expected closed-driver recv failure, got {other:?}"),

@@ -855,11 +855,7 @@ impl Worker {
         // drain, so it is retained and resumed only after the ring is
         // quiesced. A panic inside the drain itself aborts the process
         // before unwinding can free ring state (see [Driver::drain]).
-        let close_wakers = catch_unwind(AssertUnwindSafe(|| {
-            for waker in driver.close() {
-                waker.wake();
-            }
-        }));
+        let close_wakers = catch_unwind(AssertUnwindSafe(|| driver.close()));
         driver.drain();
 
         // Assert no context escaped the runtime. The check is meaningful only
@@ -2508,14 +2504,24 @@ mod tests {
     fn test_close_waker_panic_still_drains_ring() {
         struct PanicWake;
 
+        struct FlagWake(AtomicBool);
+
         impl std::task::Wake for PanicWake {
             fn wake(self: Arc<Self>) {
                 panic!("capacity wake panic");
             }
         }
 
+        impl std::task::Wake for FlagWake {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
         let listener = Arc::new(Mutex::new(None));
         let escaped = Arc::clone(&listener);
+        let close_progress = Arc::new(FlagWake(AtomicBool::new(false)));
+        let observed_close_progress = Arc::clone(&close_progress);
         let (addr_send, addr_recv) = std::sync::mpsc::channel();
         let connector = std::thread::spawn(move || {
             let addr = addr_recv.recv().unwrap();
@@ -2541,8 +2547,22 @@ mod tests {
                 drop(accept);
                 *escaped.lock() = Some(first);
 
-                // Park a second admission on capacity with a panicking waker.
-                // It must stay registered until driver close.
+                // Register the non-panicking waiter first. The arena's close
+                // traversal encounters the later panicking waiter before it,
+                // proving one callback panic cannot skip remaining wakes.
+                let mut blocked = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let waker = Waker::from(Arc::clone(&observed_close_progress));
+                let mut cx = std_task::Context::from_waker(&waker);
+                let mut accept = Box::pin(blocked.accept());
+                assert!(accept.as_mut().poll(&mut cx).is_pending());
+                std::mem::forget(accept);
+                std::mem::forget(blocked);
+
+                // Park a later capacity admission whose wake panics. Both
+                // registrations must remain live until driver close.
                 let mut blocked = context
                     .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                     .await
@@ -2558,6 +2578,10 @@ mod tests {
             })
         }));
         assert!(result.is_err(), "capacity waker should panic");
+        assert!(
+            close_progress.0.load(Ordering::Acquire),
+            "capacity waker panic skipped a later close callback"
+        );
         let _connection = connector.join().unwrap();
 
         // The root returned before the first accept was submitted. Only the
