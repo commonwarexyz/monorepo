@@ -39,7 +39,7 @@
 
 use super::{
     read::{PageReader, Replay},
-    view::View,
+    view::{OwnedView, View},
 };
 use crate::{
     Blob, Error, Handle, IoBuf, IoBufMut, IoBufs, WriteOptions,
@@ -472,7 +472,7 @@ impl<B: Blob> Writer<B> {
     }
 
     /// Returns a borrowed view over this blob.
-    fn view(&self) -> View<'_, B> {
+    fn borrowed_view(&self) -> View<'_, B> {
         View {
             blob: &self.blob,
             cache_ref: &self.cache_ref,
@@ -483,16 +483,31 @@ impl<B: Blob> Writer<B> {
         }
     }
 
+    /// Capture an owned immutable view of the current logical bytes.
+    ///
+    /// This operation is synchronous and constant-time. It does not flush or sync the writer.
+    #[must_use]
+    pub fn view(&self) -> OwnedView<B> {
+        OwnedView::new(
+            self.blob.clone(),
+            self.cache_ref.clone(),
+            self.cache_ref.next_id(),
+            self.buffer.size(),
+            self.buffer.offset,
+            self.buffer.slice(..),
+        )
+    }
+
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
     /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
     /// is returned, the contents of `buf` are unspecified.
     pub fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
-        self.view().try_read_sync_into(buf, offset)
+        self.borrowed_view().try_read_sync_into(buf, offset)
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        self.view().read_at(offset, len).await
+        self.borrowed_view().read_at(offset, len).await
     }
 
     /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
@@ -505,7 +520,7 @@ impl<B: Blob> Writer<B> {
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        self.view().read_up_to(offset, len, bufs).await
+        self.borrowed_view().read_up_to(offset, len, bufs).await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
@@ -521,7 +536,9 @@ impl<B: Blob> Writer<B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        self.view().read_many_into(buf, offsets, item_size).await
+        self.borrowed_view()
+            .read_many_into(buf, offsets, item_size)
+            .await
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
@@ -532,18 +549,19 @@ impl<B: Blob> Writer<B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Vec<usize> {
-        self.view().try_read_many_sync_into(buf, offsets, item_size)
+        self.borrowed_view()
+            .try_read_many_sync_into(buf, offsets, item_size)
     }
 
     /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges:
     /// `buf` holds one slot per range, back to back.
     pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
-        self.view().try_read_ranges_sync_into(buf, ranges)
+        self.borrowed_view().try_read_ranges_sync_into(buf, ranges)
     }
 
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        self.view().read_into(buf, offset).await
+        self.borrowed_view().read_into(buf, offset).await
     }
 
     /// Prepare physical-page writes from buffered logical bytes.
@@ -1100,6 +1118,84 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    #[test]
+    fn test_owned_view_freezes_tip_across_flush() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_view_flush")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let captured: Vec<u8> = (0u8..=255).cycle().take(page_size + 7).collect();
+            writer.append(&captured).await.unwrap();
+            let view = writer.view();
+            assert_eq!(view.size(), captured.len() as u64);
+
+            // This append makes the shared tail copy-on-write and flushes its full-page prefix.
+            writer.append(&vec![0xEE; BUFFER_SIZE]).await.unwrap();
+            assert!(
+                writer.buffer.offset >= page_size as u64,
+                "later append must transition captured tail bytes into the blob"
+            );
+
+            let mut sync_read = vec![0; captured.len()];
+            assert!(view.try_read_sync_into(&mut sync_read, 0));
+            assert_eq!(sync_read, captured);
+            assert_eq!(
+                view.read_at(0, captured.len())
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                captured.as_slice()
+            );
+            assert!(matches!(
+                view.read_at(0, captured.len() + 1).await,
+                Err(Error::BlobInsufficientLength)
+            ));
+        });
+    }
+
+    #[test]
+    fn test_owned_view_survives_writer_drop_remove_and_spawn() {
+        fn assert_send_static<T: Send + 'static>(_: &T) {}
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let name = b"owned_view_remove";
+            let (blob, blob_size) = context.open("test_partition", name).await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // The owned view must read full pages through its blob generation and the suffix from
+            // its captured tail after the writer and directory entry are gone.
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 3 + 5).collect();
+            writer.append(&data).await.unwrap();
+            assert!(writer.buffer.offset >= (page_size * 3) as u64);
+            let view = writer.view();
+            assert_send_static(&view);
+            drop(writer);
+
+            context.remove("test_partition", Some(name)).await.unwrap();
+            let data_len = data.len();
+            let read = context
+                .child("owned_view_read")
+                .spawn(move |_| async move { view.read_at(0, data_len).await.unwrap().coalesce() })
+                .await
+                .unwrap();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
 
     #[test_traced("DEBUG")]
     fn test_writes_use_uncached_hint() {

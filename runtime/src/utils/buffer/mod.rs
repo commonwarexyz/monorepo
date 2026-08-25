@@ -9,7 +9,7 @@ mod tip;
 mod write;
 
 pub use read::Read;
-pub use write::Write;
+pub use write::{OwnedView, Write};
 
 /// A shared sync result.
 ///

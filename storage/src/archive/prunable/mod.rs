@@ -171,7 +171,7 @@ use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;
-pub use storage::Archive;
+pub use storage::{Archive, IndexReadPlan, KeyReadPlan};
 
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
@@ -1562,6 +1562,81 @@ mod tests {
                 .await
                 .expect("Failed to put_multi_sync below floor");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_key_read_plan_captures_candidates_and_verifies_collisions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(8));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let key = test_key("aaaa-target");
+            archive = archive
+                .put(1, test_key("aaaa-collision"), 20)
+                .await
+                .unwrap();
+            archive = archive.put(2, key.clone(), 10).await.unwrap();
+
+            let plan = archive
+                .key_read_plan(&key)
+                .expect("Failed to capture key read")
+                .expect("Key should have translated candidates");
+            archive = archive.put(3, key.clone(), 30).await.unwrap();
+
+            assert_eq!(plan.execute().await.unwrap(), Some(10));
+            assert_eq!(
+                archive
+                    .get(Identifier::Index(3))
+                    .await
+                    .expect("Failed to read later append"),
+                Some(30)
+            );
+            assert!(context.encode().contains("unnecessary_reads_total 1"));
+        });
+    }
+
+    #[test_traced]
+    fn test_read_plans_survive_prune_and_new_plans_reject_pruned_state() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let first = test_key("first");
+            let second = test_key("second");
+            archive = archive.put_multi(1, first.clone(), 10).await.unwrap();
+            archive = archive.put_multi(1, second.clone(), 20).await.unwrap();
+            archive = archive
+                .put_multi(3, test_key("retained"), 30)
+                .await
+                .unwrap();
+
+            let index_plan = archive
+                .index_read_plan(1)
+                .unwrap()
+                .expect("Index should be present");
+            let key_plan = archive
+                .key_read_plan(&second)
+                .unwrap()
+                .expect("Key should have translated candidates");
+            archive = archive.prune(3).await.expect("Failed to prune archive");
+            assert!(archive.index_read_plan(1).unwrap().is_none());
+            assert!(archive.key_read_plan(&first).unwrap().is_none());
+
+            let index = context
+                .child("index_plan")
+                .spawn(|_| async move { index_plan.execute().await.expect("Index plan failed") });
+            let key = context
+                .child("key_plan")
+                .spawn(|_| async move { key_plan.execute().await.expect("Key plan failed") });
+            assert_eq!(index.await.unwrap(), Some(10));
+            assert_eq!(key.await.unwrap(), Some(20));
         });
     }
 }
