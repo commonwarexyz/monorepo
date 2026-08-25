@@ -701,6 +701,137 @@ mod tests {
         });
     }
 
+    /// A cold `Sealed::read_many_into` fetches the missing pages in coalesced runs and admits
+    /// them, so a subsequent sync probe of the same offsets is a full hit.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_into_bulk_cold() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany_bulk").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 6).collect();
+            append.append(&data).await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+
+            // Drop pages admitted during the writer's flushes so the batch read is cold.
+            cache_ref.clear();
+
+            // Multiple items per page across two runs of consecutive pages (0-2 and 4-5),
+            // including one straddling the page 1 / page 2 boundary.
+            let offsets: Vec<u64> = [
+                0,
+                50,
+                page_size,
+                page_size * 2 - 2,
+                page_size * 4,
+                page_size * 4 + 60,
+                page_size * 5 + 10,
+            ]
+            .into_iter()
+            .map(|o| o as u64)
+            .collect();
+            let item_size = 4usize;
+            let mut out = vec![0u8; offsets.len() * item_size];
+            sealed
+                .read_many_into(&mut out, &offsets, NZUsize!(item_size))
+                .await
+                .unwrap();
+
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &out[i * item_size..(i + 1) * item_size],
+                    &data[off as usize..off as usize + item_size],
+                );
+            }
+
+            // Every touched page was admitted, so the sync probe misses nothing.
+            let mut out = vec![0u8; offsets.len() * item_size];
+            let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
+            assert!(misses.is_empty());
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &out[i * item_size..(i + 1) * item_size],
+                    &data[off as usize..off as usize + item_size],
+                );
+            }
+        });
+    }
+
+    /// A corrupted page inside a coalesced bulk fetch surfaces `InvalidChecksum`.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_into_bulk_corrupt_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"rmany_corrupt")
+                .await
+                .unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 3).collect();
+            append.append(&data).await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+
+            drop(sealed);
+
+            // Flip a data byte in the middle physical page so its checksum no longer matches.
+            let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+            let (raw, _) = context
+                .open("test_partition", b"rmany_corrupt")
+                .await
+                .unwrap();
+            let corrupt_offset = physical_page_size as u64 + 10;
+            let byte = raw
+                .read_at(corrupt_offset, 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            raw.write_at(
+                corrupt_offset,
+                vec![byte.as_ref()[0] ^ 0xFF],
+                crate::WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            raw.sync().await.unwrap();
+            drop(raw);
+
+            // Rebuild the sealed view over the corrupted bytes with a cold cache.
+            let (blob, blob_size) = context
+                .open("test_partition", b"rmany_corrupt")
+                .await
+                .unwrap();
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+            cache_ref.clear();
+
+            // One cold batch spanning all three pages in a single coalesced run.
+            let offsets = [0u64, page_size as u64, (page_size * 2) as u64];
+            let mut out = vec![0u8; offsets.len() * 4];
+            let err = sealed
+                .read_many_into(&mut out, &offsets, NZUsize!(4))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidChecksum));
+        });
+    }
+
     #[test_traced("DEBUG")]
     #[should_panic(expected = "ranges must be sorted and non-overlapping")]
     fn test_sealed_read_many_into_rejects_unsorted_offsets() {
