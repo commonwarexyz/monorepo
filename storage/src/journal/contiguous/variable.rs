@@ -716,6 +716,25 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             group_start = group_end;
         }
 
+        // Warm the pages the runs will touch with coalesced blob reads before decoding: the
+        // per-run reads below then hit the page cache instead of faulting page by page. Each
+        // run's last frame has an unknown length, so its range extends only through the page
+        // holding its first byte; the rest of the frame usually shares that page.
+        let mut warm: Vec<(u64, &Blob<'_, E::Blob>, Vec<(u64, usize)>)> = Vec::new();
+        for (run_start, run_end, blob, handle) in &runs {
+            let start = miss_offsets[*run_start];
+            let len = (miss_offsets[*run_end - 1] - start + 1) as usize;
+            match warm.last_mut() {
+                Some((last_blob, _, ranges)) if last_blob == blob => ranges.push((start, len)),
+                _ => warm.push((*blob, handle, vec![(start, len)])),
+            }
+        }
+        try_join_all(
+            warm.iter()
+                .map(|(_, handle, ranges)| handle.warm_ranges(ranges)),
+        )
+        .await?;
+
         let run_items = try_join_all(runs.iter().map(|(run_start, run_end, blob, handle)| {
             self.read_consecutive(handle, *blob, &miss_offsets[*run_start..*run_end])
         }))

@@ -615,6 +615,15 @@ impl<'a, B: RBlob> Blob<'a, B> {
             Self::Sealed(sealed) => sealed.try_read_ranges_sync_into(buf, ranges),
         }
     }
+
+    /// Warm the page cache for sorted, non-overlapping `(offset, len)` byte ranges, admitting
+    /// missing pages with coalesced blob reads.
+    pub(super) async fn warm_ranges(&self, ranges: &[(u64, usize)]) -> Result<(), Error> {
+        match self {
+            Self::Writer(writer) => Ok(writer.warm_ranges(ranges).await?),
+            Self::Sealed(sealed) => Ok(sealed.warm_ranges(ranges).await?),
+        }
+    }
 }
 
 impl<B: RBlob> FrameReader for Blob<'_, B> {
