@@ -122,6 +122,7 @@ mod tests {
     type ClockCache<K, V> = Cache<K, V, Clock>;
 
     impl<K: Hash + Eq + Clone, V> Cache<K, V, Clock> {
+        /// Asserts the CLOCK policy's invariants hold.
         pub(crate) fn check_policy_invariants(&self) {
             if self.slots.is_empty() {
                 assert_eq!(self.policy.hand, 0);
@@ -130,6 +131,7 @@ mod tests {
             }
         }
 
+        /// Asserts both the cache and policy invariants hold.
         fn check_invariants(&self) {
             self.check_cache_invariants();
             self.check_policy_invariants();
@@ -137,18 +139,26 @@ mod tests {
     }
 
     #[test]
-    fn second_chance_protects_referenced_entry() {
+    fn test_second_chance_protects_referenced_entry() {
+        // New entries have their reference bit set, so a referenced entry only
+        // beats an unreferenced one after some bits have been cleared.
+        // Capacity is 3 and slots follow insertion order.
         let mut cache = ClockCache::new(NZUsize!(3));
-        cache.put(1u64, 10u64);
-        cache.put(2, 20);
-        cache.put(3, 30);
+        cache.put(1u64, 10u64); // slot 0, referenced
+        cache.put(2, 20); // slot 1, referenced
+        cache.put(3, 30); // slot 2, referenced
 
-        // Sweep all three initial reference bits and evict key 1.
+        // With all residents referenced, inserting key 4 clears all three
+        // bits, wraps to slot 0, and evicts key 1. The hand advances to slot 1.
+        // Slot 0 now holds referenced key 4. Keys 2 and 3 are unreferenced.
         cache.put(4, 40);
         assert!(!cache.contains(&1));
 
-        // Protect key 2. The hand skips it and evicts unreferenced key 3.
+        // Reference key 2 in slot 1, leaving key 3 in slot 2 unreferenced.
         assert_eq!(cache.get(&2).copied(), Some(20));
+
+        // Inserting key 5 starts at slot 1. It clears and skips key 2, then
+        // evicts unreferenced key 3 from slot 2.
         cache.put(5, 50);
         assert!(cache.contains(&2));
         assert!(!cache.contains(&3));
@@ -158,18 +168,20 @@ mod tests {
     }
 
     #[test]
-    fn all_referenced_evicts_at_hand() {
+    fn test_all_referenced_evicts_at_hand() {
+        // When every resident is referenced, the sweep clears all bits and
+        // evicts the slot where the hand started.
         let mut cache = ClockCache::new(NZUsize!(3));
         cache.put(1u64, 10u64);
         cache.put(2, 20);
         cache.put(3, 30);
 
-        // Re-reference every resident. The sweep clears all three bits, wraps,
-        // and evicts key 1 at the initial hand position.
         assert!(cache.get(&1).is_some());
         assert!(cache.get(&2).is_some());
         assert!(cache.get(&3).is_some());
 
+        // The hand starts at slot 0. The sweep clears every bit, wraps, and
+        // evicts key 1 from slot 0.
         cache.put(4, 40);
         assert!(!cache.contains(&1));
         assert!(cache.contains(&2));
@@ -179,51 +191,54 @@ mod tests {
     }
 
     #[test]
-    fn get_at_records_use() {
+    fn test_get_at_records_use() {
+        // After this setup, keys 2 and 3 are unreferenced and the hand points
+        // at key 2. get_at must set key 2's bit so key 3 is evicted next.
         let mut cache = ClockCache::new(NZUsize!(3));
         cache.put(1u64, 10u64);
         cache.put(2, 20);
         cache.put(3, 30);
-        cache.put(4, 40);
+        cache.put(4, 40); // Evicts key 1 and clears the other reference bits.
 
-        // get_at records use like get, so key 2 receives a second chance and
-        // unreferenced key 3 becomes the next victim.
         let slot = *cache.index.get(&2).unwrap();
         assert_eq!(cache.get_at(slot, &2).copied(), Some(20));
         cache.put(5, 50);
-        assert!(cache.contains(&2));
+        assert!(cache.contains(&2), "get_at must protect key 2");
         assert!(!cache.contains(&3));
         cache.check_invariants();
     }
 
     #[test]
-    fn peek_does_not_record_use() {
+    fn test_peek_does_not_record_use() {
+        // After this shared setup, keys 2 and 3 are unreferenced and the hand
+        // points at key 2. peek leaves key 2 unreferenced, while get sets its
+        // bit. This isolates the behavioral difference between peek and get.
         fn setup() -> ClockCache<u64, u64> {
             let mut cache = ClockCache::new(NZUsize!(3));
             cache.put(1, 10);
             cache.put(2, 20);
             cache.put(3, 30);
-            cache.put(4, 40);
+            cache.put(4, 40); // Evicts key 1 and clears the other reference bits.
             cache
         }
 
-        // peek leaves key 2 unreferenced, so it remains the next victim.
+        // peek does not record use, so key 2 remains the next victim.
         let mut cache = setup();
         assert_eq!(cache.peek(&2).copied(), Some(20));
         cache.put(5, 50);
-        assert!(!cache.contains(&2));
+        assert!(!cache.contains(&2), "peek must not protect key 2");
         assert!(cache.contains(&3));
 
-        // get sets key 2's bit, so the hand skips it and evicts key 3.
+        // get records use, so key 2 survives and key 3 is evicted instead.
         let mut cache = setup();
         assert_eq!(cache.get(&2).copied(), Some(20));
         cache.put(5, 50);
-        assert!(cache.contains(&2));
+        assert!(cache.contains(&2), "get must protect key 2");
         assert!(!cache.contains(&3));
     }
 
     #[test]
-    fn clear_resets_hand() {
+    fn test_clear_resets_hand() {
         let mut cache = ClockCache::new(NZUsize!(3));
         cache.put(1u64, 10u64);
         cache.put(2, 20);
@@ -241,17 +256,19 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_get_records_hits() {
+    fn test_concurrent_get_records_hits() {
+        // get records use through an atomic, so many threads can read through
+        // a shared cache reference without an external lock.
         let mut cache = ClockCache::new(NZUsize!(64));
         for i in 0..64u64 {
             cache.put(i, i * 10);
         }
+
+        // Clear the insertion marks so the readers must set every bit.
         for entry in &mut cache.slots {
             *entry.state.get_mut() = false;
         }
 
-        // Hits update only atomic reference bits, so shared readers can record
-        // use concurrently.
         let cache = &cache;
         thread::scope(|scope| {
             for _ in 0..4 {
@@ -270,6 +287,9 @@ mod tests {
                 .iter()
                 .all(|entry| entry.state.load(Ordering::Relaxed))
         );
+        for i in 0..64u64 {
+            assert_eq!(cache.get(&i).copied(), Some(i * 10));
+        }
         cache.check_invariants();
     }
 }
