@@ -164,7 +164,7 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     has: Counter,
     syncs: Counter,
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     values_validated_on_init: u64,
 }
 
@@ -259,7 +259,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let mut keys = Index::new(context.child("index"), translator);
         let mut intervals = RMap::new();
         let mut truncated = Vec::new();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "fuzzing"))]
         let mut values_validated_on_init = 0;
         let values_validated = context.counter(
             "values_validated",
@@ -292,7 +292,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                 if position >= validated {
                     let (offset, size) = entry.value_location();
                     values_validated.inc();
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "fuzzing"))]
                     {
                         values_validated_on_init += 1;
                     }
@@ -397,7 +397,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             gets,
             has,
             syncs,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fuzzing"))]
             values_validated_on_init,
         })
     }
@@ -801,8 +801,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Ar
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// Number of value frames validated while opening this handle.
-    #[cfg(test)]
-    pub(super) fn values_validated_on_init(&self) -> u64 {
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub fn values_validated_on_init(&self) -> u64 {
         self.0.values_validated_on_init
     }
 

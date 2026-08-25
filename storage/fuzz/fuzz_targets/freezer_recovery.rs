@@ -101,8 +101,8 @@ async fn assert_values<E: commonware_storage::Context>(
 fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let phase_input = input.clone();
     let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
-    let ((freezer_checkpoint, baseline), runtime_checkpoint) =
-        runner.start_and_recover(move |context| async move {
+    let ((freezer_checkpoint, baseline, candidate_cursors), runtime_checkpoint) = runner
+        .start_and_recover(move |context| async move {
             // Build a checkpointed baseline. The resize case deliberately leaves a bounded resize
             // in progress so the next sync writes both the old and new table regions.
             let mut freezer =
@@ -148,38 +148,40 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                 ..Default::default()
             };
 
-            match phase_input.path {
+            let candidate_cursors = match phase_input.path {
                 WritePath::Put => {
                     let updated = freezer.put(baseline_key(0), 900).await;
-                    let mut freezer = match updated {
-                        Ok((freezer, _)) => freezer,
+                    let (freezer, updated_cursor) = match updated {
+                        Ok(result) => result,
                         Err(_) => {
                             assert!(matches!(phase_input.crash, CrashKind::FailedWrite));
-                            return (freezer_checkpoint, baseline);
+                            return (freezer_checkpoint, baseline, Vec::new());
                         }
                     };
                     let inserted = freezer.put(candidate_key(), 901).await;
-                    freezer = match inserted {
-                        Ok((freezer, _)) => freezer,
+                    let (freezer, inserted_cursor) = match inserted {
+                        Ok(result) => result,
                         Err(_) => {
                             assert!(matches!(phase_input.crash, CrashKind::FailedWrite));
-                            return (freezer_checkpoint, baseline);
+                            return (freezer_checkpoint, baseline, vec![updated_cursor]);
                         }
                     };
                     assert!(
                         freezer.sync().await.is_err(),
                         "faulted candidate sync unexpectedly succeeded"
                     );
+                    vec![updated_cursor, inserted_cursor]
                 }
                 WritePath::Resize => {
                     assert!(
                         freezer.sync().await.is_err(),
                         "faulted resize sync unexpectedly succeeded"
                     );
+                    Vec::new()
                 }
-            }
+            };
 
-            (freezer_checkpoint, baseline)
+            (freezer_checkpoint, baseline, candidate_cursors)
         });
 
     deterministic::Runner::from(runtime_checkpoint).start(move |context| async move {
@@ -195,6 +197,15 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         .await
         .expect("freezer recovery failed");
         assert_values(&freezer, &baseline).await;
+
+        // Cursor reads bypass the table, so restoring a checkpoint must make every cursor from
+        // the discarded candidate suffix unreadable as well as hiding its keys.
+        for cursor in candidate_cursors {
+            assert!(
+                freezer.get(Identifier::Cursor(cursor)).await.is_err(),
+                "checkpoint recovery left a discarded cursor readable: {cursor}",
+            );
+        }
 
         // Prove the recovered structure can publish a new checkpoint and survive another reopen.
         let sentinel = sentinel_key();
