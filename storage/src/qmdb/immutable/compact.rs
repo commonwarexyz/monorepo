@@ -33,10 +33,7 @@ use crate::{
         self, Error,
         any::value::ValueEncoding,
         batch_chain::{self, Bounds, Commitment},
-        compact::{
-            batch as compact_batch,
-            witness::{self, VerifiedWitness},
-        },
+        compact::{batch as compact_batch, witness},
         operation::Key,
         sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
@@ -317,7 +314,7 @@ where
         merkle.prune_to_frontier();
 
         let witness = witness::Store::from_import(journal, imported);
-        let root = witness.with(|w| w.root);
+        let root = witness.tip().root;
         Ok(Self {
             merkle,
             root,
@@ -360,8 +357,8 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = witness.with(|w| w.size()) - 1;
-        let root = witness.with(|w| w.root);
+        let last_commit_loc = witness.tip().size() - 1;
+        let root = witness.tip().root;
 
         Ok(Self {
             merkle,
@@ -409,8 +406,8 @@ where
     ///
     /// This reflects the most recently applied batch. The target remains non-durable until a
     /// covering [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] completes.
-    pub fn target(&self) -> CompactTarget<F, H::Digest> {
-        self.witness.with(VerifiedWitness::target)
+    pub const fn target(&self) -> CompactTarget<F, H::Digest> {
+        self.witness.tip().target()
     }
 
     /// The [`Commitment`] for the database's current state.
@@ -564,7 +561,7 @@ where
         // A clean current target only needs to settle its pipelined sync. An uncommitted target
         // takes the regular rewind path so the witness journal becomes durable before return.
         if self.size() == target
-            && self.witness.with(|w| w.size()) == target
+            && self.witness.tip().size() == target
             && !self.witness.has_uncommitted_state()
         {
             self.witness.wait_for_sync().await?;
@@ -582,7 +579,7 @@ where
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
         self.last_commit_loc = target - 1;
-        self.root = self.witness.with(|w| w.root);
+        self.root = self.witness.tip().root;
         Ok(self)
     }
 
