@@ -2781,6 +2781,56 @@ mod tests {
         holder.join().unwrap();
     }
 
+    #[test]
+    fn test_successful_root_rejects_escaped_context() {
+        let escaped = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&escaped);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(move |context| async move {
+                *capture.lock() = Some(context.child("escapee"));
+            })
+        }));
+        drop(escaped.lock().take());
+
+        let payload = result.expect_err("escaped context should fail start");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("executor still has weak references"));
+    }
+
+    #[test]
+    fn test_child_drop_panic_propagates_after_teardown() {
+        struct PanicOnDrop;
+
+        impl Future for PanicOnDrop {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
+                Poll::Pending
+            }
+        }
+
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("child drop panic");
+            }
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                let _handle = context.child("pending").spawn(|_| PanicOnDrop);
+            })
+        }));
+        let payload = result.expect_err("child drop panic should fail start");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("child drop panic"));
+    }
+
     /// A dedicated task's poll panic that races root completion must still
     /// fail `start` (with the default `catch_panics(false)`): the root's
     /// interrupt receiver is already gone, so the payload routes through the
@@ -3298,6 +3348,44 @@ mod tests {
             // refresh the alarm to wake the new task at the deadline.
             let handle = context.child("mover").spawn(move |_| sleep);
             handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_registered_sleep_drop_after_worker_teardown_is_inert() {
+        let (sleeper, executor) = Runner::default().start(|context| async move {
+            context
+                .child("worker")
+                .dedicated()
+                .spawn(|_| async {})
+                .await
+                .unwrap();
+
+            let executor = context.executor.clone();
+            let mut sleeper = Box::pin(context.sleep(Duration::from_secs(3600)));
+            assert!(futures::poll!(sleeper.as_mut()).is_pending());
+            (sleeper, executor)
+        });
+
+        assert!(executor.upgrade().is_none());
+        drop(sleeper);
+    }
+
+    #[test]
+    fn test_inline_spawn_after_task_arena_close_resolves_closed() {
+        Runner::default().start(|context| async move {
+            let executor = context.executor.upgrade().unwrap();
+            for task in executor.tasks.clear() {
+                task.clear();
+            }
+
+            let invoked = Arc::new(AtomicBool::new(false));
+            let task_invoked = Arc::clone(&invoked);
+            let handle = context.child("late").spawn(move |_| async move {
+                task_invoked.store(true, Ordering::Release);
+            });
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(!invoked.load(Ordering::Acquire));
         });
     }
 

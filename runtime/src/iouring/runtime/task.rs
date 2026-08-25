@@ -576,6 +576,28 @@ mod tests {
         assert!(!tasks.has_ready());
     }
 
+    #[test]
+    fn test_zero_limit_drain_preserves_ready_tokens() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        queue_token(&tasks, pending_cell(&tasks, 0, true), ReadyLane::Normal);
+        queue_token(&tasks, pending_cell(&tasks, 10, true), ReadyLane::Event);
+
+        let mut scratch = Vec::new();
+        tasks.drain_into(&mut scratch, 0, 1);
+        assert!(scratch.is_empty());
+        assert!(tasks.has_ready());
+        {
+            let ready = tasks.ready.lock();
+            assert_eq!(ready.normal.len(), 1);
+            assert_eq!(ready.event.len(), 1);
+        }
+
+        tasks.drain_into(&mut scratch, 2, 1);
+        assert_eq!(slots(&scratch), vec![10, 0]);
+        assert!(!tasks.has_ready());
+    }
+
     /// Multiple drains may interleave the lanes, but tokens from each lane
     /// retain their own arrival order.
     #[test]
@@ -1070,6 +1092,30 @@ mod tests {
                 .unwrap();
         });
 
+        let waker = slot.lock().take().unwrap();
+        waker.wake_by_ref();
+        waker.clone().wake();
+        drop(waker);
+    }
+
+    #[test]
+    #[allow(clippy::waker_clone_wake)]
+    fn test_root_waker_outlives_runtime() {
+        let slot = Arc::new(Mutex::new(None::<Waker>));
+        let captured = Arc::clone(&slot);
+        let task_slot = Arc::new(Mutex::new(None::<std::sync::Weak<Tasks>>));
+        let captured_tasks = Arc::clone(&task_slot);
+        Runner::default().start(move |context| {
+            let executor = context.executor.upgrade().unwrap();
+            *captured_tasks.lock() = Some(Arc::downgrade(&executor.tasks));
+            std::future::poll_fn(move |cx| {
+                *captured.lock() = Some(cx.waker().clone());
+                Poll::Ready(())
+            })
+        });
+
+        // The retained waker must not keep the task arena or ring wake fd alive.
+        assert!(task_slot.lock().take().unwrap().upgrade().is_none());
         let waker = slot.lock().take().unwrap();
         waker.wake_by_ref();
         waker.clone().wake();
