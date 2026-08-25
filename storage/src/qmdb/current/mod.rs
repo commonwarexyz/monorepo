@@ -384,9 +384,9 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     pub init_buffer: NonZeroUsize,
 
     /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]):
-    /// `()` for index types that build serially, and the number of build tasks (including the
-    /// init task itself, which replays and routes the log, so `1` builds entirely on the init
-    /// task) for index types that build in parallel.
+    /// `()` for index types that build serially, and the number of build tasks for index types
+    /// that build in parallel: the init task plus the decode and insert tasks it coordinates
+    /// (`1` builds entirely on the init task).
     pub init_concurrency: B,
 }
 
