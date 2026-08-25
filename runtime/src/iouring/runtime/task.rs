@@ -19,7 +19,7 @@ use crate::iouring::driver::{waker::Waker as RingWaker, Affine};
 #[allow(unused_imports)]
 use crate::{Error, Handle};
 use commonware_utils::sync::Mutex;
-use futures::task::{waker, ArcWake};
+use futures::task::{waker, waker_ref, ArcWake};
 use std::{
     cell::RefCell,
     future::Future,
@@ -85,16 +85,6 @@ impl<F> TaskCell<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    /// Manufacture a waker backed by this task's allocation.
-    ///
-    /// The `ArcWake` adapter uses the task's allocation as its data pointer
-    /// and a type-specific static vtable, so every poll presents an identical
-    /// waker and `Waker::will_wake` fast paths (e.g. the driver's slot
-    /// refreshes) hold.
-    fn waker(self: &Arc<Self>) -> task::Waker {
-        waker(Arc::clone(self))
-    }
-
     /// Re-enqueue this task for polling.
     ///
     /// If the upgrade fails, the runtime already exited and the wake is a
@@ -124,7 +114,9 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     fn poll(self: Arc<Self>) -> bool {
-        let waker = self.waker();
+        // Borrow the task allocation while polling. Futures that retain the
+        // waker still clone it into an owned `ArcWake` waker as usual.
+        let waker = waker_ref(&self);
         let mut cx = task::Context::from_waker(&waker);
         self.future.with(|cell| {
             let mut slot = cell.borrow_mut();
@@ -371,8 +363,8 @@ mod tests {
             ),
         });
 
-        let first = cell.waker();
-        let second = cell.waker();
+        let first = waker(Arc::clone(&cell));
+        let second = waker(Arc::clone(&cell));
         assert!(first.will_wake(&second));
     }
 
