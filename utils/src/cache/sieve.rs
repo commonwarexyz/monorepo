@@ -13,8 +13,12 @@
 //! Keeping survivors in place is the distinguishing feature of SIEVE. Older
 //! residents that continue receiving hits survive repeated passes, while new
 //! one-hit residents remain near the head and are reconsidered quickly as the
-//! hand completes a pass. This provides scan resistance without moving queue
-//! entries on the shared hit path.
+//! hand completes a pass. This provides quick demotion and one-hit filtering
+//! without moving queue entries on the shared hit path.
+//!
+//! SIEVE retains no history after eviction, so it is not generally
+//! scan-resistant when page or block scans intermix with hot entries. Benchmark
+//! it against the intended workload before selecting it over another policy.
 //!
 //! Resident keys and values remain in stable [super::Cache] slots. The visited
 //! bit is stored inline as [Policy::SlotState], while insertion order and the
@@ -103,16 +107,10 @@ impl Sieve {
         self.head = Some(slot);
     }
 
-    /// Detaches a resident from the queue and repairs the eviction hand.
+    /// Detaches a resident from the queue.
     #[inline]
-    fn unlink(&mut self, slot: Slot) {
+    fn detach(&mut self, slot: Slot) {
         let ResidentSlot { previous, next } = self.slots[slot];
-
-        // `previous` points toward the newer head. If the removed resident is
-        // the next candidate, continue the current pass in that direction.
-        if self.hand == Some(slot) {
-            self.hand = linked(previous);
-        }
 
         // Splice the resident out while repairing either its newer neighbor or
         // the head endpoint.
@@ -128,8 +126,6 @@ impl Sieve {
         } else {
             self.tail = linked(previous);
         }
-
-        self.slots[slot] = ResidentSlot::default();
     }
 }
 
@@ -221,7 +217,7 @@ impl<K> Policy<K> for Sieve {
         // Continue the next pass toward the head from the victim's previous
         // neighbor. A missing neighbor restarts the following pass at the tail.
         self.hand = next_hand;
-        self.unlink(victim);
+        self.detach(victim);
 
         // SIEVE keeps survivors stationary, but the incoming resident always
         // reuses the victim's stable slot at the queue head.
@@ -232,7 +228,14 @@ impl<K> Policy<K> for Sieve {
     #[inline]
     fn remove(&mut self, slot: Option<Slot>, _key: &K) {
         if let Some(slot) = slot {
-            self.unlink(slot);
+            // If the removed resident is the next candidate, continue the
+            // current pass toward the newer head.
+            if self.hand == Some(slot) {
+                self.hand = linked(self.slots[slot].previous);
+            }
+
+            self.detach(slot);
+            self.slots[slot] = ResidentSlot::default();
         }
     }
 
@@ -495,6 +498,15 @@ mod tests {
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.hand_key(), None);
+        cache.check_invariants();
+
+        // Clearing leaves the fixed link arena ready for free-slot reuse.
+        cache.put(7, 70);
+        cache.put(8, 80);
+        assert_eq!(cache.keys(), vec![8, 7]);
+        assert_eq!(cache.hand_key(), None);
+        assert!(!cache.visited(&7));
+        assert!(!cache.visited(&8));
         cache.check_invariants();
     }
 

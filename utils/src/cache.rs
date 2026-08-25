@@ -38,16 +38,18 @@
 //!
 //! 1. Start with [Clock]. It is the default when representative benchmarks are
 //!    unavailable, resident metadata matters, or the workload is reasonably
-//!    stable. It has the least admission filtering and scan resistance.
-//! 2. Try [Sieve] when scans, bursts, or many one-hit entries pollute the cache.
-//!    New residents enter unvisited and are immediately evictable until they
-//!    receive a hit. This inexpensive filtering costs two links per resident
-//!    and slightly more insertion bookkeeping than CLOCK.
-//! 3. Try [Clock2QPlus] when misses are expensive and recently evicted entries
-//!    often return after newer traffic pushes them out. Its bounded Ghost
-//!    history recognizes that reuse and admits the entry directly into the
-//!    protected Main region, at the cost of substantially more metadata and
-//!    heavier insertion and eviction.
+//!    stable. It has the least resident metadata and insertion bookkeeping.
+//! 2. Try [Sieve] when bursts or many one-hit entries pollute the cache,
+//!    particularly for web-cache-like workloads. New residents enter
+//!    unvisited and are immediately evictable until they receive a hit. This
+//!    inexpensive filtering costs two links per resident and slightly more
+//!    insertion bookkeeping than CLOCK. Without nonresident history, SIEVE is
+//!    not generally scan-resistant for page or block workloads.
+//! 3. Try [Clock2QPlus] when misses are expensive (for example, when they entail
+//!    I/O) and recently evicted entries often return after newer traffic pushes
+//!    them out. Its bounded Ghost history recognizes that reuse and admits the
+//!    entry directly into the protected Main region, at the cost of
+//!    substantially more metadata and heavier insertion and eviction.
 //!
 //! SIEVE remembers only whether an entry was referenced while resident and
 //! forgets it after eviction. CLOCK2Q+ preserves evidence about recently
