@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut,
+    Buf, BufMut, Handle,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
@@ -312,6 +312,33 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Ok(self)
     }
 
+    /// See [crate::archive::Archive::start_sync].
+    async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
+        self.syncs.inc();
+
+        let freezer_checkpoint;
+        let freezer_sync;
+        (self.freezer, freezer_checkpoint, freezer_sync) = self.freezer.start_sync().await?;
+        let ordinal_sync;
+        (self.ordinal, ordinal_sync) = self.ordinal.start_sync().await;
+
+        let lower_sync = Handle::from_future(async move {
+            futures::future::try_join(freezer_sync, ordinal_sync)
+                .await
+                .map(|_| ())
+        });
+
+        // Metadata is the commit record for this exact lower-layer cut. Its snapshot is captured
+        // before ownership returns, but cannot be written until both dependencies are durable.
+        let freezer_key = U64::new(FREEZER_PREFIX, 0);
+        self.metadata
+            .put(freezer_key, Record::Freezer(freezer_checkpoint));
+        let handle;
+        (self.metadata, handle) = self.metadata.start_sync_after(lower_sync).await?;
+
+        Ok((self, handle))
+    }
+
     /// See [crate::archive::Archive::next_gap].
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.ordinal.next_gap(index)
@@ -399,6 +426,12 @@ impl<E: Context, K: Array, V: CodecShared> crate::archive::Archive for Archive<E
     async fn sync(mut self) -> Result<Self, Error> {
         self.0 = self.0.sync().await?;
         Ok(self)
+    }
+
+    async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        let handle;
+        (self.0, handle) = self.0.start_sync().await?;
+        Ok((self, handle))
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {

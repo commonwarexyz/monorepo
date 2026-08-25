@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, IoBuf, WriteOptions, buffer,
+    Blob, Buf, BufMut, BufferPooler, Handle, IoBuf, WriteOptions, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -1073,10 +1073,15 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// See [Freezer::sync].
     async fn sync(mut self: Box<Self>) -> Result<(Box<Self>, Checkpoint), Error> {
-        // Sync all modified sections for oversized journal
-        self.oversized = self.oversized.sync(&self.modified_sections).await?;
-        self.modified_sections.clear();
+        let checkpoint;
+        let handle;
+        (self, checkpoint, handle) = self.start_sync().await?;
+        handle.await?;
+        Ok((self, checkpoint))
+    }
 
+    /// See [Freezer::start_sync].
+    async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Checkpoint, Handle<()>), Error> {
         // Start a resize (if needed)
         if self.should_resize() && self.resize_progress.is_none() {
             self.start_resize().await?;
@@ -1087,8 +1092,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             self.advance_resize().await?;
         }
 
-        // Sync updated table entries
-        self.table.sync().await?;
+        // Start durability only after all writes in this cut have been issued. Taking the section
+        // set isolates later appends from the returned handle.
+        let modified_sections = std::mem::take(&mut self.modified_sections);
+        let oversized_handle;
+        (self.oversized, oversized_handle) = self.oversized.start_sync(&modified_sections).await?;
+        let table_handle = self.table.start_sync().await;
+
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
@@ -1101,7 +1111,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             oversized_size,
             table_size: self.table_size,
         };
-        Ok((self, checkpoint))
+        let handle = Handle::from_future(async move {
+            try_join(oversized_handle, table_handle).await.map(|_| ())
+        });
+        Ok((self, checkpoint, handle))
     }
 
     /// See [Freezer::close].
@@ -1197,6 +1210,14 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         let checkpoint;
         (self.0, checkpoint) = self.0.sync().await?;
         Ok((self, checkpoint))
+    }
+
+    /// Begin syncing pending data and return the exact covered checkpoint.
+    pub(crate) async fn start_sync(mut self) -> Result<(Self, Checkpoint, Handle<()>), Error> {
+        let checkpoint;
+        let handle;
+        (self.0, checkpoint, handle) = self.0.start_sync().await?;
+        Ok((self, checkpoint, handle))
     }
 
     /// Close the [Freezer] and return a [Checkpoint] for recovery.
