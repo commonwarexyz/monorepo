@@ -1114,8 +1114,7 @@ impl<
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
-        let mut certify_pool: AbortablePool<(Rnd, Span, Result<bool, oneshot::error::RecvError>)> =
-            Default::default();
+        let mut certify_pool = AbortablePool::default();
         select_loop! {
             self.context,
             on_start => {
