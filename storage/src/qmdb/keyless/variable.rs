@@ -71,14 +71,8 @@ where
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(
-            merkle,
-            context.child("witness"),
-            cfg.witness,
-            cfg.commit_codec_config,
-        )
-        .await
+        let journal = variable::Journal::init(context.child("witness"), cfg.witness).await?;
+        Self::init_from_journal(cfg.strategy, journal, cfg.commit_codec_config).await
     }
 }
 

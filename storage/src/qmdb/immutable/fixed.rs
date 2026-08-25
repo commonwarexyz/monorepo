@@ -7,7 +7,10 @@ use crate::{
     Context,
     journal::{
         authenticated,
-        contiguous::fixed::{self, Config as JournalConfig},
+        contiguous::{
+            fixed::{self, Config as JournalConfig},
+            variable,
+        },
     },
     merkle::Family,
     qmdb::{
@@ -69,8 +72,8 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
+        let journal = variable::Journal::init(context.child("witness"), cfg.witness).await?;
+        Self::init_from_journal(cfg.strategy, journal, ()).await
     }
 }
 
