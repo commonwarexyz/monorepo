@@ -1,26 +1,34 @@
-use commonware_utils::{TestRng, cache::Clock};
-use criterion::{Criterion, criterion_group};
-use rand::RngExt as _;
+use commonware_utils::cache::Cache;
+use criterion::{BatchSize, Criterion, criterion_group};
 use std::{hint::black_box, num::NonZeroUsize};
 
-/// Benchmarks the steady-state insert path under churn: a full cache with a
-/// working set twice the capacity, so most inserts miss and evict (CLOCK sweep,
-/// index remove + insert, slot reuse).
+const INSERTS_PER_ITERATION: usize = 1024;
+
+/// Benchmarks the steady-state insert path under churn. Every key is fresh, so
+/// each insertion into the full cache evicts a CLOCK resident.
 fn bench_insert(c: &mut Criterion) {
     for capacity in [1usize << 10, 1 << 14, 1 << 18] {
-        let working = (capacity as u64) * 2;
-        let mut cache: Clock<u64, u64> = Clock::new(NonZeroUsize::new(capacity).unwrap());
+        let mut cache: Cache<u64, u64> = Cache::new(NonZeroUsize::new(capacity).unwrap());
         for i in 0..capacity as u64 {
             cache.put(i, i);
         }
-        let mut rng = TestRng::new(capacity as u64);
-        let keys: Vec<u64> = (0..1024).map(|_| rng.random_range(0..working)).collect();
+        let mut next = capacity as u64;
         c.bench_function(&format!("{}/capacity={capacity}", module_path!()), |b| {
-            b.iter(|| {
-                for k in &keys {
-                    cache.put(black_box(*k), black_box(*k));
-                }
-            });
+            b.iter_batched(
+                || {
+                    let start = next;
+                    next = next
+                        .checked_add(INSERTS_PER_ITERATION as u64)
+                        .expect("benchmark keys must not overflow");
+                    start..next
+                },
+                |keys| {
+                    for key in keys {
+                        cache.put(black_box(key), black_box(key));
+                    }
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
 }

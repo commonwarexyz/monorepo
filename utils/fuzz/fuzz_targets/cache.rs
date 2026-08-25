@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::cache::Clock;
+use commonware_utils::cache::Cache;
 use libfuzzer_sys::fuzz_target;
 use std::{collections::HashMap, num::NonZeroUsize};
 
@@ -34,7 +34,7 @@ struct Plan {
 
 fn run(plan: Plan) {
     let cap = (plan.capacity % 16) as usize + 1;
-    let mut cache: Clock<u8, u16> = Clock::new(NonZeroUsize::new(cap).unwrap());
+    let mut cache: Cache<u8, u16> = Cache::new(NonZeroUsize::new(cap).unwrap());
     if plan.prefill {
         cache.prefill(|| 0u16);
     }
