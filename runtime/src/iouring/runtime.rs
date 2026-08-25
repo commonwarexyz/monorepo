@@ -2678,11 +2678,37 @@ mod tests {
                     .unwrap();
             }
             let executor = context.executor.upgrade().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let all_finished = executor
+                    .shared
+                    .workers
+                    .lock()
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .all(std::thread::JoinHandle::is_finished);
+                if all_finished {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "dedicated workers did not finish"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // Registration reaps every previously finished worker first.
+            let reaper = context
+                .child("reaper")
+                .shared(true)
+                .spawn(|_| async move { 42 });
             let retained = executor.shared.workers.lock().as_ref().unwrap().len();
             assert!(
-                retained < SPAWNS,
+                retained <= 1,
                 "{retained} exited worker threads retained until shutdown"
             );
+            assert_eq!(reaper.await.unwrap(), 42);
         });
     }
 
@@ -3245,13 +3271,16 @@ mod tests {
                 .child("origin")
                 .dedicated()
                 .spawn(move |context| async move {
-                    let _ = send.send(context.child("spawner"));
+                    let executor = context.executor.clone();
+                    let _ = send.send((context.child("spawner"), executor));
                 });
-            let spawner = recv.await.unwrap();
+            let (spawner, executor) = recv.await.unwrap();
             origin.await.unwrap();
-            // Give the origin worker time to finish its teardown and drop
-            // its executor (the handle resolves before either happens).
-            context.sleep(Duration::from_millis(200)).await;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while executor.upgrade().is_some() {
+                assert!(Instant::now() < deadline, "origin executor remained alive");
+                context.sleep(Duration::from_millis(1)).await;
+            }
 
             let handle = spawner.spawn(|_| async move { 7 });
             assert!(matches!(handle.await, Err(Error::Closed)));
@@ -3269,13 +3298,16 @@ mod tests {
                 .child("origin")
                 .dedicated()
                 .spawn(move |context| async move {
-                    let _ = send.send(context.child("clock"));
+                    let executor = context.executor.clone();
+                    let _ = send.send((context.child("clock"), executor));
                 });
-            let clock = recv.await.unwrap();
+            let (clock, executor) = recv.await.unwrap();
             origin.await.unwrap();
-            // Give the origin worker time to finish its teardown (the handle
-            // resolves before the worker closes its queue).
-            context.sleep(Duration::from_millis(200)).await;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while executor.upgrade().is_some() {
+                assert!(Instant::now() < deadline, "origin executor remained alive");
+                context.sleep(Duration::from_millis(1)).await;
+            }
             let sleeper = context.child("sleeper").spawn(move |_| async move {
                 clock.sleep(Duration::from_secs(3600)).await;
             });
@@ -3355,16 +3387,33 @@ mod tests {
                 .await
                 .unwrap();
             let addr = listener.local_addr().unwrap();
+            let (pending_send, pending_recv) = oneshot::channel();
 
             context.child("server").spawn(move |_| async move {
                 let (_, _sink, mut stream) = listener.accept().await.unwrap();
-                // Never receives data, aborted when the root returns.
-                let _ = stream.recv(1).await;
+                let mut recv = Box::pin(stream.recv(1));
+                let mut pending_send = Some(pending_send);
+                std::future::poll_fn(move |cx| match recv.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        if let Some(send) = pending_send.take() {
+                            let _ = send.send(());
+                        }
+                        Poll::<()>::Pending
+                    }
+                    Poll::Ready(_) => panic!("recv resolved before first Pending"),
+                })
+                .await;
             });
 
             let (_sink, _stream) = context.dial(addr).await.unwrap();
-            // Give the server's recv a chance to reach the kernel.
-            context.sleep(Duration::from_millis(50)).await;
+            pending_recv.await.unwrap();
+
+            // A child spawned by the root runs after the next driver turn.
+            context
+                .child("turn_barrier")
+                .spawn(|_| async move {})
+                .await
+                .unwrap();
         });
         assert!(
             start.elapsed() < Duration::from_secs(10),
