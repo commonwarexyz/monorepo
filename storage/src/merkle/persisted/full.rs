@@ -655,14 +655,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Probe the cache only for retained positions: entries below the pruning
         // boundary linger until CLOCK eviction, and serving one would return
         // `Ok(Some(..))` where the contract (and any cold instance) returns `Ok(None)`.
-        if *position >= self.journal.bounds().start {
-            if let Some(node) = self
+        if *position >= self.journal.bounds().start
+            && let Some(node) = self
                 .node_cache
                 .as_ref()
                 .and_then(|cache| cache.get(*position))
-            {
-                return Ok(Some(node));
-            }
+        {
+            return Ok(Some(node));
         }
         match self.journal.read(*position).await {
             Ok(item) => {
@@ -724,18 +723,24 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // [`crate::journal::contiguous::Contiguous::read`]).
         let items = if journal_misses.is_empty() {
             Vec::new()
-        } else {
+        } else if let Some(cache) = &self.node_cache {
+            // The cache retains these digests, so the journal pages backing them are read
+            // exactly once: skip page-cache admission, which would only churn that cache
+            // and serialize concurrent bulk readers on its lock.
             let items = self
                 .journal
-                .read_many(&journal_misses)
+                .read_many_uncached(&journal_misses)
                 .await
                 .map_err(Error::Journal)?;
-            if let Some(cache) = &self.node_cache {
-                for (&position, &node) in journal_misses.iter().zip(&items) {
-                    cache.insert(position, node);
-                }
+            for (&position, &node) in journal_misses.iter().zip(&items) {
+                cache.insert(position, node);
             }
             items
+        } else {
+            self.journal
+                .read_many(&journal_misses)
+                .await
+                .map_err(Error::Journal)?
         };
 
         // The unfilled slots are exactly the journal subsequence, in the order it was built.
