@@ -193,11 +193,17 @@ pub trait Contiguous: Send + Sync {
     ///
     /// Replay state is constructed only for the blobs `range` touches, so a caller consuming a
     /// small slice of a large journal should bound the range rather than dropping an unbounded
-    /// stream early. An empty range yields an empty stream.
+    /// stream early. An empty range within `bounds()` yields an empty stream.
     ///
     /// `buffer` controls the replay byte budget for each chunk. Every backing blob read from
     /// sealed history uses `read_options`. Backing reads from the live writable tip instead use
     /// [ReadOptions::DONT_CACHE] on page-cache misses because the cache retains the fetched pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemPruned] if `range.start` precedes `bounds().start`, or
+    /// [Error::ItemOutOfRange] if `range.end` exceeds `bounds().end` or the range is inverted
+    /// (`start > end`).
     fn replay_range(
         &self,
         range: Range<u64>,
