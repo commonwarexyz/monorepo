@@ -1089,6 +1089,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_finalized_fetch_height_mismatch_not_stored() {
+        harness::finalized_fetch_height_mismatch_not_stored::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_subscribe_basic_block_delivery() {
         harness::subscribe_basic_block_delivery::<CodingHarness>();
     }

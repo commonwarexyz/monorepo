@@ -1467,21 +1467,28 @@ where
                         _ => None,
                     })
                     .max();
+                let finalized_height_matches = annotations.iter().all(|annotation| match annotation {
+                    Annotation::Finalized(handler::Finalized::ByHeight { height: expected }) => {
+                        height == *expected
+                    }
+                    _ => true,
+                });
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
                 // `Finalized` means the block belongs in the finalized chain.
                 let finalization = self.cache.get_finalization_for(digest).await;
-                if let Some(finalization) = &finalization {
-                    self = self
-                        .update_processed_round_floor(height, finalization.round(), resolver)
-                        .await;
-                }
-                if finalization.is_some()
-                    || annotations
-                        .iter()
-                        .any(|annotation| matches!(annotation, Annotation::Finalized(_)))
-                {
+                let should_store_finalization = finalized_height_matches
+                    && (finalization.is_some()
+                        || annotations
+                            .iter()
+                            .any(|annotation| matches!(annotation, Annotation::Finalized(_))));
+                if should_store_finalization {
+                    if let Some(finalization) = &finalization {
+                        self = self
+                            .update_processed_round_floor(height, finalization.round(), resolver)
+                            .await;
+                    }
                     (self, _) = self
                         .store_finalization(
                             height,

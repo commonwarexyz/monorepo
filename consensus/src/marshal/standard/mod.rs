@@ -343,6 +343,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_finalized_fetch_height_mismatch_not_stored() {
+        harness::finalized_fetch_height_mismatch_not_stored::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_prune_finalized_archives() {
         harness::prune_finalized_archives::<InlineHarness>();
         harness::prune_finalized_archives::<DeferredHarness>();

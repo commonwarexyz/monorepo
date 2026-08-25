@@ -272,8 +272,8 @@ pub enum CommitmentFallback {
     ///
     /// The height is not sent to peers. It is a local hint for request retention.
     /// It is not part of response validity. A fetched block is delivered if its
-    /// commitment matches. Certified storage uses the decoded block height only
-    /// when it does not exceed this bound.
+    /// commitment matches. A matching block above this bound is delivered but
+    /// not cached.
     FetchByCommitment { height: Height },
 }
 
@@ -824,7 +824,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         });
     }
 
-    /// Returns a stream over the ancestry of a given block, leading up to genesis.
+    /// Returns a stream over the ancestry of a given block, leading toward genesis.
     ///
     /// This stream may fetch missing parents because callers should only request
     /// ancestry for data they already have locally and are willing to build on,

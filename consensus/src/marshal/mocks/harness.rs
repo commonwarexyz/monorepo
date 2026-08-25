@@ -4071,6 +4071,135 @@ pub fn commitment_fetch_height_above_hint_not_cached<H: TestHarness>() {
     });
 }
 
+/// A finalized-chain fetch must not store a block whose decoded height differs
+/// from the exact repair height, even when its finalization is already cached.
+pub fn finalized_fetch_height_mismatch_not_stored<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+        let victim = participants[0].clone();
+        let server = participants[1].clone();
+        let peers = vec![victim.clone(), server.clone()];
+        let mut oracle =
+            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
+                .await;
+
+        let victim_setup = H::setup_validator(
+            context.child("victim"),
+            &mut oracle,
+            victim.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let server_setup = H::setup_validator(
+            context.child("server"),
+            &mut oracle,
+            server.clone(),
+            ConstantProvider::new(schemes[1].clone()),
+        )
+        .await;
+
+        let mut victim_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: victim_setup.mailbox,
+            extra: victim_setup.extra,
+        };
+        let mut server_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: server_setup.mailbox,
+            extra: server_setup.extra,
+        };
+
+        let expected_height = Height::new(7);
+        let actual_height = Height::new(1_000_000);
+        let fetched = H::make_test_block(
+            Sha256::hash(&[b"finalized-fetch-height-mismatch"]),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            actual_height,
+            7,
+            NUM_VALIDATORS as u16,
+        );
+        let fetched_commitment = H::commitment(&fetched);
+        let child_height = expected_height.next();
+        let child = H::make_test_block(
+            H::digest(&fetched),
+            fetched_commitment,
+            child_height,
+            8,
+            NUM_VALIDATORS as u16,
+        );
+        let child_commitment = H::commitment(&child);
+
+        H::propose(
+            &mut server_handle,
+            Round::new(Epoch::zero(), View::new(7)),
+            &fetched,
+        )
+        .await;
+        H::propose(
+            &mut victim_handle,
+            Round::new(Epoch::zero(), View::new(8)),
+            &child,
+        )
+        .await;
+
+        let fetched_finalization = H::make_finalization(
+            Proposal::new(
+                Round::new(Epoch::zero(), View::new(7)),
+                View::new(6),
+                fetched_commitment,
+            ),
+            &schemes,
+            QUORUM,
+        );
+        H::report_finalization(&mut victim_handle.mailbox, fetched_finalization).await;
+        let child_finalization = H::make_finalization(
+            Proposal::new(
+                Round::new(Epoch::zero(), View::new(8)),
+                View::new(7),
+                child_commitment,
+            ),
+            &schemes,
+            QUORUM,
+        );
+        H::report_finalization(&mut victim_handle.mailbox, child_finalization).await;
+
+        let subscription = victim_handle
+            .mailbox
+            .subscribe_by_commitment(fetched_commitment, CommitmentFallback::Wait);
+        setup_network_links(&mut oracle, &peers, LINK).await;
+
+        let received = select! {
+            result = subscription => {
+                result.expect("finalized repair should deliver the commitment-matching block")
+            },
+            _ = context.sleep(Duration::from_secs(5)) => {
+                panic!("finalized repair did not deliver the height-mismatched block");
+            },
+        };
+        assert_eq!(received.height(), actual_height);
+        assert!(
+            victim_handle
+                .mailbox
+                .get_block(&received.digest())
+                .await
+                .is_none(),
+            "block outside the exact finalized repair height must not be stored"
+        );
+
+        let blocked = oracle.blocked().await.unwrap();
+        assert!(
+            !blocked
+                .iter()
+                .any(|(blocker, blocked)| blocker == &victim && blocked == &server),
+            "commitment-matching response must not block the serving peer"
+        );
+    });
+}
+
 /// Test basic block subscription delivery.
 pub fn subscribe_basic_block_delivery<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
