@@ -105,6 +105,17 @@ pub struct Config<C> {
     pub codec_config: C,
 }
 
+/// Recovery contract applied while opening the index and value journals.
+///
+/// Exactly one mode establishes their shared boundary: `Restore` uses an explicit checkpoint,
+/// `Floors` preserves per-section validated prefixes while repairing any suffix, and `Infer`
+/// derives the boundary entirely from journal contents.
+enum Recovery<'a> {
+    Restore { section: u64, index_size: u64 },
+    Floors(&'a BTreeMap<u64, u64>),
+    Infer,
+}
+
 /// Segmented journal for entries with oversized values.
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
@@ -148,7 +159,14 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         cfg: Config<V::Cfg>,
         checkpoint: Option<(u64, u64)>,
     ) -> Result<Self, Error> {
-        Self::init_inner(context, cfg, checkpoint, None).await
+        let recovery = match checkpoint {
+            Some((section, index_size)) => Recovery::Restore {
+                section,
+                index_size,
+            },
+            None => Recovery::Infer,
+        };
+        Self::init_inner(context, cfg, recovery).await
     }
 
     /// Initialize while preserving at least the given item count in each section.
@@ -157,20 +175,18 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         cfg: Config<V::Cfg>,
         minimum_items: &BTreeMap<u64, u64>,
     ) -> Result<Self, Error> {
-        Self::init_inner(
-            context,
-            cfg,
-            None,
-            (!minimum_items.is_empty()).then_some(minimum_items),
-        )
-        .await
+        let recovery = if minimum_items.is_empty() {
+            Recovery::Infer
+        } else {
+            Recovery::Floors(minimum_items)
+        };
+        Self::init_inner(context, cfg, recovery).await
     }
 
     async fn init_inner(
         context: E,
         cfg: Config<V::Cfg>,
-        checkpoint: Option<(u64, u64)>,
-        minimum_items: Option<&BTreeMap<u64, u64>>,
+        recovery: Recovery<'_>,
     ) -> Result<Self, Error> {
         // Initialize both journals
         let index_cfg = FixedConfig {
@@ -178,12 +194,14 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
         };
-        let index = match minimum_items {
-            Some(minimum_items) => {
+        let index = match &recovery {
+            Recovery::Floors(minimum_items) => {
                 FixedJournal::init_with_floors(context.child("index"), index_cfg, minimum_items)
                     .await?
             }
-            None => FixedJournal::init(context.child("index"), index_cfg).await?,
+            Recovery::Restore { .. } | Recovery::Infer => {
+                FixedJournal::init(context.child("index"), index_cfg).await?
+            }
         };
 
         let value_cfg = GlobConfig {
@@ -195,14 +213,18 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let values = Glob::init(context.child("values"), value_cfg).await?;
 
         let oversized = Self { index, values };
-        if let Some(minimum_items) = minimum_items {
+        if let Recovery::Floors(minimum_items) = &recovery {
             oversized.validate_value_floors(minimum_items).await?;
         }
 
         // Perform crash recovery
-        let oversized = match checkpoint {
-            Some((section, index_size)) => oversized.restore(section, index_size).await?,
-            None => oversized.repair(minimum_items).await?,
+        let oversized = match recovery {
+            Recovery::Restore {
+                section,
+                index_size,
+            } => oversized.restore(section, index_size).await?,
+            Recovery::Floors(minimum_items) => oversized.repair(Some(minimum_items)).await?,
+            Recovery::Infer => oversized.repair(None).await?,
         };
 
         Ok(oversized)

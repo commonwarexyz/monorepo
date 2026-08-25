@@ -138,13 +138,12 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                     );
                 }
                 CrashKind::UnsyncedWrite => {
-                    let (metadata, handle) = metadata
+                    let (_metadata, handle) = metadata
                         .start_sync()
                         .await
                         .expect("fault-free writes must reach start_sync");
                     assert_eq!(pending.lock().len(), 1, "metadata sync must remain pending");
                     drop(handle);
-                    drop(metadata);
                 }
             }
 

@@ -906,9 +906,10 @@ impl<B: Blob> Writer<B> {
 
     /// Return whether a raw paged blob has a well-formed logical prefix of `minimum_len` bytes.
     ///
-    /// Unlike [`Self::new`], this does not resize the blob. `physical_size` is the size reported
-    /// when `blob` was opened, and `logical_page_size` is the page size used to write it. Validation
-    /// stops once the requested prefix is covered or the first short or invalid page is reached.
+    /// Use this before constructing a writer when recovery must prove a committed floor without
+    /// allowing [`Self::new`] to resize the blob. `physical_size` is the size reported when `blob`
+    /// was opened, and `logical_page_size` is the page size used to write it. Validation stops once
+    /// the requested prefix is covered or the first short or invalid page is reached.
     pub async fn has_recoverable_prefix(
         blob: &B,
         physical_size: u64,
@@ -3323,6 +3324,21 @@ mod tests {
             let checksum = read_crc_record_from_page(page.as_ref());
             assert_eq!(checksum.len1, 3);
             assert_eq!(checksum.len2, 6);
+
+            // The protected slot proves exactly the previously committed boundary: the torn
+            // extension cannot make any later byte part of the recoverable prefix.
+            for (minimum_len, expected) in [(3, true), (4, false)] {
+                let recoverable = Writer::<_>::has_recoverable_prefix(
+                    &blob,
+                    physical_page_size as u64,
+                    u64::from(PAGE_SIZE.get()),
+                    minimum_len,
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(recoverable, expected);
+            }
 
             let (blob, blob_size) = context
                 .open("test_partition", b"torn_extension_footer")
