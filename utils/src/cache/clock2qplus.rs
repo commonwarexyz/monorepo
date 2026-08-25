@@ -1465,5 +1465,4 @@ mod tests {
         assert_eq!(cache.ghost_keys(), ghost);
         cache.check_invariants();
     }
-
 }
