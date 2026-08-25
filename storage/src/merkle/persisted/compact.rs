@@ -17,7 +17,6 @@ use crate::merkle::{
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_utils::sync::RwLock;
 use std::sync::Arc;
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
@@ -69,12 +68,12 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
 /// A Merkle structure that retains only the state required to continue appending.
 ///
-/// The [`Mem`] is held as an [`Arc`] behind the lock so `snapshot` can hand a zero-copy,
-/// immutable view to jobs running off the calling task. Mutations go through
-/// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
-/// otherwise, so a snapshot never observes later mutations.
+/// The [`Mem`] is held as an [`Arc`] so `snapshot` can hand a zero-copy, immutable view to
+/// jobs running off the calling task. Mutations go through [`Arc::make_mut`]: they are
+/// in-place while no snapshot is alive and copy-on-write otherwise, so a snapshot never
+/// observes later mutations.
 pub struct Merkle<F: Family, D: Digest, S: Strategy> {
-    inner: RwLock<Arc<Mem<F, D>>>,
+    inner: Arc<Mem<F, D>>,
     strategy: S,
 }
 
@@ -82,7 +81,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// Create an empty `Merkle`.
     pub fn new(strategy: S) -> Self {
         Self {
-            inner: RwLock::new(Arc::new(Mem::new())),
+            inner: Arc::new(Mem::new()),
             strategy,
         }
     }
@@ -95,7 +94,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     ) -> Result<Self, Error<F>> {
         let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
         Ok(Self {
-            inner: RwLock::new(Arc::new(mem)),
+            inner: Arc::new(mem),
             strategy,
         })
     }
@@ -125,36 +124,31 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// Replace the in-memory tree with one rebuilt from a compact state snapshot, discarding
     /// the current state.
     pub(crate) fn reset_to(
-        &self,
+        &mut self,
         leaves: Location<F>,
         pinned_nodes: Vec<D>,
     ) -> Result<(), Error<F>> {
         let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
-        *self.inner.write() = Arc::new(mem);
+        self.inner = Arc::new(mem);
         Ok(())
     }
 
     /// Discard all retained nodes except the pinned frontier.
-    pub(crate) fn prune_to_frontier(&self) {
-        Arc::make_mut(&mut *self.inner.write()).prune_all();
+    pub(crate) fn prune_to_frontier(&mut self) {
+        Arc::make_mut(&mut self.inner).prune_all();
     }
 
-    /// Hash `element` and append it as a single leaf, mutating in place.
-    ///
-    /// The batch is built under a read lock and applied under a write lock, so the caller
-    /// must have exclusive ownership of the db.
+    /// Hash `element` and append it as a single leaf.
     pub(crate) fn append_leaf(
-        &self,
+        &mut self,
         hasher: &impl Hasher<F, Digest = D>,
         element: &[u8],
     ) -> Result<(), Error<F>> {
-        let batch = {
-            let inner = self.inner.read();
-            UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
+        let batch =
+            UnmerkleizedBatch::wrap(self.inner.new_batch_with_strategy(self.strategy.clone()))
                 .add(hasher, element)
-                .merkleize(&inner, hasher)
-        };
-        Arc::make_mut(&mut *self.inner.write()).apply_batch(&batch)
+                .merkleize(&self.inner, hasher);
+        Arc::make_mut(&mut self.inner).apply_batch(&batch)
     }
 
     /// Return the root digest of the current state.
@@ -163,12 +157,12 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, Error<F>> {
-        self.inner.read().root(hasher, inactive_peaks)
+        self.inner.root(hasher, inactive_peaks)
     }
 
     /// Return the number of leaves in the structure.
     pub fn leaves(&self) -> Location<F> {
-        self.inner.read().leaves()
+        self.inner.leaves()
     }
 
     /// Return a reference to the merkleization strategy.
@@ -177,12 +171,8 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     }
 
     /// Borrow the in-memory [`Mem`].
-    ///
-    /// The closure runs under the tree's read lock, which is not re-entrant: do not call other
-    /// methods of this [`Merkle`] from within it.
     pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
-        let inner = self.inner.read();
-        f(&inner)
+        f(&self.inner)
     }
 
     /// Return a zero-copy, immutable snapshot of the in-memory [`Mem`].
@@ -191,24 +181,22 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// alive. Use this to move committed node fallback into a job running off the calling task;
     /// prefer [`Merkle::with_mem`] when a borrow suffices.
     pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
-        Arc::clone(&self.inner.read())
+        Arc::clone(&self.inner)
     }
 
     /// Create a new speculative batch with this structure as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, D, S> {
-        let inner = self.inner.read();
-        UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
+        UnmerkleizedBatch::wrap(self.inner.new_batch_with_strategy(self.strategy.clone()))
     }
 
     /// Create an owned merkleized batch representing the current state.
     pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        let inner = self.inner.read();
-        batch::MerkleizedBatch::from_mem_with_strategy(&inner, self.strategy.clone())
+        batch::MerkleizedBatch::from_mem_with_strategy(&self.inner, self.strategy.clone())
     }
 
     /// Apply a merkleized batch to the in-memory structure.
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
-        Arc::make_mut(self.inner.get_mut()).apply_batch(batch)
+        Arc::make_mut(&mut self.inner).apply_batch(batch)
     }
 }
 

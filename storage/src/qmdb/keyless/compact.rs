@@ -296,7 +296,7 @@ where
         witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
         let op_bytes = Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc);
-        let merkle =
+        let mut merkle =
             compact_merkle::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
         let hasher = qmdb::hasher::<H>();
         merkle.append_leaf(&hasher, &op_bytes)?;
@@ -466,7 +466,7 @@ where
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .apply::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .apply::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -487,7 +487,7 @@ where
         let handle;
         (self.witness, handle) = self
             .witness
-            .start_sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .start_sync::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -502,7 +502,7 @@ where
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .commit::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .commit::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -517,7 +517,7 @@ where
         let inactivity_floor_loc = self.inactivity_floor_loc;
         self.witness = self
             .witness
-            .sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
+            .sync::<H, S>(&mut self.merkle, inactivity_floor_loc, || {
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
@@ -550,7 +550,7 @@ where
         let last_commit_op;
         (self.witness, last_commit_op) = self
             .witness
-            .rewind::<H, S, Operation<F, V>>(&self.merkle, target, &self.commit_codec_config)
+            .rewind::<H, S, Operation<F, V>>(&mut self.merkle, target, &self.commit_codec_config)
             .await?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
