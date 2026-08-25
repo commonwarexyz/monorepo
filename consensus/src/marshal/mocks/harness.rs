@@ -3984,6 +3984,93 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
     });
 }
 
+/// A commitment-fetched block above the local height hint must wake subscribers
+/// without being admitted to a farther-future cache epoch.
+pub fn commitment_fetch_height_above_hint_not_cached<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+        let victim = participants[0].clone();
+        let server = participants[1].clone();
+        let peers = vec![victim.clone(), server.clone()];
+        let mut oracle =
+            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
+                .await;
+
+        let victim_setup = H::setup_validator(
+            context.child("victim"),
+            &mut oracle,
+            victim,
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let server_setup = H::setup_validator(
+            context.child("server"),
+            &mut oracle,
+            server,
+            ConstantProvider::new(schemes[1].clone()),
+        )
+        .await;
+
+        let victim_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: victim_setup.mailbox,
+            extra: victim_setup.extra,
+        };
+        let mut server_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: server_setup.mailbox,
+            extra: server_setup.extra,
+        };
+
+        let expected_height = Height::new(7);
+        let actual_height = Height::new(1_000_000);
+        let block = H::make_test_block(
+            Sha256::hash(&[b"commitment-fetch-height-above-hint"]),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            actual_height,
+            7,
+            NUM_VALIDATORS as u16,
+        );
+        let commitment = H::commitment(&block);
+        H::propose(
+            &mut server_handle,
+            Round::new(Epoch::zero(), View::new(1)),
+            &block,
+        )
+        .await;
+
+        let subscription = victim_handle.mailbox.subscribe_by_commitment(
+            commitment,
+            CommitmentFallback::FetchByCommitment {
+                height: expected_height,
+            },
+        );
+        setup_network_links(&mut oracle, &peers, LINK).await;
+
+        let received = select! {
+            result = subscription => {
+                result.expect("commitment subscription should receive the fetched block")
+            },
+            _ = context.sleep(Duration::from_secs(5)) => {
+                panic!("commitment subscription was not woken by block above height hint");
+            },
+        };
+        assert_eq!(received.height(), actual_height);
+        assert!(
+            victim_handle
+                .mailbox
+                .get_block(&received.digest())
+                .await
+                .is_none(),
+            "block above the local height hint must not be cached"
+        );
+    });
+}
+
 /// Test basic block subscription delivery.
 pub fn subscribe_basic_block_delivery<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));

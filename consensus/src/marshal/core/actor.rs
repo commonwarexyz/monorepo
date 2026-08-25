@@ -1460,6 +1460,13 @@ where
                 let annotations = subscribers
                     .map_into(|(annotation, _)| annotation)
                     .into_vec();
+                let certified_height_bound = annotations
+                    .iter()
+                    .filter_map(|annotation| match annotation {
+                        Annotation::Certified { height } => Some(*height),
+                        _ => None,
+                    })
+                    .max();
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
@@ -1484,9 +1491,8 @@ where
                             application,
                         )
                         .await;
-                } else if annotations
-                    .iter()
-                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
+                } else if let Some(certified_height_bound) = certified_height_bound
+                    && height <= certified_height_bound
                     && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
                 {

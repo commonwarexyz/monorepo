@@ -1084,6 +1084,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_commitment_fetch_height_above_hint_not_cached() {
+        harness::commitment_fetch_height_above_hint_not_cached::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_subscribe_basic_block_delivery() {
         harness::subscribe_basic_block_delivery::<CodingHarness>();
     }

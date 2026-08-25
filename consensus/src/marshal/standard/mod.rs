@@ -337,6 +337,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_commitment_fetch_height_above_hint_not_cached() {
+        harness::commitment_fetch_height_above_hint_not_cached::<InlineHarness>();
+        harness::commitment_fetch_height_above_hint_not_cached::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_prune_finalized_archives() {
         harness::prune_finalized_archives::<InlineHarness>();
         harness::prune_finalized_archives::<DeferredHarness>();

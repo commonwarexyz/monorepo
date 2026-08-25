@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
+use tracing::debug;
 
 /// A stream of blocks used by application propose and verify calls.
 ///
@@ -277,18 +278,25 @@ impl<D: Digest> ExpectedParent<D> {
         )
     }
 
-    fn assert_matches<B: Block<Digest = D>>(self, parent: &B) {
+    fn matches<B: Block<Digest = D>>(self, parent: &B) -> bool {
         let Self(parent_height, parent_digest) = self;
-        assert_eq!(
-            parent.height(),
-            parent_height,
-            "fetched parent must be contiguous in height"
-        );
-        assert_eq!(
-            parent.digest(),
-            parent_digest,
-            "fetched parent must be contiguous in ancestry"
-        );
+        if parent.height() != parent_height {
+            debug!(
+                expected = %parent_height,
+                actual = %parent.height(),
+                "ignoring fetched parent with non-contiguous height"
+            );
+            return false;
+        }
+        if parent.digest() != parent_digest {
+            debug!(
+                expected = ?parent_digest,
+                actual = ?parent.digest(),
+                "ignoring fetched parent with non-contiguous ancestry"
+            );
+            return false;
+        }
+        true
     }
 }
 
@@ -440,8 +448,11 @@ where
                 // buffer it for the next poll.
                 match this.pending.as_mut().poll(cx) {
                     Poll::Ready(Some(Some((expected, parent)))) => {
-                        expected.assert_matches(parent.as_ref());
-                        this.buffered.push(parent);
+                        if expected.matches(parent.as_ref()) {
+                            this.buffered.push(parent);
+                        } else {
+                            *this.pending.as_mut() = None.into();
+                        }
                         *this.pending_child = None;
                     }
                     Poll::Ready(Some(None)) => {
@@ -470,7 +481,11 @@ where
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Some((expected, block)))) => {
-                expected.assert_matches(block.as_ref());
+                if !expected.matches(block.as_ref()) {
+                    *this.pending.as_mut() = None.into();
+                    *this.pending_child = None;
+                    return Poll::Ready(None);
+                }
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
@@ -483,8 +498,11 @@ where
                     // buffer it for the next poll.
                     match this.pending.as_mut().poll(cx) {
                         Poll::Ready(Some(Some((expected, parent)))) => {
-                            expected.assert_matches(parent.as_ref());
-                            this.buffered.push(parent);
+                            if expected.matches(parent.as_ref()) {
+                                this.buffered.push(parent);
+                            } else {
+                                *this.pending.as_mut() = None.into();
+                            }
                             *this.pending_child = None;
                         }
                         Poll::Ready(Some(None)) => {
@@ -649,33 +667,47 @@ mod test {
     }
 
     #[test]
-    #[should_panic = "fetched parent must be contiguous in height"]
-    fn test_panics_on_non_contiguous_fetched_parent_height() {
+    fn test_ends_on_non_contiguous_fetched_parent_height() {
         deterministic::Runner::default().start(|context| async move {
             let parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
             let child = TestBlock::new(parent.digest(), Height::new(3), 3);
-            let stream = stream(&context, MockProvider(vec![parent]), [child]);
-            futures::pin_mut!(stream);
+            let mut stream = stream(&context, MockProvider(vec![parent]), [child.clone()]);
 
-            let waker = futures::task::noop_waker_ref();
-            let mut cx = std::task::Context::from_waker(waker);
-            let _ = futures::Stream::poll_next(stream.as_mut(), &mut cx);
+            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(stream.next().await, None);
         });
     }
 
     #[test]
-    #[should_panic = "fetched parent must be contiguous in ancestry"]
-    fn test_panics_on_non_contiguous_fetched_parent_digest() {
+    fn test_ends_on_non_contiguous_fetched_parent_digest() {
         deterministic::Runner::default().start(|context| async move {
             let expected_parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
             let fetched_parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 1);
             let child = TestBlock::new(expected_parent.digest(), Height::new(1), 2);
-            let stream = stream(&context, WrongParentProvider(fetched_parent), [child]);
-            futures::pin_mut!(stream);
+            let mut stream = stream(
+                &context,
+                WrongParentProvider(fetched_parent),
+                [child.clone()],
+            );
 
-            let waker = futures::task::noop_waker_ref();
-            let mut cx = std::task::Context::from_waker(waker);
-            let _ = futures::Stream::poll_next(stream.as_mut(), &mut cx);
+            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(stream.next().await, None);
+        });
+    }
+
+    #[test]
+    fn test_ends_on_delayed_non_contiguous_fetched_parent() {
+        deterministic::Runner::default().start(|context| async move {
+            let expected_parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
+            let fetched_parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 1);
+            let child = TestBlock::new(expected_parent.digest(), Height::new(1), 2);
+            let provider = PendingProvider::default();
+            let mut stream = stream(&context, provider.clone(), [child.clone()]);
+
+            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(provider.subscription_count(), 1);
+            provider.complete_all(Arc::new(fetched_parent));
+            assert_eq!(stream.next().await, None);
         });
     }
 

@@ -272,7 +272,8 @@ pub enum CommitmentFallback {
     ///
     /// The height is not sent to peers. It is a local hint for request retention.
     /// It is not part of response validity. A fetched block is delivered if its
-    /// commitment matches. Certified storage uses the decoded block height.
+    /// commitment matches. Certified storage uses the decoded block height only
+    /// when it does not exceed this bound.
     FetchByCommitment { height: Height },
 }
 
@@ -634,11 +635,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Create an ancestor stream that fetches missing parents by commitment.
     ///
-    /// This stream is always a fetching stream. Callers must only use it after
-    /// they already have a block that is safe to verify, certify, build on, or
-    /// repair from. From that point, every parent walked by the stream is part of
-    /// a certified ancestry chain, and the stream can derive each missing
-    /// parent's height from its child before issuing a height-bound request.
+    /// This stream is always a fetching stream. Callers must already have a block
+    /// that is safe to verify, certify, build on, or repair from. The stream derives
+    /// each missing parent's height and digest from its child and terminates if a
+    /// fetched block does not match that relationship.
     ///
     /// Do not use this to wait for pending candidate proposal data.
     pub(crate) fn ancestor_stream<I, C>(
