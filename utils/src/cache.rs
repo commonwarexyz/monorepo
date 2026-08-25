@@ -34,10 +34,25 @@
 //!
 //! # Policies
 //!
-//! The default [Clock] policy provides low-overhead replacement. [Clock2QPlus]
-//! adds scan resistance through separate admission and eviction regions backed
-//! by bounded history. [Sieve] retains FIFO insertion order and sifts
-//! unvisited entries with a backward-moving hand.
+//! The policies form an escalation ladder:
+//!
+//! 1. Start with [Clock]. It is the default when representative benchmarks are
+//!    unavailable, resident metadata matters, or the workload is reasonably
+//!    stable. It has the least admission filtering and scan resistance.
+//! 2. Try [Sieve] when scans, bursts, or many one-hit entries pollute the cache.
+//!    New residents enter unvisited and are immediately evictable until they
+//!    receive a hit. This inexpensive filtering costs two links per resident
+//!    and slightly more insertion bookkeeping than CLOCK.
+//! 3. Try [Clock2QPlus] when misses are expensive and recently evicted entries
+//!    often return after newer traffic pushes them out. Its bounded Ghost
+//!    history recognizes that reuse and admits the entry directly into the
+//!    protected Main region, at the cost of substantially more metadata and
+//!    heavier insertion and eviction.
+//!
+//! SIEVE remembers only whether an entry was referenced while resident and
+//! forgets it after eviction. CLOCK2Q+ preserves evidence about recently
+//! evicted probationary entries. Move up this ladder only when benchmarks
+//! representative of the intended workload show a material benefit.
 //!
 //! # Concurrency
 //!
