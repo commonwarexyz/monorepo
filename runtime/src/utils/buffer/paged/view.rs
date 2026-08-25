@@ -179,16 +179,56 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read remaining ranges from the underlying blob, concurrently.
-        let mut reads = cache_ranges
-            .iter_mut()
-            .map(|(item_buf, offset)| self.cache_ref.read(self.blob, self.id, item_buf, *offset))
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = reads.next().await {
-            result?;
+        // Slow path: warm the missing pages behind the remaining ranges with coalesced blob
+        // reads, then serve the ranges from the now-warm cache.
+        let miss_ranges: Vec<(u64, usize)> = cache_ranges
+            .iter()
+            .map(|(item_buf, offset)| (*offset, item_buf.len()))
+            .collect();
+        self.warm_ranges(&miss_ranges).await?;
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+
+        // Ranges whose pages were evicted between admission and the re-probe (possible only
+        // when the batch exceeds the cache capacity) fall back to per-range reads.
+        if !cache_ranges.is_empty() {
+            let mut reads = cache_ranges
+                .iter_mut()
+                .map(|(item_buf, offset)| {
+                    self.cache_ref.read(self.blob, self.id, item_buf, *offset)
+                })
+                .collect::<FuturesUnordered<_>>();
+            while let Some(result) = reads.next().await {
+                result?;
+            }
         }
 
         Ok(offsets.len() - blob_reads)
+    }
+
+    /// Warm the page cache for the given `(offset, len)` byte ranges: compute the distinct
+    /// pages the ranges touch below the in-memory tail and admit the missing ones with
+    /// coalesced blob reads. Ranges must be sorted by offset and non-overlapping; bytes served
+    /// by the in-memory tail are skipped.
+    pub async fn warm_ranges(&self, ranges: &[(u64, usize)]) -> Result<(), Error> {
+        // The sorted, non-overlapping ranges make the touched pages ascend; adjacent ranges
+        // sharing a page are deduplicated by continuing from one past the last recorded page.
+        let mut pages: Vec<u64> = Vec::new();
+        for &(offset, len) in ranges {
+            if len == 0 || offset >= self.tail_offset {
+                continue;
+            }
+            let end = offset.saturating_add(len as u64).min(self.tail_offset);
+            let (first, _) = self.cache_ref.offset_to_page(offset);
+            let (last, _) = self.cache_ref.offset_to_page(end - 1);
+            let next = match pages.last() {
+                Some(&prev) if prev >= first => prev + 1,
+                _ => first,
+            };
+            pages.extend(next..=last);
+        }
+        self.cache_ref
+            .fetch_pages_after_faults(self.blob, self.id, pages)
+            .await
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only.
