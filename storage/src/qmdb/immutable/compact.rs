@@ -63,8 +63,6 @@ where
     C: Clone + Send + Sync + 'static,
 {
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
-    root: H::Digest,
-    last_commit_loc: Location<F>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
     commit_codec_config: C,
@@ -314,11 +312,8 @@ where
         merkle.prune_to_frontier();
 
         let witness = witness::Store::from_import(journal, imported);
-        let root = witness.tip().root;
         Ok(Self {
             merkle,
-            root,
-            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
@@ -357,13 +352,8 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = witness.tip().size() - 1;
-        let root = witness.tip().root;
-
         Ok(Self {
             merkle,
-            root,
-            last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
@@ -374,17 +364,7 @@ where
 
     /// Return the root of the db.
     pub const fn root(&self) -> H::Digest {
-        self.root
-    }
-
-    /// Return a reference to the merkleization strategy.
-    pub const fn strategy(&self) -> &S {
-        self.merkle.strategy()
-    }
-
-    /// Return the location of the last commit.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
+        self.witness.tip().root
     }
 
     /// Return the inactivity floor declared by the last committed batch.
@@ -393,8 +373,8 @@ where
     }
 
     /// Return the location of the next operation appended to this db.
-    pub fn size(&self) -> Location<F> {
-        self.last_commit_loc + 1
+    pub const fn size(&self) -> Location<F> {
+        self.witness.tip().size()
     }
 
     /// Get the metadata associated with the last commit.
@@ -411,8 +391,8 @@ where
     }
 
     /// The [`Commitment`] for the database's current state.
-    pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
-        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root())
+    pub(crate) const fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
+        batch_chain::Commitment::new(self.size(), self.root())
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -473,10 +453,8 @@ where
     ) -> Result<(Self, core::ops::Range<Location<F>>), Error<F>> {
         self.validate_batch(&batch)?;
 
-        let start_loc = self.last_commit_loc + 1;
+        let start_loc = self.size();
         self.merkle.apply_batch(&batch.merkle_batch)?;
-        self.root = batch.root();
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.last_commit_metadata = batch.commit_metadata.clone();
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         let last_commit_metadata = self.last_commit_metadata.clone();
@@ -560,10 +538,7 @@ where
     {
         // A clean current target only needs to settle its pipelined sync. An uncommitted target
         // takes the regular rewind path so the witness journal becomes durable before return.
-        if self.size() == target
-            && self.witness.tip().size() == target
-            && !self.witness.has_uncommitted_state()
-        {
+        if self.witness.tip().size() == target && !self.witness.has_uncommitted_state() {
             self.witness.wait_for_sync().await?;
             return Ok(self);
         }
@@ -578,8 +553,6 @@ where
         };
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = target - 1;
-        self.root = self.witness.tip().root;
         Ok(self)
     }
 
@@ -1858,7 +1831,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), size_after_first);
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -1893,7 +1865,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), size_before_drop);
             assert_eq!(db.root(), root_before_drop);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -1937,7 +1908,6 @@ mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.size(), size_after_first);
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });

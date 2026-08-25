@@ -591,7 +591,6 @@ mod tests {
             assert_eq!(guard.get_metadata(), Some(U64::new(9)));
 
             let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
-            assert_eq!(target.root, guard.root());
             assert_eq!(target.size, mmr::Location::new(3));
         });
     }
