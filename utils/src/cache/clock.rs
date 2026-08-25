@@ -25,22 +25,15 @@ pub struct Clock {
     capacity: usize,
 }
 
-impl Clock {
-    /// Creates an empty CLOCK policy with the given capacity.
-    pub const fn new(capacity: NonZeroUsize) -> Self {
-        Self {
-            hand: 0,
-            capacity: capacity.get(),
-        }
-    }
-}
-
 impl<K> Policy<K> for Clock {
     type SlotState = AtomicBool;
 
     #[inline]
     fn new(capacity: NonZeroUsize) -> Self {
-        Self::new(capacity)
+        Self {
+            hand: 0,
+            capacity: capacity.get(),
+        }
     }
 
     #[inline]
@@ -51,6 +44,11 @@ impl<K> Policy<K> for Clock {
         if !state.load(Ordering::Relaxed) {
             state.store(true, Ordering::Relaxed);
         }
+    }
+
+    #[inline]
+    fn hit_mut(&mut self, _slot: Slot, state: &mut AtomicBool) {
+        state.store(true, Ordering::Relaxed);
     }
 
     #[inline]
@@ -71,7 +69,8 @@ impl<K> Policy<K> for Clock {
             if !referenced.load(Ordering::Relaxed) {
                 let victim = self.hand;
                 let _ = claim(Some(victim));
-                // Do not reconsider the new resident until the hand completes a revolution.
+                // Do not reconsider the new resident until the hand completes
+                // a revolution.
                 self.advance();
                 return AtomicBool::new(true);
             }
