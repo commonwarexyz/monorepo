@@ -473,12 +473,13 @@ where
         for range in positions.chunks(lane) {
             let range = range.to_vec();
             let log = log.clone();
-            readers.push(any::db::AbortOnDrop::new(
+            readers.push(
                 graft_context
                     .child("graft_reader")
                     .shared(true)
-                    .spawn(move |_| async move { log.merkle.get_nodes(&range).await }),
-            ));
+                    .spawn(move |_| async move { log.merkle.get_nodes(&range).await })
+                    .abort_on_drop(),
+            );
         }
 
         // Join the readers in lane order, aborting the rest on the first failure so no
