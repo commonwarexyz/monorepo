@@ -689,7 +689,7 @@ where
 {
     const fn commit_barrier(&self) -> bool {
         match self {
-            Self::Install(_, _, _, _, _) | Self::Prune(_, _) | Self::Promoted(_, _) => true,
+            Self::Install(_, _, _, _, _) | Self::Prune(_, _) => true,
             #[cfg(test)]
             Self::InstallThrough(_, _, _, _, _, _) => true,
             _ => false,
@@ -1120,6 +1120,9 @@ where
 
     fn command_ready(&self, command: &Command<H, V, B>) -> bool {
         match command {
+            Command::Promoted(_, _) => {
+                !self.admission_active && self.pending_admission.is_none()
+            }
             Command::Admit(admissions, _, _)
                 if !admissions.is_empty() && admissions.len() <= self.durability_capacity =>
             {
@@ -4789,7 +4792,7 @@ mod tests {
     }
 
     #[test]
-    fn acknowledgement_sync_does_not_block_catalog_reads() {
+    fn acknowledgement_sync_does_not_block_catalog_reads_or_promotion() {
         deterministic::Runner::default().start(|context| async move {
             let limits = Limits::new(2, 2).unwrap();
             let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
@@ -4805,8 +4808,10 @@ mod tests {
                 inner: context.child("delayed"),
                 pending: syncs.clone(),
             };
+            let mut catalog_config = config(&context, &committee);
+            catalog_config.finalized_blocks = ArchiveMode::Immutable;
             let (client, handle, _delivery) =
-                spawn_catalog(config(&context, &committee), delayed.child("catalog")).await;
+                spawn_catalog(catalog_config, delayed.child("catalog")).await;
             let current = client.checkpoint().await.unwrap();
             let block = producer_block(&committee, 0, 11);
             let reference = block.reference();
@@ -4829,6 +4834,7 @@ mod tests {
                 None,
             )
             .unwrap();
+            let promoted_frontiers = checkpoint.emitted().to_vec();
             drive_pending_syncs(
                 &syncs,
                 client.commit(Commit {
@@ -4882,10 +4888,45 @@ mod tests {
                 _ = context.sleep(std::time::Duration::from_millis(1)) => {},
             }
 
+            let mut promotion = Box::pin(client.promoted(promoted_frontiers));
+            let mut promoted = false;
+            for _ in 0..100 {
+                let pending = {
+                    let mut pending = syncs.lock();
+                    (pending.len() > 1).then(|| pending.remove(1))
+                };
+                if let Some(pending) = pending {
+                    let _ = pending.release.send(Ok(()));
+                }
+                commonware_macros::select! {
+                    result = &mut promotion => {
+                        result.expect("promotion succeeds");
+                        promoted = true;
+                        break;
+                    },
+                    _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+                }
+            }
+            assert!(promoted, "acknowledgement durability blocked promotion");
+            drop(promotion);
+            commonware_macros::select! {
+                result = &mut acknowledgement => {
+                    panic!("promotion released acknowledgement durability: {result:?}")
+                },
+                _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+            }
+
             syncs.unblock();
-            acknowledgement.await.unwrap();
+            commonware_macros::select! {
+                result = &mut acknowledgement => result.unwrap(),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("acknowledgement did not finish after durability was released")
+                },
+            }
+            drop(acknowledgement);
             drop(client);
-            assert!(handle.await.is_ok());
+            handle.abort();
+            let _ = handle.await;
         });
     }
 
