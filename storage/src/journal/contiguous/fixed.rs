@@ -1181,19 +1181,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 }
 
-/// Implementation of [super::Mutable] for fixed-size value journals.
-///
-/// # Repair
-///
-/// Like
-/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-/// and
-/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying blob will be truncated to the last valid item). Repair is performed during init.
-///
-/// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle.
 /// Whether a batched read admits faulted pages into the page cache.
 #[derive(Clone, Copy)]
 enum Admission {
@@ -1211,6 +1198,19 @@ enum Admission {
     Bypass,
 }
 
+/// Implementation of [super::Mutable] for fixed-size value journals.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying blob will be truncated to the last valid item). Repair is performed during init.
+///
+/// Mutating functions consume the journal and return it only on success: an error (or a dropped
+/// future) destroys the handle.
 pub struct Journal<E: Context, A>(Box<Inner<E, A>>);
 
 impl<E: Context, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
