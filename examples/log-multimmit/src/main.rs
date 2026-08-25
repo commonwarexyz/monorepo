@@ -619,6 +619,9 @@ fn main() {
         let profile = profile(&committee, index);
         let publication_retention = NonZeroUsize::new(profile.resources().max_outbox_effects())
             .expect("the consensus outbox bound is non-zero");
+        let producer_chain = profile
+            .protocol()
+            .producer_chain(Participant::from_usize(index));
         let proposal_latency =
             application::ProposalLatency::new(&application_context, publication_retention);
 
@@ -628,6 +631,7 @@ fn main() {
             key,
             config.body_size,
             publication_retention,
+            producer_chain,
             marshal.clone(),
             proposal_latency,
         );

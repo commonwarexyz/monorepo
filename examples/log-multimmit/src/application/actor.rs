@@ -9,7 +9,7 @@ use commonware_consensus::{
     multimmit::{
         Artifact,
         marshal::{Custody, Mailbox, Update},
-        types::{Activity, BlockRef, Context, TransactionBlock, TransactionBlockHeader},
+        types::{Activity, BlockRef, ChainId, Context, TransactionBlock, TransactionBlockHeader},
     },
 };
 use commonware_cryptography::{
@@ -237,6 +237,13 @@ impl Staged {
         block.custody.take()
     }
 
+    fn retain_verified(&self, producer_chain: Option<ChainId>, block: Arc<Block>) -> bool {
+        if Some(block.reference().chain()) != producer_chain {
+            return true;
+        }
+        self.insert(block)
+    }
+
     /// Retires bodies below the bounded window that can still have live egress obligations.
     fn certify(&self, reference: BlockRef<Sha256Digest>, retention: NonZeroUsize) {
         let retention = u64::try_from(retention.get()).unwrap_or(u64::MAX);
@@ -257,6 +264,7 @@ pub struct Application<E: Clock + Spawner> {
     seed: u64,
     body_size: usize,
     publication_retention: NonZeroUsize,
+    producer_chain: Option<ChainId>,
     marshal: Marshal,
     staged: Staged,
     proposal_latency: ProposalLatency,
@@ -269,6 +277,7 @@ impl<E: Clock + Spawner> Clone for Application<E> {
             seed: self.seed,
             body_size: self.body_size,
             publication_retention: self.publication_retention,
+            producer_chain: self.producer_chain,
             marshal: self.marshal.clone(),
             staged: self.staged.clone(),
             proposal_latency: self.proposal_latency.clone(),
@@ -283,6 +292,7 @@ impl<E: Clock + Spawner> Application<E> {
         seed: u64,
         body_size: usize,
         publication_retention: NonZeroUsize,
+        producer_chain: Option<ChainId>,
         marshal: Marshal,
         proposal_latency: ProposalLatency,
     ) -> Self {
@@ -291,6 +301,7 @@ impl<E: Clock + Spawner> Application<E> {
             seed,
             body_size,
             publication_retention,
+            producer_chain,
             marshal,
             staged: Staged::default(),
             proposal_latency,
@@ -370,6 +381,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
         let reference = header.block_ref::<Sha256>();
         let marshal = self.marshal.clone();
         let staged = self.staged.clone();
+        let producer_chain = self.producer_chain;
         let (mut sender, receiver) = oneshot::channel();
         self.context.child("verify").spawn(move |_| async move {
             if let Some(custody) = staged.take_custody(reference) {
@@ -402,7 +414,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                         let _ = sender.send(false);
                         return;
                     }
-                    let _ = sender.send(staged.insert(block));
+                    let _ = sender.send(staged.retain_verified(producer_chain, block));
                 }
                 Err(error) => {
                     warn!(
@@ -615,6 +627,33 @@ mod tests {
             latency.finalize(&[child.reference()], &staged);
             assert!(latency.started.lock().is_empty());
         });
+    }
+
+    #[test]
+    fn verified_bodies_are_retained_only_for_the_local_producer() {
+        let staged = Staged::default();
+        let local_chain = ChainId::new(0);
+        let block = |chain| {
+            let context = Context::new(
+                Epoch::new(7),
+                chain,
+                Height::new(1),
+                Sha256::hash(&[b"parent"]),
+            )
+            .unwrap();
+            Arc::new(TransactionBlock::<Sha256, _>::from_context(
+                context,
+                Body::junk(9, context, 32),
+            ))
+        };
+        let local = block(local_chain);
+        let remote = block(ChainId::new(1));
+
+        assert!(staged.retain_verified(Some(local_chain), Arc::clone(&local)));
+        assert!(staged.retain_verified(Some(local_chain), remote));
+        let retained = staged.0.lock();
+        assert_eq!(retained.len(), 1);
+        assert!(retained.contains_key(&local.digest()));
     }
 
     #[test]
