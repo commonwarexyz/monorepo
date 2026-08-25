@@ -457,10 +457,32 @@ where
     // prefetched concurrently with that rebuild: the reads depend only on the opened log
     // (the graftable range is a function of the operation count), while the grafted leaves
     // also need the bitmap the rebuild produces, so hashing and assembly happen after.
+    let graft_context = context.child("graft");
     let overlap = move |log: Arc<any::db::AuthenticatedLog<F, E, J, H, S>>| async move {
+        // Read the digests on a few concurrent tasks: a single get_nodes call runs its
+        // fault-path work (page reads, checksums, copies) on one task, which leaves the
+        // read CPU-bound on one core. A small task count avoids contending on the node
+        // journal's page-cache lock. Lane order restores position order on join, and each
+        // task is guarded so cancelling init aborts it.
+        const GRAFT_READ_TASKS: usize = 3;
         let chunks = db::graft_chunk_range::<F, N>(pruned_chunks, *log.size());
         let positions = db::graft_node_positions::<F, N>(chunks);
-        Ok(log.merkle.get_nodes(&positions).await?)
+        let lane = positions.len().div_ceil(GRAFT_READ_TASKS).max(1);
+        let mut readers = Vec::new();
+        for range in positions.chunks(lane) {
+            let range = range.to_vec();
+            let log = log.clone();
+            readers.push(any::db::AbortOnDrop::new(
+                graft_context
+                    .child("graft_reader")
+                    .spawn(move |_| async move { log.merkle.get_nodes(&range).await }),
+            ));
+        }
+        let mut nodes = Vec::with_capacity(positions.len());
+        for reader in readers {
+            nodes.extend(reader.join().await??);
+        }
+        Ok(nodes)
     };
     let (any, node_digests) =
         any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap), overlap).await?;
