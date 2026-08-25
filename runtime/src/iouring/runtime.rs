@@ -964,7 +964,11 @@ impl crate::Runner for Runner {
         let root_tree = Tree::root();
         let output = catch_unwind(AssertUnwindSafe(|| {
             let context = worker.context(label.name(), Vec::new(), root_tree.clone());
-            worker.run(panicked.interrupt(f(context)), Arc::clone(&root_tree))
+            // Construct the user future inside the worker loop so a panic in
+            // `f` follows the same driver cleanup path as a panic while
+            // polling the future.
+            let root = async move { panicked.interrupt(f(context)).await };
+            worker.run(root, Arc::clone(&root_tree))
         }));
 
         // Snapshot reap-stashed panics before triggering any further
@@ -1614,9 +1618,9 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, IoBuf, Listener as _, Metrics as _, Network as _, ReadOptions, Resolver as _,
-        Runner as _, Sink as _, Spawner as _, Storage as _, Strategizer as _, Stream as _,
-        Supervisor as _, WriteOptions,
+        Blob as _, IoBuf, IoBufMut, Listener as _, Metrics as _, Network as _, ReadOptions,
+        Resolver as _, Runner as _, Sink as _, Spawner as _, Storage as _, Strategizer as _,
+        Stream as _, Supervisor as _, WriteOptions,
     };
     use commonware_parallel::Strategy as _;
     use commonware_utils::{NZUsize, channel::oneshot};
@@ -1800,22 +1804,144 @@ mod tests {
         });
     }
 
+    /// A panic while constructing the root future must still close the root
+    /// worker's driver before the panic leaves `start`.
+    #[test]
+    fn test_root_closure_panic_closes_driver() {
+        let cfg = Config::default();
+        let storage_directory = cfg.storage_directory().clone();
+        let escaped = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&escaped);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(cfg).start(move |context| -> std::future::Ready<()> {
+                *capture.lock() = Some(context);
+                panic!("root closure panic");
+            });
+        }));
+        assert!(result.is_err(), "root closure should panic");
+
+        let context = escaped.lock().take().expect("context should escape");
+        let (blob, _) = futures::executor::block_on(context.open("partition", b"blob")).unwrap();
+        let waker = futures::task::noop_waker();
+        let mut cx = std_task::Context::from_waker(&waker);
+        let mut read = Box::pin(blob.read_at(0, 1, ReadOptions::default()));
+        assert!(
+            matches!(
+                read.as_mut().poll(&mut cx),
+                Poll::Ready(Err(Error::ReadFailed))
+            ),
+            "escaped driver accepted work after root cleanup"
+        );
+
+        drop(read);
+        drop(blob);
+        drop(context);
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
     /// Using a ring-bound resource from another worker fails loudly with the
     /// documented affinity panic (the task fails, the runtime survives): the
     /// io_uring runtime deliberately does not provide the tokio backend's
     /// location transparency for blobs, sockets, and listeners.
     #[test]
     fn test_blob_use_on_other_worker_panics() {
+        #[derive(Clone, Copy, Debug)]
+        enum Operation {
+            Resize,
+            ResizeOverflow,
+            Read,
+            ReadEmpty,
+            ReadBufferEmpty,
+            ReadOverflow,
+            ReadBufferOverflow,
+            WriteEmpty,
+            WriteOverflow,
+            WriteSyncEmpty,
+            WriteSyncOverflow,
+        }
+
+        let cases = [
+            ("resize", Operation::Resize),
+            ("resize_overflow", Operation::ResizeOverflow),
+            ("read", Operation::Read),
+            ("read_empty", Operation::ReadEmpty),
+            ("read_buffer_empty", Operation::ReadBufferEmpty),
+            ("read_overflow", Operation::ReadOverflow),
+            ("read_buffer_overflow", Operation::ReadBufferOverflow),
+            ("write_empty", Operation::WriteEmpty),
+            ("write_overflow", Operation::WriteOverflow),
+            ("write_sync_empty", Operation::WriteSyncEmpty),
+            ("write_sync_overflow", Operation::WriteSyncOverflow),
+        ];
+
         let cfg = Config::default().with_catch_panics(true);
         Runner::new(cfg).start(|context| async move {
             let (blob, _) = context.open("partition", b"blob").await.unwrap();
-            let handle = context
-                .child("dedicated")
-                .dedicated()
-                .spawn(move |_| async move {
-                    let _ = blob.read_at(0, 1, ReadOptions::default()).await;
+            for (label, operation) in cases {
+                let blob = blob.clone();
+                let handle = context.child(label).dedicated().spawn(move |_| async move {
+                    match operation {
+                        Operation::Resize => {
+                            let _ = blob.resize(1).await;
+                        }
+                        Operation::ResizeOverflow => {
+                            let _ = blob.resize(u64::MAX).await;
+                        }
+                        Operation::Read => {
+                            let _ = blob.read_at(0, 1, ReadOptions::default()).await;
+                        }
+                        Operation::ReadEmpty => {
+                            let _ = blob.read_at(0, 0, ReadOptions::default()).await;
+                        }
+                        Operation::ReadBufferEmpty => {
+                            let _ = blob
+                                .read_at_buf(
+                                    0,
+                                    0,
+                                    IoBufMut::with_capacity(1),
+                                    ReadOptions::default(),
+                                )
+                                .await;
+                        }
+                        Operation::ReadOverflow => {
+                            let _ = blob.read_at(u64::MAX, 1, ReadOptions::default()).await;
+                        }
+                        Operation::ReadBufferOverflow => {
+                            let _ = blob
+                                .read_at_buf(
+                                    u64::MAX,
+                                    1,
+                                    IoBufMut::with_capacity(1),
+                                    ReadOptions::default(),
+                                )
+                                .await;
+                        }
+                        Operation::WriteEmpty => {
+                            let _ = blob
+                                .write_at(0, Vec::<u8>::new(), WriteOptions::default())
+                                .await;
+                        }
+                        Operation::WriteOverflow => {
+                            let _ = blob
+                                .write_at(u64::MAX, b"x".to_vec(), WriteOptions::default())
+                                .await;
+                        }
+                        Operation::WriteSyncEmpty => {
+                            let _ = blob.write_at(0, Vec::<u8>::new(), WriteOptions::SYNC).await;
+                        }
+                        Operation::WriteSyncOverflow => {
+                            let _ = blob
+                                .write_at(u64::MAX, b"x".to_vec(), WriteOptions::SYNC)
+                                .await;
+                        }
+                    }
                 });
-            assert!(matches!(handle.await, Err(Error::Exited)));
+                assert!(
+                    matches!(handle.await, Err(Error::Exited)),
+                    "{operation:?} should panic on another worker"
+                );
+            }
         });
     }
 

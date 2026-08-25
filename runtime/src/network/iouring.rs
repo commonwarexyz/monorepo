@@ -450,6 +450,7 @@ impl Drop for Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.handle.assert_owner();
         match self.state {
             SinkState::Open => {}
             SinkState::Sending => {
@@ -586,6 +587,7 @@ impl Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
+        self.handle.assert_owner();
         if self.poisoned {
             return Err(Error::Closed);
         }

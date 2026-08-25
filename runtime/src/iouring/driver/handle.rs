@@ -357,6 +357,14 @@ impl Handle {
         self.ops.with(|cell| f(&mut cell.borrow_mut()))
     }
 
+    /// Assert that the caller is running on the driver's owning thread.
+    ///
+    /// Front-ends call this before validation, no-op, or synchronous paths
+    /// that would otherwise bypass the affinity check in op admission.
+    pub(crate) fn assert_owner(&self) {
+        self.ops.with(|_| ());
+    }
+
     /// Access the shared op state if called on the runtime thread.
     fn try_with<R>(&self, f: impl FnOnce(&mut Ops) -> R) -> Option<R> {
         self.ops.try_with(|cell| f(&mut cell.borrow_mut()))

@@ -335,6 +335,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
+        self.io_handle.assert_owner();
         let mut input_bufs = bufs.into();
         // SAFETY: `len` bytes are filled via io_uring read loop below.
         unsafe { input_bufs.set_len(len) };
@@ -384,6 +385,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
+        self.io_handle.assert_owner();
         let bufs = bufs.into();
         let offset = offset
             .checked_add(self.data_offset)
@@ -405,6 +407,7 @@ impl crate::Blob for Blob {
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.io_handle.assert_owner();
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
