@@ -32,7 +32,11 @@
 //! value allocation from steady-state insertion. Value-returning methods such
 //! as [Cache::put] replace and drop displaced values as usual.
 //!
-//! The [clock] module provides [Clock], the default replacement policy.
+//! # Policies
+//!
+//! The default [Clock] policy provides low-overhead replacement. [Clock2QPlus]
+//! adds scan resistance through separate admission and eviction regions backed
+//! by bounded history.
 //!
 //! # Concurrency
 //!
@@ -74,10 +78,12 @@
 //! ```
 
 pub mod clock;
+pub mod clock2qplus;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 pub use clock::Clock;
+pub use clock2qplus::Clock2QPlus;
 use core::{hash::Hash, num::NonZeroUsize, ops::Index};
 use hashbrown::HashMap;
 
@@ -1170,6 +1176,17 @@ mod tests {
             ops in proptest::collection::vec(op_strategy(), 0..256),
         ) {
             exercise_policy::<Clock, _>(capacity, prefill, ops, |cache| {
+                cache.check_policy_invariants();
+            })?;
+        }
+
+        #[test]
+        fn clock2qplus_invariants_hold(
+            capacity in 1usize..8,
+            prefill in any::<bool>(),
+            ops in proptest::collection::vec(op_strategy(), 0..256),
+        ) {
+            exercise_policy::<clock2qplus::Clock2QPlus<u8>, _>(capacity, prefill, ops, |cache| {
                 cache.check_policy_invariants();
             })?;
         }
