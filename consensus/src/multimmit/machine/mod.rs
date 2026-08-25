@@ -134,7 +134,6 @@ mod state;
 mod view;
 
 #[cfg(all(feature = "test-utils", feature = "mocks", not(target_arch = "wasm32")))]
-#[path = "../test_utils/benchmarks/mod.rs"]
 pub(crate) mod benchmarks;
 
 pub use admission::*;

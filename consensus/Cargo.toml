@@ -66,7 +66,7 @@ bench = false
 [[bench]]
 name = "multimmit"
 harness = false
-path = "benches/multimmit/bench.rs"
+path = "src/multimmit/benches/bench.rs"
 
 [features]
 test-utils = ["mocks"]

@@ -4,6 +4,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig, Variant},
 };
 use commonware_parallel::Sequential;
+use commonware_utils::TestRng;
 use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
@@ -22,11 +23,16 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
                 strategy,
             ),
             |b| {
+                let mut rng = TestRng::new(0x0ddc_0ffe);
                 b.iter(|| {
                     let verified = if parallel {
-                        fixture.verifier.verify_vqc::<Sha256, _>(&vqc, &rayon)
+                        fixture
+                            .verifier
+                            .verify_vqc::<_, Sha256, _>(&mut rng, &vqc, &rayon)
                     } else {
-                        fixture.verifier.verify_vqc::<Sha256, _>(&vqc, &Sequential)
+                        fixture
+                            .verifier
+                            .verify_vqc::<_, Sha256, _>(&mut rng, &vqc, &Sequential)
                     };
                     black_box(verified.unwrap())
                 });
@@ -41,11 +47,16 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
                 strategy,
             ),
             |b| {
+                let mut rng = TestRng::new(0x0ddc_0ffe);
                 b.iter(|| {
                     let verified = if parallel {
-                        fixture.verifier.verify_lqc::<Sha256, _>(&lqc, &rayon)
+                        fixture
+                            .verifier
+                            .verify_lqc::<_, Sha256, _>(&mut rng, &lqc, &rayon)
                     } else {
-                        fixture.verifier.verify_lqc::<Sha256, _>(&lqc, &Sequential)
+                        fixture
+                            .verifier
+                            .verify_lqc::<_, Sha256, _>(&mut rng, &lqc, &Sequential)
                     };
                     black_box(verified.unwrap())
                 });

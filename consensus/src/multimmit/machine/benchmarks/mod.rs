@@ -9,6 +9,4 @@ pub use fabric::{
     MACHINE_SCALE_PARTICIPANTS, MACHINE_SCALE_VIEWS, MachineScaleReport, machine_scale_report,
 };
 pub use journal::{JournalScenario, run_journal};
-pub use machine::{
-    AllocationCases, IdleAllocationCase, MachineScenario, idle_allocation_case, run_machine,
-};
+pub use machine::{MachineScenario, run_machine};

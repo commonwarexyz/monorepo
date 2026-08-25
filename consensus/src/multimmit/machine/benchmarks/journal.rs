@@ -2,7 +2,8 @@ use super::fabric;
 use crate::multimmit::{
     config::Limits,
     machine::{
-        Artifact, Cursor, DomainEventCodecConfig, Input, Machine, PersistJob, Profile, Role, Tuning,
+        Artifact, Cursor, DomainEventCodecConfig, Input, Machine, PersistJob, Profile, Role,
+        Tuning, ViewProof,
     },
     mocks::Committee,
     storage::{JournalConfig, SafetyJournal},
@@ -64,7 +65,9 @@ fn harvest(views: u64, seed: u64) -> Harvest {
             &mut machine,
             staged,
             NonZeroUsize::MIN,
-            &mut |key| panic!("view advance requires no resolution: {key:?}"),
+            &mut |job| {
+                ViewProof::Nullification(Box::new(committee.nullification(job.view().get())))
+            },
             &mut |job| jobs.push(job.clone()),
         );
     }
@@ -119,9 +122,9 @@ async fn append_pipelined(
 }
 
 // The harvest is lazy so filtered runs of the other bench groups do not pay for it. Each
-// nullified view currently stages three single-event records, so 400 views cover the
+// nullified view currently stages two records, so 500 views cover the
 // largest record slice used below.
-static HARVEST: LazyLock<Arc<Harvest>> = LazyLock::new(|| Arc::new(harvest(400, 99)));
+static HARVEST: LazyLock<Arc<Harvest>> = LazyLock::new(|| Arc::new(harvest(500, 99)));
 
 /// Fixed real-store journal workloads.
 #[derive(Clone, Copy, Debug)]

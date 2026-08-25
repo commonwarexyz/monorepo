@@ -352,9 +352,13 @@ pub(super) fn drain_with<F, P>(
                     queue.extend(step.into_capabilities());
                 }
                 Capability::Leader(LeaderCapability::ArmTimer(_))
-                | Capability::Producer(ProducerCapability::ArmTimer(_)) => {}
+                | Capability::Producer(ProducerCapability::ArmTimer(_))
+                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(DurabilityCapability::Retire(_)) => {}
                 Capability::Resolver(
-                    ResolverCapability::Cancel(_) | ResolverCapability::Reject(_),
+                    ResolverCapability::Cancel(_)
+                    | ResolverCapability::Reject(_)
+                    | ResolverCapability::Prune(_),
                 ) => {}
                 // Observers never sign or build; recoveries and aggregations stay unanswered
                 // because their completions are not constructible outside the crate. Both jobs
@@ -519,8 +523,13 @@ fn view_soak(profile: CompletionProfile) -> (LogicalRun, Vec<u64>) {
         MACHINE_SCALE_PARTICIPANTS as u32,
         Limits::new(2, 1).unwrap(),
     );
-    let certificates = (1..=MACHINE_SCALE_VIEWS)
-        .map(|view| Artifact::Nullification(committee.nullification(view)))
+    let nullifications = (1..=MACHINE_SCALE_VIEWS)
+        .map(|view| committee.nullification(view))
+        .collect::<Vec<_>>();
+    let certificates = nullifications
+        .iter()
+        .cloned()
+        .map(Artifact::Nullification)
         .collect::<Vec<_>>();
     let machine_profile =
         Profile::new(committee.config, Role::Observer, Tuning::default()).unwrap();
@@ -530,7 +539,11 @@ fn view_soak(profile: CompletionProfile) -> (LogicalRun, Vec<u64>) {
 
     for certificate in certificates {
         let run = observe_profiled(&mut machine, vec![certificate], profile, &mut |job| {
-            panic!("unexpected machine-scale view resolution: {job:?}")
+            let index = usize::try_from(job.view().get())
+                .unwrap()
+                .checked_sub(1)
+                .expect("genesis requires no resolution");
+            ViewProof::Nullification(Box::new(nullifications[index].clone()))
         });
         completion_tails.push(run.logical_ticks);
         total.add(run);
@@ -670,6 +683,13 @@ fn schedule_capabilities(
             )
             | Capability::Producer(
                 ProducerCapability::ArmTimer(_) | ProducerCapability::RecoverDa(_),
+            )
+            | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+            | Capability::Durability(DurabilityCapability::Retire(_))
+            | Capability::Resolver(
+                ResolverCapability::Cancel(_)
+                | ResolverCapability::Reject(_)
+                | ResolverCapability::Prune(_),
             ) => continue,
             other => panic!("unexpected profiled capability: {other:?}"),
         };

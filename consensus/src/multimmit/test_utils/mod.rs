@@ -19,10 +19,9 @@ use {
 #[cfg(not(target_arch = "wasm32"))]
 pub mod benchmarks {
     pub use super::super::machine::benchmarks::{
-        AllocationCases, CompletionProfile, IdleAllocationCase, JournalScenario,
-        MACHINE_SCALE_BLOCKS_PER_CHAIN, MACHINE_SCALE_COMPLETION_PROFILE,
-        MACHINE_SCALE_PARTICIPANTS, MACHINE_SCALE_VIEWS, MachineScaleReport, MachineScenario,
-        idle_allocation_case, machine_scale_report, run_journal, run_machine,
+        CompletionProfile, JournalScenario, MACHINE_SCALE_BLOCKS_PER_CHAIN,
+        MACHINE_SCALE_COMPLETION_PROFILE, MACHINE_SCALE_PARTICIPANTS, MACHINE_SCALE_VIEWS,
+        MachineScaleReport, MachineScenario, machine_scale_report, run_journal, run_machine,
     };
 }
 

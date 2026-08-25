@@ -1,13 +1,15 @@
 use super::fabric::{self, BenchArtifact};
+#[cfg(test)]
+use crate::multimmit::machine::PersistJob;
 use crate::{
     multimmit::{
         config::Config,
         machine::{
             Artifact, BarrierAck, BlockValidity, Capabilities, Capability, DurabilityCapability,
             DurableEffect, EffectCompletion, EffectId, Input, LeaderCapability, Machine,
-            ObservationStatus, PersistJob, ProducerCapability, Profile, PublicationDischarge, Role,
-            SignRequest, Snapshot, StepStatus, Tuning, ValidationCompletion, Verdict,
-            VerificationCapability, VerificationCompletion,
+            ObservationStatus, ProducerCapability, Profile, PublicationDischarge,
+            ResolverCapability, Role, SignRequest, Snapshot, StepStatus, Tuning,
+            ValidationCompletion, Verdict, VerificationCapability, VerificationCompletion,
         },
         types::{
             Anchor, ChainId, ChainProposal, DaCertificate, DaVote, SignedLeaderBlock,
@@ -97,7 +99,15 @@ fn start_counted(protocol: Config<Digest>) -> Machine<CountedSha256, MinPk> {
                         .unwrap();
                     capabilities.extend(step.into_capabilities());
                 }
-                Capability::Leader(LeaderCapability::ArmTimer(_)) => {}
+                Capability::Leader(LeaderCapability::ArmTimer(_))
+                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(DurabilityCapability::Retire(_))
+                | Capability::Resolver(
+                    ResolverCapability::Resolve(_)
+                    | ResolverCapability::Cancel(_)
+                    | ResolverCapability::Reject(_)
+                    | ResolverCapability::Prune(_),
+                ) => {}
                 other => panic!("unexpected counted-machine startup capability: {other:?}"),
             }
         }
@@ -197,7 +207,15 @@ fn drain_validator(machine: &mut fabric::BenchMachine, effects: fabric::BenchCap
                 | Capability::Producer(ProducerCapability::RecoverDa(_))
                 | Capability::Leader(LeaderCapability::RecoverNullification(_))
                 | Capability::Leader(LeaderCapability::AggregateVqc(_))
-                | Capability::Leader(LeaderCapability::AggregateLqc(_)) => continue,
+                | Capability::Leader(LeaderCapability::AggregateLqc(_))
+                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(DurabilityCapability::Retire(_))
+                | Capability::Resolver(
+                    ResolverCapability::Resolve(_)
+                    | ResolverCapability::Cancel(_)
+                    | ResolverCapability::Reject(_)
+                    | ResolverCapability::Prune(_),
+                ) => continue,
                 other => panic!("unexpected discharge-setup effect: {other:?}"),
             };
             effects.extend(step.into_capabilities());
@@ -222,6 +240,7 @@ fn add_vote_obligation(machine: &mut fabric::BenchMachine, header: TransactionBl
     drain_validator(machine, effects);
 }
 
+#[cfg(test)]
 fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<MinPk, Digest>) {
     let protocol = fabric::protocol(6, 64);
     let profile = Profile::new(
@@ -297,7 +316,15 @@ fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<Mi
                 | Capability::Producer(ProducerCapability::RecoverDa(_))
                 | Capability::Leader(LeaderCapability::RecoverNullification(_))
                 | Capability::Leader(LeaderCapability::AggregateVqc(_))
-                | Capability::Leader(LeaderCapability::AggregateLqc(_)) => continue,
+                | Capability::Leader(LeaderCapability::AggregateLqc(_))
+                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(DurabilityCapability::Retire(_))
+                | Capability::Resolver(
+                    ResolverCapability::Resolve(_)
+                    | ResolverCapability::Cancel(_)
+                    | ResolverCapability::Reject(_)
+                    | ResolverCapability::Prune(_),
+                ) => continue,
                 other => panic!("unexpected allocation-corpus effect: {other:?}"),
             };
             effects.extend(step.into_capabilities());
@@ -319,6 +346,7 @@ fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<Mi
     }
 }
 
+#[cfg(test)]
 fn next_persist(
     machine: &mut fabric::BenchMachine,
     effects: fabric::BenchCapabilities,
@@ -333,7 +361,15 @@ fn next_persist(
                     return job.job().clone();
                 }
                 Capability::Leader(LeaderCapability::ArmTimer(_))
-                | Capability::Producer(ProducerCapability::ArmTimer(_)) => {}
+                | Capability::Producer(ProducerCapability::ArmTimer(_))
+                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(DurabilityCapability::Retire(_))
+                | Capability::Resolver(
+                    ResolverCapability::Resolve(_)
+                    | ResolverCapability::Cancel(_)
+                    | ResolverCapability::Reject(_)
+                    | ResolverCapability::Prune(_),
+                ) => {}
                 other => panic!("unexpected pre-publication effect: {other:?}"),
             }
         }
@@ -483,8 +519,8 @@ pub enum MachineScenario {
     ObserveDuplicates,
 }
 
-/// Four independent zero-allocation protocol operations.
-pub struct AllocationCases {
+#[cfg(test)]
+struct AllocationCases {
     duplicate_machine: fabric::BenchMachine,
     duplicate_input: Option<Input<MinPk, Digest>>,
     sign_machine: fabric::BenchMachine,
@@ -494,9 +530,9 @@ pub struct AllocationCases {
     reference_effect: DurableEffect<MinPk, Digest>,
 }
 
+#[cfg(test)]
 impl AllocationCases {
-    /// Builds all fixtures outside the measured allocation regions.
-    pub fn new() -> Self {
+    fn new() -> Self {
         let protocol = fabric::protocol(PARTICIPANTS, PIPELINE_DEPTH);
         let profile = fabric::observer(protocol.clone());
         let leader = empty_leader(&protocol);
@@ -527,72 +563,48 @@ impl AllocationCases {
         }
     }
 
-    /// Executes duplicate ingress exactly once.
-    pub fn duplicate_ingress(&mut self) {
+    fn duplicate_ingress(&mut self) {
         let input = self
             .duplicate_input
             .take()
-            .expect("duplicate ingress is measured once");
+            .expect("duplicate ingress is counted once");
         self.duplicate_machine.step(input).unwrap();
     }
 
-    /// Executes local signing completion exactly once.
-    pub fn sign_completion(&mut self) {
+    fn sign_completion(&mut self) {
         let completion = self
             .sign_completion
             .take()
-            .expect("sign completion is measured once");
+            .expect("sign completion is counted once");
         self.sign_machine
             .step(Input::EffectCompleted(completion))
             .unwrap();
     }
 
-    /// Executes durable publication release exactly once.
-    pub fn publication_release(&mut self) {
+    fn publication_release(&mut self) {
         let acknowledgement = self
             .release_acknowledgement
             .take()
-            .expect("publication release is measured once");
+            .expect("publication release is counted once");
         self.release_machine
             .step(Input::Persisted(acknowledgement))
             .unwrap();
     }
 
-    /// Checks whether one publication carries the validator's signature.
-    pub fn signature_reference(&mut self) {
-        assert!(
-            std::hint::black_box(&self.reference_effect)
-                .references_own_signature(Some(Participant::new(0)))
-        );
+    fn signature_reference(&self) -> bool {
+        std::hint::black_box(&self.reference_effect)
+            .references_own_signature(Some(Participant::new(0)))
     }
 }
 
-impl Default for AllocationCases {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Two independent idle transitions used by the allocation sanity check.
-pub struct IdleAllocationCase {
+#[cfg(test)]
+struct IdleAllocationCase {
     coalesced: fabric::BenchMachine,
     idle: fabric::BenchMachine,
 }
 
-impl IdleAllocationCase {
-    /// Executes and checks the two idle operations.
-    pub fn run(&mut self) {
-        let wake = self.coalesced.step(Input::ProducerWake).unwrap();
-        let poll = self.idle.poll(NonZeroUsize::MIN).unwrap();
-        assert_eq!(wake.status(), &StepStatus::ProducerWake);
-        assert!(wake.capabilities().is_empty());
-        assert!(poll.capabilities().is_empty());
-        assert!(!poll.work_remaining());
-    }
-}
-
-/// Builds the idle fixtures outside the measured allocation region.
-pub fn idle_allocation_case() -> IdleAllocationCase {
+#[cfg(test)]
+fn idle_allocation_case() -> IdleAllocationCase {
     let protocol = fabric::protocol(PARTICIPANTS, PIPELINE_DEPTH);
     let profile = fabric::observer(protocol);
     let mut coalesced = fabric::start(profile.clone());
@@ -788,4 +800,116 @@ fn run_observe_duplicates() -> Duration {
         "duplicates stage nothing"
     );
     elapsed
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+    use core::{alloc::GlobalAlloc, cell::Cell};
+    use std::alloc::{Layout, System};
+
+    thread_local! {
+        static COUNT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct CountingAllocator;
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    // SAFETY: Every method forwards the caller's exact pointer and layout contract to `System`.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: `layout` is forwarded unchanged to the system allocator.
+            let allocation = unsafe { System.alloc(layout) };
+            count_allocation(allocation);
+            allocation
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: `layout` is forwarded unchanged to the system allocator.
+            let allocation = unsafe { System.alloc_zeroed(layout) };
+            count_allocation(allocation);
+            allocation
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` and `layout` came from the corresponding system allocation.
+            unsafe { System.dealloc(ptr, layout) };
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: The pointer, layout, and requested size are forwarded unchanged.
+            let allocation = unsafe { System.realloc(ptr, layout, new_size) };
+            count_allocation(allocation);
+            allocation
+        }
+    }
+
+    fn count_allocation(allocation: *mut u8) {
+        if allocation.is_null() {
+            return;
+        }
+        COUNT_ALLOCATIONS.with(|enabled| {
+            if enabled.get() {
+                ALLOCATIONS.with(|count| count.set(count.get() + 1));
+            }
+        });
+    }
+
+    fn count_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        struct Reset;
+
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+            }
+        }
+
+        COUNT_ALLOCATIONS.with(|enabled| {
+            assert!(
+                !enabled.replace(true),
+                "allocation counters cannot be nested"
+            );
+        });
+        ALLOCATIONS.with(|count| count.set(0));
+        let reset = Reset;
+        let result = operation();
+        let allocations = ALLOCATIONS.with(Cell::get);
+        drop(reset);
+        (result, allocations)
+    }
+
+    #[test]
+    fn hot_path_allocation_budgets_are_stable() {
+        let mut cases = AllocationCases::new();
+        let (_, duplicate) = count_allocations(|| cases.duplicate_ingress());
+        let (_, sign) = count_allocations(|| cases.sign_completion());
+        let (_, publication) = count_allocations(|| cases.publication_release());
+        let (references_signature, reference) = count_allocations(|| cases.signature_reference());
+
+        assert!(references_signature);
+        // Debug builds authenticate the supplied artifact ID again before classifying a duplicate.
+        let expected_duplicate = usize::from(cfg!(debug_assertions));
+        assert_eq!(
+            [duplicate, sign, publication, reference],
+            [expected_duplicate, 1, 0, 0]
+        );
+    }
+
+    #[test]
+    fn idle_operations_do_not_allocate() {
+        let mut case = idle_allocation_case();
+        let (wake, wake_allocations) =
+            count_allocations(|| case.coalesced.step(Input::ProducerWake).unwrap());
+        let (poll, poll_allocations) =
+            count_allocations(|| case.idle.poll(NonZeroUsize::MIN).unwrap());
+
+        assert_eq!(wake.status(), &StepStatus::ProducerWake);
+        assert!(wake.capabilities().is_empty());
+        assert!(poll.capabilities().is_empty());
+        assert!(!poll.work_remaining());
+        assert_eq!([wake_allocations, poll_allocations], [0, 0]);
+    }
 }
