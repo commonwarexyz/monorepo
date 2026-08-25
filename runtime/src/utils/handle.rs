@@ -108,6 +108,22 @@ where
     where
         F: Future<Output = T> + Send + 'static,
     {
+        Self::init_with_fallback(f, metric, panicker, tree, drop)
+    }
+
+    /// Initializes a task handle with a fallback for an undeliverable panic.
+    #[inline(always)]
+    pub(crate) fn init_with_fallback<F, C>(
+        f: F,
+        metric: MetricHandle,
+        panicker: Panicker,
+        tree: Arc<Tree>,
+        fallback: C,
+    ) -> (impl Future<Output = ()>, Self)
+    where
+        F: Future<Output = T> + Send + 'static,
+        C: FnOnce(Panic) + Send + 'static,
+    {
         // Initialize channels to handle result/abort
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
@@ -136,11 +152,9 @@ where
                     let _ = sender.send(Ok(result));
                 }
                 Ok(Err(panic)) => {
-                    // An undeliverable payload here means the root completed
-                    // on another thread in the same instant. The executors
-                    // using this wrapper have no later shutdown path to
-                    // route it through, so it is logged and dropped.
-                    let _ = panicker.notify(panic);
+                    if let Some(panic) = panicker.notify(panic) {
+                        fallback(panic);
+                    }
                     let _ = sender.send(Err(Error::Exited));
                 }
                 Err(Aborted) => {}

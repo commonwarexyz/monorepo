@@ -1262,11 +1262,15 @@ impl crate::Spawner for Context {
 
         // Wrap the future with panic catching, abort support, and cleanup.
         let future = f(self);
-        let (task, handle) = Handle::init(
+        let panic_shared = Arc::clone(&executor.shared);
+        let (task, handle) = Handle::init_with_fallback(
             future,
             metric.clone(),
             executor.shared.panicker.clone(),
             Arc::clone(&parent),
+            move |panic| {
+                let _ = panic_shared.worker_panic.lock().get_or_insert(panic);
+            },
         );
 
         // Register the task, unless the executor is already tearing down.
@@ -2259,6 +2263,67 @@ mod tests {
             .copied()
             .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
         assert_eq!(message, Some("late worker panic"));
+    }
+
+    /// A default inline child on a dedicated worker can panic after the main
+    /// root's interrupt receiver closes. The join phase must retain that
+    /// undeliverable payload even though the dedicated worker exits normally.
+    #[test]
+    fn test_nested_inline_panic_after_root_receiver_closes() {
+        const PAYLOAD: u64 = 0x5eed_cafe;
+
+        let (shared_send, shared_recv) = std::sync::mpsc::channel();
+        let (blocked_send, blocked_recv) = std::sync::mpsc::channel();
+        let (returning_send, returning_recv) = std::sync::mpsc::channel();
+        let (release_send, release_recv) = std::sync::mpsc::channel();
+
+        let runtime = std::thread::spawn(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                Runner::default().start(|context| async move {
+                    let executor = context.executor.upgrade().unwrap();
+                    shared_send.send(Arc::clone(&executor.shared)).unwrap();
+
+                    let _handle =
+                        context
+                            .child("worker")
+                            .dedicated()
+                            .spawn(move |context| async move {
+                                let _handle = context.child("nested").spawn(move |_| async move {
+                                    blocked_send.send(()).unwrap();
+                                    release_recv.recv().unwrap();
+                                    std::panic::panic_any(PAYLOAD);
+                                });
+                                futures::future::pending::<()>().await;
+                            });
+
+                    blocked_recv.recv().unwrap();
+                    returning_send.send(()).unwrap();
+                });
+            }))
+        });
+
+        let shared = shared_recv.recv().unwrap();
+        returning_recv.recv().unwrap();
+
+        // Once the registry is empty, the main root has closed its panic
+        // receiver and moved the dedicated worker into the final join batch.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let joining = shared.workers.lock().as_ref().is_some_and(Vec::is_empty);
+            if joining {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not enter join phase"
+            );
+            std::thread::yield_now();
+        }
+
+        release_send.send(()).unwrap();
+        let result = runtime.join().expect("runtime thread should join");
+        let payload = result.expect_err("nested panic should unwind start");
+        assert_eq!(payload.downcast_ref::<u64>(), Some(&PAYLOAD));
     }
 
     /// A worker panic already observed by an opportunistic reap happened
