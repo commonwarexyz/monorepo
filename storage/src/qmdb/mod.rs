@@ -73,7 +73,7 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
-    cache::Clock,
+    cache::Cache,
     channel::mpsc,
 };
 use core::{num::NonZeroUsize, ops::Range};
@@ -290,7 +290,7 @@ where
     // Memoize `(location -> key)` for replayed update ops so collision resolution in
     // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
     // log.
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<u64, <C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
@@ -329,7 +329,7 @@ async fn delete_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -351,7 +351,7 @@ async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -381,7 +381,7 @@ async fn update_key<F, I, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -406,7 +406,7 @@ async fn update_at_cursor<F, C, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -440,7 +440,7 @@ async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -500,7 +500,7 @@ where
     C: Contiguous<Item: Operation<F>>,
     R: PartitionRange<Value = Location<F>>,
 {
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<u64, <C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
         for (key, loc, is_delete) in batch {
             if is_delete {
