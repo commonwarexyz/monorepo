@@ -23,6 +23,15 @@
 //! Users configure leader election with an elector [`Config`] (for example,
 //! [`RoundRobin`]) and pass it to the consensus configuration. Consensus builds
 //! the initialized [`Elector`] with the scheme participants before starting.
+//!
+//! # Evidence Equivalence
+//!
+//! Simplex certificates are not generally canonical: different quorum subsets can produce
+//! different certificates for the same subject. Honest participants can also enter one target
+//! round through different certificate subjects, such as notarization or nullification, and stable
+//! terms can admit source certificates from different views. An elector must return the same
+//! leader for every such valid entry path. [`RoundRobinElector`] does so by ignoring evidence;
+//! [`RandomElector`] uses a unique recovered threshold seed and supports rotating terms only.
 
 pub use crate::elector::{Config, Elector, RoundRobin, RoundRobinElector, Terms};
 use crate::{

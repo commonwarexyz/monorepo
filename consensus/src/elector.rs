@@ -7,8 +7,10 @@
 //! # Determinism
 //!
 //! [`Elector::elect`] must be a pure function of the elector's construction parameters and its
-//! arguments: every honest participant must select the same leader for the same round and the same
-//! evidence. A non-deterministic elector is a safety bug, not a liveness one.
+//! arguments. More strongly, every honest participant must select the same leader for a target
+//! round across every evidence value that its protocol can validly use to enter that round.
+//! Evidence is not necessarily canonical: quorum subsets, encodings, subjects, or source rounds
+//! can differ while authorizing the same target round.
 //!
 //! # Evidence
 //!
@@ -142,6 +144,8 @@ pub trait Config<P: PublicKey, Evidence>: Clone + Default + Send + 'static {
 /// An initialized elector that selects leaders for consensus rounds.
 ///
 /// See the module documentation for the determinism requirement and the meaning of `Evidence`.
+/// Implementations may derive leadership from evidence only when the result is invariant across
+/// every valid evidence representation and entry path for the target round.
 pub trait Elector<Evidence>: Clone + Send + 'static {
     /// Returns the leadership term structure this elector was built with.
     ///
