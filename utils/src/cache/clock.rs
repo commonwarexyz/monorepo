@@ -1,4 +1,4 @@
-//! CLOCK cache replacement.
+//! CLOCK cache policy.
 //!
 //! CLOCK approximates least-recently-used replacement with one reference bit
 //! per cache slot. A hit sets the bit. When the cache is full, a clock hand
@@ -9,17 +9,6 @@
 //! atomic operations so [super::Cache::get] can record hits through a shared
 //! reference. Admission and eviction still require exclusive access to the
 //! cache.
-//!
-//! # Example
-//!
-//! ```
-//! use commonware_utils::cache::Cache;
-//! use core::num::NonZeroUsize;
-//!
-//! let mut cache = Cache::<u64, u64>::new(NonZeroUsize::new(2).unwrap());
-//! cache.put(1, 10);
-//! assert_eq!(cache.get(&1), Some(&10));
-//! ```
 
 use super::{Claimed, Policy, Slot};
 use core::{
@@ -71,7 +60,9 @@ impl<K> Policy<K> for Clock {
         C: FnOnce(Option<Slot>) -> Claimed<K>,
     {
         if has_vacancy {
-            claim(None);
+            // CLOCK admits into available capacity without scanning. Mark the
+            // new resident referenced so it receives a full second chance.
+            let _ = claim(None);
             return AtomicBool::new(true);
         }
 
@@ -79,10 +70,13 @@ impl<K> Policy<K> for Clock {
             let referenced = &states[self.hand];
             if !referenced.load(Ordering::Relaxed) {
                 let victim = self.hand;
+                let _ = claim(Some(victim));
+                // Do not reconsider the new resident until the hand completes a revolution.
                 self.advance();
-                claim(Some(victim));
                 return AtomicBool::new(true);
             }
+            // A set bit grants one second chance. Clear it and continue from
+            // the following slot.
             referenced.store(false, Ordering::Relaxed);
             self.advance();
         }
@@ -121,6 +115,7 @@ mod tests {
 
     impl<K: Hash + Eq + Clone, V> Cache<K, V, Clock> {
         fn check_clock_invariants(&self) {
+            self.check_cache_invariants();
             if self.slots.is_empty() {
                 assert_eq!(self.policy.hand, 0);
             } else {
@@ -145,6 +140,8 @@ mod tests {
         cache.put(5, 50);
         assert!(cache.contains(&2));
         assert!(!cache.contains(&3));
+        assert!(cache.contains(&4));
+        assert!(cache.contains(&5));
         cache.check_clock_invariants();
     }
 
@@ -154,6 +151,9 @@ mod tests {
         cache.put(1u64, 10u64);
         cache.put(2, 20);
         cache.put(3, 30);
+
+        // Re-reference every resident. The sweep clears all three bits, wraps,
+        // and evicts key 1 at the initial hand position.
         assert!(cache.get(&1).is_some());
         assert!(cache.get(&2).is_some());
         assert!(cache.get(&3).is_some());
@@ -162,6 +162,7 @@ mod tests {
         assert!(!cache.contains(&1));
         assert!(cache.contains(&2));
         assert!(cache.contains(&3));
+        assert!(cache.contains(&4));
         cache.check_clock_invariants();
     }
 
@@ -173,6 +174,8 @@ mod tests {
         cache.put(3, 30);
         cache.put(4, 40);
 
+        // get_at records use like get, so key 2 receives a second chance and
+        // unreferenced key 3 becomes the next victim.
         let slot = *cache.index.get(&2).unwrap();
         assert_eq!(cache.get_at(slot, &2).copied(), Some(20));
         cache.put(5, 50);
@@ -192,12 +195,14 @@ mod tests {
             cache
         }
 
+        // peek leaves key 2 unreferenced, so it remains the next victim.
         let mut cache = setup();
         assert_eq!(cache.peek(&2).copied(), Some(20));
         cache.put(5, 50);
         assert!(!cache.contains(&2));
         assert!(cache.contains(&3));
 
+        // get sets key 2's bit, so the hand skips it and evicts key 3.
         let mut cache = setup();
         assert_eq!(cache.get(&2).copied(), Some(20));
         cache.put(5, 50);
@@ -212,8 +217,11 @@ mod tests {
         cache.put(2, 20);
         cache.put(3, 30);
         cache.put(4, 40);
+
+        // The first eviction moves the hand away from its initial position.
         assert_ne!(cache.policy.hand, 0);
 
+        // Clearing restores the initial hand position for the next population.
         cache.clear();
         assert_eq!(cache.policy.hand, 0);
         cache.put(5, 50);
@@ -226,6 +234,9 @@ mod tests {
         for i in 0..64u64 {
             cache.put(i, i * 10);
         }
+
+        // Hits update only atomic reference bits, so shared readers can record
+        // use concurrently.
         let cache = &cache;
         thread::scope(|scope| {
             for _ in 0..4 {
@@ -238,6 +249,9 @@ mod tests {
                 });
             }
         });
+        for i in 0..64u64 {
+            assert_eq!(cache.get(&i).copied(), Some(i * 10));
+        }
         cache.check_clock_invariants();
     }
 }
