@@ -1,6 +1,6 @@
 use commonware_utils::{
     TestRng,
-    cache::{Cache, Clock2QPlus, Policy},
+    cache::{Cache, Clock2QPlus, Policy, Sieve},
 };
 use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
@@ -53,6 +53,14 @@ fn bench_get(c: &mut Criterion) {
             capacity.get(),
             &keys,
             Cache::<u64, u64, Clock2QPlus<u64>>::new(capacity),
+        );
+
+        bench(
+            c,
+            "sieve",
+            capacity.get(),
+            &keys,
+            Cache::<u64, u64, Sieve>::new(capacity),
         );
     }
 }
