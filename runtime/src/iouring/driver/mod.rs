@@ -899,20 +899,16 @@ impl IoUringLoop {
 
 /// Build and configure an `io_uring` instance.
 pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
-    let mut builder = &mut IoUring::builder();
-    if cfg.io_poll {
-        builder = builder.setup_iopoll();
-    }
     // Every ring is created and submitted by one worker thread. SINGLE_ISSUER
     // records that invariant for the kernel, while DEFER_TASKRUN processes
     // completions only during io_uring_enter calls with GETEVENTS. Every turn,
     // including the wake fast path, eventually makes such a call.
     //
     // DEFER_TASKRUN requires SINGLE_ISSUER and both flags require Linux 6.1.
-    builder = builder.setup_single_issuer();
-    builder = builder.setup_defer_taskrun();
-
-    builder.build(cfg.size)
+    IoUring::builder()
+        .setup_single_issuer()
+        .setup_defer_taskrun()
+        .build(cfg.size)
 }
 
 /// Owned half of the io_uring driver: the ring plus the loop state that
@@ -1159,18 +1155,6 @@ mod tests {
             validated_ring_size(MAX_RING_SIZE + 1);
         }));
         assert!(rejected.is_err());
-    }
-
-    #[test]
-    fn test_new_ring_iopoll_builder_path_is_exercised() {
-        // IOPOLL requires files opened with O_DIRECT to do useful work, so this
-        // only verifies the builder path constructs (or cleanly fails to
-        // construct) a ring with the flag.
-        let cfg = RingConfig {
-            io_poll: true,
-            ..Default::default()
-        };
-        let _ = new_ring(&cfg);
     }
 
     #[test]

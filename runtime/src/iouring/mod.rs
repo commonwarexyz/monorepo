@@ -233,12 +233,6 @@ pub struct RingConfig {
     /// queue entries, so the rounded size must not exceed [`MAX_RING_SIZE`].
     /// Larger rounded sizes panic during construction.
     pub size: u32,
-    /// If true, use IOPOLL mode.
-    ///
-    /// IOPOLL requires files opened with O_DIRECT, which the runtime does not
-    /// use, so the mode is honored by ring construction but not exercised end
-    /// to end by the runtime.
-    pub io_poll: bool,
     /// Maximum request timeout supported by the userspace timeout wheel.
     ///
     /// Deadlines are clamped to this horizon. This value should be set to the
@@ -287,7 +281,6 @@ impl Default for RingConfig {
     fn default() -> Self {
         Self {
             size: 128,
-            io_poll: false,
             max_request_timeout: Duration::from_secs(60),
             shutdown_timeout: None,
             timeout_wheel_tick: Duration::from_millis(5),
