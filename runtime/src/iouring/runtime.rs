@@ -248,7 +248,7 @@ impl Config {
     }
     /// Sets the timeout applied to each network dial attempt.
     ///
-    /// Defaults to 10 seconds. Values above 30 years panic in
+    /// Defaults to 10 seconds. Zero and values above 30 years panic in
     /// [crate::Runner::start], a policy bound kept consistent with the
     /// runtime's sleep clamp. The runtime raises the ring's timeout wheel
     /// horizon to cover both network timeouts, so at the default
@@ -263,7 +263,7 @@ impl Config {
     /// and to each in-flight accept (which is transparently reissued on
     /// expiry).
     ///
-    /// Defaults to 60 seconds. Values above 30 years panic in
+    /// Defaults to 60 seconds. Zero and values above 30 years panic in
     /// [crate::Runner::start], a policy bound kept consistent with the
     /// runtime's sleep clamp. The runtime raises the ring's timeout wheel
     /// horizon to cover both network timeouts, so at the default
@@ -382,10 +382,18 @@ impl Config {
     /// Rejects configurations the runtime must not start with.
     ///
     /// Called at the beginning of [crate::Runner::start], before any startup
-    /// side effect. Panics when either network timeout exceeds
+    /// side effect. Panics when either network timeout is zero or exceeds
     /// [MAX_TIMER_DURATION], keeping timeout policy consistent with the
     /// runtime's sleep clamp.
     fn validate(&self) {
+        assert!(
+            !self.network_cfg.connect_timeout.is_zero(),
+            "connect_timeout must be non-zero"
+        );
+        assert!(
+            !self.network_cfg.read_write_timeout.is_zero(),
+            "read_write_timeout must be non-zero"
+        );
         assert!(
             self.network_cfg.connect_timeout <= MAX_TIMER_DURATION,
             "connect_timeout must be at most 30 years"
@@ -1697,6 +1705,22 @@ mod tests {
         Config::default()
             .with_connect_timeout(MAX_TIMER_DURATION)
             .with_read_write_timeout(MAX_TIMER_DURATION)
+            .validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "connect_timeout must be non-zero")]
+    fn test_config_rejects_zero_connect_timeout() {
+        Config::default()
+            .with_connect_timeout(Duration::ZERO)
+            .validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "read_write_timeout must be non-zero")]
+    fn test_config_rejects_zero_read_write_timeout() {
+        Config::default()
+            .with_read_write_timeout(Duration::ZERO)
             .validate();
     }
 

@@ -71,7 +71,7 @@ pub struct Config {
     /// Timeout for establishing an outbound TCP connection.
     ///
     /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
-    /// The runtime rejects values above its 30-year timer policy at startup.
+    /// The runtime rejects zero and values above its 30-year timer policy at startup.
     pub connect_timeout: Duration,
     /// Timeout budget applied to each top-level send/recv call and to each
     /// in-flight accept (which is transparently reissued on expiry).
@@ -79,7 +79,7 @@ pub struct Config {
     /// This is a network-level policy and is independent from io_uring loop
     /// tuning. The runtime raises the loop timeout horizon as needed so this
     /// value is never clamped by the ring's `max_request_timeout`.
-    /// Values above the runtime's 30-year timer policy are rejected at startup.
+    /// Zero and values above the runtime's 30-year timer policy are rejected at startup.
     pub read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///
