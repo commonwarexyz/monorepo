@@ -1,0 +1,1773 @@
+//! The Clock2Q+ cache replacement policy.
+//!
+//! # Admission and Eviction
+//!
+//! Clock2Q+ divides resident entries between a small FIFO queue and a main
+//! CLOCK. New entries normally enter Small. Entries seen in bounded Ghost
+//! history enter Main instead. When an entry reaches the tail of Small, an
+//! unreferenced entry is evicted to Ghost while a referenced entry is promoted
+//! to Main.
+//!
+//! # Correlation Filtering
+//!
+//! Up to the newest half of Small forms a correlation window. Hits in that
+//! window are ignored, which prevents a burst of closely spaced accesses from
+//! making a cold entry appear hot. Once enough newer entries arrive, the entry
+//! leaves the window permanently. A later hit sets its reference bit and
+//! promotes it when it reaches the Small tail.
+//!
+//! # Sizing and State
+//!
+//! This implementation targets the paper's fixed proportions. For integer
+//! capacity `C`, Small is `max(C / 10, 1)` when `C > 1`, Main gets the
+//! remainder, and Ghost is `C / 2`. The correlation window is half of Small,
+//! rounded up. A capacity of one uses Main only. Resident keys and values
+//! remain in stable [super::Cache] slots. Queue topology and Ghost history are
+//! policy-owned, while each slot's correlation marker and reference bit are
+//! stored inline as [Policy::SlotState]. Ghost admission is sampled when
+//! insertion commits.
+//!
+//! # References
+//!
+//! - [Clock2Q+: A Simple and Efficient Replacement Algorithm for Metadata
+//!   Cache in VMware vSAN](https://arxiv.org/abs/2511.21958)
+
+use super::{Cache, Claimed, Hasher, Policy, Slot};
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
+use core::{
+    hash::Hash,
+    num::NonZeroUsize,
+    ops::Index,
+    sync::atomic::{AtomicU8, Ordering},
+};
+use hashbrown::HashMap;
+
+/// Sentinel used when a policy-owned slot has no neighbor.
+const UNLINKED: usize = usize::MAX;
+/// Slot-state bit set after an eligible resident hit.
+const REFERENCED: u8 = 1 << 0;
+/// Slot-state bit set while a Small resident is in the correlation window.
+const CORRELATED: u8 = 1 << 1;
+
+/// Converts the internal link sentinel into an optional slot.
+#[inline]
+const fn linked(slot: usize) -> Option<usize> {
+    if slot == UNLINKED { None } else { Some(slot) }
+}
+
+/// Where a resident slot participates in the replacement policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Location {
+    /// The cache slot is not attached to either resident partition.
+    Free,
+    /// One of the newest entries in Small. Hits here are correlated and ignored.
+    SmallYoung,
+    /// An older Small entry. A hit here marks the entry for promotion.
+    SmallOld,
+    /// An entry in the Main CLOCK ring.
+    Main,
+}
+
+/// Policy-owned topology for a stable cache slot.
+#[derive(Clone, Copy)]
+struct ResidentSlot {
+    /// Partition containing the resident, or [`Location::Free`] when detached.
+    location: Location,
+    /// Previous entry toward the head of Small, or in Main's circular ring.
+    prev: usize,
+    /// Next entry toward the tail of Small, or in Main's circular ring.
+    next: usize,
+    /// Small admission generation, used only while this entry is correlated.
+    admitted_at: usize,
+}
+
+impl Default for ResidentSlot {
+    /// Returns detached metadata with no queue neighbors.
+    fn default() -> Self {
+        Self {
+            location: Location::Free,
+            prev: UNLINKED,
+            next: UNLINKED,
+            admitted_at: 0,
+        }
+    }
+}
+
+/// A key-only entry in the bounded Ghost FIFO.
+struct GhostSlot<K> {
+    /// Historical key, or `None` when this slot is available for reuse.
+    key: Option<K>,
+    /// Previous entry toward the Ghost head.
+    prev: usize,
+    /// Next entry toward the Ghost tail.
+    next: usize,
+}
+
+/// Resident partition selected for an incoming key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Admission {
+    /// Admit at the head of the Small FIFO.
+    Small,
+    /// Admit immediately before the hand in the Main CLOCK ring.
+    Main,
+}
+
+/// Policy state stored inline with each Clock2Q+ cache slot.
+///
+/// The correlation marker and reference bit share one atomic byte, so a shared
+/// hit needs no access to policy-owned queue topology. Relaxed ordering is
+/// sufficient because these bits affect only replacement decisions and do not
+/// publish resident keys or values.
+#[repr(transparent)]
+#[derive(Default)]
+pub struct SlotState(AtomicU8);
+
+impl SlotState {
+    /// Returns the initial state for a resident entering `admission`.
+    #[inline]
+    const fn new(admission: Admission) -> Self {
+        let state = match admission {
+            Admission::Small => CORRELATED,
+            Admission::Main => 0,
+        };
+        Self(AtomicU8::new(state))
+    }
+
+    /// Records a hit through a shared cache reference.
+    ///
+    /// Hits inside the correlation window are ignored. The conditional store
+    /// also avoids dirtying the cache line again after the bit is already set.
+    #[inline]
+    fn record_hit(&self) {
+        let current = self.0.load(Ordering::Relaxed);
+        if current & (CORRELATED | REFERENCED) == 0 {
+            self.0.store(REFERENCED, Ordering::Relaxed);
+        }
+    }
+
+    /// Records a hit while the cache is already exclusively borrowed.
+    #[inline]
+    fn record_hit_mut(&mut self) {
+        let current = self.0.get_mut();
+        if *current & CORRELATED == 0 {
+            *current |= REFERENCED;
+        }
+    }
+}
+
+/// Clock2Q+ admission and eviction policy.
+///
+/// Clock2Q+ divides residents between a Small FIFO and a Main CLOCK ring. New
+/// keys enter Small, while keys found in bounded Ghost history enter Main.
+/// Hits to the newest portion of Small are ignored to filter correlated access.
+/// An eligible Small hit marks the resident for promotion when it reaches the
+/// FIFO tail.
+///
+/// The policy owns queue topology, partition sizes, the Main clock hand, and
+/// exact bounded Ghost history. Resident keys and values remain in [Cache].
+/// The target proportions are 10% Small, 90% Main, and 50% Ghost, with a
+/// correlation window covering half of Small. Integer sizes use floor division,
+/// except that Small receives at least one slot when total capacity exceeds
+/// one. A capacity of one uses Main as a one-entry CLOCK.
+///
+/// Resident values stay in stable cache slots while queue links remain in the
+/// policy. Hits mutate only relaxed atomic slot state, so readers can share the
+/// cache behind a reader-writer lock without serializing.
+///
+/// See [Clock2Q+: A Simple and Efficient Replacement Algorithm for Metadata
+/// Cache in VMware vSAN](https://arxiv.org/abs/2511.21958).
+///
+/// # Example
+///
+/// ```
+/// use commonware_utils::cache::{Cache, Clock2QPlus};
+/// use core::num::NonZeroUsize;
+///
+/// let mut cache = Cache::<u64, u64, Clock2QPlus<u64>>::new(
+///     NonZeroUsize::new(100).unwrap(),
+/// );
+/// cache.put(7, 49);
+/// assert_eq!(cache.get(&7), Some(&49));
+/// ```
+pub struct Clock2QPlus<K> {
+    /// Queue topology and admission age indexed by the cache's stable slots.
+    ///
+    /// The cache owns keys, values, and inline [`SlotState`]. This parallel
+    /// array is required for policy-owned links that must also be available to
+    /// [`Policy::remove`], which receives a slot identifier but no state view.
+    slots: Vec<ResidentSlot>,
+
+    /// Maximum number of residents in the Small partition.
+    small_capacity: usize,
+    /// Small admission age at which a resident leaves the correlation window.
+    correlation_window: usize,
+    /// Newest resident in the Small FIFO.
+    small_head: Option<usize>,
+    /// Oldest resident in the Small FIFO.
+    small_tail: Option<usize>,
+    /// The oldest entry still inside the correlation window.
+    small_young_tail: Option<usize>,
+    /// Monotonic count of Small admissions, including entries later removed.
+    small_admissions: usize,
+    /// Current number of Small residents.
+    small_len: usize,
+
+    /// Maximum number of residents in the Main partition.
+    main_capacity: usize,
+    /// Next Main resident considered for eviction.
+    main_hand: Option<usize>,
+    /// Current number of Main residents.
+    main_len: usize,
+
+    /// Exact Ghost membership mapped to positions in `ghost_slots`.
+    ///
+    /// The index makes admission checks and explicit history removal O(1).
+    ghost_index: HashMap<K, usize, Hasher>,
+    /// Storage for the bounded Ghost FIFO.
+    ghost_slots: Vec<GhostSlot<K>>,
+    /// Detached Ghost slots available for reuse.
+    ghost_free: Vec<usize>,
+    /// Newest key in Ghost.
+    ghost_head: Option<usize>,
+    /// Oldest key in Ghost.
+    ghost_tail: Option<usize>,
+    /// Maximum number of Ghost entries.
+    ghost_capacity: usize,
+}
+
+impl<K: Hash + Eq + Clone> Clock2QPlus<K> {
+    /// Constructs empty policy metadata for `capacity` resident slots.
+    fn with_capacity(capacity: NonZeroUsize) -> Self {
+        let capacity = capacity.get();
+        // Keep tiny caches usable while approaching the paper's target ratios
+        // with integer arithmetic at normal capacities.
+        let small_capacity = if capacity == 1 {
+            0
+        } else {
+            (capacity / 10).max(1)
+        };
+        let main_capacity = capacity - small_capacity;
+        let correlation_window = small_capacity.div_ceil(2);
+        let ghost_capacity = capacity / 2;
+
+        Self {
+            slots: vec![ResidentSlot::default(); capacity],
+            small_capacity,
+            correlation_window,
+            small_head: None,
+            small_tail: None,
+            small_young_tail: None,
+            small_admissions: 0,
+            small_len: 0,
+            main_capacity,
+            main_hand: None,
+            main_len: 0,
+            ghost_index: HashMap::with_capacity_and_hasher(ghost_capacity, Hasher::default()),
+            ghost_slots: Vec::with_capacity(ghost_capacity),
+            ghost_free: Vec::with_capacity(ghost_capacity),
+            ghost_head: None,
+            ghost_tail: None,
+            ghost_capacity,
+        }
+    }
+
+    /// Chooses the resident partition for an incoming key.
+    #[inline]
+    fn admission(&mut self, key: &K, has_vacancy: bool) -> Admission {
+        // A Ghost hit bypasses Small. During warm-up, Small fills to its target
+        // before additional vacant cache slots are assigned to Main.
+        if self.discard_ghost(key)
+            || self.small_capacity == 0
+            || (has_vacancy && self.small_len >= self.small_capacity)
+        {
+            Admission::Main
+        } else {
+            Admission::Small
+        }
+    }
+
+    /// Selects storage for a Small admission and records a pending promotion.
+    ///
+    /// A referenced old tail is promoted in place. The incoming key then uses
+    /// a Main victim, keeping both fixed-size resident partitions within their
+    /// targets. A correlated or unreferenced tail is selected directly.
+    fn select_small<I: Index<Slot, Output = SlotState>>(
+        &mut self,
+        states: &I,
+        promotion: &mut Option<Slot>,
+        has_vacancy: bool,
+    ) -> Option<Slot> {
+        if has_vacancy {
+            return None;
+        }
+
+        let tail = self.small_tail.expect("full cache must have a Small tail");
+        let state = states[tail].0.load(Ordering::Relaxed);
+
+        // Correlated references never earn promotion. The tail is eligible for
+        // promotion only when REFERENCED is set and CORRELATED is clear.
+        if state & (CORRELATED | REFERENCED) != REFERENCED {
+            return Some(tail);
+        }
+
+        // A referenced Small tail is promoted in its existing stable slot.
+        // Since a full cache also has a full Main partition, the incoming
+        // entry reuses the Main victim selected here.
+        self.unlink_small(tail);
+        states[tail].0.store(0, Ordering::Relaxed);
+        *promotion = Some(tail);
+        Some(self.select_main(states))
+    }
+
+    /// Selects storage for a Main admission.
+    ///
+    /// Main may require a victim even while the cache has a vacant Small slot.
+    fn select_for_main<I: Index<Slot, Output = SlotState>>(&mut self, states: &I) -> Option<Slot> {
+        // Main is a fixed-size CLOCK partition. Reusing a Ghost key must
+        // replace a Main resident even when Cache has a free Small slot.
+        if self.main_len == self.main_capacity {
+            return Some(self.select_main(states));
+        }
+        None
+    }
+
+    /// Runs the Main CLOCK hand until it finds an unreferenced victim.
+    fn select_main<I: Index<Slot, Output = SlotState>>(&mut self, states: &I) -> Slot {
+        loop {
+            let slot = self.main_hand.expect("nonempty Main must have a hand");
+            let state = &states[slot];
+            if state.0.load(Ordering::Relaxed) & REFERENCED != 0 {
+                // A set bit grants one second chance. Clear it and continue
+                // from the following resident in the Main ring.
+                state.0.store(0, Ordering::Relaxed);
+                self.main_hand = Some(self.slots[slot].next);
+                continue;
+            }
+            return slot;
+        }
+    }
+
+    /// Attaches a free stable slot to its selected resident partition.
+    fn attach<I: Index<Slot, Output = SlotState>>(
+        &mut self,
+        states: &I,
+        slot: usize,
+        admission: Admission,
+    ) {
+        match admission {
+            Admission::Small => self.insert_small_head(states, slot),
+            Admission::Main => self.insert_main(slot),
+        }
+    }
+
+    /// Detaches a resident from whichever partition currently owns it.
+    fn unlink_resident(&mut self, slot: usize) {
+        match self.slots[slot].location {
+            Location::SmallYoung | Location::SmallOld => self.unlink_small(slot),
+            Location::Main => self.unlink_main(slot),
+            Location::Free => unreachable!("resident slot cannot be free"),
+        }
+    }
+
+    /// Inserts a free slot at the Small head and advances correlation age.
+    fn insert_small_head<I: Index<Slot, Output = SlotState>>(&mut self, states: &I, slot: usize) {
+        // Admission count, rather than live queue length, makes correlation age
+        // monotonic across explicit removal and retention. Wrapping remains
+        // valid because a correlated resident leaves within one bounded window,
+        // long before the counter can complete a full cycle.
+        self.small_admissions = self.small_admissions.wrapping_add(1);
+        let old_head = self.small_head;
+        {
+            let entry = &mut self.slots[slot];
+            assert_eq!(entry.location, Location::Free);
+            entry.location = Location::SmallYoung;
+            entry.prev = UNLINKED;
+            entry.next = old_head.unwrap_or(UNLINKED);
+            entry.admitted_at = self.small_admissions;
+        }
+        if let Some(head) = old_head {
+            self.slots[head].prev = slot;
+        } else {
+            self.small_tail = Some(slot);
+        }
+        self.small_head = Some(slot);
+        self.small_len += 1;
+
+        if self.small_young_tail.is_none() {
+            self.small_young_tail = Some(slot);
+        }
+        // Only the oldest correlated survivor can leave the window after one
+        // new admission because Small preserves admission order.
+        let demoted = self
+            .small_young_tail
+            .expect("nonempty correlation window must have a tail");
+        let age = self
+            .small_admissions
+            .wrapping_sub(self.slots[demoted].admitted_at);
+        if age < self.correlation_window {
+            return;
+        }
+
+        let new_boundary = self.slots[demoted].prev;
+        assert_ne!(new_boundary, UNLINKED);
+        // Discard references made inside the correlation window. Only a hit
+        // after the entry becomes old should promote it to Main.
+        states[demoted].0.store(0, Ordering::Relaxed);
+        self.slots[demoted].location = Location::SmallOld;
+        self.slots[demoted].admitted_at = 0;
+        self.small_young_tail = Some(new_boundary);
+    }
+
+    /// Detaches a resident from Small and repairs its correlation boundary.
+    fn unlink_small(&mut self, slot: usize) {
+        let location = self.slots[slot].location;
+        assert!(matches!(
+            location,
+            Location::SmallYoung | Location::SmallOld
+        ));
+        let prev = self.slots[slot].prev;
+        let next = self.slots[slot].next;
+        if prev != UNLINKED {
+            self.slots[prev].next = next;
+        } else {
+            self.small_head = linked(next);
+        }
+        if next != UNLINKED {
+            self.slots[next].prev = prev;
+        } else {
+            self.small_tail = linked(prev);
+        }
+
+        self.small_len -= 1;
+        // Removing a correlated resident shrinks the live window without
+        // making any older resident young again.
+        if location == Location::SmallYoung && self.small_young_tail == Some(slot) {
+            self.small_young_tail = linked(prev);
+        }
+
+        self.slots[slot] = ResidentSlot::default();
+    }
+
+    /// Inserts a free slot immediately before the Main hand.
+    fn insert_main(&mut self, slot: usize) {
+        assert!(self.main_len < self.main_capacity);
+        let Some(hand) = self.main_hand else {
+            // A one-entry ring links the resident to itself and points the hand
+            // at that sole eviction candidate.
+            let entry = &mut self.slots[slot];
+            assert_eq!(entry.location, Location::Free);
+            entry.location = Location::Main;
+            entry.prev = slot;
+            entry.next = slot;
+            self.main_hand = Some(slot);
+            self.main_len = 1;
+            return;
+        };
+
+        // New residents start behind the current hand, so they are considered
+        // only after the existing CLOCK sweep reaches them.
+        let prev = self.slots[hand].prev;
+        assert_ne!(prev, UNLINKED);
+        {
+            let entry = &mut self.slots[slot];
+            assert_eq!(entry.location, Location::Free);
+            entry.location = Location::Main;
+            entry.prev = prev;
+            entry.next = hand;
+        }
+        self.slots[prev].next = slot;
+        self.slots[hand].prev = slot;
+        self.main_len += 1;
+    }
+
+    /// Detaches a resident from Main and advances the hand when necessary.
+    fn unlink_main(&mut self, slot: usize) {
+        assert_eq!(self.slots[slot].location, Location::Main);
+        if self.main_len == 1 {
+            assert_eq!(self.main_hand, Some(slot));
+            self.main_hand = None;
+            self.main_len = 0;
+        } else {
+            let prev = self.slots[slot].prev;
+            let next = self.slots[slot].next;
+            assert_ne!(prev, UNLINKED);
+            assert_ne!(next, UNLINKED);
+            self.slots[prev].next = next;
+            self.slots[next].prev = prev;
+            if self.main_hand == Some(slot) {
+                self.main_hand = Some(next);
+            }
+            self.main_len -= 1;
+        }
+        self.slots[slot] = ResidentSlot::default();
+    }
+
+    /// Adds an evicted Small key to the bounded Ghost FIFO.
+    fn push_ghost(&mut self, key: K) {
+        if self.ghost_capacity == 0 {
+            return;
+        }
+        // Prefer recycled storage, then grow to the Ghost bound, then reuse
+        // the oldest live slot after removing its previous key.
+        let slot = if let Some(slot) = self.ghost_free.pop() {
+            slot
+        } else if self.ghost_slots.len() < self.ghost_capacity {
+            let slot = self.ghost_slots.len();
+            self.ghost_slots.push(GhostSlot {
+                key: None,
+                prev: UNLINKED,
+                next: UNLINKED,
+            });
+            slot
+        } else {
+            let slot = self.ghost_tail.expect("full Ghost must have a tail");
+            self.remove_ghost(slot, false);
+            slot
+        };
+
+        let old_head = self.ghost_head;
+        {
+            let entry = &mut self.ghost_slots[slot];
+            assert!(entry.key.is_none());
+            // Ghost keeps one key in its hash index and one in its FIFO slot,
+            // which avoids per-entry shared ownership between the structures.
+            entry.key = Some(key.clone());
+            entry.prev = UNLINKED;
+            entry.next = old_head.unwrap_or(UNLINKED);
+        }
+        if let Some(head) = old_head {
+            self.ghost_slots[head].prev = slot;
+        } else {
+            self.ghost_tail = Some(slot);
+        }
+        self.ghost_head = Some(slot);
+        self.ghost_index.insert(key, slot);
+    }
+
+    /// Removes exact history for `key` and reports whether it was present.
+    fn discard_ghost(&mut self, key: &K) -> bool {
+        let Some(slot) = self.ghost_index.remove(key) else {
+            return false;
+        };
+        self.unlink_ghost(slot, true);
+        true
+    }
+
+    /// Removes a Ghost slot from both the FIFO and exact membership index.
+    fn remove_ghost(&mut self, slot: usize, recycle: bool) {
+        let key = self.unlink_ghost(slot, recycle);
+        let removed = self.ghost_index.remove(&key);
+        assert_eq!(removed, Some(slot));
+    }
+
+    /// Detaches a Ghost slot from the FIFO and returns its owned key.
+    ///
+    /// When `recycle` is true, the detached position is added to the free list.
+    fn unlink_ghost(&mut self, slot: usize, recycle: bool) -> K {
+        let prev = self.ghost_slots[slot].prev;
+        let next = self.ghost_slots[slot].next;
+        if prev != UNLINKED {
+            self.ghost_slots[prev].next = next;
+        } else {
+            self.ghost_head = linked(next);
+        }
+        if next != UNLINKED {
+            self.ghost_slots[next].prev = prev;
+        } else {
+            self.ghost_tail = linked(prev);
+        }
+
+        let key = self.ghost_slots[slot]
+            .key
+            .take()
+            .expect("linked Ghost entry must have a key");
+        self.ghost_slots[slot].prev = UNLINKED;
+        self.ghost_slots[slot].next = UNLINKED;
+        if recycle {
+            self.ghost_free.push(slot);
+        }
+        key
+    }
+
+    /// Removes all Ghost history and resets its reusable slot metadata.
+    fn clear_ghost(&mut self) {
+        self.ghost_index.clear();
+        self.ghost_slots.clear();
+        self.ghost_free.clear();
+        self.ghost_head = None;
+        self.ghost_tail = None;
+    }
+}
+
+impl<K: Hash + Eq + Clone> Policy<K> for Clock2QPlus<K> {
+    type SlotState = SlotState;
+
+    /// Constructs an empty Clock2Q+ policy for the cache's capacity.
+    fn new(capacity: NonZeroUsize) -> Self {
+        Self::with_capacity(capacity)
+    }
+
+    /// Records an eligible hit through inline atomic slot state.
+    #[inline]
+    fn hit(&self, _slot: Slot, state: &SlotState) {
+        state.record_hit();
+    }
+
+    /// Records an eligible hit through exclusively borrowed slot state.
+    #[inline]
+    fn hit_mut(&mut self, _slot: Slot, state: &mut SlotState) {
+        state.record_hit_mut();
+    }
+
+    /// Selects storage, applies policy transitions, and returns initial state.
+    fn insert<I, C>(
+        &mut self,
+        states: &I,
+        key: &K,
+        has_vacancy: bool,
+        claim: C,
+    ) -> (Slot, SlotState)
+    where
+        I: Index<Slot, Output = SlotState>,
+        C: FnOnce(Option<Slot>) -> Claimed<K>,
+    {
+        let admission = self.admission(key, has_vacancy);
+        let mut promotion = None;
+        // Selection may detach a Small resident for deferred promotion, but
+        // the cache slot is not claimed until the complete victim is known.
+        let victim = match admission {
+            Admission::Small => self.select_small(states, &mut promotion, has_vacancy),
+            Admission::Main => self.select_for_main(states),
+        };
+
+        // Claim transfers an evicted key to the policy without cloning it.
+        let slot = match claim(victim) {
+            Claimed::Vacant(slot) => slot,
+            Claimed::Evicted(key) => {
+                let slot = victim.expect("an eviction claim requires a victim");
+                let location = self.slots[slot].location;
+                self.unlink_resident(slot);
+                // Only Small evictions become Ghost evidence. Main victims
+                // have already passed the admission filter.
+                if matches!(location, Location::SmallYoung | Location::SmallOld) {
+                    self.push_ghost(key);
+                }
+                slot
+            }
+        };
+
+        assert_eq!(self.slots[slot].location, Location::Free);
+        // Finish a deferred Small-to-Main promotion before attaching the
+        // incoming entry to the slot claimed from Main.
+        if let Some(promoted) = promotion {
+            self.insert_main(promoted);
+        }
+        self.attach(states, slot, admission);
+        (slot, SlotState::new(admission))
+    }
+
+    /// Forgets Ghost history and detaches the resident slot when present.
+    fn remove(&mut self, slot: Option<Slot>, key: &K) {
+        if let Some(slot) = slot {
+            // Resident and Ghost keys are disjoint, so resident removal can
+            // detach directly without probing nonresident history.
+            self.unlink_resident(slot);
+        } else {
+            self.discard_ghost(key);
+        }
+    }
+
+    /// Resets all resident topology and nonresident history.
+    fn clear(&mut self) {
+        self.slots.fill(ResidentSlot::default());
+        self.small_head = None;
+        self.small_tail = None;
+        self.small_young_tail = None;
+        self.small_admissions = 0;
+        self.small_len = 0;
+        self.main_hand = None;
+        self.main_len = 0;
+        self.clear_ghost();
+    }
+}
+
+impl<K: Hash + Eq + Clone, V> core::fmt::Debug for Cache<K, V, Clock2QPlus<K>> {
+    /// Formats cache occupancy and Clock2Q+ partition sizes.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Clock2QPlus")
+            .field("len", &self.index.len())
+            .field("capacity", &self.policy.slots.len())
+            .field("small_target", &self.policy.small_capacity)
+            .field("small_len", &self.policy.small_len)
+            .field("main_len", &self.policy.main_len)
+            .field("ghost_len", &self.policy.ghost_index.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{NZUsize, cache::Cache, sync::RwLock};
+    use proptest::prelude::*;
+    use std::{
+        collections::{HashMap, HashSet, VecDeque},
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    /// Cache specialization exercised by the Clock2Q+ tests.
+    type TestCache<K, V> = Cache<K, V, Clock2QPlus<K>>;
+
+    /// Returns the number of residents attached to either partition.
+    const fn residents<K>(policy: &Clock2QPlus<K>) -> usize {
+        policy.small_len + policy.main_len
+    }
+
+    /// One resident in the slot-independent reference model.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ReferenceEntry {
+        /// Resident key.
+        key: u8,
+        /// Whether the resident has earned a second chance or promotion.
+        referenced: bool,
+        /// Small admission generation, or `None` after entering Main.
+        admitted_at: Option<u64>,
+    }
+
+    /// A queue-level Clock2Q+ model independent of cache slots and policy links.
+    struct ReferenceClock2QPlus {
+        /// Maximum number of resident entries.
+        capacity: usize,
+        /// Target number of Small residents.
+        small_capacity: usize,
+        /// Target number of Main residents.
+        main_capacity: usize,
+        /// Number of later Small admissions treated as correlated.
+        correlation_window: usize,
+        /// Maximum number of historical Ghost keys.
+        ghost_capacity: usize,
+        /// Newest Small entry is at the front.
+        small: VecDeque<ReferenceEntry>,
+        /// Counts every Small admission, even if that entry is later removed.
+        small_admissions: u64,
+        /// The Main CLOCK hand is at the front. New entries go immediately before it.
+        main: VecDeque<ReferenceEntry>,
+        /// Newest Ghost key is at the front.
+        ghost: VecDeque<u8>,
+    }
+
+    impl ReferenceClock2QPlus {
+        /// Constructs an empty queue-level model.
+        fn new(capacity: usize) -> Self {
+            let small_capacity = if capacity == 1 {
+                0
+            } else {
+                (capacity / 10).max(1)
+            };
+            Self {
+                capacity,
+                small_capacity,
+                main_capacity: capacity - small_capacity,
+                correlation_window: small_capacity.div_ceil(2),
+                ghost_capacity: capacity / 2,
+                small: VecDeque::new(),
+                small_admissions: 0,
+                main: VecDeque::new(),
+                ghost: VecDeque::new(),
+            }
+        }
+
+        /// Applies one access and reports whether the key was resident.
+        fn access(&mut self, key: u8) -> bool {
+            if let Some(position) = self.small.iter().position(|entry| entry.key == key) {
+                let admitted_at = self.small[position]
+                    .admitted_at
+                    .expect("Small entry must have an admission generation");
+                if self.small_admissions - admitted_at >= self.correlation_window as u64 {
+                    self.small[position].referenced = true;
+                }
+                return true;
+            }
+            if let Some(position) = self.main.iter().position(|entry| entry.key == key) {
+                self.main[position].referenced = true;
+                return true;
+            }
+
+            // Consume Ghost evidence as part of this atomic model admission,
+            // matching the production insertion transition.
+            let ghost_hit = self
+                .ghost
+                .iter()
+                .position(|historical| *historical == key)
+                .map(|position| self.ghost.remove(position).unwrap())
+                .is_some();
+            let has_vacancy = self.small.len() + self.main.len() < self.capacity;
+            let admit_to_main = ghost_hit
+                || self.small_capacity == 0
+                || (has_vacancy && self.small.len() >= self.small_capacity);
+            if admit_to_main {
+                self.admit_main(key, has_vacancy);
+            } else {
+                self.admit_small(key, has_vacancy);
+            }
+            false
+        }
+
+        /// Removes a resident or forgets nonresident history for `key`.
+        fn remove(&mut self, key: u8) -> bool {
+            if let Some(position) = self.small.iter().position(|entry| entry.key == key) {
+                self.small.remove(position);
+                return true;
+            }
+            if let Some(position) = self.main.iter().position(|entry| entry.key == key) {
+                self.main.remove(position);
+                return true;
+            }
+            if let Some(position) = self.ghost.iter().position(|historical| *historical == key) {
+                self.ghost.remove(position);
+            }
+            false
+        }
+
+        /// Retains resident keys below `limit` while preserving Ghost history.
+        fn retain(&mut self, limit: u8) {
+            self.small.retain(|entry| entry.key < limit);
+            self.main.retain(|entry| entry.key < limit);
+        }
+
+        /// Resets all resident and historical model state.
+        fn clear(&mut self) {
+            self.small.clear();
+            self.small_admissions = 0;
+            self.main.clear();
+            self.ghost.clear();
+        }
+
+        /// Admits a cold key to Small, promoting its tail when eligible.
+        fn admit_small(&mut self, key: u8, has_vacancy: bool) {
+            if !has_vacancy {
+                loop {
+                    let tail = self.small.back().unwrap();
+                    let admitted_at = tail
+                        .admitted_at
+                        .expect("Small entry must have an admission generation");
+                    let young =
+                        self.small_admissions - admitted_at < self.correlation_window as u64;
+                    if young || !tail.referenced {
+                        let victim = self.small.pop_back().unwrap().key;
+                        self.push_ghost(victim);
+                        break;
+                    }
+
+                    let mut promoted = self.small.pop_back().unwrap();
+                    promoted.referenced = false;
+                    promoted.admitted_at = None;
+                    if self.main.len() == self.main_capacity {
+                        self.evict_main();
+                        self.main.push_back(promoted);
+                        break;
+                    }
+                    self.main.push_back(promoted);
+                }
+            }
+            self.small_admissions += 1;
+            self.small.push_front(ReferenceEntry {
+                key,
+                referenced: false,
+                admitted_at: Some(self.small_admissions),
+            });
+        }
+
+        /// Admits a Ghost hit or warm-up key directly to Main.
+        fn admit_main(&mut self, key: u8, has_vacancy: bool) {
+            if self.main.len() == self.main_capacity {
+                self.evict_main();
+            } else if !has_vacancy {
+                loop {
+                    let tail = self.small.back().unwrap();
+                    let admitted_at = tail
+                        .admitted_at
+                        .expect("Small entry must have an admission generation");
+                    let young =
+                        self.small_admissions - admitted_at < self.correlation_window as u64;
+                    if young || !tail.referenced {
+                        let victim = self.small.pop_back().unwrap().key;
+                        self.push_ghost(victim);
+                        break;
+                    }
+
+                    let mut promoted = self.small.pop_back().unwrap();
+                    promoted.referenced = false;
+                    promoted.admitted_at = None;
+                    self.main.push_back(promoted);
+                    if self.main.len() == self.main_capacity {
+                        self.evict_main();
+                        break;
+                    }
+                }
+            }
+            self.main.push_back(ReferenceEntry {
+                key,
+                referenced: false,
+                admitted_at: None,
+            });
+        }
+
+        /// Runs the model's Main CLOCK scan through the first unreferenced key.
+        fn evict_main(&mut self) {
+            loop {
+                let mut candidate = self.main.pop_front().unwrap();
+                if candidate.referenced {
+                    candidate.referenced = false;
+                    self.main.push_back(candidate);
+                } else {
+                    return;
+                }
+            }
+        }
+
+        /// Adds a key to the bounded model Ghost FIFO.
+        fn push_ghost(&mut self, key: u8) {
+            assert!(!self.ghost.contains(&key));
+            if self.ghost.len() == self.ghost_capacity {
+                self.ghost.pop_back();
+            }
+            self.ghost.push_front(key);
+        }
+
+        /// Returns Small from newest to oldest with reference state.
+        fn small_state(&self) -> Vec<(u8, bool)> {
+            self.small
+                .iter()
+                .map(|entry| (entry.key, entry.referenced))
+                .collect()
+        }
+
+        /// Returns Main from the hand forward with reference state.
+        fn main_state(&self) -> Vec<(u8, bool)> {
+            self.main
+                .iter()
+                .map(|entry| (entry.key, entry.referenced))
+                .collect()
+        }
+    }
+
+    /// Mutation applied to both the cache and queue-level reference model.
+    #[derive(Clone, Debug)]
+    enum ReferenceOp {
+        /// Accesses a key and inserts it on a miss.
+        Access(u8),
+        /// Removes a key or its Ghost history.
+        Remove(u8),
+        /// Retains resident keys below the supplied limit.
+        Retain(u8),
+        /// Clears all policy and cache state.
+        Clear,
+    }
+
+    /// Generates weighted operations for model-based mutation testing.
+    fn reference_op_strategy() -> impl Strategy<Value = ReferenceOp> {
+        prop_oneof![
+            8 => (0u8..64).prop_map(ReferenceOp::Access),
+            2 => (0u8..64).prop_map(ReferenceOp::Remove),
+            1 => (0u8..64).prop_map(ReferenceOp::Retain),
+            1 => Just(ReferenceOp::Clear),
+        ]
+    }
+
+    impl<K: Hash + Eq + Clone + core::fmt::Debug, V> Cache<K, V, Clock2QPlus<K>> {
+        /// Returns Small slot order from newest to oldest.
+        fn small_order(&self) -> Vec<usize> {
+            let mut order = Vec::with_capacity(self.policy.small_len);
+            let mut current = self.policy.small_head;
+            while let Some(slot) = current {
+                order.push(slot);
+                current = linked(self.policy.slots[slot].next);
+            }
+            order
+        }
+
+        /// Returns Main slot order starting at the CLOCK hand.
+        fn main_order(&self) -> Vec<usize> {
+            let mut order = Vec::with_capacity(self.policy.main_len);
+            let Some(hand) = self.policy.main_hand else {
+                return order;
+            };
+            let mut current = hand;
+            loop {
+                order.push(current);
+                current = self.policy.slots[current].next;
+                assert_ne!(current, UNLINKED);
+                if current == hand {
+                    return order;
+                }
+            }
+        }
+
+        /// Returns Ghost slot order from newest to oldest.
+        fn ghost_order(&self) -> Vec<usize> {
+            let mut order = Vec::with_capacity(self.policy.ghost_index.len());
+            let mut current = self.policy.ghost_head;
+            while let Some(slot) = current {
+                order.push(slot);
+                current = linked(self.policy.ghost_slots[slot].next);
+            }
+            order
+        }
+
+        /// Returns Small keys from newest to oldest.
+        fn small_keys(&self) -> Vec<K> {
+            self.small_order()
+                .into_iter()
+                .map(|slot| self.slots[slot].key.clone())
+                .collect()
+        }
+
+        /// Returns Main keys starting at the CLOCK hand.
+        fn main_keys(&self) -> Vec<K> {
+            self.main_order()
+                .into_iter()
+                .map(|slot| self.slots[slot].key.clone())
+                .collect()
+        }
+
+        /// Returns Ghost keys from newest to oldest.
+        fn ghost_keys(&self) -> Vec<K> {
+            self.ghost_order()
+                .into_iter()
+                .map(|slot| {
+                    self.policy.ghost_slots[slot]
+                        .key
+                        .as_ref()
+                        .expect("live Ghost entry must have a key")
+                        .clone()
+                })
+                .collect()
+        }
+
+        /// Asserts the Clock2Q+ policy's invariants hold.
+        pub(crate) fn check_policy_invariants(&self) {
+            let policy = &self.policy;
+            assert!(residents(policy) <= policy.slots.len());
+            assert!(policy.small_len <= policy.small_capacity);
+            assert!(policy.main_len <= policy.main_capacity);
+            assert_eq!(self.index.len(), residents(policy));
+            assert_eq!(self.index.len() + self.free.len(), self.slots.len());
+
+            let free: HashSet<_> = self.free.iter().copied().collect();
+            assert_eq!(free.len(), self.free.len(), "duplicate resident free slot");
+            let small = self.small_order();
+            let main = self.main_order();
+            assert_eq!(small.len(), policy.small_len);
+            assert_eq!(main.len(), policy.main_len);
+            let young_len = policy
+                .small_young_tail
+                .map(|tail| {
+                    small
+                        .iter()
+                        .position(|slot| *slot == tail)
+                        .expect("correlation boundary must belong to Small")
+                        + 1
+                })
+                .unwrap_or(0);
+            assert!(young_len <= policy.correlation_window);
+            assert!(young_len <= policy.small_len);
+
+            let mut resident = HashSet::new();
+            for (rank, &slot) in small.iter().enumerate() {
+                assert!(resident.insert(slot), "duplicate Small resident {slot}");
+                assert!(self.slots[slot].live);
+                let expected = if rank < young_len {
+                    Location::SmallYoung
+                } else {
+                    Location::SmallOld
+                };
+                assert_eq!(policy.slots[slot].location, expected);
+                let state = self.slots[slot].state.0.load(Ordering::Relaxed);
+                assert_eq!(state & CORRELATED != 0, expected == Location::SmallYoung);
+                if expected == Location::SmallYoung {
+                    assert_eq!(state, CORRELATED);
+                }
+                let expected_prev = rank.checked_sub(1).map(|rank| small[rank]);
+                let expected_next = small.get(rank + 1).copied();
+                assert_eq!(linked(policy.slots[slot].prev), expected_prev);
+                assert_eq!(linked(policy.slots[slot].next), expected_next);
+            }
+            assert_eq!(policy.small_head, small.first().copied());
+            assert_eq!(policy.small_tail, small.last().copied());
+            let expected_young_tail = young_len
+                .checked_sub(1)
+                .and_then(|rank| small.get(rank))
+                .copied();
+            assert_eq!(policy.small_young_tail, expected_young_tail);
+
+            for (rank, &slot) in main.iter().enumerate() {
+                assert!(resident.insert(slot), "resident {slot} in two queues");
+                assert!(self.slots[slot].live);
+                assert_eq!(policy.slots[slot].location, Location::Main);
+                assert_eq!(
+                    self.slots[slot].state.0.load(Ordering::Relaxed) & CORRELATED,
+                    0
+                );
+                assert_eq!(
+                    policy.slots[slot].prev,
+                    main[(rank + main.len() - 1) % main.len()]
+                );
+                assert_eq!(policy.slots[slot].next, main[(rank + 1) % main.len()]);
+            }
+
+            for (key, &slot) in &self.index {
+                assert!(slot < self.slots.len());
+                assert!(resident.contains(&slot));
+                assert_eq!(&self.slots[slot].key, key);
+            }
+            for slot in 0..self.slots.len() {
+                if resident.contains(&slot) {
+                    assert!(!free.contains(&slot));
+                } else {
+                    assert!(free.contains(&slot));
+                    assert!(!self.slots[slot].live);
+                    assert_eq!(policy.slots[slot].location, Location::Free);
+                }
+            }
+            for slot in self.slots.len()..policy.slots.len() {
+                assert_eq!(policy.slots[slot].location, Location::Free);
+            }
+
+            assert!(policy.ghost_index.len() <= policy.ghost_capacity);
+            let ghost = self.ghost_order();
+            assert_eq!(ghost.len(), policy.ghost_index.len());
+            let ghost_free: HashSet<_> = policy.ghost_free.iter().copied().collect();
+            assert_eq!(ghost_free.len(), policy.ghost_free.len());
+            let mut seen_ghost = HashSet::new();
+            for (rank, &slot) in ghost.iter().enumerate() {
+                assert!(seen_ghost.insert(slot));
+                assert!(!ghost_free.contains(&slot));
+                let key = policy.ghost_slots[slot]
+                    .key
+                    .as_ref()
+                    .expect("linked Ghost entry must have a key");
+                assert_eq!(policy.ghost_index.get(key), Some(&slot));
+                assert!(!self.index.contains_key(key));
+                let expected_prev = rank.checked_sub(1).map(|rank| ghost[rank]);
+                let expected_next = ghost.get(rank + 1).copied();
+                assert_eq!(linked(policy.ghost_slots[slot].prev), expected_prev);
+                assert_eq!(linked(policy.ghost_slots[slot].next), expected_next);
+            }
+            assert_eq!(policy.ghost_head, ghost.first().copied());
+            assert_eq!(policy.ghost_tail, ghost.last().copied());
+            for (slot, entry) in policy.ghost_slots.iter().enumerate() {
+                if seen_ghost.contains(&slot) {
+                    assert!(entry.key.is_some());
+                } else {
+                    assert!(ghost_free.contains(&slot));
+                    assert!(entry.key.is_none());
+                }
+            }
+        }
+
+        /// Asserts both the cache and policy invariants hold.
+        fn check_invariants(&self) {
+            self.check_cache_invariants();
+            self.check_policy_invariants();
+        }
+    }
+
+    /// Returns the implementation's observable Small state for model checks.
+    fn actual_small_state(cache: &TestCache<u8, u8>) -> Vec<(u8, bool)> {
+        cache
+            .small_order()
+            .into_iter()
+            .map(|slot| {
+                let referenced = cache.policy.slots[slot].location == Location::SmallOld
+                    && cache.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED != 0;
+                (cache.slots[slot].key, referenced)
+            })
+            .collect()
+    }
+
+    /// Returns the implementation's observable Main state for model checks.
+    fn actual_main_state(cache: &TestCache<u8, u8>) -> Vec<(u8, bool)> {
+        cache
+            .main_order()
+            .into_iter()
+            .map(|slot| {
+                (
+                    cache.slots[slot].key,
+                    cache.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED != 0,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn partitions_round_for_tiny_capacities() {
+        // Ratio-derived partitions round down. Capacities above one still keep
+        // at least one Small slot, while capacity one uses Main alone.
+        let expected = [
+            (1, 0, 1, 0, 0),
+            (2, 1, 1, 1, 1),
+            (10, 1, 9, 1, 5),
+            (11, 1, 10, 1, 5),
+            (20, 2, 18, 1, 10),
+            (40, 4, 36, 2, 20),
+        ];
+        for (capacity, small, main, window, ghost) in expected {
+            let cache = TestCache::<u64, u64>::new(NonZeroUsize::new(capacity).unwrap());
+            assert_eq!(cache.policy.small_capacity, small);
+            assert_eq!(cache.policy.main_capacity, main);
+            assert_eq!(cache.policy.correlation_window, window);
+            assert_eq!(cache.policy.ghost_capacity, ghost);
+            cache.check_invariants();
+        }
+
+        // Exercise every tiny partition through repeated replacement, where
+        // off-by-one errors in the queue bounds are easiest to expose.
+        for capacity in 1..=20 {
+            let mut cache = TestCache::new(NonZeroUsize::new(capacity).unwrap());
+            for key in 0..200u64 {
+                cache.put(key, key);
+                cache.check_invariants();
+            }
+        }
+    }
+
+    #[test]
+    fn capacity_one_behaves_as_clock() {
+        // With no Small or Ghost capacity, the only Main slot is replaced on
+        // each cold insertion.
+        let mut cache = TestCache::new(NZUsize!(1));
+        cache.put(1u64, 10u64);
+        assert_eq!(cache.get(&1), Some(&10));
+        cache.put(2, 20);
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.get(&2), Some(&20));
+        assert!(cache.ghost_keys().is_empty());
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn warmup_fills_small_then_main_with_cold_entries() {
+        // Warm-up fills the 10% Small partition first, then uses the remaining
+        // vacant slots for unreferenced Main residents.
+        let mut cache = TestCache::new(NZUsize!(20));
+        for key in 0..20u64 {
+            cache.put(key, key);
+        }
+
+        assert_eq!(cache.small_keys(), vec![1, 0]);
+        assert_eq!(cache.main_keys(), (2..20).collect::<Vec<_>>());
+        for key in 2..20u64 {
+            let slot = cache.index[&key];
+            assert_eq!(
+                cache.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED,
+                0
+            );
+        }
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn policy_empty_state_includes_precise_ghost_history() {
+        // Resident filtering does not erase unrelated Ghost evidence. The
+        // policy may therefore retain useful history with no live residents.
+        let mut cache = TestCache::new(NZUsize!(2));
+        for key in 1..=3u64 {
+            cache.put(key, key);
+        }
+        assert_eq!(cache.ghost_keys(), vec![1]);
+
+        cache.retain(|key, _| *key == 1);
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.ghost_keys(), vec![1]);
+        assert!(!cache.policy.ghost_index.is_empty());
+
+        cache.retain(|_, _| false);
+        assert_eq!(residents(&cache.policy), 0);
+        assert_eq!(cache.ghost_keys(), vec![1]);
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn correlation_window_ignores_only_young_hits() {
+        // Key 4 is at the Small head, inside the two-entry correlation window.
+        // Its hit must not set the bit, so a scan ages and evicts it to Ghost.
+        let mut correlated = TestCache::new(NZUsize!(40));
+        for key in 1..=40u64 {
+            correlated.put(key, key);
+        }
+        assert_eq!(correlated.small_keys(), vec![4, 3, 2, 1]);
+        assert_eq!(correlated.get(&4), Some(&4));
+        let slot = correlated.index[&4];
+        assert_eq!(
+            correlated.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED,
+            0
+        );
+        for key in 41..=44u64 {
+            correlated.put(key, key);
+        }
+        assert!(!correlated.contains(&4));
+        assert!(!correlated.main_keys().contains(&4));
+        assert!(correlated.ghost_keys().contains(&4));
+        correlated.check_invariants();
+
+        // Key 1 is already outside the window. Its hit marks it for promotion
+        // to Main when the next insertion examines the Small tail.
+        let mut reused = TestCache::new(NZUsize!(40));
+        for key in 1..=40u64 {
+            reused.put(key, key);
+        }
+        assert_eq!(reused.get(&1), Some(&1));
+        reused.put(41, 41);
+        assert!(reused.small_keys().contains(&41));
+        assert!(reused.main_keys().contains(&1));
+        let slot = reused.index[&1];
+        assert_eq!(
+            reused.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED,
+            0
+        );
+        assert!(reused.ghost_keys().is_empty());
+        reused.check_invariants();
+    }
+
+    #[test]
+    fn removing_younger_entry_does_not_rewind_correlation_age() {
+        let mut cache = TestCache::new(NZUsize!(20));
+        for key in 0..20u64 {
+            cache.put(key, key);
+        }
+
+        // Key 0 has left the correlation window, so this hit makes it eligible
+        // for promotion when it reaches the Small tail.
+        assert_eq!(cache.get(&0), Some(&0));
+
+        // Removing the younger key must not move key 0 back into the
+        // correlation window or discard its eligible reference.
+        assert!(cache.remove(&1));
+        cache.put(20, 20);
+        cache.put(21, 21);
+
+        assert!(cache.main_keys().contains(&0));
+        assert!(!cache.ghost_keys().contains(&0));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn removing_younger_entry_does_not_delay_correlation_age() {
+        let mut cache = TestCache::new(NZUsize!(40));
+        for key in 0..40u64 {
+            cache.put(key, key);
+        }
+        assert_eq!(cache.small_keys(), vec![3, 2, 1, 0]);
+
+        // Removing key 3 must not erase its admission from key 2's age. Key 40
+        // is the second later Small admission, so key 2 leaves the window.
+        assert!(cache.remove(&3));
+        cache.put(40, 40);
+        assert_eq!(cache.get(&2), Some(&2));
+
+        // Advance key 2 to the Small tail. Its eligible hit must promote it
+        // into Main instead of letting the final insertion evict it to Ghost.
+        for key in 41..=43u64 {
+            cache.put(key, key);
+        }
+        assert!(cache.main_keys().contains(&2));
+        assert!(!cache.ghost_keys().contains(&2));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn ghost_history_is_bounded_and_promotes_reuse() {
+        // Cold churn fills the ten-entry Ghost FIFO and drops its oldest key.
+        let mut cache = TestCache::new(NZUsize!(20));
+        for key in 0..=30u64 {
+            cache.put(key, key);
+        }
+        assert_eq!(cache.small_keys(), vec![30, 29]);
+        assert_eq!(cache.main_keys(), (2..20).collect::<Vec<_>>());
+        assert_eq!(
+            cache.ghost_keys(),
+            (20..=28)
+                .rev()
+                .chain(core::iter::once(1))
+                .collect::<Vec<_>>()
+        );
+
+        // Key 1 is still in Ghost, so reuse consumes its history and admits it
+        // directly to Main without disturbing Small.
+        let (_, value) = cache.get_or_insert_mut(1, || unreachable!());
+        *value = 100;
+        assert_eq!(cache.peek(&1), Some(&100));
+        assert!(cache.main_keys().contains(&1));
+        assert!(!cache.ghost_keys().contains(&1));
+        assert_eq!(cache.small_keys(), vec![30, 29]);
+        assert_eq!(cache.ghost_keys(), (20..=28).rev().collect::<Vec<_>>());
+
+        // Key 0 has already aged out of Ghost and therefore enters Small as a
+        // cold miss, evicting Small's tail into Ghost.
+        cache.put(0, 200);
+        assert_eq!(cache.small_keys()[0], 0);
+        assert!(!cache.main_keys().contains(&0));
+        assert_eq!(cache.ghost_keys()[0], 29);
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn main_evicts_despite_an_offered_vacancy() {
+        // Removing the Small resident leaves a globally vacant slot while Main
+        // remains full and key 1 remains in Ghost.
+        let mut cache = TestCache::new(NZUsize!(2));
+        for key in 1..=3u64 {
+            cache.put(key, key);
+        }
+        assert_eq!(cache.main_keys(), vec![2]);
+        assert!(cache.remove(&3));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.ghost_keys(), vec![1]);
+
+        // Ghost reuse is constrained to Main, so it replaces Main key 2 and
+        // deliberately leaves the Small vacancy unused.
+        cache.put(1, 10);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.main_keys(), vec![1]);
+        assert!(!cache.contains(&2));
+        assert_eq!(cache.free.len(), 1);
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn promoting_small_replaces_from_full_main() {
+        // Reference the original Small tail so the next cold miss promotes it
+        // while keeping both fixed-size resident partitions full.
+        let mut cache = TestCache::new(NZUsize!(20));
+        for key in 0..20u64 {
+            cache.put(key, key);
+        }
+        for key in 0..18u64 {
+            assert_eq!(cache.get(&key), Some(&key));
+        }
+        cache.put(20, 20);
+        assert_eq!(cache.policy.main_len, cache.policy.main_capacity);
+        assert_eq!(cache.policy.small_len, 2);
+        let slot = cache.index[&0];
+        assert!(cache.main_keys().contains(&0));
+        assert_eq!(
+            cache.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED,
+            0
+        );
+
+        // Repeat the transition with a full Main CLOCK. The promoted key keeps
+        // its slot and starts in Main with a clear reference bit.
+        let promoted = *cache.small_keys().last().unwrap();
+        assert_eq!(cache.get(&promoted), Some(&promoted));
+        cache.put(21, 21);
+
+        assert!(cache.main_keys().contains(&promoted));
+        let slot = cache.index[&promoted];
+        assert_eq!(
+            cache.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED,
+            0
+        );
+        assert!(cache.small_keys().contains(&21));
+        assert_eq!(cache.policy.main_len, cache.policy.main_capacity);
+        assert_eq!(cache.policy.small_len, 2);
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn slot_stays_stable_on_promotion_and_goes_stale_on_reuse() {
+        // Promotion changes only policy topology, so key 1 keeps its original
+        // slot and the existing lookup hint remains valid.
+        let mut cache = TestCache::new(NZUsize!(40));
+        let (slot1, value) = cache.get_or_insert_mut(1u64, || 0u64);
+        *value = 10;
+        let (slot2, value) = cache.get_or_insert_mut(2, || 0);
+        *value = 20;
+        for key in 3..=40u64 {
+            cache.put(key, key * 10);
+        }
+        assert_eq!(cache.get_at(slot1, &1), Some(&10));
+        cache.put(41, 410);
+        assert_eq!(cache.get_at(slot1, &1), Some(&10));
+        assert!(cache.main_keys().contains(&1));
+
+        // An actual eviction reuses key 2's slot for key 42. The old hint then
+        // fails full-key validation while the new key resolves in that slot.
+        assert!(cache.slots[slot2].live);
+        assert_eq!(cache.slots[slot2].key, 2);
+        cache.put(42, 420);
+        assert_eq!(cache.get_at(slot2, &2), None);
+        let slot42 = *cache.index.get(&42).unwrap();
+        assert_eq!(slot42, slot2);
+        assert_eq!(cache.get_at(slot2, &2), None);
+        assert_eq!(cache.get_at(slot42, &42), Some(&420));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn scan_does_not_displace_main() {
+        // Warm-up places keys 1 through 9 in Main. A one-cache-capacity scan is
+        // absorbed by Small and leaves that Main working set intact.
+        let mut clock2qplus = TestCache::new(NZUsize!(10));
+        for key in 0..10u64 {
+            clock2qplus.put(key, key);
+        }
+        let mut protected = 1..10u64;
+        assert_eq!(clock2qplus.policy.main_len, 9);
+
+        // Plain CLOCK provides the control case and loses every original key
+        // to the same scan.
+        let mut clock: Cache<u64, u64> = Cache::new(NZUsize!(10));
+        for key in 0..10u64 {
+            clock.put(key, key);
+        }
+
+        for key in 100..110u64 {
+            clock2qplus.put(key, key);
+            clock.put(key, key);
+        }
+        assert!(
+            protected
+                .clone()
+                .all(|key| clock2qplus.peek(&key).is_some())
+        );
+        assert!(protected.all(|key| clock.peek(&key).is_none()));
+        clock2qplus.check_invariants();
+    }
+
+    #[test]
+    fn prefill_reuses_values_through_churn() {
+        // Prefill allocates every value once. Policy churn must keep reusing
+        // those same stable slots without invoking the factory again.
+        let mut makes = 0usize;
+        let mut cache = TestCache::<u64, Vec<u8>>::new(NZUsize!(20));
+        cache.prefill(|| {
+            makes += 1;
+            vec![0; 32]
+        });
+        assert_eq!(makes, 20);
+
+        for key in 0..2_000u64 {
+            let (_, value) = cache.get_or_insert_mut(key, || unreachable!());
+            value[0] = key as u8;
+            cache.check_invariants();
+        }
+        assert_eq!(cache.slots.len(), 20);
+        assert_eq!(makes, 20);
+    }
+
+    #[test]
+    fn remove_retain_and_clear_repair_resident_state() {
+        // Exercise removal from Main and Ghost, then prove a removed Ghost key
+        // returns as cold instead of receiving stale Main admission.
+        let mut cache = TestCache::new(NZUsize!(20));
+        for key in 0..=30u64 {
+            cache.put(key, key);
+        }
+        cache.put(1, 1);
+        assert!(cache.remove(&1));
+        assert!(!cache.remove(&1));
+
+        let ghost = cache.ghost_keys()[0];
+        assert!(!cache.remove(&ghost));
+        assert!(!cache.ghost_keys().contains(&ghost));
+
+        // Replace the vacancy left by the resident removal. With a full cache,
+        // the forgotten Ghost key must now enter Small as a cold admission.
+        cache.put(100, 100);
+        cache.put(ghost, ghost);
+        assert!(cache.small_keys().contains(&ghost));
+        assert!(!cache.main_keys().contains(&ghost));
+
+        // Retain detaches rejected residents but preserves unrelated Ghost
+        // history. Clear resets both resident topology and Ghost history.
+        cache.retain(|key, _| key % 2 == 0);
+        assert!(!cache.ghost_keys().is_empty());
+        assert!(cache.index.keys().all(|key| key % 2 == 0));
+        cache.check_invariants();
+
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(residents(&cache.policy), 0);
+        assert!(cache.policy.ghost_index.is_empty());
+        assert!(cache.ghost_keys().is_empty());
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn shared_hits_are_concurrent() {
+        // Shared lookups race only on the relaxed per-slot reference bit. The
+        // accumulated hit must still protect key 1 on the next insertion.
+        let mut cache = TestCache::new(NZUsize!(40));
+        for key in 1..=40u64 {
+            cache.put(key, key);
+        }
+        let slot = *cache.index.get(&1).unwrap();
+        let cache = Arc::new(RwLock::new(cache));
+        let barrier = Arc::new(Barrier::new(5));
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            threads.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..1_000 {
+                    let guard = cache.read();
+                    assert_eq!(guard.get_at(slot, &1), Some(&1));
+                }
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let mut cache = Arc::try_unwrap(cache).unwrap().into_inner();
+        cache.put(41, 41);
+        assert!(cache.main_keys().contains(&1));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn fallible_factory_error_leaves_policy_unchanged() {
+        // Key 1 is in Ghost. A failed factory must return before policy
+        // insertion consumes that evidence or changes resident topology.
+        let mut cache = TestCache::new(NZUsize!(2));
+        for key in 1..=3u64 {
+            cache.put(key, key);
+        }
+        let small = cache.small_keys();
+        let main = cache.main_keys();
+        let ghost = cache.ghost_keys();
+        let result = cache.try_get_or_insert_with(1, || Err::<u64, _>("failure"));
+        assert_eq!(result, Err("failure"));
+        assert_eq!(cache.small_keys(), small);
+        assert_eq!(cache.main_keys(), main);
+        assert_eq!(cache.ghost_keys(), ghost);
+        cache.check_invariants();
+    }
+
+    proptest! {
+        #[test]
+        fn pure_accesses_match_queue_level_reference(
+            capacity in 1usize..33,
+            accesses in prop::collection::vec(0u8..64, 0..400),
+        ) {
+            let mut cache = TestCache::new(NonZeroUsize::new(capacity).unwrap());
+            let mut reference = ReferenceClock2QPlus::new(capacity);
+
+            // Compare every hit decision and complete queue state against a
+            // slot-independent model of the paper's access transitions.
+            for key in accesses {
+                let expected_hit = reference.access(key);
+                let actual_hit = cache.get(&key).is_some();
+                if !actual_hit {
+                    cache.put(key, key);
+                }
+
+                prop_assert_eq!(actual_hit, expected_hit);
+                prop_assert_eq!(actual_small_state(&cache), reference.small_state());
+                prop_assert_eq!(actual_main_state(&cache), reference.main_state());
+                prop_assert_eq!(cache.ghost_keys(), reference.ghost.iter().copied().collect::<Vec<_>>());
+                cache.check_invariants();
+            }
+        }
+
+        #[test]
+        fn mutations_match_queue_level_reference(
+            capacity in 1usize..33,
+            operations in prop::collection::vec(reference_op_strategy(), 0..400),
+        ) {
+            let mut cache = TestCache::new(NonZeroUsize::new(capacity).unwrap());
+            let mut reference = ReferenceClock2QPlus::new(capacity);
+
+            // Removal and retention must not rewind monotonic correlation age
+            // or disturb the Main hand and Ghost FIFO.
+            for operation in operations {
+                match operation {
+                    ReferenceOp::Access(key) => {
+                        let expected_hit = reference.access(key);
+                        let actual_hit = cache.get(&key).is_some();
+                        if !actual_hit {
+                            cache.put(key, key);
+                        }
+                        prop_assert_eq!(actual_hit, expected_hit);
+                    }
+                    ReferenceOp::Remove(key) => {
+                        prop_assert_eq!(cache.remove(&key), reference.remove(key));
+                    }
+                    ReferenceOp::Retain(limit) => {
+                        cache.retain(|key, _| *key < limit);
+                        reference.retain(limit);
+                    }
+                    ReferenceOp::Clear => {
+                        cache.clear();
+                        reference.clear();
+                    }
+                }
+
+                prop_assert_eq!(actual_small_state(&cache), reference.small_state());
+                prop_assert_eq!(actual_main_state(&cache), reference.main_state());
+                prop_assert_eq!(cache.ghost_keys(), reference.ghost.iter().copied().collect::<Vec<_>>());
+                cache.check_invariants();
+            }
+        }
+
+        #[test]
+        fn arbitrary_operations_preserve_invariants(
+            capacity in 1usize..17,
+            operations in prop::collection::vec((0u8..8, 0u8..24, any::<u16>()), 0..300),
+        ) {
+            let mut cache = TestCache::new(NonZeroUsize::new(capacity).unwrap());
+            let mut values = HashMap::new();
+
+            // Exercise every mutating Cache entry point while checking policy
+            // topology and the last value written for each surviving key.
+            for (operation, key, value) in operations {
+                match operation {
+                    0 => {
+                        cache.put(key, value);
+                        values.insert(key, value);
+                    }
+                    1 => {
+                        let _ = cache.get(&key);
+                    }
+                    2 => {
+                        if let Some(stored) = cache.get_mut(&key) {
+                            *stored = value;
+                            values.insert(key, value);
+                        }
+                    }
+                    3 => {
+                        let stored = *cache.get_or_insert_with(key, || value);
+                        values.insert(key, stored);
+                    }
+                    4 => {
+                        *cache.get_or_insert_mut(key, || value).1 = value;
+                        values.insert(key, value);
+                    }
+                    5 => {
+                        cache.remove(&key);
+                        values.remove(&key);
+                    }
+                    6 => {
+                        cache.retain(|stored, _| *stored < key);
+                        values.retain(|stored, _| *stored < key);
+                    }
+                    _ => {
+                        cache.clear();
+                        values.clear();
+                    }
+                }
+
+                cache.check_invariants();
+                prop_assert!(cache.len() <= capacity);
+                for (resident, &slot) in &cache.index {
+                    prop_assert_eq!(cache.slots[slot].value, values[resident]);
+                }
+            }
+        }
+    }
+}
