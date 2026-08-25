@@ -133,9 +133,16 @@ pub trait Policy<K> {
     /// a victim. The policy commits its choice by calling `claim` exactly once.
     /// Passing `None` claims unused capacity and returns its assigned slot.
     /// Passing `Some(slot)` replaces that slot and returns its previous key.
-    /// The returned [Self::SlotState] becomes the incoming entry's initial
-    /// policy state.
-    fn insert<I, C>(&mut self, states: &I, key: &K, has_vacancy: bool, claim: C) -> Self::SlotState
+    ///
+    /// The returned [Slot] must be the storage resolved by `claim`. The returned
+    /// [Self::SlotState] becomes the incoming entry's initial policy state.
+    fn insert<I, C>(
+        &mut self,
+        states: &I,
+        key: &K,
+        has_vacancy: bool,
+        claim: C,
+    ) -> (Slot, Self::SlotState)
     where
         I: Index<Slot, Output = Self::SlotState>,
         C: FnOnce(Option<Slot>) -> Claimed<K>;
@@ -460,8 +467,17 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
         }
     }
 
-    /// Claims storage for an incoming key and returns a reusable slot and its
-    /// initial policy state. A missing slot means the cache should grow.
+    /// Resolves the policy's insertion decision for a confirmed miss.
+    ///
+    /// The policy invokes the cache-provided claim exactly once. `claim(None)`
+    /// asks the cache to use unused capacity. `claim(Some(slot))` asks it to
+    /// evict that resident. The claim resolves the physical slot and returns
+    /// either the assigned vacant slot or the displaced key so the policy can
+    /// finish updating its metadata.
+    ///
+    /// Returns `Some(slot)` when an existing slot can be reused. Returns `None`
+    /// when the policy reserved the next slot and the caller must grow the
+    /// cache.
     fn claim_slot(&mut self, key: &K) -> (Option<Slot>, P::SlotState) {
         let Self {
             index,
@@ -471,31 +487,36 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
             policy,
         } = self;
         let has_vacancy = !free.is_empty() || slots.len() < *capacity;
-        let mut claimed_slot = None;
-        let state = policy.insert(&States(slots), key, has_vacancy, |victim| {
-            let (slot, claimed) = victim.map_or_else(
+
+        let (slot, state) = policy.insert(&States(slots), key, has_vacancy, |victim| {
+            victim.map_or_else(
                 || {
                     assert!(has_vacancy, "policy requested unavailable cache capacity");
+
+                    // Reuse a free slot before reserving the next slot for growth.
                     let slot = free.pop().unwrap_or(slots.len());
-                    (slot, Claimed::Vacant(slot))
+                    Claimed::Vacant(slot)
                 },
                 |slot| {
                     let resident = slots
                         .get(slot)
                         .expect("policy selected a slot outside the cache");
                     assert!(resident.live, "policy selected a nonresident slot");
+
+                    // Transfer the displaced key to the policy without cloning it.
                     let (evicted, indexed_slot) = index
                         .remove_entry(&resident.key)
                         .expect("a live victim must be indexed");
                     assert_eq!(indexed_slot, slot, "resident index must match its slot");
-                    (slot, Claimed::Evicted(evicted))
+
+                    Claimed::Evicted(evicted)
                 },
-            );
-            claimed_slot = Some((slot != slots.len()).then_some(slot));
-            claimed
+            )
         });
-        let slot = claimed_slot.expect("policy must claim storage exactly once");
-        (slot, state)
+
+        // Existing slots can be updated in place. The slot at `slots.len()` is
+        // the next vector position and tells the caller to grow instead.
+        ((slot != slots.len()).then_some(slot), state)
     }
 }
 
@@ -566,24 +587,25 @@ mod tests {
 
         fn hit_mut(&mut self, _slot: Slot, _state: &mut ()) {}
 
-        fn insert<I, C>(&mut self, _states: &I, _key: &K, has_vacancy: bool, claim: C)
+        fn insert<I, C>(&mut self, _states: &I, _key: &K, has_vacancy: bool, claim: C) -> (Slot, ())
         where
             I: Index<Slot, Output = ()>,
             C: FnOnce(Option<Slot>) -> Claimed<K>,
         {
             let slot = if has_vacancy {
                 let Claimed::Vacant(slot) = claim(None) else {
-                    panic!("vacancy claim returned an eviction");
+                    unreachable!("vacancy claim returned an eviction");
                 };
                 slot
             } else {
                 let victim = self.residents.remove(0);
                 let Claimed::Evicted(_) = claim(Some(victim)) else {
-                    panic!("victim claim returned vacant capacity");
+                    unreachable!("victim claim returned vacant capacity");
                 };
                 victim
             };
             self.residents.push(slot);
+            (slot, ())
         }
 
         fn remove(&mut self, slot: Option<Slot>, _key: &K) {
@@ -939,14 +961,20 @@ mod tests {
 
         fn hit_mut(&mut self, _slot: Slot, _state: &mut ()) {}
 
-        fn insert<I, C>(&mut self, _states: &I, _key: &u64, has_vacancy: bool, claim: C)
+        fn insert<I, C>(
+            &mut self,
+            _states: &I,
+            _key: &u64,
+            has_vacancy: bool,
+            claim: C,
+        ) -> (Slot, ())
         where
             I: Index<Slot, Output = ()>,
             C: FnOnce(Option<Slot>) -> Claimed<u64>,
         {
             let slot = if let Some(&victim) = self.residents.first() {
                 let Claimed::Evicted(key) = claim(Some(victim)) else {
-                    panic!("early eviction policy must evict a resident");
+                    unreachable!("early eviction policy must evict a resident");
                 };
                 self.residents.remove(0);
                 self.history.push(key);
@@ -954,11 +982,12 @@ mod tests {
             } else {
                 assert!(has_vacancy);
                 let Claimed::Vacant(slot) = claim(None) else {
-                    panic!("early eviction policy must claim vacant capacity");
+                    unreachable!("early eviction policy must claim vacant capacity");
                 };
                 slot
             };
             self.residents.push(slot);
+            (slot, ())
         }
 
         fn remove(&mut self, slot: Option<Slot>, key: &u64) {
