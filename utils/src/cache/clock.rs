@@ -113,13 +113,17 @@ mod tests {
     type ClockCache<K, V> = Cache<K, V, Clock>;
 
     impl<K: Hash + Eq + Clone, V> Cache<K, V, Clock> {
-        fn check_clock_invariants(&self) {
-            self.check_cache_invariants();
+        pub(crate) fn check_policy_invariants(&self) {
             if self.slots.is_empty() {
                 assert_eq!(self.policy.hand, 0);
             } else {
                 assert!(self.policy.hand < self.slots.len());
             }
+        }
+
+        fn check_invariants(&self) {
+            self.check_cache_invariants();
+            self.check_policy_invariants();
         }
     }
 
@@ -141,7 +145,7 @@ mod tests {
         assert!(!cache.contains(&3));
         assert!(cache.contains(&4));
         assert!(cache.contains(&5));
-        cache.check_clock_invariants();
+        cache.check_invariants();
     }
 
     #[test]
@@ -162,7 +166,7 @@ mod tests {
         assert!(cache.contains(&2));
         assert!(cache.contains(&3));
         assert!(cache.contains(&4));
-        cache.check_clock_invariants();
+        cache.check_invariants();
     }
 
     #[test]
@@ -180,7 +184,7 @@ mod tests {
         cache.put(5, 50);
         assert!(cache.contains(&2));
         assert!(!cache.contains(&3));
-        cache.check_clock_invariants();
+        cache.check_invariants();
     }
 
     #[test]
@@ -224,7 +228,7 @@ mod tests {
         cache.clear();
         assert_eq!(cache.policy.hand, 0);
         cache.put(5, 50);
-        cache.check_clock_invariants();
+        cache.check_invariants();
     }
 
     #[test]
@@ -251,6 +255,6 @@ mod tests {
         for i in 0..64u64 {
             assert_eq!(cache.get(&i).copied(), Some(i * 10));
         }
-        cache.check_clock_invariants();
+        cache.check_invariants();
     }
 }

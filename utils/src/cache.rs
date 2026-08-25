@@ -563,7 +563,7 @@ mod tests {
     use super::*;
     use crate::NZUsize;
     use core::{cell::Cell, hash::Hash};
-    use proptest::prelude::*;
+    use proptest::{prelude::*, test_runner::TestCaseResult};
     use std::{
         collections::{HashMap, HashSet},
         rc::Rc,
@@ -1057,73 +1057,92 @@ mod tests {
         ]
     }
 
+    fn exercise_policy<P, F>(
+        capacity: usize,
+        prefill: bool,
+        ops: Vec<Op>,
+        check_policy_invariants: F,
+    ) -> TestCaseResult
+    where
+        P: Policy<u8>,
+        P::SlotState: Default,
+        F: Fn(&Cache<u8, u16, P>),
+    {
+        let mut cache = Cache::<u8, u16, P>::new(NonZeroUsize::new(capacity).unwrap());
+        if prefill {
+            cache.prefill(|| 0u16);
+        }
+        let mut model = HashMap::new();
+
+        for op in ops {
+            match op {
+                Op::Get(key) => {
+                    let value = cache.get(&key).copied();
+                    prop_assert_eq!(value, cache.peek(&key).copied());
+                }
+                Op::Peek(key) => {
+                    let _ = cache.peek(&key);
+                }
+                Op::Put(key, value) => {
+                    cache.put(key, value);
+                    model.insert(key, value);
+                    prop_assert_eq!(cache.peek(&key).copied(), Some(value));
+                }
+                Op::GetOrInsert(key, value) => {
+                    let stored = *cache.get_or_insert_with(key, || value);
+                    model.insert(key, stored);
+                    prop_assert_eq!(cache.peek(&key).copied(), Some(stored));
+                }
+                Op::GetOrInsertMut(key, value) => {
+                    *cache.get_or_insert_mut(key, || value).1 = value;
+                    model.insert(key, value);
+                    prop_assert_eq!(cache.peek(&key).copied(), Some(value));
+                }
+                Op::GetMut(key, value) => {
+                    if let Some(stored) = cache.get_mut(&key) {
+                        *stored = value;
+                        model.insert(key, value);
+                    }
+                }
+                Op::Remove(key) => {
+                    let present = cache.contains(&key);
+                    prop_assert_eq!(cache.remove(&key), present);
+                    model.remove(&key);
+                    prop_assert!(!cache.contains(&key));
+                }
+                Op::Retain(key) => {
+                    cache.retain(|resident, _| *resident < key);
+                    model.retain(|resident, _| *resident < key);
+                    prop_assert!(cache.len() <= usize::from(key).min(capacity));
+                }
+            }
+
+            prop_assert!(cache.len() <= capacity);
+            prop_assert!(cache.slots.len() <= capacity);
+            for key in 0..16u8 {
+                let present = cache.contains(&key);
+                prop_assert_eq!(present, cache.peek(&key).is_some());
+                if present {
+                    prop_assert_eq!(cache.peek(&key).copied(), model.get(&key).copied());
+                }
+            }
+            cache.check_cache_invariants();
+            check_policy_invariants(&cache);
+        }
+
+        Ok(())
+    }
+
     proptest! {
         #[test]
-        fn invariants_hold(
+        fn clock_invariants_hold(
             capacity in 1usize..8,
             prefill in any::<bool>(),
             ops in proptest::collection::vec(op_strategy(), 0..256),
         ) {
-            let mut cache: Cache<u8, u16> = Cache::new(NonZeroUsize::new(capacity).unwrap());
-            if prefill {
-                cache.prefill(|| 0u16);
-            }
-            let mut model = HashMap::new();
-
-            for op in ops {
-                match op {
-                    Op::Get(key) => {
-                        let value = cache.get(&key).copied();
-                        prop_assert_eq!(value, cache.peek(&key).copied());
-                    }
-                    Op::Peek(key) => {
-                        let _ = cache.peek(&key);
-                    }
-                    Op::Put(key, value) => {
-                        cache.put(key, value);
-                        model.insert(key, value);
-                        prop_assert_eq!(cache.peek(&key).copied(), Some(value));
-                    }
-                    Op::GetOrInsert(key, value) => {
-                        let stored = *cache.get_or_insert_with(key, || value);
-                        model.insert(key, stored);
-                        prop_assert_eq!(cache.peek(&key).copied(), Some(stored));
-                    }
-                    Op::GetOrInsertMut(key, value) => {
-                        *cache.get_or_insert_mut(key, || value).1 = value;
-                        model.insert(key, value);
-                        prop_assert_eq!(cache.peek(&key).copied(), Some(value));
-                    }
-                    Op::GetMut(key, value) => {
-                        if let Some(stored) = cache.get_mut(&key) {
-                            *stored = value;
-                            model.insert(key, value);
-                        }
-                    }
-                    Op::Remove(key) => {
-                        let present = cache.contains(&key);
-                        prop_assert_eq!(cache.remove(&key), present);
-                        model.remove(&key);
-                        prop_assert!(!cache.contains(&key));
-                    }
-                    Op::Retain(key) => {
-                        cache.retain(|resident, _| *resident < key);
-                        model.retain(|resident, _| *resident < key);
-                        prop_assert!(cache.len() <= usize::from(key).min(capacity));
-                    }
-                }
-
-                prop_assert!(cache.len() <= capacity);
-                prop_assert!(cache.slots.len() <= capacity);
-                for key in 0..16u8 {
-                    let present = cache.contains(&key);
-                    prop_assert_eq!(present, cache.peek(&key).is_some());
-                    if present {
-                        prop_assert_eq!(cache.peek(&key).copied(), model.get(&key).copied());
-                    }
-                }
-                cache.check_cache_invariants();
-            }
+            exercise_policy::<Clock, _>(capacity, prefill, ops, |cache| {
+                cache.check_policy_invariants();
+            })?;
         }
     }
 }
