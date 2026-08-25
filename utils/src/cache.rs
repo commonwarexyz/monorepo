@@ -32,8 +32,7 @@
 //! value allocation from steady-state insertion. Value-returning methods such
 //! as [Cache::put] replace and drop displaced values as usual.
 //!
-//! Replacement policies are provided in submodules. [Cache] uses [Clock] by
-//! default. See the [clock] module for its behavior.
+//! The [clock] module provides [Clock], the default replacement policy.
 //!
 //! # Concurrency
 //!
@@ -121,6 +120,12 @@ pub trait Policy<K> {
     /// synchronization.
     fn hit(&self, slot: Slot, state: &Self::SlotState);
 
+    /// Records a hit while the cache is exclusively borrowed.
+    ///
+    /// Unlike [Self::hit], this method may update policy metadata directly
+    /// without synchronization.
+    fn hit_mut(&mut self, slot: Slot, state: &mut Self::SlotState);
+
     /// Inserts `key` after a confirmed cache miss.
     ///
     /// `states` provides policy state indexed by [Slot]. `has_vacancy` reports
@@ -203,7 +208,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
         Self {
             index: HashMap::with_capacity_and_hasher(capacity, Hasher::default()),
             slots: Vec::with_capacity(capacity),
-            free: Vec::with_capacity(capacity),
+            free: Vec::new(),
             capacity,
             policy,
         }
@@ -281,7 +286,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         let &index = self.index.get(key)?;
         let slot = &mut self.slots[index];
-        self.policy.hit(index, &slot.state);
+        self.policy.hit_mut(index, &mut slot.state);
         Some(&mut slot.value)
     }
 
@@ -293,7 +298,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     pub fn put(&mut self, key: K, value: V) -> Option<V> {
         if let Some(&index) = self.index.get(&key) {
             let slot = &mut self.slots[index];
-            self.policy.hit(index, &slot.state);
+            self.policy.hit_mut(index, &mut slot.state);
             return Some(core::mem::replace(&mut slot.value, value));
         }
         self.insert_value(key, value);
@@ -309,7 +314,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     pub fn get_or_insert_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &V {
         let slot = match self.index.get(&key) {
             Some(&slot) => {
-                self.policy.hit(slot, &self.slots[slot].state);
+                self.policy.hit_mut(slot, &mut self.slots[slot].state);
                 slot
             }
             None => self.insert_value(key, f()),
@@ -330,7 +335,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     ) -> Result<&V, E> {
         let slot = match self.index.get(&key) {
             Some(&slot) => {
-                self.policy.hit(slot, &self.slots[slot].state);
+                self.policy.hit_mut(slot, &mut self.slots[slot].state);
                 slot
             }
             None => self.insert_value(key, f()?),
@@ -353,7 +358,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// [Self::get_at] instead of a hash lookup.
     pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> (Slot, &mut V) {
         if let Some(&slot) = self.index.get(&key) {
-            self.policy.hit(slot, &self.slots[slot].state);
+            self.policy.hit_mut(slot, &mut self.slots[slot].state);
             return (slot, &mut self.slots[slot].value);
         }
         let mut value = None;
@@ -372,37 +377,40 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// The slot and its allocation are retained for reuse, so the value is not
     /// returned.
     pub fn remove(&mut self, key: &K) -> bool {
-        let Some((key, slot)) = self.index.remove_entry(key) else {
-            self.policy.remove(None, key);
-            return false;
-        };
-        self.policy.remove(Some(slot), &key);
-        self.slots[slot].live = false;
-        self.free.push(slot);
-        true
+        match self.index.remove(key) {
+            Some(slot) => {
+                self.policy.remove(Some(slot), key);
+                self.slots[slot].live = false;
+                self.free.push(slot);
+                true
+            }
+            None => {
+                self.policy.remove(None, key);
+                false
+            }
+        }
     }
 
     /// Retains only the entries for which `keep` returns `true`.
     ///
     /// Dropped entries' slots and allocations are retained for reuse.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
-        for slot in 0..self.slots.len() {
-            let remove = {
-                let resident = &self.slots[slot];
-                resident.live && !keep(&resident.key, &resident.value)
-            };
-            if !remove {
-                continue;
+        let Self {
+            index,
+            slots,
+            free,
+            policy,
+            ..
+        } = self;
+        index.retain(|key, &mut slot| {
+            let keep = keep(key, &slots[slot].value);
+            if !keep {
+                policy.remove(Some(slot), key);
+                slots[slot].live = false;
+                free.push(slot);
             }
-            let key = self
-                .index
-                .remove_entry(&self.slots[slot].key)
-                .expect("a live slot must be indexed")
-                .0;
-            self.policy.remove(Some(slot), &key);
-            self.slots[slot].live = false;
-            self.free.push(slot);
-        }
+            keep
+        });
     }
 
     /// Retains resident entries and policy history accepted by `keep`.
@@ -410,24 +418,23 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// This key-only form is useful when nonresident admission history must be
     /// invalidated by the same predicate as resident entries.
     pub fn retain_keys<F: FnMut(&K) -> bool>(&mut self, mut keep: F) {
-        for slot in 0..self.slots.len() {
-            let remove = {
-                let resident = &self.slots[slot];
-                resident.live && !keep(&resident.key)
-            };
-            if !remove {
-                continue;
+        let Self {
+            index,
+            slots,
+            free,
+            policy,
+            ..
+        } = self;
+        index.retain(|key, &mut slot| {
+            let keep = keep(key);
+            if !keep {
+                policy.remove(Some(slot), key);
+                slots[slot].live = false;
+                free.push(slot);
             }
-            let key = self
-                .index
-                .remove_entry(&self.slots[slot].key)
-                .expect("a live slot must be indexed")
-                .0;
-            self.policy.remove(Some(slot), &key);
-            self.slots[slot].live = false;
-            self.free.push(slot);
-        }
-        self.policy.retain(keep);
+            keep
+        });
+        policy.retain(keep);
     }
 
     /// Removes all entries, dropping their values and retaining the allocated
@@ -440,14 +447,12 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     }
 
     /// Inserts `value` for a `key` known to be absent, returning its slot.
-    #[inline(always)]
     fn insert_value(&mut self, key: K, value: V) -> Slot {
         let (slot, state) = self.claim_slot(&key, |_| {});
         self.install(slot, key, state, Some(value));
         slot
     }
 
-    #[inline(always)]
     fn install(&mut self, slot: Slot, key: K, state: P::SlotState, value: Option<V>) {
         let index_key = key.clone();
         if slot == self.slots.len() {
@@ -476,7 +481,6 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
 
     /// Claims storage for an incoming key and returns its slot and initial
     /// policy state. `on_claim` runs before the policy observes the result.
-    #[inline(always)]
     fn claim_slot<F: FnOnce(bool)>(&mut self, key: &K, on_claim: F) -> (Slot, P::SlotState) {
         let Self {
             index,
@@ -545,6 +549,15 @@ where
     }
 }
 
+impl<K, V> core::fmt::Debug for Cache<K, V, Clock> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Cache")
+            .field("len", &self.index.len())
+            .field("capacity", &self.capacity)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +583,8 @@ mod tests {
         }
 
         fn hit(&self, _slot: Slot, _state: &()) {}
+
+        fn hit_mut(&mut self, _slot: Slot, _state: &mut ()) {}
 
         fn insert<I, C>(&mut self, _states: &I, _key: &K, has_vacancy: bool, claim: C)
         where
@@ -942,6 +957,8 @@ mod tests {
 
         fn hit(&self, _slot: Slot, _state: &()) {}
 
+        fn hit_mut(&mut self, _slot: Slot, _state: &mut ()) {}
+
         fn insert<I, C>(&mut self, _states: &I, _key: &u64, has_vacancy: bool, claim: C)
         where
             I: Index<Slot, Output = ()>,
@@ -1047,7 +1064,7 @@ mod tests {
             prefill in any::<bool>(),
             ops in proptest::collection::vec(op_strategy(), 0..256),
         ) {
-            let mut cache = TestCache::new(NonZeroUsize::new(capacity).unwrap());
+            let mut cache: Cache<u8, u16> = Cache::new(NonZeroUsize::new(capacity).unwrap());
             if prefill {
                 cache.prefill(|| 0u16);
             }
