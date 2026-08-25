@@ -151,6 +151,8 @@ jobs:
     - name: Check oversized --inflight is rejected
       run: |
         set -euo pipefail
+        # 16,385 is the first rejected value: doubling it rounds above
+        # MAX_RING_SIZE (32,768).
         out=$(cargo bench -p commonware-runtime --bench storage --features iouring -- \
           --workload read_rand --file-size 4096 --cache warm --inflight 16385 2>&1) \
           && { echo "expected validation failure"; exit 1; } || true

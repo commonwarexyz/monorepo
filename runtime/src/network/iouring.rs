@@ -7,6 +7,20 @@
 //! to the event loop that services the ring, which the `iouring` runtime drives on the runtime
 //! thread. Socket creation and bind are cheap non-blocking syscalls performed inline.
 //!
+//! Each worker owns the handle used by its network backend and by the resources
+//! that backend creates:
+//!
+//! ```text
+//! worker -> Network -> Listener/Sink/Stream -> worker's io_uring ring
+//! ```
+//!
+//! Use the network, its resources, and their in-flight operations on that worker.
+//! Socket creation, bind, and socket-option setup run synchronously on the
+//! calling worker. Connect, accept, and non-empty sends use the ring. A recv
+//! reaches the ring only when cached bytes cannot satisfy it. `local_addr` and
+//! `peek` only inspect cached state. Foreign drops of admitted operation and
+//! ticket state are routed to the owning worker.
+//!
 //! ## Memory Safety
 //!
 //! Buffers and file descriptors are owned by the active request state machine inside the io_uring
@@ -57,6 +71,7 @@ pub struct Config {
     /// Timeout for establishing an outbound TCP connection.
     ///
     /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
+    /// The runtime rejects values above its 30-year timer policy at startup.
     pub connect_timeout: Duration,
     /// Timeout budget applied to each top-level send/recv call and to each
     /// in-flight accept (which is transparently reissued on expiry).
@@ -64,6 +79,7 @@ pub struct Config {
     /// This is a network-level policy and is independent from io_uring loop
     /// tuning. The runtime raises the loop timeout horizon as needed so this
     /// value is never clamped by the ring's `max_request_timeout`.
+    /// Values above the runtime's 30-year timer policy are rejected at startup.
     pub read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///

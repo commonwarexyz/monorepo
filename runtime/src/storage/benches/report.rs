@@ -1,4 +1,10 @@
 //! Statistics collection and reporting.
+//!
+//! Reports show settings effective for the selected backend. Human-readable
+//! output uses `n/a` for a setting that does not apply, and `default` when
+//! Tokio's optional global queue interval was not supplied. JSON uses `null`
+//! for optional or non-applicable values. A missing Tokio interval is therefore
+//! `null` even though Tokio uses its built-in default.
 
 use crate::{
     config::{Config, Workload},

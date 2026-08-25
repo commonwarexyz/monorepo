@@ -129,11 +129,11 @@ impl fmt::Display for SyncMode {
     }
 }
 
-/// Runtime settings that are actually applied by the selected backend.
+/// Tokio settings applied by the selected backend.
 pub(crate) struct EffectiveRuntimeConfig {
-    /// Applied Tokio worker count, or None for io_uring.
+    /// Applied worker count.
     pub(crate) worker_threads: Option<usize>,
-    /// Applied Tokio global queue interval, or None when unset or unsupported.
+    /// Applied global queue interval.
     pub(crate) global_queue_interval: Option<u32>,
 }
 
@@ -159,11 +159,13 @@ pub struct Config {
     #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
     pub io_size: usize,
 
-    /// Parallel worker count for steady-state workloads.
+    /// Number of parallel readers or writers. `read_write_append` adds one
+    /// writer to this many readers, while `write_append` requires one.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
     pub inflight: usize,
 
-    /// Tokio worker thread count for the benchmark runtime.
+    /// Tokio worker thread count for the benchmark runtime. Ignored by the
+    /// io_uring backend, which runs one runtime worker.
     #[arg(
         long,
         default_value_t = default_worker_threads(),
@@ -171,7 +173,8 @@ pub struct Config {
     )]
     pub worker_threads: usize,
 
-    /// Tokio scheduler ticks between global queue polls.
+    /// Tokio scheduler ticks between global queue polls. Ignored by the
+    /// io_uring backend.
     #[arg(long, value_parser = value_parser!(u32))]
     pub global_queue_interval: Option<u32>,
 
@@ -231,7 +234,13 @@ impl Config {
         Duration::from_secs(self.duration)
     }
 
-    /// Return the settings applied by the runtime backend selected at build time.
+    /// Return the Tokio settings applied by the selected backend.
+    ///
+    /// For Tokio, `worker_threads` is always set and
+    /// `global_queue_interval` is set only when explicitly configured. A
+    /// missing Tokio interval means that Tokio uses its own default. For
+    /// io_uring, both values are `None` because these Tokio-only settings are
+    /// ignored.
     pub(crate) const fn effective_runtime_config(&self) -> EffectiveRuntimeConfig {
         if cfg!(all(target_os = "linux", feature = "iouring")) {
             EffectiveRuntimeConfig {

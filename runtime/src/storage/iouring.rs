@@ -7,6 +7,17 @@
 //! while op futures are polled on the runtime thread, and the `iouring` runtime's
 //! event loop submits them to the ring and parks their results.
 //!
+//! Each worker owns the handle used by its storage backend and by the blobs it
+//! opens:
+//!
+//! ```text
+//! worker -> Storage::open_versioned -> Blob -> worker's io_uring ring
+//! ```
+//!
+//! Use a blob and its in-flight operations on the worker that opened it. See
+//! [Blocking Metadata Operations](#blocking-metadata-operations) for synchronous
+//! paths and [`Blob`] for its I/O behavior.
+//!
 //! ## Memory Safety
 //!
 //! Buffers and file descriptors are owned by the active request state machine inside the io_uring
@@ -87,12 +98,12 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 
 /// io_uring implementation of [crate::Storage].
 ///
-/// Bound to the worker whose ring services it: blobs it opens must be used
-/// on that worker (see the [worker affinity](crate::iouring#worker-affinity)
-/// rules). Metadata operations (`open`, `remove`, `scan`) run synchronously
-/// on the calling worker under a runtime-wide lock and therefore block its
-/// event loop (see the [module docs](self) for the blocking rules and
-/// lifecycle).
+/// Its `open_versioned` method is associated with the worker whose ring
+/// services it, and blobs it opens must be used on that worker (see the
+/// [worker affinity](crate::iouring#worker-affinity) rules). Metadata operations
+/// (`open`, `remove`, `scan`) run synchronously on the calling worker under a
+/// runtime-wide lock and therefore block its event loop (see the [module docs](self)
+/// for the blocking rules and lifecycle).
 #[derive(Clone)]
 pub struct Storage {
     lock: Arc<Mutex<()>>,
@@ -261,9 +272,10 @@ impl crate::Storage for Storage {
 ///
 /// Bound to the worker whose ring services it: using it from another worker
 /// panics (see the [worker affinity](crate::iouring#worker-affinity) rules).
-/// Reads, writes, and syncs go through the ring, while [crate::Blob::resize]
-/// runs a synchronous `set_len` that blocks the calling worker (see the
-/// [module docs](self) for the blocking rules and lifecycle).
+/// Non-empty reads, writes, and syncs go through the ring. Empty reads and
+/// writes complete locally. [crate::Blob::resize] runs a synchronous `set_len`
+/// that blocks the calling worker (see the [module docs](self) for the blocking
+/// rules and lifecycle).
 pub struct Blob {
     /// The partition this blob lives in
     partition: String,
