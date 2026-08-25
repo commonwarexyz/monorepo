@@ -97,9 +97,6 @@ impl<K> Policy<K> for Clock {
     fn remove(&mut self, _slot: Option<Slot>, _key: &K) {}
 
     #[inline]
-    fn retain<F: FnMut(&K) -> bool>(&mut self, _keep: F) {}
-
-    #[inline]
     fn clear(&mut self) {
         self.hand = 0;
     }
@@ -249,6 +246,9 @@ mod tests {
         for i in 0..64u64 {
             cache.put(i, i * 10);
         }
+        for entry in &mut cache.slots {
+            *entry.state.get_mut() = false;
+        }
 
         // Hits update only atomic reference bits, so shared readers can record
         // use concurrently.
@@ -264,9 +264,12 @@ mod tests {
                 });
             }
         });
-        for i in 0..64u64 {
-            assert_eq!(cache.get(&i).copied(), Some(i * 10));
-        }
+        assert!(
+            cache
+                .slots
+                .iter()
+                .all(|entry| entry.state.load(Ordering::Relaxed))
+        );
         cache.check_invariants();
     }
 }
