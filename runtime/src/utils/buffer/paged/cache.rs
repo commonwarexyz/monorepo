@@ -15,7 +15,7 @@ use std::{
     num::{NonZeroU16, NonZeroUsize},
     pin::Pin,
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -385,9 +385,10 @@ impl CacheRef {
                     .ok_or(Error::OffsetOverflow)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // Completion may cache or remove only the fetch generations installed below. The owners
-        // become available before polling without making the shared physical future self-referential.
-        let fetch_owners = Arc::new(OnceLock::<Vec<PageFetch>>::new());
+        // Completion may cache or remove only the fetch generations installed below. Weak
+        // references identify those generations without making the shared physical future own
+        // the page futures that depend on it.
+        let fetch_owners = Arc::new(OnceLock::<Vec<Weak<PageFetchFuture>>>::new());
         let completion_owners = Arc::clone(&fetch_owners);
         let completion_keys = keys.clone();
         let cache_ref = Arc::clone(&self.cache);
@@ -422,10 +423,13 @@ impl CacheRef {
                 .expect("bulk fetch owners are installed before polling");
             let mut cache = cache_ref.write();
             for (index, (key, owner)) in completion_keys.iter().zip(owners).enumerate() {
+                let Some(owner) = owner.upgrade() else {
+                    continue;
+                };
                 let current = cache
                     .page_fetches
                     .get(key)
-                    .is_some_and(|entry| Arc::ptr_eq(&entry.fetch, owner));
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.fetch, &owner));
                 if !current {
                     continue;
                 }
@@ -466,7 +470,7 @@ impl CacheRef {
                             waiters: 1,
                         },
                     );
-                    owners.push(Arc::clone(&fetch));
+                    owners.push(Arc::downgrade(&fetch));
                     fetches.push(fetch_future);
                     fetch_guards.push(PageFetchGuard::new(Arc::clone(&self.cache), key, fetch));
                 }
@@ -817,6 +821,7 @@ mod tests {
     #[derive(Clone)]
     struct BlockingBlob {
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        _lifetime: Arc<()>,
     }
 
     impl Blob for BlockingBlob {
@@ -1252,8 +1257,11 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             const PAGES: usize = 3;
             let (started_tx, started_rx) = oneshot::channel();
+            let lifetime = Arc::new(());
+            let weak_lifetime = Arc::downgrade(&lifetime);
             let blob = BlockingBlob {
                 started: Arc::new(Mutex::new(Some(started_tx))),
+                _lifetime: lifetime,
             };
             let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGES));
             let task_cache = cache.clone();
@@ -1267,6 +1275,7 @@ mod tests {
             task.abort();
             assert!(matches!(task.await, Err(Error::Closed)));
             assert!(cache.cache.read().page_fetches.is_empty());
+            assert!(weak_lifetime.upgrade().is_none());
         });
     }
 
@@ -1421,6 +1430,7 @@ mod tests {
             let (started_tx, started_rx) = oneshot::channel();
             let blob = BlockingBlob {
                 started: Arc::new(Mutex::new(Some(started_tx))),
+                _lifetime: Arc::new(()),
             };
             let mut read_buf = vec![0u8; PAGE_SIZE.get() as usize];
 
