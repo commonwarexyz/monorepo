@@ -100,17 +100,18 @@ impl Drop for PageFetchGuard {
 /// construction.
 ///
 /// Reads first resolve pages through `hints`, a fixed-size direct-mapped array from
-/// [Self::hint_index] to the cache slot the page was last cached in: a lookup is one array load
-/// instead of a hash-table probe chain, which the out-of-order core cannot overlap across items.
-/// Hints are best-effort, never truth: [cache::Cache::get_at] only resolves a slot that still holds
-/// the page's key live, so entries staled by eviction, invalidation, or hint collisions read as
-/// misses and fall back to the cache's own lookup. Hints need no maintenance on eviction or
-/// invalidation, and their memory is fixed at construction, so no blob offset can grow them.
+/// [Self::hint_index] to the [cache::Cache] slot the page was last cached in: a lookup is one array
+/// load instead of a hash-table probe chain, which the out-of-order core cannot overlap across
+/// items. Hints are best-effort, never truth: [cache::Cache::get_at] only resolves a slot that
+/// still holds the page's key live, so entries staled by eviction, invalidation, or hint collisions
+/// read as misses and fall back to the [cache::Cache]'s own lookup. Hints need no maintenance on
+/// eviction or invalidation, and their memory is fixed at construction, so no blob offset can grow
+/// them.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
     cache: cache::Cache<(u64, u64), IoBufMut>,
 
-    /// Direct-mapped cache slot hints, indexed by [Self::hint_index]. Initialized
+    /// Direct-mapped [cache::Cache] slot hints, indexed by [Self::hint_index]. Initialized
     /// out-of-range so untouched entries read as misses. The length is a power of two so
     /// [Self::hint_index] can wrap with a mask instead of a division, and at least twice the
     /// cache capacity: a full cache has one live page per `capacity`, so sizing at capacity
@@ -545,7 +546,7 @@ impl Cache {
         (salted & (self.hints.len() as u64 - 1)) as usize
     }
 
-    /// Look up a page, preferring its direct-mapped slot hint over the cache's own lookup.
+    /// Look up a page, preferring its direct-mapped slot hint over the [cache::Cache]'s own lookup.
     #[inline]
     fn get_page(&self, blob_id: u64, page_num: u64) -> Option<&IoBufMut> {
         let key = (blob_id, page_num);
@@ -1458,9 +1459,9 @@ mod tests {
     #[test_traced]
     fn test_read_cached_many_cross_blob_hint_collision() {
         // Two blobs whose salted ranges overlap share a hint entry, and the later insert
-        // overwrites the earlier blob's hint. The hint only proposes a slot: [cache::Cache::get_at]
-        // validates the full (blob, page) key, so each blob reads back its own bytes (the
-        // clobbered one through the fallback lookup), never the other's.
+        // overwrites the earlier blob's hint. The hint only proposes a [cache::Cache] slot.
+        // [cache::Cache::get_at] validates the full (blob, page) key, so each blob reads back its
+        // own bytes (the clobbered one through the fallback lookup), never the other's.
         let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
         let blob_a = cache_ref.next_id();
