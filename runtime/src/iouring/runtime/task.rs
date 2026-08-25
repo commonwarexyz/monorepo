@@ -1,7 +1,7 @@
 //! Task machinery for the io_uring runtime executor.
 //!
 //! A spawned task is one [TaskCell] allocation: the concrete future stored
-//! inline, the identity behind a raw-vtable waker sharing that allocation,
+//! inline, the identity behind an `ArcWake` waker sharing that allocation,
 //! and a queued latch that coalesces repeated wakes into one ready-queue
 //! entry. Polling crosses a single type-erased boundary ([Erased]) so the
 //! compiler sees the concrete future type inside the monomorphized cell.
@@ -15,19 +15,19 @@
 // In scope for the intra-doc links in this module's documentation.
 #[allow(unused_imports)]
 use super::Executor;
-use crate::iouring::driver::{Affine, waker::Waker as RingWaker};
+use crate::iouring::driver::{waker::Waker as RingWaker, Affine};
 #[allow(unused_imports)]
 use crate::{Error, Handle};
 use commonware_utils::sync::Mutex;
-use futures::task::{ArcWake, waker};
+use futures::task::{waker, ArcWake};
 use std::{
     cell::RefCell,
     future::Future,
-    mem::{ManuallyDrop, swap, take},
+    mem::{swap, take},
     pin::Pin,
     sync::{
-        Arc, Weak,
         atomic::{AtomicBool, Ordering},
+        Arc, Weak,
     },
     task::{self, Poll},
     thread::{self, ThreadId},
@@ -53,7 +53,7 @@ pub(super) trait Erased: Send + Sync {
 }
 
 /// A spawned task: one allocation holding the concrete future and the
-/// identity behind its raw-vtable waker. Results reach the task's handle
+/// identity behind its `ArcWake` waker. Results reach the task's handle
 /// through the wrapper built by [Handle::init], not through the cell.
 struct TaskCell<F>
 where
@@ -85,49 +85,14 @@ impl<F> TaskCell<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    /// Waker vtable sharing the task's own allocation: cloning bumps the
-    /// task's strong count and waking enqueues the task pointer directly, so
-    /// wakes carry no id and polls need no registry lookup.
-    const VTABLE: task::RawWakerVTable = task::RawWakerVTable::new(
-        Self::waker_clone,
-        Self::waker_wake,
-        Self::waker_wake_by_ref,
-        Self::waker_drop,
-    );
-
     /// Manufacture a waker backed by this task's allocation.
     ///
-    /// Waker identity is (data pointer, vtable), both stable for the task's
-    /// lifetime, so every poll presents an identical waker and
-    /// `Waker::will_wake` fast paths (e.g. the driver's slot refreshes) hold.
+    /// The `ArcWake` adapter uses the task's allocation as its data pointer
+    /// and a type-specific static vtable, so every poll presents an identical
+    /// waker and `Waker::will_wake` fast paths (e.g. the driver's slot
+    /// refreshes) hold.
     fn waker(self: &Arc<Self>) -> task::Waker {
-        let ptr = Arc::into_raw(Arc::clone(self)).cast::<()>();
-        // SAFETY: the vtable functions uphold the RawWaker contract over the
-        // Arc reference encoded in `ptr`.
-        unsafe { task::Waker::from_raw(task::RawWaker::new(ptr, &Self::VTABLE)) }
-    }
-
-    unsafe fn waker_clone(ptr: *const ()) -> task::RawWaker {
-        // SAFETY: `ptr` encodes an Arc<Self> reference from [Self::waker].
-        unsafe { Arc::increment_strong_count(ptr.cast::<Self>()) };
-        task::RawWaker::new(ptr, &Self::VTABLE)
-    }
-
-    unsafe fn waker_wake(ptr: *const ()) {
-        // SAFETY: consumes the waker's Arc reference.
-        let cell = unsafe { Arc::from_raw(ptr.cast::<Self>()) };
-        cell.enqueue();
-    }
-
-    unsafe fn waker_wake_by_ref(ptr: *const ()) {
-        // SAFETY: borrows the waker's Arc reference without consuming it.
-        let cell = unsafe { ManuallyDrop::new(Arc::from_raw(ptr.cast::<Self>())) };
-        cell.enqueue();
-    }
-
-    unsafe fn waker_drop(ptr: *const ()) {
-        // SAFETY: releases the waker's Arc reference.
-        drop(unsafe { Arc::from_raw(ptr.cast::<Self>()) });
+        waker(Arc::clone(self))
     }
 
     /// Re-enqueue this task for polling.
@@ -142,6 +107,15 @@ where
         if let Some(tasks) = self.tasks.upgrade() {
             tasks.queue(Arc::clone(self) as Arc<dyn Erased>);
         }
+    }
+}
+
+impl<F> ArcWake for TaskCell<F>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.enqueue();
     }
 }
 
@@ -381,6 +355,26 @@ mod tests {
     use crate::{Clock as _, Runner as _, Spawner as _, Supervisor as _};
     use commonware_utils::channel::oneshot;
     use std::{task::Waker, time::Duration};
+
+    /// Separately constructed wakers for one task must retain the task's
+    /// pointer identity so callers can use `Waker::will_wake`.
+    #[test]
+    fn test_task_wakers_will_wake_same_cell() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        let cell = Arc::new(TaskCell {
+            slot: 0,
+            tasks: Arc::downgrade(&tasks),
+            queued: AtomicBool::new(true),
+            future: Affine::pinned(
+                std::thread::current().id(),
+                RefCell::new(Some(std::future::pending::<()>())),
+            ),
+        });
+
+        let first = cell.waker();
+        let second = cell.waker();
+        assert!(first.will_wake(&second));
+    }
 
     /// Repeated wakes of the same task before its next poll must coalesce
     /// into one ready-queue entry: unguarded pushes let a legal
