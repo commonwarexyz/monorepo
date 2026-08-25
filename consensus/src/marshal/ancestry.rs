@@ -299,8 +299,8 @@ impl<D: Digest> ExpectedParent<D> {
     }
 }
 
-// Builds a parent fetch that records successful fetch latency and validates the
-// expected relationship before returning the parent.
+// Builds a parent fetch that records latency when a parent arrives. The fetch
+// returns only a parent with the expected height and digest.
 fn timed_parent_fetch<C, M>(
     clock: &Arc<C>,
     marshal: &M,
@@ -744,8 +744,7 @@ mod test {
     #[test]
     fn test_ends_on_immediate_bad_grandparent_after_delayed_parent() {
         deterministic::Runner::default().start(|context| async move {
-            let expected_grandparent =
-                TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
+            let expected_grandparent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
             let wrong_grandparent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 1);
             let parent = TestBlock::new(expected_grandparent.digest(), Height::new(1), 2);
             let child = TestBlock::new(parent.digest(), Height::new(2), 3);

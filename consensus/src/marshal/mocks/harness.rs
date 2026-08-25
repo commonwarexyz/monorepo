@@ -3984,8 +3984,8 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
     });
 }
 
-/// A commitment-fetched block above the local height hint must wake subscribers
-/// without being admitted to a farther-future cache epoch.
+/// A commitment-fetched block above the local height hint wakes subscribers but
+/// is not cached.
 pub fn commitment_fetch_height_above_hint_not_cached<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
