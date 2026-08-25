@@ -875,23 +875,14 @@ pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
     if cfg.io_poll {
         builder = builder.setup_iopoll();
     }
-    if cfg.single_issuer {
-        builder = builder.setup_single_issuer();
-        // Enable `DEFER_TASKRUN` to defer work processing until `io_uring_enter` is
-        // called with `IORING_ENTER_GETEVENTS`. By default, io_uring processes work at
-        // the end of any system call or thread interrupt, which can delay application
-        // progress. With `DEFER_TASKRUN`, completions are only processed when explicitly
-        // requested, reducing overhead and improving CPU cache locality.
-        //
-        // This is safe in our implementation since we eventually call `submit_and_wait()`
-        // (which sets `IORING_ENTER_GETEVENTS`) even on the wake fast-path, and we are
-        // also enabling `IORING_SETUP_SINGLE_ISSUER` here, which is a pre-requisite.
-        //
-        // This is available since kernel 6.1.
-        //
-        // See IORING_SETUP_DEFER_TASKRUN in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
-        builder = builder.setup_defer_taskrun();
-    }
+    // Every ring is created and submitted by one worker thread. SINGLE_ISSUER
+    // records that invariant for the kernel, while DEFER_TASKRUN processes
+    // completions only during io_uring_enter calls with GETEVENTS. Every turn,
+    // including the wake fast path, eventually makes such a call.
+    //
+    // DEFER_TASKRUN requires SINGLE_ISSUER and both flags require Linux 6.1.
+    builder = builder.setup_single_issuer();
+    builder = builder.setup_defer_taskrun();
 
     builder.build(cfg.size)
 }
@@ -1010,11 +1001,7 @@ pub(crate) mod testing {
     }
 
     impl TestLoop {
-        pub(crate) fn new(mut cfg: RingConfig) -> Self {
-            // Mirror the runtime's startup behavior: production always runs
-            // with single issuer (and thus deferred task running), so the
-            // harness must exercise the same completion-delivery mode.
-            cfg.single_issuer = true;
+        pub(crate) fn new(cfg: RingConfig) -> Self {
             let mut registry = Registry::default();
             let (driver, handle) =
                 Driver::new(cfg, &mut registry).expect("unable to create io_uring instance");
@@ -3602,14 +3589,10 @@ mod tests {
     }
 
     #[test]
-    fn test_single_issuer_ring_construction() {
-        // Verify the single-issuer + defer-taskrun configuration constructs on
-        // the calling thread (the runtime always enables it).
-        let cfg = RingConfig {
-            single_issuer: true,
-            ..Default::default()
-        };
-        let ring = new_ring(&cfg).expect("single issuer ring should construct");
+    fn test_required_ring_flags_construct() {
+        // The runtime cannot operate without single-issuer and deferred
+        // task-run mode, so every RingConfig must exercise both flags.
+        let ring = new_ring(&RingConfig::default()).expect("required ring flags should construct");
         drop(ring);
     }
 }

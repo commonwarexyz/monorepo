@@ -141,8 +141,8 @@ pub struct Config {
     /// One ring serves all storage and network I/O, so its `size` bounds the
     /// number of concurrently in-flight logical operations (each in-flight
     /// send, recv, accept, connect, read, write, or sync consumes one slot).
-    /// `single_issuer` is always enabled by the runtime because the runtime
-    /// thread creates the ring and is its only submitter, and
+    /// The driver always enables single-issuer and deferred task-run modes
+    /// because the runtime thread creates the ring and is its only submitter.
     /// `max_request_timeout` is raised to at least `read_write_timeout` and
     /// `connect_timeout` so network deadlines are never clamped.
     ring: RingConfig,
@@ -194,8 +194,7 @@ impl Config {
     /// Sets the configuration for each worker's io_uring instance.
     ///
     /// The ring `size` bounds the number of concurrently in-flight logical
-    /// operations per worker. Defaults to a 1024-entry ring. Regardless of
-    /// the provided value, the runtime always enables `single_issuer` and
+    /// operations per worker. Defaults to a 1024-entry ring. The runtime
     /// raises `max_request_timeout` to cover both network timeouts.
     pub const fn with_ring(mut self, ring: RingConfig) -> Self {
         self.ring = ring;
@@ -633,10 +632,7 @@ impl Worker {
         let mut registry = shared.registry.clone();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
-        // The worker thread creates the ring and is its only submitter, so
-        // single issuer mode is always sound here.
         let mut ring_cfg = shared.cfg.ring.clone();
-        ring_cfg.single_issuer = true;
         ring_cfg.max_request_timeout = ring_cfg
             .max_request_timeout
             .max(shared.cfg.network_cfg.read_write_timeout)

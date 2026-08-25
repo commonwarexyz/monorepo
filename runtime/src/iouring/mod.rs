@@ -237,14 +237,6 @@ pub struct RingConfig {
     /// use, so the mode is honored by ring construction but not exercised end
     /// to end by the runtime.
     pub io_poll: bool,
-    /// If true, use single issuer mode.
-    /// Warning: when enabled, the same thread that creates the ring must be
-    /// the only thread that submits work to it.
-    ///
-    /// The runtime always enables this: the runtime thread creates the ring
-    /// and performs all ring submissions.
-    /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
-    pub single_issuer: bool,
     /// Maximum request timeout supported by the userspace timeout wheel.
     ///
     /// Deadlines are clamped to this horizon. This value should be set to the
@@ -294,7 +286,6 @@ impl Default for RingConfig {
         Self {
             size: 128,
             io_poll: false,
-            single_issuer: false,
             max_request_timeout: Duration::from_secs(60),
             shutdown_timeout: None,
             timeout_wheel_tick: Duration::from_millis(5),
