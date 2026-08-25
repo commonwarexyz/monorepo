@@ -323,9 +323,9 @@ pub struct Listener {
     /// In-flight accept, retained so a cancelled accept future resumes the
     /// same request instead of losing an accepted connection.
     ///
-    /// A connection accepted between `accept` calls parks in the ticket's
-    /// waiter slot (holding its fd and the slot) until the next call takes it
-    /// or the listener drops.
+    /// A connection accepted between `accept` calls moves into the ticket's
+    /// Ready completion entry until the next call takes it or the listener
+    /// drops. The request's waiter slot is already free at that point.
     pending: Option<iouring::AcceptTicket>,
 }
 

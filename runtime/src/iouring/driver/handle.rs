@@ -12,8 +12,10 @@
 //!
 //! Op futures ([Op]) stage requests by inserting into the slab and pushing
 //! onto the backlog during `poll`. The loop builds and submits SQEs in
-//! its own turn, parks terminal results in the slot, and wakes the stored
-//! task waker. Dropping an op future orphans its slot: cancelable kinds are
+//! its own turn, parks ordinary op results in the slot, and wakes the stored
+//! task waker. Detached ticket results move to an independently generational
+//! completion arena before their waiter is recycled. Dropping an op future
+//! orphans its slot: cancelable kinds are
 //! async-cancelled eagerly, while storage writes and syncs detach and keep
 //! running for durability parity with the tokio backend. Dropping an admitted
 //! op future or a [Ticket] (including one held inside a front-end object such
@@ -30,7 +32,9 @@ use super::{
         ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest,
         WriteAtState,
     },
-    waiter::{DropOutcome, WaiterId, Waiters},
+    waiter::{
+        CompletionDropOutcome, CompletionId, DropOutcome, TicketCompletions, WaiterId, Waiters,
+    },
     waker::Waker as RingWaker,
 };
 use crate::{Error, IoBufMut, IoBufs, WriteOptions};
@@ -107,6 +111,10 @@ pub(crate) struct Ops {
     /// Slot table tracking every admitted logical request. Slots own all
     /// operation resources (buffers, FDs) for the request lifetime.
     pub(super) waiters: Waiters,
+    /// Detached ticket state. Pending entries point to an active waiter,
+    /// while Ready entries own userspace-only output after that waiter has
+    /// already been recycled.
+    pub(super) completions: TicketCompletions,
     /// Waiter ids whose next SQE the loop must build, in FIFO order. Fresh
     /// admissions and requeued partial operations share this queue.
     pub(super) backlog: VecDeque<WaiterId>,
@@ -120,6 +128,50 @@ pub(crate) struct Ops {
     pub(super) capacity: CapacityWaiters,
     /// Set at teardown: admission fails with the kind-specific error.
     pub(super) closed: bool,
+}
+
+impl Ops {
+    /// Aggregate logical operations for metric compatibility.
+    ///
+    /// Pending completion entries are represented by their active waiter and
+    /// are not counted again. Ready entries have no waiter and are added.
+    pub(super) const fn operation_count(&self) -> usize {
+        self.waiters.len() + self.completions.ready()
+    }
+}
+
+/// Deferred action for a task waker detached from owner state.
+pub(super) enum WakerAction {
+    /// Drop a stored waker after its owner state is disarmed.
+    Drop(Waker),
+    /// Invoke a waker after the state change it observes is committed.
+    Wake(Waker),
+}
+
+/// Run every detached waker action, then resume the first panic if any action
+/// panicked.
+///
+/// Capacity registrations are invalidated before their wakers leave [Ops]. A
+/// panic from an earlier callback must therefore not strand later callbacks
+/// that no longer have a live registration to retry from. Stored wakers can
+/// also run user RawWaker code on drop, so their destruction follows the same
+/// ordering and unwind isolation.
+pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
+    let mut first_panic = None;
+    for action in actions {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || match action {
+                WakerAction::Drop(waker) => drop(waker),
+                WakerAction::Wake(waker) => waker.wake(),
+            }))
+            && first_panic.is_none()
+        {
+            first_panic = Some(payload);
+        }
+    }
+    if let Some(payload) = first_panic {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 /// The capacity wait list: tasks parked until a waiter slot frees.
@@ -202,19 +254,19 @@ impl CapacityWaiters {
     ///
     /// This is the only wake-all path: every slot-free and close site funnels
     /// through it, so the epoch advances in exactly one place.
-    pub(super) fn drain_into(&mut self, wakers: &mut Vec<Waker>) {
+    pub(super) fn drain_into<T>(&mut self, wakers: &mut Vec<T>, mut wrap: impl FnMut(Waker) -> T) {
         self.epoch = self
             .epoch
             .checked_add(1)
             .expect("capacity epoch overflowed");
         self.free.clear();
-        wakers.extend(self.slots.drain(..).flatten());
+        wakers.extend(self.slots.drain(..).flatten().map(&mut wrap));
     }
 
     /// [Self::drain_into] into a fresh vector.
     fn drain(&mut self) -> Vec<Waker> {
         let mut wakers = Vec::new();
-        self.drain_into(&mut wakers);
+        self.drain_into(&mut wakers, std::convert::identity);
         wakers
     }
 
@@ -291,6 +343,9 @@ pub(crate) struct Handle {
 pub(super) enum Orphan {
     /// An admitted waiter whose future or ticket was dropped.
     Waiter(WaiterId),
+    /// A detached ticket dropped after admission. The completion entry owns
+    /// the waiter link while Pending and generation-validates foreign drops.
+    Completion(CompletionId),
     /// A capacity registration whose admission attempt was dropped while
     /// parked on a full slab (before any waiter existed).
     Capacity(CapacitySlot),
@@ -335,6 +390,7 @@ impl Handle {
         Self {
             ops: Arc::new(Affine::new(RefCell::new(Ops {
                 waiters: Waiters::new(capacity),
+                completions: TicketCompletions::new(),
                 backlog: VecDeque::with_capacity(capacity),
                 pending_cancels: VecDeque::with_capacity(capacity),
                 released_deadlines: Vec::new(),
@@ -581,11 +637,59 @@ fn poll_admission(
     }
 }
 
+/// Poll one detached-ticket admission attempt.
+///
+/// Closed and full handling matches ordinary op admission. Once capacity is
+/// available, the completion and waiter are bound under one op-state borrow,
+/// and the ticket receives only the independently generational completion ID.
+fn poll_ticket_admission(
+    handle: &Handle,
+    request: &mut Option<Request>,
+    registration: &mut Registration<'_>,
+    cx: &mut Context<'_>,
+) -> Poll<Result<CompletionId, Output>> {
+    let outcome = handle.with(|ops| {
+        if ops.closed {
+            if let Some(slot) = registration.slot.take() {
+                ops.capacity.cancel(slot);
+            }
+            return TicketAdmission::Closed;
+        }
+        if ops.waiters.is_full() {
+            ops.capacity.register(&mut registration.slot, cx.waker());
+            return TicketAdmission::Full;
+        }
+        if let Some(slot) = registration.slot.take() {
+            ops.capacity.cancel(slot);
+        }
+        let request = request.take().expect("request consumed before admission");
+        let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
+        let (completion_id, waiter_id) = completions
+            .insert_pending(cx.waker().clone(), |completion_id| {
+                waiters.insert_ticket(request, completion_id)
+            });
+        ops.backlog.push_back(waiter_id);
+        TicketAdmission::Admitted(completion_id)
+    });
+    match outcome {
+        TicketAdmission::Admitted(id) => Poll::Ready(Ok(id)),
+        TicketAdmission::Full => Poll::Pending,
+        TicketAdmission::Closed => {
+            let request = request.take().expect("request lost on closed driver");
+            Poll::Ready(Err(request.fail()))
+        }
+    }
+}
+
 /// Poll for the parked result of an admitted request.
 ///
 /// Taking a result frees a slot, so capacity waiters are released (outside
 /// the state borrow). A pending poll refreshes the stored task waker.
-fn poll_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<Output> {
+fn poll_op_completion(
+    handle: &Handle,
+    id: WaiterId,
+    cx: &mut Context<'_>,
+) -> Poll<(Output, Vec<Waker>)> {
     let (output, wakers) = handle.with(|ops| {
         let output = ops.waiters.poll_take(id, cx.waker());
         let wakers = if output.is_some() {
@@ -595,10 +699,14 @@ fn poll_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<
         };
         (output, wakers)
     });
-    for waker in wakers {
-        waker.wake();
-    }
-    output.map_or(Poll::Pending, Poll::Ready)
+    output.map_or(Poll::Pending, |output| Poll::Ready((output, wakers)))
+}
+
+/// Poll a detached ticket's completion entry.
+fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_>) -> Poll<Output> {
+    handle
+        .with(|ops| ops.completions.poll_take(id, cx.waker()))
+        .map_or(Poll::Pending, Poll::Ready)
 }
 
 /// Apply the orphan wind-down for `id` on the op table.
@@ -625,13 +733,27 @@ pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId) -> bool {
     }
 }
 
+/// Apply detached-ticket wind-down after generation-validating its completion
+/// ID. Pending entries yield their active waiter for request-kind-specific
+/// cancellation or detach. Ready entries drop only their output because the
+/// waiter was already recycled at terminal completion.
+pub(super) fn wind_down_ticket(ops: &mut Ops, id: CompletionId) -> (Option<Waker>, bool) {
+    match ops.completions.mark_orphaned(id) {
+        CompletionDropOutcome::Pending { waiter_id, waker } => {
+            let freed = wind_down_orphan(ops, waiter_id);
+            (waker, freed)
+        }
+        CompletionDropOutcome::Ready => (None, false),
+    }
+}
+
 /// Wind down an admitted request whose future or ticket is being dropped.
 ///
 /// Drop must not panic, so a foreign-thread drop cannot touch the
 /// thread-affine table directly: it hands the id to the loop through the
 /// orphan mailbox instead, and the loop applies the same wind-down on its
 /// next turn.
-fn orphan(handle: &Handle, id: WaiterId) {
+fn orphan_waiter(handle: &Handle, id: WaiterId) {
     let Some(wakers) = handle.try_with(|ops| {
         if wind_down_orphan(ops, id) {
             ops.capacity.drain()
@@ -642,14 +764,40 @@ fn orphan(handle: &Handle, id: WaiterId) {
         handle.orphans.push(Orphan::Waiter(id));
         return;
     };
-    for waker in wakers {
-        waker.wake();
-    }
+    wake_batch(wakers.into_iter().map(WakerAction::Wake));
+}
+
+/// Wind down a detached ticket using only its completion ID.
+fn orphan_ticket(handle: &Handle, id: CompletionId) {
+    let Some((waker, wakers)) = handle.try_with(|ops| {
+        let (waker, freed) = wind_down_ticket(ops, id);
+        let wakers = if freed {
+            ops.capacity.drain()
+        } else {
+            Vec::new()
+        };
+        (waker, wakers)
+    }) else {
+        handle.orphans.push(Orphan::Completion(id));
+        return;
+    };
+    let actions = waker
+        .map(WakerAction::Drop)
+        .into_iter()
+        .chain(wakers.into_iter().map(WakerAction::Wake));
+    wake_batch(actions);
 }
 
 /// Outcome of one admission attempt.
 enum Admission {
     Admitted(WaiterId),
+    Full,
+    Closed,
+}
+
+/// Outcome of one detached-ticket admission attempt.
+enum TicketAdmission {
+    Admitted(CompletionId),
     Full,
     Closed,
 }
@@ -718,8 +866,9 @@ impl Future for Op<'_> {
                 }
             }
             OpState::Waiting(id) => {
-                let output = std::task::ready!(poll_completion(this.handle, *id, cx));
+                let (output, wakers) = std::task::ready!(poll_op_completion(this.handle, *id, cx));
                 this.state = OpState::Done;
+                wake_batch(wakers.into_iter().map(WakerAction::Wake));
                 Poll::Ready(output)
             }
             OpState::Done => panic!("io_uring op polled after completion"),
@@ -732,7 +881,7 @@ impl Drop for Op<'_> {
         // Queued: the request (and its buffers) drops with the future, nothing
         // reached the loop or the kernel. Done: nothing to release.
         if let OpState::Waiting(id) = self.state {
-            orphan(self.handle, id);
+            orphan_waiter(self.handle, id);
         }
     }
 }
@@ -743,8 +892,9 @@ impl Drop for Op<'_> {
 /// after admission, which keeps them `Sync` (requests own iovec scratch
 /// pointers) so the front-ends that retain them stay `Sync`.
 enum TicketState {
-    /// Admitted: the slot owns the request, the ticket holds the reservation.
-    Waiting(WaiterId),
+    /// Admitted: the completion entry links to the waiter while Pending and
+    /// owns the output after it becomes Ready.
+    Waiting(CompletionId),
     /// Admission failed on a closed driver: the failure output is parked
     /// locally for the next poll.
     Failed(Option<Output>),
@@ -754,8 +904,9 @@ enum TicketState {
 
 /// Detached completion handle for an admitted request.
 ///
-/// Owns a driver clone so it can outlive its front-end call. Dropping the
-/// ticket orphans the slot.
+/// Owns a driver clone so it can outlive its front-end call. Poll and drop use
+/// only the completion ID. A Pending drop winds down the linked waiter, while
+/// a Ready drop never addresses the already recycled waiter.
 struct Ticket {
     handle: Handle,
     state: TicketState,
@@ -769,7 +920,7 @@ impl Ticket {
         // while parked releases its capacity slot.
         let mut registration = Registration::new(handle);
         let state = std::future::poll_fn(|cx| {
-            poll_admission(handle, &mut request, &mut registration, cx).map(|admitted| {
+            poll_ticket_admission(handle, &mut request, &mut registration, cx).map(|admitted| {
                 match admitted {
                     Ok(id) => TicketState::Waiting(id),
                     Err(output) => TicketState::Failed(Some(output)),
@@ -791,7 +942,7 @@ impl Future for Ticket {
         let this = self.get_mut();
         match &mut this.state {
             TicketState::Waiting(id) => {
-                let output = std::task::ready!(poll_completion(&this.handle, *id, cx));
+                let output = std::task::ready!(poll_ticket_completion(&this.handle, *id, cx));
                 this.state = TicketState::Done;
                 Poll::Ready(output)
             }
@@ -808,7 +959,7 @@ impl Future for Ticket {
 impl Drop for Ticket {
     fn drop(&mut self) {
         if let TicketState::Waiting(id) = self.state {
-            orphan(&self.handle, id);
+            orphan_ticket(&self.handle, id);
         }
     }
 }

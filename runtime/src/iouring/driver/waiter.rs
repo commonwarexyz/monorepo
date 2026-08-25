@@ -1,9 +1,11 @@
 //! Waiter identity and lifecycle state for tracked io_uring requests.
 //!
-//! This module manages waiter IDs, request lifecycle transitions, and
-//! outstanding-operation tracking. It is the source of truth for which logical
-//! requests are still tracked, whether each currently has an operation SQE
-//! outstanding, and which terminal results are parked awaiting their ticket.
+//! This module manages independently generational waiter and ticket-completion
+//! IDs, request lifecycle transitions, and outstanding-operation tracking.
+//! Waiters own kernel-referenced request state only until terminal completion.
+//! Ordinary op results remain parked in their waiter, while detached ticket
+//! results move to [TicketCompletions] so their waiter slot can be recycled
+//! before the ticket is consumed.
 
 use super::{
     Tick, UserData,
@@ -97,6 +99,40 @@ impl WaiterId {
     }
 }
 
+/// Stable identity for a detached ticket's completion entry.
+///
+/// Completion generations are independent from waiter generations. A ticket
+/// keeps this ID after admission and never observes the waiter ID that carries
+/// its request through the kernel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompletionId {
+    index: u32,
+    generation: u32,
+}
+
+impl CompletionId {
+    /// Build a completion ID from its slot and generation.
+    const fn new(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+
+    /// Return the slot index.
+    const fn index(self) -> u32 {
+        self.index
+    }
+
+    /// Return the generation.
+    #[cfg(test)]
+    const fn generation(self) -> u32 {
+        self.generation
+    }
+
+    /// Advance the generation for a recycled completion slot.
+    const fn next_generation(self) -> Self {
+        Self::new(self.index, self.generation.wrapping_add(1))
+    }
+}
+
 /// Why a request's cancellation was requested.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CancelReason {
@@ -150,12 +186,43 @@ pub enum WaiterState {
 enum Lifecycle {
     /// The request is still progressing and owns all operation resources.
     Pending(Request),
-    /// The terminal result is parked until the owning ticket takes it.
+    /// The terminal result is parked until the owning ordinary op takes it.
     ///
     /// The kernel has fully retired the operation before this state is
     /// entered, so the buffers inside the output are exclusively
     /// userspace-owned again.
     Ready(Output),
+    /// A detached ticket's output has left the waiter and is ready to publish
+    /// in its completion entry.
+    ///
+    /// This state exists only while the driver holds the op-state borrow that
+    /// performs the terminal transition. The waiter is recycled before any
+    /// external waker can run.
+    TicketComplete,
+}
+
+/// Observer that owns the eventual result of a waiter.
+enum Observer {
+    /// An ordinary op future. Its waker stays with the waiter because its
+    /// result is consumed from that same slot.
+    Op(Option<Waker>),
+    /// A detached ticket. Its waker and terminal output live in the separate
+    /// completion arena.
+    Ticket(CompletionId),
+    /// The observer was dropped. Accept requests cancel, while sync requests
+    /// detach, according to the request's orphan policy.
+    Orphaned,
+}
+
+/// Non-orphaned terminal output after its waiter state is committed.
+enum FinishedOutput {
+    /// Output parked in an ordinary op waiter.
+    Op { waker: Option<Waker> },
+    /// Output leaving the waiter for a detached completion entry.
+    Ticket {
+        completion_id: CompletionId,
+        output: Output,
+    },
 }
 
 /// State for one tracked logical request.
@@ -166,13 +233,8 @@ struct Waiter {
     state: WaiterState,
     /// Whether the logical request currently has an operation SQE in flight.
     in_flight: bool,
-    /// Whether the owning ticket was dropped.
-    ///
-    /// Orphaned slots deliver no result: terminal outputs are dropped and the
-    /// slot is freed as soon as the kernel retires the operation.
-    orphaned: bool,
-    /// Waker of the task awaiting the ticket, refreshed on every poll.
-    waker: Option<Waker>,
+    /// Owner of the eventual output.
+    observer: Observer,
     /// Progress state and owned resources.
     lifecycle: Lifecycle,
 }
@@ -184,11 +246,21 @@ pub enum StageOutcome {
     /// (the observer sees timeout), local shutdown (the observer sees
     /// closed), and orphan retirement (no observer, the slot is freed).
     Complete {
-        /// Waker to invoke outside any state borrow, when a ticket still
+        /// Waker to invoke outside any state borrow, when an ordinary op still
         /// observes the parked result.
         waker: Option<Waker>,
-        /// Whether the slot was freed because the ticket was already dropped.
+        /// Whether the slot was freed because its observer was already dropped.
         freed: bool,
+    },
+    /// A detached ticket reached a terminal state without emitting an SQE.
+    /// Its output must be published before this waiter is recycled.
+    Ticket {
+        /// Waiter whose request reached the terminal state.
+        waiter_id: WaiterId,
+        /// Detached completion entry that receives the output.
+        completion_id: CompletionId,
+        /// Terminal request output.
+        output: Output,
     },
     /// The waiter is still active and produced an SQE for submission.
     Submit(SqueueEntry),
@@ -203,20 +275,34 @@ pub enum CompletionOutcome {
     Requeue(WaiterId),
     /// The logical request reached a terminal state.
     ///
-    /// The result was parked in the slot for the owning ticket, or dropped
-    /// (and the slot freed) when the ticket was already gone.
+    /// An ordinary op result was parked in its waiter, or an orphaned result
+    /// was dropped and its waiter freed.
     Complete {
-        /// Waker to invoke outside any state borrow, if a ticket is waiting.
+        /// Waker to invoke outside any state borrow, if an op is waiting.
         waker: Option<Waker>,
         /// Active deadline tracking to remove from the timeout wheel, when
         /// completion happened before cancellation was requested.
         target_tick: Option<Tick>,
-        /// Whether the slot was freed because the ticket was already dropped.
+        /// Whether the slot was freed because its observer was already dropped.
         freed: bool,
+    },
+    /// A detached ticket reached a terminal state.
+    ///
+    /// The driver publishes `output` into `completion_id`, removes timeout
+    /// accounting, and recycles `waiter_id` before invoking any waker.
+    Ticket {
+        /// Waiter whose kernel-owned request state is terminal.
+        waiter_id: WaiterId,
+        /// Detached completion entry that receives the output.
+        completion_id: CompletionId,
+        /// Terminal request output.
+        output: Output,
+        /// Active deadline tracking to remove from the timeout wheel.
+        target_tick: Option<Tick>,
     },
 }
 
-/// Outcome produced when a ticket is dropped.
+/// Outcome produced when a waiter's observer is dropped.
 pub enum DropOutcome {
     /// The parked result was dropped and the slot freed.
     Freed,
@@ -231,6 +317,206 @@ pub enum DropOutcome {
     /// The request keeps running to completion without an observer (storage
     /// writes and syncs preserve durability semantics on caller drop).
     Detached,
+}
+
+/// Outcome produced when a detached ticket is dropped.
+pub enum CompletionDropOutcome {
+    /// The request is still active in `waiter_id` and must follow its
+    /// request-kind-specific orphan path.
+    Pending {
+        /// Active waiter linked from the removed completion entry.
+        waiter_id: WaiterId,
+        /// Stored task waker to drop after waiter wind-down is committed.
+        waker: Option<Waker>,
+    },
+    /// The terminal output was dropped and the completion slot recycled.
+    Ready,
+}
+
+/// Lifecycle of a detached ticket completion.
+enum Completion {
+    /// The waiter still owns the active request.
+    Pending {
+        waiter_id: WaiterId,
+        waker: Option<Waker>,
+    },
+    /// Terminal userspace-owned output, independent from any waiter slot.
+    Ready(Output),
+}
+
+/// One detached ticket completion entry.
+struct TicketCompletion {
+    id: CompletionId,
+    completion: Completion,
+}
+
+/// Independently generational arena for detached ticket completions.
+///
+/// The arena grows only to its high-water mark. Dropped or consumed entries
+/// return to a free list and reuse their existing vector storage.
+pub struct TicketCompletions {
+    entries: Vec<Option<TicketCompletion>>,
+    free: Vec<CompletionId>,
+    ready: usize,
+}
+
+impl TicketCompletions {
+    /// Create an empty completion arena.
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            free: Vec::new(),
+            ready: 0,
+        }
+    }
+
+    /// Allocate a pending completion and admit its associated waiter.
+    ///
+    /// `insert_waiter` receives the completion ID before the waiter is
+    /// inserted, allowing the waiter to retain the reverse link without a
+    /// temporary partially initialized completion entry.
+    pub fn insert_pending(
+        &mut self,
+        waker: Waker,
+        insert_waiter: impl FnOnce(CompletionId) -> WaiterId,
+    ) -> (CompletionId, WaiterId) {
+        let id = self.free.last().copied().unwrap_or_else(|| {
+            let index = u32::try_from(self.entries.len()).expect("completion slot index overflow");
+            CompletionId::new(index, 0)
+        });
+        let waiter_id = insert_waiter(id);
+        let entry = TicketCompletion {
+            id,
+            completion: Completion::Pending {
+                waiter_id,
+                waker: Some(waker),
+            },
+        };
+        let index = id.index() as usize;
+        if index == self.entries.len() {
+            self.entries.push(Some(entry));
+        } else {
+            let recycled = self
+                .free
+                .pop()
+                .expect("reused completion missing from free list");
+            assert_eq!(recycled, id, "completion free list order changed");
+            let replaced = self.entries[index].replace(entry);
+            assert!(replaced.is_none(), "free completion slot still occupied");
+        }
+        (id, waiter_id)
+    }
+
+    /// Publish a ticket's terminal output and return its task waker.
+    ///
+    /// The associated waiter remains tracked until the caller has removed
+    /// deadline accounting. The caller then recycles it before invoking the
+    /// returned waker.
+    pub fn publish_ready(
+        &mut self,
+        completion_id: CompletionId,
+        waiter_id: WaiterId,
+        output: Output,
+    ) -> Option<Waker> {
+        let entry = self.entry_mut(completion_id, "publish_ready");
+        let Completion::Pending {
+            waiter_id: pending_waiter,
+            ..
+        } = &entry.completion
+        else {
+            panic!("publish_ready called for ready completion");
+        };
+        assert_eq!(
+            *pending_waiter, waiter_id,
+            "publish_ready called with wrong waiter id"
+        );
+        let Completion::Pending { waker, .. } =
+            std::mem::replace(&mut entry.completion, Completion::Ready(output))
+        else {
+            unreachable!("completion verified pending above");
+        };
+        self.ready += 1;
+        waker
+    }
+
+    /// Take a ready output, or refresh the pending ticket waker.
+    pub fn poll_take(&mut self, completion_id: CompletionId, waker: &Waker) -> Option<Output> {
+        let index = completion_id.index() as usize;
+        let entry = self.entry_mut(completion_id, "poll_take");
+        match &mut entry.completion {
+            Completion::Pending { waker: stored, .. } => {
+                match stored {
+                    Some(existing) => existing.clone_from(waker),
+                    None => *stored = Some(waker.clone()),
+                }
+                None
+            }
+            Completion::Ready(_) => {
+                let Completion::Ready(output) = self.take(index) else {
+                    unreachable!("completion verified ready above");
+                };
+                Some(output)
+            }
+        }
+    }
+
+    /// Remove a ticket's completion state and recycle its slot.
+    ///
+    /// A Pending entry returns its stored waker so the caller can first
+    /// commit the linked waiter's orphan transition, then drop the waker
+    /// outside the owner-state borrow.
+    pub fn mark_orphaned(&mut self, completion_id: CompletionId) -> CompletionDropOutcome {
+        let index = completion_id.index() as usize;
+        let _ = self.entry(completion_id, "mark_orphaned");
+        match self.take(index) {
+            Completion::Pending { waiter_id, waker } => {
+                CompletionDropOutcome::Pending { waiter_id, waker }
+            }
+            Completion::Ready(_) => CompletionDropOutcome::Ready,
+        }
+    }
+
+    /// Return the number of terminal outputs retained by tickets.
+    pub const fn ready(&self) -> usize {
+        self.ready
+    }
+
+    /// Return the completion arena's high-water size.
+    #[cfg(test)]
+    pub const fn arena_len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn entry(&self, id: CompletionId, operation: &str) -> &TicketCompletion {
+        let entry = self
+            .entries
+            .get(id.index() as usize)
+            .and_then(Option::as_ref)
+            .unwrap_or_else(|| panic!("{operation} called for untracked completion"));
+        assert_eq!(entry.id, id, "{operation} called with stale completion id");
+        entry
+    }
+
+    fn entry_mut(&mut self, id: CompletionId, operation: &str) -> &mut TicketCompletion {
+        let entry = self
+            .entries
+            .get_mut(id.index() as usize)
+            .and_then(Option::as_mut)
+            .unwrap_or_else(|| panic!("{operation} called for untracked completion"));
+        assert_eq!(entry.id, id, "{operation} called with stale completion id");
+        entry
+    }
+
+    fn take(&mut self, index: usize) -> Completion {
+        let entry = self.entries[index]
+            .take()
+            .expect("tracked completion missing");
+        if matches!(entry.completion, Completion::Ready(_)) {
+            self.ready -= 1;
+        }
+        self.free.push(entry.id.next_generation());
+        entry.completion
+    }
 }
 
 /// Tracks logical requests and the state needed to complete them.
@@ -282,9 +568,9 @@ impl Waiters {
     /// Return the number of tracked waiters whose request is still
     /// progressing (staged, in flight, or awaiting cancellation).
     ///
-    /// Parked terminal results are excluded: they hold no kernel resources
-    /// and are reclaimed by their ticket, so drain termination keys on this
-    /// count rather than [Self::len].
+    /// Parked ordinary op results are excluded because they hold no kernel
+    /// resources. Ticket results leave the waiter entirely, so drain
+    /// termination keys on this count rather than [Self::len].
     pub const fn pending(&self) -> usize {
         self.pending
     }
@@ -302,6 +588,15 @@ impl Waiters {
     /// Panics if no free slot is available.
     #[inline]
     pub fn insert(&mut self, request: Request, waker: Waker) -> WaiterId {
+        self.insert_with_observer(request, Observer::Op(Some(waker)))
+    }
+
+    /// Insert a request owned by a detached ticket.
+    pub fn insert_ticket(&mut self, request: Request, completion_id: CompletionId) -> WaiterId {
+        self.insert_with_observer(request, Observer::Ticket(completion_id))
+    }
+
+    fn insert_with_observer(&mut self, request: Request, observer: Observer) -> WaiterId {
         let id = self
             .free
             .pop()
@@ -311,8 +606,7 @@ impl Waiters {
             id,
             state: WaiterState::Active { target_tick: None },
             in_flight: false,
-            orphaned: false,
-            waker: Some(waker),
+            observer,
             lifecycle: Lifecycle::Pending(request),
         });
         assert!(replaced.is_none(), "free slot should not contain waiter");
@@ -393,7 +687,7 @@ impl Waiters {
             // Slot was reused, this CQE belongs to an older waiter generation.
             return false;
         }
-        if matches!(slot.lifecycle, Lifecycle::Ready(_)) {
+        if !matches!(slot.lifecycle, Lifecycle::Pending(_)) {
             // The parked result is no longer cancellable.
             return false;
         }
@@ -417,7 +711,7 @@ impl Waiters {
     pub fn cancel_active(&mut self) -> Vec<(WaiterId, Option<Tick>, bool)> {
         let mut cancelled = Vec::new();
         for slot in self.entries.iter_mut().filter_map(Option::as_mut) {
-            if matches!(slot.lifecycle, Lifecycle::Ready(_)) {
+            if !matches!(slot.lifecycle, Lifecycle::Pending(_)) {
                 continue;
             }
             let WaiterState::Active { target_tick } = slot.state else {
@@ -469,7 +763,7 @@ impl Waiters {
                     !slot.in_flight,
                     "stage called for cancelled waiter with op in flight"
                 );
-                if slot.orphaned {
+                if matches!(slot.observer, Observer::Orphaned) {
                     // Nobody can take the parked result, so free the slot.
                     let _ = self.take(index);
                     StageOutcome::Complete {
@@ -482,10 +776,19 @@ impl Waiters {
                     // what the observer sees: a deadline expiry surfaces as
                     // timeout, a shutdown as closed.
                     let output = request.interrupt(reason.into_error());
-                    let waker = self.park_output_at(index, output);
-                    StageOutcome::Complete {
-                        waker,
-                        freed: false,
+                    match self.finish_output_at(waiter_id, output) {
+                        FinishedOutput::Op { waker } => StageOutcome::Complete {
+                            waker,
+                            freed: false,
+                        },
+                        FinishedOutput::Ticket {
+                            completion_id,
+                            output,
+                        } => StageOutcome::Ticket {
+                            waiter_id,
+                            completion_id,
+                            output,
+                        },
                     }
                 }
             }
@@ -496,7 +799,8 @@ impl Waiters {
                 // from this arm would silently resurrect stale wind-down
                 // logic if the state machine drifts.
                 assert!(
-                    !slot.orphaned || !request.orphan_stops_progress(),
+                    !matches!(slot.observer, Observer::Orphaned)
+                        || !request.orphan_stops_progress(),
                     "orphan-stopping request staged while active"
                 );
                 assert!(
@@ -513,8 +817,8 @@ impl Waiters {
     ///
     /// Cancel CQEs are handled internally. Operation CQEs drive the request
     /// state machine and return a high-level loop action. Terminal results are
-    /// parked in the slot for the owning ticket, or dropped (freeing the slot)
-    /// when the ticket is already gone.
+    /// parked for an ordinary op, transferred toward a ticket completion
+    /// entry, or dropped when the observer is already gone.
     ///
     /// Panics if a non-cancel CQE does not refer to a currently tracked waiter,
     /// if it uses a stale waiter generation, or if the waiter has no operation
@@ -562,7 +866,7 @@ impl Waiters {
         slot.in_flight = false;
 
         let state = slot.state;
-        let orphaned = slot.orphaned;
+        let orphaned = matches!(slot.observer, Observer::Orphaned);
         let orphan_stops = request.orphan_stops_progress();
         let output = request.on_cqe(state, result);
         if output.is_none() && !(orphaned && orphan_stops) {
@@ -590,31 +894,59 @@ impl Waiters {
             }
         } else {
             let output = output.expect("non-orphaned completion is terminal");
-            let waker = self.park_output_at(index, output);
-            CompletionOutcome::Complete {
-                waker,
-                target_tick,
-                freed: false,
+            match self.finish_output_at(waiter_id, output) {
+                FinishedOutput::Op { waker } => CompletionOutcome::Complete {
+                    waker,
+                    target_tick,
+                    freed: false,
+                },
+                FinishedOutput::Ticket {
+                    completion_id,
+                    output,
+                } => CompletionOutcome::Ticket {
+                    waiter_id,
+                    completion_id,
+                    output,
+                    target_tick,
+                },
             }
         }
     }
 
-    /// Park `output` in the slot at `index`, dropping the pending request
-    /// shell in place, and return the parked waker.
-    fn park_output_at(&mut self, index: usize, output: Output) -> Option<Waker> {
+    /// Commit a non-orphaned terminal output to its owner.
+    fn finish_output_at(&mut self, waiter_id: WaiterId, output: Output) -> FinishedOutput {
+        let index = waiter_id.index() as usize;
         let slot = self.entries[index]
             .as_mut()
             .expect("tracked waiter missing");
-        slot.lifecycle = Lifecycle::Ready(output);
-        self.pending -= 1;
-        slot.waker.take()
+        assert_eq!(slot.id, waiter_id, "finish_output_at with stale waiter id");
+        match &mut slot.observer {
+            Observer::Op(waker) => {
+                slot.lifecycle = Lifecycle::Ready(output);
+                self.pending -= 1;
+                FinishedOutput::Op {
+                    waker: waker.take(),
+                }
+            }
+            Observer::Ticket(completion_id) => {
+                let completion_id = *completion_id;
+                slot.lifecycle = Lifecycle::TicketComplete;
+                self.pending -= 1;
+                FinishedOutput::Ticket {
+                    completion_id,
+                    output,
+                }
+            }
+            Observer::Orphaned => panic!("orphaned output reached observer publication"),
+        }
     }
 
-    /// Take the parked result for a ticket, freeing the slot, or refresh the
-    /// stored waker when the request is still progressing.
+    /// Take the parked result for an ordinary op, freeing the slot, or refresh
+    /// the stored waker when the request is still progressing.
     ///
     /// Panics if the waiter is not tracked or the id is stale: only the owning
-    /// ticket frees a non-orphaned slot, so a miss is an invariant violation.
+    /// ordinary op frees a non-orphaned slot, so a miss is an invariant
+    /// violation.
     #[inline]
     pub fn poll_take(&mut self, waiter_id: WaiterId, waker: &Waker) -> Option<Output> {
         let index = waiter_id.index() as usize;
@@ -624,6 +956,10 @@ impl Waiters {
             .and_then(Option::as_mut)
             .expect("poll_take called for untracked waiter");
         assert_eq!(slot.id, waiter_id, "poll_take called with stale waiter id");
+        assert!(
+            matches!(slot.observer, Observer::Op(_)),
+            "poll_take called for ticket waiter"
+        );
 
         match &mut slot.lifecycle {
             Lifecycle::Ready(_) => {
@@ -633,16 +969,46 @@ impl Waiters {
                 Some(output)
             }
             Lifecycle::Pending(_) => {
-                match &mut slot.waker {
+                let Observer::Op(stored) = &mut slot.observer else {
+                    unreachable!("observer verified op above");
+                };
+                match stored {
                     Some(existing) => existing.clone_from(waker),
-                    None => slot.waker = Some(waker.clone()),
+                    None => *stored = Some(waker.clone()),
                 }
                 None
             }
+            Lifecycle::TicketComplete => panic!("op waiter reached ticket terminal state"),
         }
     }
 
-    /// Mark a waiter's ticket as dropped and resolve how its slot winds down.
+    /// Recycle a terminal ticket waiter after its output is published.
+    pub fn finish_ticket(&mut self, waiter_id: WaiterId, completion_id: CompletionId) {
+        let index = waiter_id.index() as usize;
+        let slot = self
+            .entries
+            .get(index)
+            .and_then(Option::as_ref)
+            .expect("finish_ticket called for untracked waiter");
+        assert_eq!(
+            slot.id, waiter_id,
+            "finish_ticket called with stale waiter id"
+        );
+        assert!(
+            matches!(slot.lifecycle, Lifecycle::TicketComplete),
+            "finish_ticket called before terminal ticket output"
+        );
+        let Observer::Ticket(stored_completion) = slot.observer else {
+            panic!("finish_ticket called for non-ticket waiter");
+        };
+        assert_eq!(
+            stored_completion, completion_id,
+            "finish_ticket called with wrong completion id"
+        );
+        let _ = self.take(index);
+    }
+
+    /// Mark a waiter's observer as dropped and resolve how its slot winds down.
     ///
     /// Parked results are dropped and their slot freed immediately. Requests
     /// whose kind stops progressing without an observer transition to
@@ -662,12 +1028,15 @@ impl Waiters {
         );
 
         let Lifecycle::Pending(request) = &slot.lifecycle else {
+            assert!(
+                matches!(slot.lifecycle, Lifecycle::Ready(_)),
+                "ticket-terminal waiter escaped driver commit"
+            );
             let _ = self.take(index);
             return DropOutcome::Freed;
         };
 
-        slot.orphaned = true;
-        slot.waker = None;
+        slot.observer = Observer::Orphaned;
         if !request.orphan_stops_progress() {
             return DropOutcome::Detached;
         }
@@ -789,6 +1158,147 @@ mod tests {
             "remove_waiter called with stale waiter id"
         );
         waiters.take(index)
+    }
+
+    fn insert_ticket(
+        completions: &mut TicketCompletions,
+        waiters: &mut Waiters,
+        request: Request,
+    ) -> (CompletionId, WaiterId) {
+        completions.insert_pending(noop_waker(), |completion_id| {
+            waiters.insert_ticket(request, completion_id)
+        })
+    }
+
+    #[test]
+    fn test_ticket_output_survives_waiter_reuse() {
+        let mut waiters = Waiters::new(1);
+        let mut completions = TicketCompletions::new();
+        let (completion_id, waiter_id) =
+            insert_ticket(&mut completions, &mut waiters, make_sync_request());
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        let CompletionOutcome::Ticket {
+            waiter_id: completed_waiter,
+            completion_id: completed_completion,
+            output,
+            target_tick: None,
+        } = waiters.on_completion(waiter_id.user_data(), 0)
+        else {
+            panic!("sync ticket did not produce detached output");
+        };
+
+        let _ = completions.publish_ready(completed_completion, completed_waiter, output);
+        waiters.finish_ticket(completed_waiter, completed_completion);
+        assert_eq!(waiters.len(), 0);
+        assert_eq!(completions.ready(), 1);
+
+        // Reuse the only waiter before consuming the first ticket. The Ready
+        // output remains addressed solely by its independent completion ID.
+        let (second_completion, second_waiter) =
+            insert_ticket(&mut completions, &mut waiters, make_sync_request());
+        assert_eq!(second_waiter.index(), waiter_id.index());
+        assert_ne!(second_waiter, waiter_id);
+        assert_ne!(second_completion, completion_id);
+        assert!(matches!(
+            completions.poll_take(completion_id, &noop_waker()),
+            Some(Output::Sync(Ok(())))
+        ));
+
+        assert!(matches!(
+            completions.mark_orphaned(second_completion),
+            CompletionDropOutcome::Pending { waiter_id, .. } if waiter_id == second_waiter
+        ));
+        let _ = remove_waiter(&mut waiters, second_waiter);
+    }
+
+    #[test]
+    fn test_completion_generation_reuse_rejects_stale_id() {
+        let mut waiters = Waiters::new(1);
+        let mut completions = TicketCompletions::new();
+        let (first, first_waiter) =
+            insert_ticket(&mut completions, &mut waiters, make_sync_request());
+        assert!(matches!(
+            completions.mark_orphaned(first),
+            CompletionDropOutcome::Pending { waiter_id, .. } if waiter_id == first_waiter
+        ));
+        let _ = remove_waiter(&mut waiters, first_waiter);
+
+        let (reused, reused_waiter) =
+            insert_ticket(&mut completions, &mut waiters, make_sync_request());
+        assert_eq!(reused.index(), first.index());
+        assert_eq!(reused.generation(), first.generation().wrapping_add(1));
+        assert_eq!(completions.arena_len(), 1);
+
+        let stale = catch_unwind(AssertUnwindSafe(|| {
+            let _ = completions.poll_take(first, &noop_waker());
+        }));
+        assert!(stale.is_err());
+        assert!(matches!(
+            completions.mark_orphaned(reused),
+            CompletionDropOutcome::Pending { waiter_id, .. } if waiter_id == reused_waiter
+        ));
+        let _ = remove_waiter(&mut waiters, reused_waiter);
+    }
+
+    #[test]
+    fn test_ticket_local_timeout_publishes_then_recycles_waiter() {
+        let mut waiters = Waiters::new(1);
+        let mut completions = TicketCompletions::new();
+        let (completion_id, waiter_id) =
+            insert_ticket(&mut completions, &mut waiters, make_recv_request());
+        assert!(waiters.cancel(waiter_id));
+        let StageOutcome::Ticket {
+            waiter_id: completed_waiter,
+            completion_id: completed_completion,
+            output,
+        } = waiters.stage(waiter_id)
+        else {
+            panic!("locally timed out ticket did not produce detached output");
+        };
+        assert_eq!(completed_waiter, waiter_id);
+        assert_eq!(completed_completion, completion_id);
+
+        let _ = completions.publish_ready(completed_completion, completed_waiter, output);
+        waiters.finish_ticket(completed_waiter, completed_completion);
+        assert!(waiters.is_empty());
+        let Some(Output::Recv(Err(error))) = completions.poll_take(completion_id, &noop_waker())
+        else {
+            panic!("locally timed out ticket did not retain recv failure");
+        };
+        let (_, error) = *error;
+        assert!(matches!(error, Error::Timeout));
+    }
+
+    #[test]
+    fn test_pending_sync_ticket_drop_detaches_through_completion_id() {
+        let mut waiters = Waiters::new(1);
+        let mut completions = TicketCompletions::new();
+        let (completion_id, waiter_id) =
+            insert_ticket(&mut completions, &mut waiters, make_sync_request());
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert!(matches!(
+            completions.mark_orphaned(completion_id),
+            CompletionDropOutcome::Pending {
+                waiter_id: pending_waiter,
+                ..
+            } if pending_waiter == waiter_id
+        ));
+        assert!(matches!(
+            waiters.mark_orphaned(waiter_id),
+            DropOutcome::Detached
+        ));
+        assert_eq!(completions.ready(), 0);
+        assert_eq!(waiters.pending(), 1);
+
+        assert!(matches!(
+            waiters.on_completion(waiter_id.user_data(), 0),
+            CompletionOutcome::Complete {
+                waker: None,
+                freed: true,
+                ..
+            }
+        ));
+        assert!(waiters.is_empty());
     }
 
     #[test]
@@ -1058,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn test_waiters_stage_orphans_dropped_tickets() {
+    fn test_waiters_stage_orphans_dropped_ops() {
         // Verify orphaned send and read-at requests are removed locally before
         // their first SQE is ever staged.
         for (request, tick) in [(make_send_request(), 7), (make_read_at_request(), 8)] {
@@ -1084,9 +1594,9 @@ mod tests {
     }
 
     #[test]
-    fn test_waiters_orphan_dropped_tickets_after_nonterminal_completion() {
+    fn test_waiters_orphan_dropped_ops_after_nonterminal_completion() {
         // Verify retryable and partial-progress send, recv, and read-at CQEs
-        // remove the waiter instead of requeueing once the ticket is gone.
+        // remove the waiter instead of requeueing once the op is gone.
         for (request, tick, result) in [
             // Retryable CQE.
             (make_send_request(), 5, -libc::EAGAIN),
@@ -1123,7 +1633,7 @@ mod tests {
 
     #[test]
     fn test_waiters_detach_write_and_sync_on_drop() {
-        // Verify write/sync requests keep progressing after their ticket is
+        // Verify write/sync requests keep progressing after their op is
         // dropped and free their slot at the terminal CQE.
         let mut waiters = Waiters::new(1);
         let waiter_id = insert(&mut waiters, make_sync_request(), None);
@@ -1151,7 +1661,7 @@ mod tests {
 
     #[test]
     fn test_waiters_drop_after_completion_frees_slot() {
-        // Verify dropping a ticket whose result is already parked frees the
+        // Verify dropping an op whose result is already parked frees the
         // slot and drops the output.
         let mut waiters = Waiters::new(1);
         let waiter_id = insert(&mut waiters, make_sync_request(), None);

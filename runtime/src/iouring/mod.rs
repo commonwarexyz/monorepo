@@ -16,10 +16,12 @@
 //!
 //! Work is submitted thread-locally: op futures stage requests directly into the loop's
 //! shared state (a waiter slab plus a backlog FIFO) while they are polled on the runtime
-//! thread, and completions are parked in the waiter slot until the owning future takes
-//! them. There are no channels and no per-op queue or completion allocations on this
-//! path (address-carrying ops and vectored writes allocate their scratch once per
-//! logical request when built). The event loop
+//! thread. Ordinary op completions park in their waiter until consumed. Detached accept
+//! and sync tickets use a second, independently generational arena, so terminal output
+//! moves out of the waiter and the waiter is recycled immediately. There are no channels
+//! and no per-op queue or completion allocations on this path. The arenas reuse vector
+//! storage up to their high-water marks (address-carrying ops and vectored writes allocate
+//! their scratch once per logical request when built). The event loop
 //! blocks either in userspace futex wait (when the ring is truly idle) or in
 //! `io_uring_enter` (when the ring has active waiters), and is woken by:
 //! - normal CQE progress in the ring
@@ -68,7 +70,8 @@
 //! 2. Advances userspace deadlines
 //! 3. Builds and submits SQEs for requests admitted into the backlog by op futures
 //! 4. Handles partial progress and retryable errors by requeuing requests
-//! 5. Parks terminal results in the waiter slot and wakes the awaiting task
+//! 5. Commits terminal output to its waiter or detached completion entry
+//! 6. Recycles terminal ticket waiters, then wakes ticket and capacity tasks
 //!
 //! ## Request Flow
 //!
@@ -76,6 +79,17 @@
 //! Data path:
 //!   Op future poll -> Driver (slab insert + backlog FIFO) -> IoUringLoop -> SQE -> io_uring
 //!   Op future poll <- parked Output in slot <- IoUringLoop <- CQE <- io_uring
+//!
+//! Detached ticket path:
+//!   Ticket admission -> Completion::Pending { waiter_id, waker }
+//!                    -> Waiter { owner: CompletionId, request }
+//!                    -> SQE -> io_uring -> CQE
+//!   CQE -> Completion::Ready(Output) -> timeout removal -> recycle WaiterId
+//!       -> ticket wake -> Ticket poll(CompletionId) -> Output
+//!
+//! Detached ticket drop:
+//!   CompletionId -> Pending(waiter_id) -> Accept cancel or Sync detach
+//!                -> Ready(Output)      -> drop Output, no waiter access
 //!
 //! Wake paths (cross-thread task wakes only):
 //!   Foreign thread --futex wake--> packed wake state --> IoUringLoop
@@ -94,11 +108,14 @@
 //!
 //! ## Work Tracking
 //!
-//! Each admitted request is assigned a waiter id that serves as the `user_data` field in its
-//! SQEs. The loop state maintains a flat `Waiters` store where each slot maps to a
-//! request that owns all resources (buffers, FDs, progress state) needed for the
-//! request's lifetime, plus the waker of the awaiting task and, after completion,
-//! the parked terminal result.
+//! Each admitted request is assigned a waiter ID that serves as the `user_data` field in
+//! its SQEs. The flat `Waiters` store owns all kernel-referenced request resources
+//! (buffers, FDs, and progress state) until terminal completion. Ordinary op outputs
+//! remain in that slot until their future takes them. Detached accept and sync tickets
+//! hold only a completion ID after admission. Their separate `TicketCompletions` arena
+//! stores `Pending { waiter_id, waker }` while the kernel request is active and
+//! `Ready(Output)` after it is terminal. Publishing Ready, removing timeout accounting,
+//! and recycling the waiter all happen before ticket or capacity wakers run.
 //!
 //! ## Timeout Handling
 //!
@@ -147,8 +164,8 @@
 //! 3. If `shutdown_timeout` is configured, every request still outstanding when the
 //!    budget expires is cancelled, and the drain then waits for the kernel to retire
 //!    it (buffers stay owned until then)
-//! 4. Parked results owned by escaped tickets survive the drain: they hold no kernel
-//!    resources and are reclaimed when their ticket is polled or dropped
+//! 4. Ready results owned by escaped tickets survive the drain in the completion arena:
+//!    they hold no kernel resources or waiter slots and are reclaimed when polled or dropped
 //!
 //! ## Liveness Model
 //!
@@ -187,10 +204,10 @@
 //!   per-request timeouts.
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
-//! - Parked terminal results count toward the capacity limit until their ticket is polled or
-//!   dropped, and capacity waiters themselves have no deadline protection (deadlines only apply
-//!   after admission). A task that retains a completed ticket indefinitely therefore withholds a
-//!   slot from waiting admissions.
+//! - Ready detached tickets do not count toward waiter capacity. Their waiter is recycled before
+//!   the ticket waker runs, so retaining a completed accept or sync ticket cannot block admission.
+//!   Capacity waiters themselves have no deadline protection because deadlines apply only after
+//!   admission.
 
 pub(crate) mod driver;
 #[cfg(test)]
