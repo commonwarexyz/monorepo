@@ -252,6 +252,7 @@ where
                     }
                     Ok(AckOutcome::Duplicate) => {}
                     Err(DkgAckError::UnexpectedPlayer) => {
+                        // An authenticated non-player cannot legitimately acknowledge this round.
                         commonware_p2p::block!(
                             self.blocker,
                             from,
@@ -260,9 +261,7 @@ where
                         );
                     }
                     Err(DkgAckError::InvalidAck) => {
-                        // This actor sends one dealer transcript to every player and recreates it
-                        // unchanged after restart. Because `from` is authenticated, a player that
-                        // acknowledges any other transcript can be blocked.
+                        // The authenticated sender acknowledged a transcript this actor never sent.
                         commonware_p2p::block!(self.blocker, from, ?epoch, "invalid ack signature");
                     }
                 }
