@@ -317,7 +317,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 metadata,
                 journal_dirty: false,
                 strategy: cfg.strategy,
-                node_cache: cfg.node_cache_size.map(node_cache::NodeCache::new),
+                node_cache: cfg
+                    .node_cache_size
+                    .map(|size| node_cache::NodeCache::new(size, &context)),
             });
         }
 
@@ -458,7 +460,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             metadata,
             journal_dirty: false,
             strategy: cfg.strategy,
-            node_cache: cfg.node_cache_size.map(node_cache::NodeCache::new),
+            node_cache: cfg
+                .node_cache_size
+                .map(|size| node_cache::NodeCache::new(size, &context)),
         })
     }
 
@@ -609,7 +613,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             metadata,
             journal_dirty: false,
             strategy: cfg.config.strategy,
-            node_cache: cfg.config.node_cache_size.map(node_cache::NodeCache::new),
+            node_cache: cfg
+                .config
+                .node_cache_size
+                .map(|size| node_cache::NodeCache::new(size, &context)),
         })
     }
 
@@ -1243,7 +1250,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        BufferPooler, Metrics as _, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::prefixed_u64::U64};
     use std::{
@@ -3956,6 +3963,53 @@ mod tests {
             "cached reads diverged from storage after rewind"
         );
     }
+
+    /// Parse a counter value out of an encoded metrics buffer.
+    fn counter(buffer: &str, name: &str) -> u64 {
+        buffer
+            .lines()
+            .find(|l| l.contains(name) && !l.starts_with('#'))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .expect("counter missing")
+    }
+
+    #[test]
+    fn test_node_cache_faults_metric() {
+        deterministic::Runner::default().start(node_cache_faults_metric_inner::<mmr::Family>);
+    }
+
+    /// Warming reads fault once per journal-served position and cached re-reads add none.
+    async fn node_cache_faults_metric_inner<F2: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let mut cfg = test_config(&context);
+        cfg.node_cache_size = Some(NZUsize!(1024));
+        let mut merkle =
+            Merkle::<F2, _, Digest, Sequential>::init(context.child("cached"), &hasher, cfg)
+                .await
+                .unwrap();
+
+        let mut batch = merkle.new_batch();
+        for i in 0..20u8 {
+            batch = batch.add(&hasher, &Sha256::hash(&[&[i][..]]));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.sync().await.unwrap();
+
+        // Warming reads fault on every position that escapes the in-memory structure.
+        let positions: Vec<_> = (0..*merkle.size()).map(Position::new).collect();
+        let warm: Vec<_> = merkle.get_nodes(&positions).await.unwrap();
+        let after_warm = counter(&context.encode(), "node_cache_faults_total");
+        assert!(after_warm > 0, "warming reads must fault");
+
+        // Cached re-reads serve the same digests without new faults.
+        assert_eq!(merkle.get_nodes(&positions).await.unwrap(), warm);
+        assert_eq!(
+            counter(&context.encode(), "node_cache_faults_total"),
+            after_warm
+        );
+    }
 }
 /// A sharded, position-keyed cache of node digests read from the merkle journal.
 ///
@@ -3967,6 +4021,10 @@ mod tests {
 /// (entries below the pruning boundary linger until CLOCK eviction but are unreachable).
 pub(crate) mod node_cache {
     use commonware_cryptography::Digest;
+    use commonware_runtime::{
+        Metrics,
+        telemetry::metrics::{Counter, MetricsExt as _},
+    };
     use commonware_utils::{cache::Clock, sync::RwLock};
     use core::num::NonZeroUsize;
 
@@ -3976,26 +4034,38 @@ pub(crate) mod node_cache {
     /// See the module docs.
     pub(crate) struct NodeCache<D> {
         shards: Box<[RwLock<Clock<u64, D>>]>,
+        /// Probes that fell through to a journal read. Hits are deliberately untracked to
+        /// keep the hit path free of shared-counter traffic.
+        faults: Counter,
     }
 
     impl<D: Digest> NodeCache<D> {
         /// Creates a cache holding at most `capacity` entries, rounded up to a multiple
-        /// of the shard count and preallocated eagerly.
-        pub(crate) fn new(capacity: NonZeroUsize) -> Self {
+        /// of the shard count and preallocated eagerly. Registers the fault counter under
+        /// `context`.
+        pub(crate) fn new(capacity: NonZeroUsize, context: &impl Metrics) -> Self {
             let per_shard = NonZeroUsize::new(capacity.get().div_ceil(SHARDS).max(1)).unwrap();
             Self {
                 shards: (0..SHARDS)
                     .map(|_| RwLock::new(Clock::new(per_shard)))
                     .collect(),
+                faults: context.counter(
+                    "node_cache_faults",
+                    "Number of node cache probes that fell through to a journal read",
+                ),
             }
         }
 
-        /// The digest cached at `position`, if any.
+        /// The digest cached at `position`, if any. A miss counts as a fault.
         pub(crate) fn get(&self, position: u64) -> Option<D> {
-            self.shards[(position as usize) % SHARDS]
+            let node = self.shards[(position as usize) % SHARDS]
                 .read()
                 .get(&position)
-                .copied()
+                .copied();
+            if node.is_none() {
+                self.faults.inc();
+            }
+            node
         }
 
         /// Caches the digest at `position` unless already present.
