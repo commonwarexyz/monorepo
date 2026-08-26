@@ -1484,10 +1484,12 @@ where
                             application,
                         )
                         .await;
-                } else if annotations
-                    .iter()
-                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
-                    && height > self.floor.processed_height()
+                } else if annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation,
+                        Annotation::Certified { height: bound } if height <= *bound
+                    )
+                }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
                 {
                     self.cache = self
