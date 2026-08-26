@@ -528,14 +528,6 @@ pub enum Failure<P> {
         /// because publishing them would reveal too many shares.
         unavailable: Set<P>,
     },
-    /// The selected commitments do not preserve the previous public key.
-    #[error("selected commitments do not preserve the previous public key")]
-    InconsistentReshare {
-        /// Dealers whose commitments contributed to the inconsistent result.
-        ///
-        /// This is diagnostic context, not fault attribution.
-        contributors: Set<P>,
-    },
 }
 
 /// An error finalizing a player's DKG output and private share.
@@ -702,6 +694,8 @@ impl From<Reveal> for CodecMode {
 ///
 /// This is used to bind signatures to the current round, and to provide the
 /// information that dealers, players, and observers need to perform their actions.
+/// Every operation using an [`Info`] must use the same [`Faults`] implementation
+/// that constructed it. Reshares must retain that fault model across rounds.
 #[derive(Debug, Clone)]
 pub struct Info<V: Variant, P> {
     summary: Summary,
@@ -926,7 +920,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         }
         if let Some(previous) = previous.as_ref() {
             if Some(previous.public.total().get()) != u32::try_from(previous.players.len()).ok()
-                || previous.public.required() > previous.quorum::<M>()
+                || previous.public.required() != previous.quorum::<M>()
             {
                 return Err(Error::InvalidPreviousOutput);
             }
@@ -1860,7 +1854,7 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
         strategy: &impl Strategy,
-    ) -> Result<Self, Failure<P>> {
+    ) -> Self {
         // Logs::select validated the shape of each selected log. Track player
         // shares reconstructible from their dealer reveals.
         let reveal_threshold = info.reveal_threshold::<M>();
@@ -1910,11 +1904,11 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
             let public = weights
                 .interpolate(&commitments, strategy)
                 .expect("select checks that enough points have been provided");
-            if previous.public().public() != public.constant() {
-                return Err(Failure::InconsistentReshare {
-                    contributors: dealers,
-                });
-            }
+            assert_eq!(
+                previous.public().public(),
+                public.constant(),
+                "selected reshare commitments must preserve the previous public key",
+            );
             (public, Some(weights))
         } else {
             let mut public = Poly::zero();
@@ -1931,7 +1925,7 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
             players: info.players,
             revealed,
         };
-        Ok(Self { output, weights })
+        Self { output, weights }
     }
 }
 
@@ -1942,16 +1936,14 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
 ///
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
-/// Returns [`Failure::InsufficientLogs`] if too few usable dealer logs remain. A
-/// reshare also returns [`Failure::InconsistentReshare`] if the selected
-/// commitments do not preserve the previous public key.
+/// Returns [`Failure::InsufficientLogs`] if too few usable dealer logs remain.
 pub fn observe<V: Variant, P: PublicKey, M: Faults, B: BatchVerifier<PublicKey = P>>(
     rng: &mut impl CryptoRng,
     logs: Logs<V, P, M>,
     strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Failure<P>> {
     let (info, selected) = logs.select::<B>(rng, strategy)?;
-    Observe::<V, P>::reckon::<M>(info, selected, strategy).map(|inner| inner.output)
+    Ok(Observe::<V, P>::reckon::<M>(info, selected, strategy).output)
 }
 
 /// Represents a player in the DKG / reshare process.
@@ -2154,7 +2146,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             .try_collect::<Map<_, _>>()
             .expect("Logs::select produces at most one entry per dealer");
         let Observe { output, weights } =
-            Observe::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy)?;
+            Observe::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy);
         let private = weights.map_or_else(
             || {
                 let mut out = <Scalar as Additive>::zero();
@@ -3403,7 +3395,18 @@ mod test {
             Poly::commit(Poly::<Scalar>::new(TestRng::new(6), 3)),
         );
 
-        for previous in [wrong_total, excessive_degree] {
+        // Matching the participant count is insufficient when the recovery threshold does not
+        // match the configured fault model.
+        let mut lower_threshold = excessive_degree.clone();
+        lower_threshold.public = Sharing::<MinPk>::new(
+            Mode::NonZeroCounter,
+            NZU32!(4),
+            Poly::commit(Poly::<Scalar>::new(TestRng::new(7), 1)),
+        );
+        assert_eq!(lower_threshold.public.required(), 2);
+        assert_eq!(lower_threshold.quorum::<N3f1>(), 3);
+
+        for previous in [wrong_total, excessive_degree, lower_threshold] {
             assert!(matches!(
                 Info::<MinPk, _>::new::<N3f1>(
                     b"invalid-previous-output-test",
@@ -3496,9 +3499,7 @@ mod test {
             .into_iter()
             .try_collect::<Map<_, _>>()
             .expect("dealers must be unique");
-        let output = Observe::reckon::<N3f1>(info, selected, &Sequential)
-            .expect("DKG observation must succeed")
-            .output;
+        let output = Observe::reckon::<N3f1>(info, selected, &Sequential).output;
 
         output.revealed().position(&target).is_some()
     }
@@ -4187,52 +4188,6 @@ mod test {
         assert!(matches!(
             check_pre_verify_log(&fixture.info, &dealer.key, &log),
             Err(DealerLogError::Fault(FaultReason::ExcessiveReveals))
-        ));
-    }
-
-    #[test]
-    fn reckon_reports_inconsistent_reshare_without_attribution() {
-        let info = reshare_info(30_000);
-        let previous_public = *info.previous.as_ref().unwrap().public().public();
-        let pub_msg = pub_msg_with_different_constant(&info, &previous_public, 30_005);
-
-        let results: Map<_, _> = info
-            .players
-            .iter()
-            .cloned()
-            .map(|player| {
-                (
-                    player,
-                    AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::one())),
-                )
-            })
-            .try_collect()
-            .expect("players must be unique");
-        let required = usize::try_from(info.required_commitments::<N3f1>())
-            .expect("required commitments exceed usize::MAX");
-        let selected: Map<_, _> = info
-            .dealers
-            .iter()
-            .take(required)
-            .cloned()
-            .map(|dealer| {
-                (
-                    dealer,
-                    DealerLog {
-                        pub_msg: pub_msg.clone(),
-                        results: DealerResult::Ok(results.clone()),
-                    },
-                )
-            })
-            .try_collect()
-            .expect("dealers must be unique");
-        let contributors = selected.keys().clone();
-
-        assert!(matches!(
-            Observe::reckon::<N3f1>(info, selected, &Sequential),
-            Err(Failure::InconsistentReshare {
-                contributors: actual,
-            }) if actual == contributors
         ));
     }
 
