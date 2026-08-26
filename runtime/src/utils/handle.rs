@@ -108,17 +108,22 @@ where
     where
         F: Future<Output = T> + Send + 'static,
     {
-        Self::init_with_fallback(f, metric, panicker, tree, drop)
+        Self::init_with_panic_handler(f, metric, tree, move |panic| {
+            let _ = panicker.notify(panic);
+        })
     }
 
-    /// Initializes a task handle with a fallback for an undeliverable panic.
+    /// Initializes a task handle with runtime-specific panic routing.
+    ///
+    /// `on_panic` runs at the catch boundary, before the task publishes its
+    /// terminal result. Runtimes can attach source metadata or retain a panic
+    /// that their root interrupt can no longer receive.
     #[inline(always)]
-    pub(crate) fn init_with_fallback<F, C>(
+    pub(crate) fn init_with_panic_handler<F, C>(
         f: F,
         metric: MetricHandle,
-        panicker: Panicker,
         tree: Arc<Tree>,
-        fallback: C,
+        on_panic: C,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -152,9 +157,7 @@ where
                     let _ = sender.send(Ok(result));
                 }
                 Ok(Err(panic)) => {
-                    if let Some(panic) = panicker.notify(panic) {
-                        fallback(panic);
-                    }
+                    on_panic(panic);
                     let _ = sender.send(Err(Error::Exited));
                 }
                 Err(Aborted) => {}
@@ -430,12 +433,19 @@ impl Panicker {
         error!(?err, "task panicked");
 
         // If we are catching panics, the payload is absorbed by policy.
+        // Forget arbitrary drop glue so suppression cannot raise a new panic.
         if self.catch {
+            std::mem::forget(panic);
             return None;
         }
 
         // If we've already sent a panic, later ones rank below it.
-        let sender = self.sender.lock().take()?;
+        let Some(sender) = self.sender.lock().take() else {
+            // An earlier payload already owns propagation. Forget later user
+            // drop glue instead of letting it replace that first failure.
+            std::mem::forget(panic);
+            return None;
+        };
 
         // Send the panic. A dead receiver hands the payload back.
         sender.send(panic).err()
@@ -499,10 +509,11 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::Handle;
+    use super::{Handle, Panicker};
     use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
     use futures::future;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
@@ -516,6 +527,43 @@ mod tests {
                 None
             }
         })
+    }
+
+    /// Panic suppression must not run arbitrary payload drop glue.
+    #[test]
+    fn panicker_forgets_caught_payload() {
+        struct DropPanic;
+
+        impl Drop for DropPanic {
+            fn drop(&mut self) {
+                panic!("suppressed payload dropped");
+            }
+        }
+
+        let (panicker, _panicked) = Panicker::new(true);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            assert!(panicker.notify(Box::new(DropPanic)).is_none());
+        }));
+        assert!(result.is_ok());
+    }
+
+    /// A lower-ranked panic must not run arbitrary payload drop glue.
+    #[test]
+    fn panicker_forgets_payload_after_interrupt_claimed() {
+        struct DropPanic;
+
+        impl Drop for DropPanic {
+            fn drop(&mut self) {
+                panic!("lower-ranked payload dropped");
+            }
+        }
+
+        let (panicker, _panicked) = Panicker::new(false);
+        assert!(panicker.notify(Box::new("first panic")).is_none());
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            assert!(panicker.notify(Box::new(DropPanic)).is_none());
+        }));
+        assert!(result.is_ok());
     }
 
     #[test]
