@@ -177,9 +177,9 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
+                skip_budget: cfg.skip_budget,
             },
-        )
-        .with_skip_budget(cfg.skip_budget);
+        );
         (
             Self {
                 context: ContextCell::new(context),
