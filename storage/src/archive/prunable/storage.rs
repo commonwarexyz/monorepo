@@ -116,7 +116,7 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Whether a marker sync must be observed by a later sync request.
     marker_sync_pending: bool,
 
-    /// Per-section boundaries that may be published once their data sync completes.
+    /// Per-section boundaries for sections mutated by this handle.
     barriers: BTreeMap<u64, Barrier>,
 
     /// Sections whose latest completed blocking data sync has not been published by a later
@@ -163,9 +163,7 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     gets: Counter,
     has: Counter,
     syncs: Counter,
-
-    #[cfg(any(test, feature = "fuzzing"))]
-    values_validated_on_init: u64,
+    _values_validated: Counter,
 }
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
@@ -249,18 +247,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             &validation_floors,
         )
         .await?;
-        let section_lengths = oversized
-            .sections()
-            .map(|section| Ok((section, oversized.section_len(section)?)))
-            .collect::<Result<BTreeMap<_, _>, crate::journal::Error>>()?;
 
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.child("index"), translator);
         let mut intervals = RMap::new();
         let mut truncated = Vec::new();
-        #[cfg(any(test, feature = "fuzzing"))]
-        let mut values_validated_on_init = 0;
         let values_validated = context.counter(
             "values_validated",
             "Number of value frames CRC-validated during startup",
@@ -292,10 +284,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                 if position >= validated {
                     let (offset, size) = entry.value_location();
                     values_validated.inc();
-                    #[cfg(any(test, feature = "fuzzing"))]
-                    {
-                        values_validated_on_init += 1;
-                    }
                     if !replay.verify_value(section, offset, size).await? {
                         truncated.push((section, position));
                         section_truncated = true;
@@ -319,17 +307,16 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         };
 
         let mut oversized = oversized;
-        let mut section_lengths = section_lengths;
         for (section, items) in truncated {
             let index_size = items
                 .checked_mul(Record::<K>::SIZE as u64)
                 .ok_or(crate::journal::Error::OffsetOverflow)?;
             oversized = oversized.rewind_section(section, index_size).await?;
-            section_lengths.insert(section, items);
         }
 
         let mut metadata_dirty = false;
-        for (&section, &items) in &section_lengths {
+        for section in oversized.sections() {
+            let items = oversized.section_len(section)?;
             let key = SectionKey::new(section);
             if items == 0 && metadata.get(&key).is_none() {
                 continue;
@@ -347,11 +334,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         } else {
             false
         };
-        let barriers = section_lengths
-            .into_iter()
-            .map(|(section, length)| (section, Barrier::new(length)))
-            .collect();
-
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");
         let indices_pruned = context.counter("indices_pruned", "Number of indices pruned");
@@ -370,7 +352,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             oversized,
             metadata,
             marker_sync_pending,
-            barriers,
+            barriers: BTreeMap::new(),
             unpublished: BTreeSet::new(),
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
@@ -385,8 +367,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             gets,
             has,
             syncs,
-            #[cfg(any(test, feature = "fuzzing"))]
-            values_validated_on_init,
+            _values_validated: values_validated,
         })
     }
 
@@ -533,7 +514,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.pending.insert(section);
         self.barriers
             .entry(section)
-            .or_insert_with(|| Barrier::new(0));
+            .or_insert_with(|| Barrier::new(position));
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
@@ -791,7 +772,14 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// Number of value frames validated while opening this handle.
     #[cfg(any(test, feature = "fuzzing"))]
     pub fn values_validated_on_init(&self) -> u64 {
-        self.0.values_validated_on_init
+        #[cfg(target_has_atomic = "64")]
+        {
+            self.0._values_validated.get()
+        }
+        #[cfg(not(target_has_atomic = "64"))]
+        {
+            u64::from(self.0._values_validated.get())
+        }
     }
 
     /// Initialize a new `Archive` instance.

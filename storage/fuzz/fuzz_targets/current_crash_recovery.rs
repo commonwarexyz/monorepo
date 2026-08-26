@@ -23,7 +23,7 @@ use commonware_storage::{
 use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     num::{NonZeroU16, NonZeroUsize},
 };
 
@@ -122,21 +122,10 @@ fn make_config(
     }
 }
 
-/// Remove affected keys from committed since their recovered value is unknown.
-fn forget_pending(
-    pending: &HashMap<RawKey, Option<RawValue>>,
-    committed: &mut HashMap<RawKey, RawValue>,
-) {
-    for key in pending.keys() {
-        committed.remove(key);
-    }
-}
+type State = HashMap<RawKey, RawValue>;
 
 /// Merge pending changes into committed after a successful commit.
-fn apply_pending(
-    pending: &mut HashMap<RawKey, Option<RawValue>>,
-    committed: &mut HashMap<RawKey, RawValue>,
-) {
+fn apply_pending(pending: &mut HashMap<RawKey, Option<RawValue>>, committed: &mut State) {
     for (k, v) in pending.drain() {
         match v {
             Some(val) => {
@@ -149,48 +138,55 @@ fn apply_pending(
     }
 }
 
-/// Commit pending writes. Returns the db on success; `None` on error (the db
-/// is dropped, simulating a crash).
+/// Return the complete snapshots recovery may expose after an errored batch.
+fn failure_states(pending: &HashMap<RawKey, Option<RawValue>>, committed: &State) -> Vec<State> {
+    let mut post = committed.clone();
+    for (key, value) in pending {
+        match value {
+            Some(value) => {
+                post.insert(*key, *value);
+            }
+            None => {
+                post.remove(key);
+            }
+        }
+    }
+
+    if post == *committed {
+        vec![committed.clone()]
+    } else {
+        vec![committed.clone(), post]
+    }
+}
+
+/// Commit pending writes, returning the complete snapshots allowed after failure.
 async fn commit_pending<F: Graftable>(
     db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     pending: &mut HashMap<RawKey, Option<RawValue>>,
-    committed: &mut HashMap<RawKey, RawValue>,
-) -> Option<Db<F>> {
+    committed: &mut State,
+) -> Result<Db<F>, Vec<State>> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
     let merkleized = match batch.merkleize(&db, None).await {
         Ok(m) => m,
-        Err(_) => {
-            forget_pending(pending, committed);
-            return None;
-        }
+        Err(_) => return Err(vec![committed.clone()]),
     };
     let db = match db.apply_batch(merkleized).await {
         Ok((db, _)) => db,
-        Err(_) => {
-            forget_pending(pending, committed);
-            return None;
-        }
+        Err(_) => return Err(failure_states(pending, committed)),
     };
     let db = match db.commit().await {
         Ok(db) => db,
-        Err(_) => {
-            forget_pending(pending, committed);
-            return None;
-        }
+        Err(_) => return Err(failure_states(pending, committed)),
     };
     apply_pending(pending, committed);
-    Some(db)
+    Ok(db)
 }
 
 fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
-    if input.operations.is_empty() {
-        return;
-    }
-
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let merkle_items_per_blob = input.merkle_items_per_blob;
@@ -206,7 +202,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
 
     // Phase 1: Execute operations with fault injection until crash.
     // Track committed KV state so we can verify it survives recovery.
-    let (committed, checkpoint) = runner.start_and_recover(|ctx| {
+    let ((known_keys, allowed_states), checkpoint) = runner.start_and_recover(|ctx| {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
@@ -233,9 +229,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             };
 
             // Active KV pairs after the last successful commit.
-            let mut committed: HashMap<RawKey, RawValue> = HashMap::new();
+            let mut committed = State::new();
             // Uncommitted changes since the last commit. None = delete, Some = upsert.
             let mut pending: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+            let mut known_keys = BTreeSet::new();
+            let mut failure = None;
 
             // Accumulate writes until Commit, matching the intended
             // pending/committed separation.
@@ -244,30 +242,42 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             for op in &operations {
                 db = match op {
                     CurrentOperation::Update { key, value } => {
+                        known_keys.insert(*key);
                         pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                         pending.insert(*key, Some(*value));
                         db
                     }
                     CurrentOperation::Delete { key } => {
+                        known_keys.insert(*key);
                         pending_writes.push((Key::new(*key), None));
                         pending.insert(*key, None);
                         db
                     }
                     CurrentOperation::Commit => {
-                        let Some(db) =
-                            commit_pending(db, &mut pending_writes, &mut pending, &mut committed)
-                                .await
-                        else {
-                            break;
-                        };
-                        db
+                        match commit_pending(db, &mut pending_writes, &mut pending, &mut committed)
+                            .await
+                        {
+                            Ok(db) => db,
+                            Err(states) => {
+                                failure = Some(states);
+                                break;
+                            }
+                        }
                     }
                     CurrentOperation::Prune => {
-                        let Some(db) =
-                            commit_pending(db, &mut pending_writes, &mut pending, &mut committed)
-                                .await
-                        else {
-                            break;
+                        let db = match commit_pending(
+                            db,
+                            &mut pending_writes,
+                            &mut pending,
+                            &mut committed,
+                        )
+                        .await
+                        {
+                            Ok(db) => db,
+                            Err(states) => {
+                                failure = Some(states);
+                                break;
+                            }
                         };
                         let boundary = db.sync_boundary();
                         match db.prune(boundary).await {
@@ -278,7 +288,10 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 };
             }
 
-            committed
+            (
+                known_keys.into_iter().collect::<Vec<_>>(),
+                failure.unwrap_or_else(|| vec![committed]),
+            )
         }
     });
 
@@ -304,25 +317,36 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             .await
             .expect("recovery must succeed");
 
-            // Verify all committed KV pairs survived the crash and are provable.
+            let keys = known_keys.iter().copied().map(Key::new).collect::<Vec<_>>();
+            let key_refs = keys.iter().collect::<Vec<_>>();
+            let recovered = db
+                .get_many(&key_refs)
+                .await
+                .expect("whole-snapshot read should not fail");
+            let matches_allowed = allowed_states.iter().any(|state| {
+                known_keys
+                    .iter()
+                    .map(|key| state.get(key).copied().map(Value::new))
+                    .eq(recovered.iter().cloned())
+            });
+            assert!(
+                matches_allowed,
+                "recovery exposed a state that was not atomic at a batch boundary"
+            );
+
+            // Verify all recovered KV pairs are provable.
             let root = db.root();
-            for (key, value) in &committed {
-                let k = Key::new(*key);
-                let v = Value::new(*value);
-
-                let result = db.get(&k).await.expect("get should not fail");
-                assert_eq!(
-                    result,
-                    Some(v.clone()),
-                    "committed KV pair lost after crash recovery"
-                );
-
+            for (key, value) in keys
+                .into_iter()
+                .zip(recovered)
+                .filter_map(|(key, value)| value.map(|value| (key, value)))
+            {
                 let proof = db
-                    .key_value_proof(k.clone())
+                    .key_value_proof(key.clone())
                     .await
-                    .expect("proof generation should not fail for committed key");
+                    .expect("proof generation should not fail for recovered key");
                 assert!(
-                    Db::<F>::verify_key_value_proof(k, v, &proof, &root),
+                    Db::<F>::verify_key_value_proof(key, value, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }

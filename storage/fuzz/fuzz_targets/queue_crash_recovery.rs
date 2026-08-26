@@ -117,9 +117,7 @@ struct RecoveryState {
 
     /// Whether we observed a mutable storage error during the operation phase.
     ///
-    /// After mutable errors, the queue may be left in an inconsistent state until
-    /// restart. In that case recovery checks should only assert basic liveness,
-    /// not exact durability/accounting bounds.
+    /// The failed operation's suffix is uncertain, but earlier committed items remain durable.
     saw_mutable_error: bool,
 }
 
@@ -336,17 +334,68 @@ async fn run_operations(
     state
 }
 
-/// Verify recovery after a mutable error during the operation phase.
-///
-/// Mutable errors may leave storage temporarily inconsistent, so we only assert
-/// that the queue can be re-initialized and used again for basic operations.
-async fn verify_recovery_after_mutable_error(mut queue: Queue<deterministic::Context, Vec<u8>>) {
-    // Basic read-path sanity should not fail.
+async fn verify_recovered_items(
+    queue: &mut Queue<deterministic::Context, Vec<u8>>,
+    state: &RecoveryState,
+    size: u64,
+    ack_floor: u64,
+) {
+    queue.reset();
+    let mut dequeued_count = 0u64;
+    loop {
+        match queue.dequeue().await {
+            Ok(Some((pos, item))) => {
+                dequeued_count += 1;
+                if let Some(value) = state.committed.get(&pos) {
+                    assert_eq!(
+                        item,
+                        make_item(*value),
+                        "item at position {pos} has wrong content after recovery",
+                    );
+                }
+                assert!(
+                    dequeued_count <= size,
+                    "dequeued more items than queue size"
+                );
+            }
+            Ok(None) => break,
+            Err(err) => panic!(
+                "dequeue at position {} failed after recovery: {err} (size={size}, \
+                 ack_floor={ack_floor})",
+                ack_floor + dequeued_count,
+            ),
+        }
+    }
+    assert_eq!(
+        dequeued_count,
+        size - ack_floor,
+        "dequeued {dequeued_count} items but expected {} unacked (size={size}, \
+         ack_floor={ack_floor})",
+        size - ack_floor,
+    );
+}
+
+/// Verify the durable prefix and basic usability after a mutable operation failed.
+async fn verify_recovery_after_mutable_error(
+    mut queue: Queue<deterministic::Context, Vec<u8>>,
+    state: &RecoveryState,
+) {
     let size_before = queue.size();
-    queue
-        .dequeue()
-        .await
-        .expect("dequeue should not error after recovery");
+    let ack_floor = queue.ack_floor();
+    let durable_end = state
+        .committed
+        .last_key_value()
+        .map_or(0, |(&position, _)| position + 1);
+    assert!(
+        size_before >= durable_end,
+        "recovered size {size_before} lost committed positions through {durable_end}",
+    );
+    assert!(
+        ack_floor <= state.current_ack_floor,
+        "recovered ack floor {ack_floor} exceeds requested floor {}",
+        state.current_ack_floor,
+    );
+    verify_recovered_items(&mut queue, state, size_before, ack_floor).await;
 
     // Queue should remain writable after recovery.
     let (queue, new_pos) = queue
@@ -368,7 +417,7 @@ async fn verify_recovery_after_mutable_error(mut queue: Queue<deterministic::Con
 /// Verify the queue state after recovery.
 async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, state: &RecoveryState) {
     if state.saw_mutable_error() {
-        verify_recovery_after_mutable_error(queue).await;
+        verify_recovery_after_mutable_error(queue, state).await;
         return;
     }
 
@@ -404,48 +453,7 @@ async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, stat
         state.max_recovered_ack_floor()
     );
 
-    // Reset to re-read all unacked items from the beginning
-    queue.reset();
-
-    // Verify all unacked items can be dequeued and have correct content
-    let mut dequeued_count = 0u64;
-    loop {
-        match queue.dequeue().await {
-            Ok(Some((pos, item))) => {
-                dequeued_count += 1;
-
-                // Verify item content if we know what it should be
-                if let Some(value) = state.committed.get(&pos) {
-                    let expected = make_item(*value);
-                    assert_eq!(
-                        item, expected,
-                        "item at position {} has wrong content after recovery",
-                        pos
-                    );
-                }
-
-                // Prevent infinite loop
-                if dequeued_count > size {
-                    panic!("dequeued more items than queue size");
-                }
-            }
-            Ok(None) => break,
-            Err(e) => panic!(
-                "dequeue at position {} failed after recovery: {e} (size={}, ack_floor={})",
-                ack_floor + dequeued_count,
-                size,
-                ack_floor
-            ),
-        }
-    }
-
-    // The number of unacked items should be size - ack_floor
-    let expected_unacked = size - ack_floor;
-    assert_eq!(
-        dequeued_count, expected_unacked,
-        "dequeued {} items but expected {} unacked (size={}, ack_floor={})",
-        dequeued_count, expected_unacked, size, ack_floor
-    );
+    verify_recovered_items(&mut queue, state, size, ack_floor).await;
 
     // Verify we can enqueue new items after recovery
     let (_queue, new_pos) = queue.enqueue(make_item(0xFF)).await.unwrap();

@@ -10,8 +10,8 @@ use commonware_runtime::{
     BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::merkle::{
-    Bagging::ForwardFold, Family as MerkleFamily, Location, full::Config,
-    hasher::Standard as StandardHasher, mmb, mmr,
+    Bagging::ForwardFold, Family as MerkleFamily, Location, Position, full::Config,
+    hasher::Standard as StandardHasher, mem::Mem, mmb, mmr,
 };
 use commonware_utils::{NZU64, Probability};
 use libfuzzer_sys::fuzz_target;
@@ -112,6 +112,7 @@ struct ExpectedBounds {
     max_leaves: u64,
     min_pruned: u64,
     max_pruned: u64,
+    leaves: Vec<[u8; DATA_SIZE]>,
 }
 
 async fn run_operations<F: MerkleFamily>(
@@ -125,6 +126,7 @@ async fn run_operations<F: MerkleFamily>(
     let mut max_leaves = merkle.leaves().as_u64();
     let mut min_pruned = 0u64;
     let mut max_pruned = merkle.bounds().start.as_u64();
+    let mut leaves = Vec::new();
 
     // A failed operation breaks out of the loop.
     for op in operations.iter() {
@@ -133,6 +135,7 @@ async fn run_operations<F: MerkleFamily>(
                 let batch = merkle.new_batch().add(hasher, data);
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
                 let merkle = merkle.apply_batch(&batch).unwrap();
+                leaves.push(*data);
                 max_size = max_size.max(merkle.size().as_u64());
                 max_leaves = max_leaves.max(merkle.leaves().as_u64());
                 merkle
@@ -208,14 +211,26 @@ async fn run_operations<F: MerkleFamily>(
         max_leaves,
         min_pruned,
         max_pruned,
+        leaves,
     }
 }
 
-fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
-    if input.operations.is_empty() {
-        return;
+fn build_reference<F: MerkleFamily>(
+    hasher: &StandardHasher<Sha256>,
+    leaves: &[[u8; DATA_SIZE]],
+    count: u64,
+) -> Mem<F, Digest> {
+    let mut reference = Mem::new();
+    let mut batch = reference.new_batch();
+    for data in leaves.iter().take(count as usize) {
+        batch = batch.add(hasher, data);
     }
+    let batch = batch.merkleize(&reference, hasher);
+    reference.apply_batch(&batch).unwrap();
+    reference
+}
 
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_blob = input.items_per_blob;
@@ -320,6 +335,43 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             "pruned {} < min_pruned {}",
             pruned,
             bounds.min_pruned
+        );
+
+        // Scalar bounds select the allowed recovered prefix. Compare every readable node against
+        // a separately rebuilt tree so a same-size corruption cannot satisfy the recovery oracle.
+        let reference = build_reference::<F>(&hasher, &bounds.leaves, leaves);
+        if leaves > 0 {
+            assert_eq!(
+                merkle
+                    .root(&hasher, 0)
+                    .expect("recovered root should exist"),
+                reference
+                    .root(&hasher, 0)
+                    .expect("reference root should exist"),
+                "recovered root does not match the intended leaf prefix",
+            );
+        }
+        let prune_loc = Location::<F>::new(pruned);
+        let prune_pos = F::location_to_position(prune_loc);
+        let mut positions = F::nodes_to_pin(prune_loc).collect::<Vec<_>>();
+        positions.extend((prune_pos.as_u64()..size).map(Position::<F>::new));
+        positions.sort_unstable();
+        positions.dedup();
+        let expected_nodes = positions
+            .iter()
+            .map(|&position| {
+                reference
+                    .get_node(position)
+                    .expect("reference node should exist")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            merkle
+                .get_nodes(&positions)
+                .await
+                .expect("recovered nodes should remain readable"),
+            expected_nodes,
+            "recovered nodes do not match the intended leaf prefix",
         );
 
         // Verify we can add new data after recovery

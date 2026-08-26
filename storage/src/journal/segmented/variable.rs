@@ -685,16 +685,18 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     /// Returns the next `(section, offset, size, item)`, or `None` once every section is
     /// exhausted.
     ///
-    /// An error ends the section that produced it, and iteration continues with the
-    /// next section. The exception is [Error::ReplayInterrupted], which ends the
+    /// An error ends the section that produced it, and iteration continues with the next section.
+    /// Errors while mutating storage to repair a section, and [Error::ReplayInterrupted], end the
     /// replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, u32, V), Error>> {
-        // An interrupted or failed repair can leave the section's writer with in-memory state
-        // that no longer matches the blob. Fail the replay rather than repair or decode over it.
+        // A repair that does not complete successfully leaves the section's writer unusable.
+        // A cancelled repair still needs an error; a completed failure already yielded one.
         if self.repairing {
             self.repairing = false;
             self.sections.clear();
-            return self.fail(Error::ReplayInterrupted);
+            if !self.errored {
+                return self.fail(Error::ReplayInterrupted);
+            }
         }
         while !self.sections.is_empty() {
             let current = self
@@ -2081,10 +2083,6 @@ mod tests {
                 .unwrap();
             assert!(matches!(replay.next().await, Some(Ok((0, 0, _, u64::MAX)))));
             assert!(matches!(replay.next().await, Some(Err(Error::Runtime(_)))));
-            assert!(matches!(
-                replay.next().await,
-                Some(Err(Error::ReplayInterrupted))
-            ));
             assert!(replay.next().await.is_none());
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
         });
@@ -2122,10 +2120,6 @@ mod tests {
             assert!(matches!(replay.next().await, Some(Err(Error::Runtime(_)))));
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            assert!(matches!(
-                replay.next().await,
-                Some(Err(Error::ReplayInterrupted))
-            ));
             assert!(replay.next().await.is_none());
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
         });

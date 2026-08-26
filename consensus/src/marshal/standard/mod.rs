@@ -64,7 +64,6 @@ mod tests {
                 verifying::MockVerifyingApp,
             },
             resolver::handler,
-            store,
         },
         simplex::{
             self, Plan,
@@ -93,13 +92,10 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _,
-        buffer::paged::CacheRef,
-        deterministic::{self, PartialWriteMode, WriteConfig},
-        mocks::{DelayedSyncContext, PendingSyncs},
+        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
     use commonware_storage::{
-        Context as StorageContext,
         archive::{Archive as _, immutable, prunable},
         metadata::{self, Metadata},
         translator::{EightCap, TwoCap},
@@ -6152,8 +6148,10 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
+        const PARTITION_PREFIX: &str = "finalized-delivery-verify-only";
+
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
+        let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
@@ -6162,12 +6160,14 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+            let verifier = schemes[0].clone();
+            let application = Application::<B>::manual_ack();
 
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
                 context.child("validator"),
-                "finalized-delivery-verify-only",
-                VerifierProvider::new(schemes[0].clone()),
-                Application::<B>::default(),
+                PARTITION_PREFIX,
+                VerifierProvider::new(verifier.clone()),
+                application.clone(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -6186,7 +6186,7 @@ mod tests {
                                 tracing::Span::none(),
                             )),
                         },
-                        value: (finalization, block).encode(),
+                        value: (finalization.clone(), block.clone()).encode(),
                         response,
                     })
                     .accepted()
@@ -6195,6 +6195,40 @@ mod tests {
                 response_rx.await.expect("delivery response missing"),
                 "finalization verified through a verify-only scope should be accepted"
             );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, height);
+            assert_eq!(
+                application.blocks().get(&height).unwrap().digest(),
+                block.digest()
+            );
+
+            actor_handle.abort();
+            drop(mailbox);
+            (verifier, block, finalization)
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (verifier, block, finalization) = fixture;
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("recovered"),
+                PARTITION_PREFIX,
+                VerifierProvider::new(verifier),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let recovered_block = mailbox
+                .get_block(Height::new(1))
+                .await
+                .expect("delivered finalized block must be durable");
+            assert_eq!(recovered_block.digest(), block.digest());
+            let recovered_finalization = mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .expect("delivered finalization must be durable");
+            assert_eq!(recovered_finalization.proposal, finalization.proposal);
         });
     }
 
@@ -7174,15 +7208,15 @@ mod tests {
         }
     }
 
-    /// Initialize the two real prunable stores used by Marshal's finalized path.
+    /// Initialize paced prunable finalized stores for direct actor tests.
     #[allow(clippy::type_complexity)]
-    async fn prunable_finalized_stores<E: StorageContext>(
-        context: &E,
+    async fn paced_finalized_stores(
+        context: &deterministic::Context,
         partition_prefix: &str,
-        value_write_buffer: NonZeroUsize,
+        pace: Duration,
     ) -> (
-        prunable::Archive<EightCap, E, D, Finalization<S, D>>,
-        prunable::Archive<EightCap, E, D, B>,
+        PacedStore<prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>>,
+        PacedStore<prunable::Archive<EightCap, deterministic::Context, D, B>>,
     ) {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let finalizations_by_height = prunable::Archive::init(
@@ -7197,7 +7231,7 @@ mod tests {
                 codec_config: S::certificate_codec_config_unbounded(),
                 items_per_section: NZU64!(10),
                 key_write_buffer: NZUsize!(1024),
-                value_write_buffer,
+                value_write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
         )
@@ -7215,27 +7249,12 @@ mod tests {
                 codec_config: (),
                 items_per_section: NZU64!(10),
                 key_write_buffer: NZUsize!(1024),
-                value_write_buffer,
+                value_write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
         )
         .await
         .expect("failed to initialize finalized blocks archive");
-        (finalizations_by_height, finalized_blocks)
-    }
-
-    /// Initialize paced prunable finalized stores for direct actor tests.
-    #[allow(clippy::type_complexity)]
-    async fn paced_finalized_stores(
-        context: &deterministic::Context,
-        partition_prefix: &str,
-        pace: Duration,
-    ) -> (
-        PacedStore<prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>>,
-        PacedStore<prunable::Archive<EightCap, deterministic::Context, D, B>>,
-    ) {
-        let (finalizations_by_height, finalized_blocks) =
-            prunable_finalized_stores(context, partition_prefix, NZUsize!(1024)).await;
         (
             PacedStore {
                 inner: finalizations_by_height,
@@ -7248,305 +7267,6 @@ mod tests {
                 pace,
             },
         )
-    }
-
-    /// The finalized block and certificate archives are separate durability domains. A supported
-    /// subset-write crash can lose both height-1 value frames while retaining the later height-2
-    /// frames in the same sections. Startup truncates each section at its first CRC-invalid value:
-    ///
-    /// ```text
-    /// after recovery:
-    ///   block archive: [h1 bad CRC] [h2 retained] -> []
-    ///   cert archive:  [h1 bad CRC] [h2 retained] -> []
-    ///
-    /// one authenticated h1 delivery:
-    ///   block archive: [h1]
-    ///   cert archive:  [h1]
-    /// ```
-    ///
-    /// Height 1 is dispatched only after the joined archive sync completes. A subsequent crash and
-    /// raw reopen therefore prove that the single delivery repaired both real prunable stores.
-    #[test_traced("WARN")]
-    fn test_standard_one_finalized_delivery_repairs_both_crashed_archives() {
-        const PREFIX: &str = "one-delivery-repairs-both-crashed-archives";
-
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let block_1 = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let block_2 = make_raw_block(block_1.digest(), Height::new(2), 200);
-            let finalization_1 = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    block_1.digest(),
-                ),
-                &schemes,
-                QUORUM,
-            );
-            let finalization_2 = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(2)),
-                    View::new(1),
-                    block_2.digest(),
-                ),
-                &schemes,
-                QUORUM,
-            );
-
-            let fault_config = context.storage_fault_config();
-            let pending = PendingSyncs::default();
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let (mut finalizations, mut blocks) =
-                prunable_finalized_stores(&context, PREFIX, NZUsize!(1)).await;
-
-            // Value frames exceed the one-byte glob buffer and are issued under the fault policy
-            // active at append time. Index pages remain buffered until the final retained sync.
-            *fault_config.write() = deterministic::FaultConfig {
-                write_rate: Some(WriteConfig {
-                    failure_rate: Probability!(0.0),
-                    retention_rate: Probability!(0.0),
-                    mode: PartialWriteMode::Subset,
-                }),
-                ..Default::default()
-            };
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(1),
-                block_1.digest(),
-                finalization_1.clone(),
-            )
-            .await
-            .unwrap();
-            blocks = store::Blocks::put(blocks, block_1.clone()).await.unwrap();
-
-            *fault_config.write() = deterministic::FaultConfig {
-                write_rate: Some(WriteConfig {
-                    failure_rate: Probability!(0.0),
-                    retention_rate: Probability!(1.0),
-                    mode: PartialWriteMode::Subset,
-                }),
-                ..Default::default()
-            };
-            finalizations = store::Certificates::put(
-                finalizations,
-                Height::new(2),
-                block_2.digest(),
-                finalization_2,
-            )
-            .await
-            .unwrap();
-            blocks = store::Blocks::put(blocks, block_2.clone()).await.unwrap();
-
-            let (finalizations, finalizations_sync) =
-                store::Certificates::start_sync(finalizations)
-                    .await
-                    .unwrap();
-            let (blocks, blocks_sync) = store::Blocks::start_sync(blocks).await.unwrap();
-            assert_eq!(
-                pending.lock().len(),
-                4,
-                "both archives must park their index and value durability barriers"
-            );
-            drop(finalizations_sync);
-            drop(blocks_sync);
-            drop(finalizations);
-            drop(blocks);
-
-            (schemes, block_1, block_2, finalization_1)
-        });
-
-        let (fixture, checkpoint) =
-            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
-                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-                let (finalizations, blocks) =
-                    prunable_finalized_stores(&context, PREFIX, NZUsize!(1024)).await;
-                let (schemes, block_1, block_2, finalization_1) = fixture;
-
-                // The first invalid value removes the entire same-section suffix from each
-                // archive, including the retained height-2 frame.
-                assert!(finalizations.ranges().next().is_none());
-                assert!(blocks.ranges().next().is_none());
-                for height in [Height::new(1), Height::new(2)] {
-                    assert!(
-                        store::Certificates::get(
-                            &finalizations,
-                            commonware_storage::archive::Identifier::Index(height.get()),
-                        )
-                        .await
-                        .unwrap()
-                        .is_none(),
-                        "certificate archive retained truncated height {height:?}"
-                    );
-                    assert!(
-                        store::Blocks::get(
-                            &blocks,
-                            commonware_storage::archive::Identifier::Index(height.get()),
-                        )
-                        .await
-                        .unwrap()
-                        .is_none(),
-                        "block archive retained truncated height {height:?}"
-                    );
-                }
-
-                let provider = ConstantProvider::new(schemes[0].clone());
-                let config = Config {
-                    provider,
-                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                    start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-                    mailbox_size: NZUsize!(100),
-                    view_retention: ViewDelta::new(10),
-                    max_repair: NZUsize!(10),
-                    max_pending_acks: NZUsize!(1),
-                    block_codec_config: (),
-                    partition_prefix: PREFIX.to_string(),
-                    prunable_items_per_section: NZU64!(10),
-                    replay_buffer: NZUsize!(1024),
-                    key_write_buffer: NZUsize!(1024),
-                    value_write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    strategy: Sequential,
-                };
-                let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                    context.child("actor"),
-                    finalizations,
-                    blocks,
-                    config,
-                )
-                .await;
-                let application = Application::<B>::manual_ack();
-                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-                let (response, response_rx) = oneshot::channel();
-                assert!(
-                    resolver
-                        .enqueue(handler::Message::Deliver {
-                            delivery: Delivery {
-                                key: handler::Key::Finalized {
-                                    height: Height::new(1),
-                                },
-                                subscribers: NonEmptyVec::new((
-                                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                        height: Height::new(1),
-                                    }),
-                                    tracing::Span::none(),
-                                )),
-                            },
-                            value: (finalization_1.clone(), block_1.clone()).encode(),
-                            response,
-                        })
-                        .accepted()
-                );
-                let actor_handle =
-                    actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
-
-                assert!(
-                    response_rx.await.expect("delivery response missing"),
-                    "the authenticated height-1 repair must be accepted"
-                );
-                assert_eq!(application.acknowledged().await, Height::zero());
-                assert_eq!(
-                    application.acknowledged().await,
-                    Height::new(1),
-                    "height 1 must dispatch only after both repair syncs complete"
-                );
-                assert_eq!(
-                    application.blocks().get(&Height::new(1)).unwrap().digest(),
-                    block_1.digest()
-                );
-
-                actor_handle.abort();
-                drop(mailbox);
-                (block_1, block_2, finalization_1)
-            });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let (finalizations, blocks) =
-                prunable_finalized_stores(&context, PREFIX, NZUsize!(1024)).await;
-            let (block_1, block_2, finalization_1) = fixture;
-            let block_1_digest = block_1.digest();
-            let block_2_digest = block_2.digest();
-
-            let recovered_finalization = store::Certificates::get(
-                &finalizations,
-                commonware_storage::archive::Identifier::Index(1),
-            )
-            .await
-            .unwrap()
-            .expect("height-1 finalization repair was not durable");
-            assert_eq!(recovered_finalization.proposal, finalization_1.proposal);
-            assert!(
-                store::Certificates::get(
-                    &finalizations,
-                    commonware_storage::archive::Identifier::Key(&block_1_digest),
-                )
-                .await
-                .unwrap()
-                .is_some()
-            );
-
-            let recovered_block =
-                store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(1))
-                    .await
-                    .unwrap()
-                    .expect("height-1 block repair was not durable");
-            assert_eq!(recovered_block.digest(), block_1_digest);
-            assert_eq!(
-                store::Blocks::get(
-                    &blocks,
-                    commonware_storage::archive::Identifier::Key(&block_1_digest),
-                )
-                .await
-                .unwrap()
-                .unwrap()
-                .digest(),
-                block_1_digest,
-            );
-
-            assert!(
-                store::Certificates::get(
-                    &finalizations,
-                    commonware_storage::archive::Identifier::Index(2),
-                )
-                .await
-                .unwrap()
-                .is_none(),
-                "height-2 finalization suffix reappeared after repair"
-            );
-            assert!(
-                store::Certificates::get(
-                    &finalizations,
-                    commonware_storage::archive::Identifier::Key(&block_2_digest),
-                )
-                .await
-                .unwrap()
-                .is_none(),
-                "height-2 finalization key reappeared after repair"
-            );
-            assert!(
-                store::Blocks::get(&blocks, commonware_storage::archive::Identifier::Index(2))
-                    .await
-                    .unwrap()
-                    .is_none(),
-                "height-2 block suffix reappeared after repair"
-            );
-            assert!(
-                store::Blocks::get(
-                    &blocks,
-                    commonware_storage::archive::Identifier::Key(&block_2_digest),
-                )
-                .await
-                .unwrap()
-                .is_none(),
-                "height-2 block key reappeared after repair"
-            );
-        });
     }
 
     /// A slow finalized-archive sync must not block the marshal mailbox.

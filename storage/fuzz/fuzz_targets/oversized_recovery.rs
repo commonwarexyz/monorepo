@@ -175,6 +175,33 @@ struct AuthenticatedIndex {
     surviving_physical_extent: u64,
 }
 
+/// Return whether changing a byte can alter the original checksum-proven index prefix.
+///
+/// Setup writes each page once, leaving the first checksum slot active and the second slot's
+/// length at zero. While a section remains authenticated, earlier raw writes can only have changed
+/// page padding, the inactive slot's checksum, or bytes beyond the original physical extent.
+fn authenticates_original_index_byte(authenticated: AuthenticatedIndex, offset: u64) -> bool {
+    if offset >= authenticated.surviving_physical_extent {
+        return false;
+    }
+    let page_size = u64::from(PAGE_SIZE.get());
+    let physical_page_size = page_size + PAGE_CHECKSUM_RECORD_SIZE as u64;
+    let page = offset / physical_page_size;
+    let in_page = offset % physical_page_size;
+    let logical_start = page * page_size;
+    if in_page < page_size {
+        let authenticated_on_page = authenticated
+            .logical_len
+            .saturating_sub(logical_start)
+            .min(page_size);
+        return in_page < authenticated_on_page;
+    }
+
+    // The active slot and both slot lengths select the authenticated prefix. The final four bytes
+    // are the checksum of the still-inactive second slot and have no effect while its length is 0.
+    in_page - page_size < 8
+}
+
 fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.into(),
@@ -368,8 +395,8 @@ fn fuzz(input: FuzzInput) {
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
                         let new_size = (size * (*size_factor as u64)) / 256;
-                        authenticated_entries.remove(section);
                         if blob.resize(new_size).await.is_ok() {
+                            authenticated_entries.remove(section);
                             if let Some(authenticated) = authenticated_indices.get_mut(section) {
                                 authenticated.surviving_physical_extent =
                                     authenticated.surviving_physical_extent.min(new_size);
@@ -386,9 +413,10 @@ fn fuzz(input: FuzzInput) {
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                     {
                         let new_size = (size * (*size_factor as u64)) / 256;
-                        authenticated_entries.remove(section);
-                        let _ = blob.resize(new_size).await;
-                        let _ = blob.sync().await;
+                        if blob.resize(new_size).await.is_ok() {
+                            authenticated_entries.remove(section);
+                            let _ = blob.sync().await;
+                        }
                     }
                 }
                 CorruptionType::CorruptIndexBytes {
@@ -401,10 +429,34 @@ fn fuzz(input: FuzzInput) {
                         && size > 0
                     {
                         let offset = (size * (*offset_factor as u64)) / 256;
-                        authenticated_entries.remove(section);
-                        let _ = blob
+                        let existing = (size - offset).min(data.len() as u64) as usize;
+                        let original = blob
+                            .read_at(offset, existing, ReadOptions::default())
+                            .await
+                            .expect("oracle index read failed")
+                            .coalesce();
+                        let taints = authenticated_entries.contains_key(section)
+                            && authenticated_indices
+                                .get(section)
+                                .is_some_and(|authenticated| {
+                                    original.as_ref().iter().zip(data).enumerate().any(
+                                        |(index, (&before, &after))| {
+                                            before != after
+                                                && authenticates_original_index_byte(
+                                                    *authenticated,
+                                                    offset + index as u64,
+                                                )
+                                        },
+                                    )
+                                });
+                        if blob
                             .write_at(offset, data.to_vec(), WriteOptions::SYNC)
-                            .await;
+                            .await
+                            .is_ok()
+                            && taints
+                        {
+                            authenticated_entries.remove(section);
+                        }
                     }
                 }
                 CorruptionType::CorruptGlobBytes {
@@ -417,10 +469,29 @@ fn fuzz(input: FuzzInput) {
                         && size > 0
                     {
                         let offset = (size * (*offset_factor as u64)) / 256;
-                        authenticated_entries.remove(section);
-                        let _ = blob
+                        let existing = (size - offset).min(data.len() as u64) as usize;
+                        let original = blob
+                            .read_at(offset, existing, ReadOptions::default())
+                            .await
+                            .expect("oracle value read failed")
+                            .coalesce();
+                        let authenticated_len =
+                            authenticated_entries.get(section).map_or(0, |ids| {
+                                ids.len() as u64 * (TestValue::SIZE + u32::SIZE) as u64
+                            });
+                        let taints = original.as_ref().iter().zip(data).enumerate().any(
+                            |(index, (&before, &after))| {
+                                before != after && offset + (index as u64) < authenticated_len
+                            },
+                        );
+                        if blob
                             .write_at(offset, data.to_vec(), WriteOptions::SYNC)
-                            .await;
+                            .await
+                            .is_ok()
+                            && taints
+                        {
+                            authenticated_entries.remove(section);
+                        }
                     }
                 }
                 CorruptionType::DeleteIndex { section } => {

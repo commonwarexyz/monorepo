@@ -71,7 +71,7 @@ enum PreflightMode<B> {
 }
 
 struct Validated<A, B> {
-    boundaries: BTreeMap<u64, (u64, Option<A>)>,
+    boundaries: BTreeMap<u64, Option<A>>,
     mode: PreflightMode<B>,
 }
 
@@ -83,7 +83,7 @@ pub(crate) struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
-    pub(crate) const fn boundaries(&self) -> &BTreeMap<u64, (u64, Option<A>)> {
+    pub(crate) const fn boundaries(&self) -> &BTreeMap<u64, Option<A>> {
         &self.validated.boundaries
     }
 
@@ -150,7 +150,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 ))
             })?;
             if required == 0 {
-                boundaries.insert(section, (0, None));
+                boundaries.insert(section, None);
                 continue;
             }
 
@@ -172,7 +172,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             }
             let entry = A::decode(entry.as_slice()).map_err(Error::Codec)?;
             recoverable_lengths.insert(section, recoverable);
-            boundaries.insert(section, (required, Some(entry)));
+            boundaries.insert(section, Some(entry));
         }
 
         Ok(Validated {
@@ -267,12 +267,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 }
                 Some(A::decode(captured.as_slice()).map_err(Error::Codec)?)
             };
-            boundaries.insert(candidate, (boundary_size, entry));
+            boundaries.insert(candidate, entry);
             if is_current && physical_size > current_physical {
                 current = Some((blob, current_physical));
             }
         }
-        boundaries.entry(section).or_insert((size, None));
+        boundaries.entry(section).or_insert(None);
 
         let discard = stored
             .iter()

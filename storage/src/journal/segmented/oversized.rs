@@ -330,7 +330,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         values: &Glob<E, V>,
         preflight: &RecoveryPreflight<E, I>,
     ) -> Result<(), Error> {
-        for (&section, (_, entry)) in preflight.boundaries() {
+        for (&section, entry) in preflight.boundaries() {
             let Some(entry) = entry else {
                 continue;
             };
@@ -361,7 +361,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         preflight: &RecoveryPreflight<E, I>,
         section: u64,
     ) -> Result<(), Error> {
-        for (&candidate, (_, entry)) in preflight.boundaries().range(..section) {
+        for (&candidate, entry) in preflight.boundaries().range(..section) {
             let required = match entry {
                 None => 0,
                 Some(entry) => {
@@ -389,7 +389,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             )));
         }
 
-        let entry = &preflight.boundaries()[&section].1;
+        let entry = &preflight.boundaries()[&section];
         if let Some(entry) = entry {
             let (offset, size) = entry.value_location();
             let required = offset.checked_add(u64::from(size)).ok_or_else(|| {

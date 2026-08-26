@@ -232,7 +232,8 @@ mod tests {
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
     };
-    use commonware_codec::{DecodeExt, Error as CodecError};
+    use commonware_codec::{DecodeExt, Error as CodecError, FixedSize};
+    use commonware_cryptography::Crc32;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         Blob as _, BufferPooler, Error as RError, Metrics as _, ReadOptions, Runner, Spawner as _,
@@ -1111,16 +1112,37 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(archive.values_validated_on_init(), 2);
+            assert!(has_metric_value(
+                &context.encode(),
+                "first_open_values_validated_total",
+                2
+            ));
             assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 1)]);
             drop(archive);
 
-            let archive =
-                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_open"), cfg)
-                    .await
-                    .unwrap();
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("second_open"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
             assert_eq!(archive.values_validated_on_init(), 0);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
+
+            let archive = archive.put(2, test_key("two"), 30).await.unwrap();
+            let archive = archive.sync().await.unwrap();
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("third_open"), cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 1);
+            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 2)]);
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(30));
         });
     }
 
@@ -1305,6 +1327,138 @@ mod tests {
                     .coalesce();
                 assert_eq!(actual.as_ref(), expected.as_ref());
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_validation_marker_survives_torn_index_tail_rewrite() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let cfg = test_config(&context, "marker-torn-tail", NZU64!(4));
+            let archive = Archive::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Publish a marker for one record while its index occupies only part of the first page.
+            let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.sync().await.unwrap();
+            let page_size = usize::from(PAGE_SIZE.get());
+            let physical_page_size = page_size + 12;
+            let record_size = u64::SIZE + FixedBytes::<64>::SIZE + u64::SIZE + u32::SIZE;
+            assert!(record_size < page_size);
+            let (index, size) = context
+                .open(&cfg.key_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(size, physical_page_size as u64);
+            let old_page = index
+                .read_at(0, physical_page_size, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            let old_page = old_page.as_ref().to_vec();
+            drop(index);
+            let old_len =
+                u16::from_be_bytes(old_page[page_size..page_size + 2].try_into().unwrap()) as usize;
+            let old_crc =
+                u32::from_be_bytes(old_page[page_size + 2..page_size + 6].try_into().unwrap());
+            assert_eq!(old_len, record_size);
+            assert_eq!(old_crc, Crc32::checksum(&old_page[..old_len]));
+
+            // Capture Archive's same-page extension, then persist only the prefix through the new
+            // slot's length. This is the exact Prefix fault cut: the old slot remains valid while
+            // the new slot's checksum retains its prior zero bytes.
+            let archive = archive.put_sync(1, test_key("one"), 20).await.unwrap();
+            drop(archive);
+            let (index, size) = context
+                .open(&cfg.key_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(size, physical_page_size as u64);
+            let new_page = index
+                .read_at(0, physical_page_size, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            let new_page = new_page.as_ref().to_vec();
+            assert_eq!(
+                &new_page[page_size..page_size + 6],
+                &old_page[page_size..page_size + 6],
+            );
+            let new_len =
+                u16::from_be_bytes(new_page[page_size + 6..page_size + 8].try_into().unwrap())
+                    as usize;
+            let new_crc =
+                u32::from_be_bytes(new_page[page_size + 8..page_size + 12].try_into().unwrap());
+            assert_eq!(new_len, 2 * record_size);
+            assert_eq!(new_crc, Crc32::checksum(&new_page[..new_len]));
+
+            index
+                .write_at(0, old_page.clone(), WriteOptions::SYNC)
+                .await
+                .unwrap();
+            let torn_prefix = page_size + 6 + 2;
+            index
+                .write_at(0, new_page[..torn_prefix].to_vec(), WriteOptions::SYNC)
+                .await
+                .unwrap();
+            let torn_page = index
+                .read_at(0, physical_page_size, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            let torn_page = torn_page.as_ref();
+            assert_eq!(
+                &torn_page[page_size..page_size + 6],
+                &old_page[page_size..page_size + 6],
+            );
+            assert_eq!(
+                u16::from_be_bytes(torn_page[page_size + 6..page_size + 8].try_into().unwrap(),)
+                    as usize,
+                new_len,
+            );
+            let torn_crc =
+                u32::from_be_bytes(torn_page[page_size + 8..page_size + 12].try_into().unwrap());
+            assert_ne!(torn_crc, Crc32::checksum(&torn_page[..new_len]));
+            drop(index);
+
+            let (_, value_size) = context
+                .open(&cfg.value_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(value_size, 2 * I32_VALUE_FRAME_SIZE);
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            pending.arm();
+            let cfg = test_config(&delayed, "marker-torn-tail", NZU64!(4));
+
+            // Recovery must trust the marker-covered record, select the older checksum slot, and
+            // durably remove only the orphaned value suffix.
+            let archive = drive_pending_syncs(
+                &pending,
+                Archive::<_, _, FixedBytes<64>, i32>::init(delayed.child("reopen"), cfg.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(pending.calls(), 1);
+            assert_eq!(archive.values_validated_on_init(), 0);
+            assert_eq!(archive.last_index(), Some(0));
+            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 0)]);
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+            drop(archive);
+
+            let (_, value_size) = context
+                .open(&cfg.value_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(value_size, I32_VALUE_FRAME_SIZE);
         });
     }
 
