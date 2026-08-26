@@ -5979,6 +5979,86 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_block_delivery_aggregates_coalesced_annotations() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Start from genesis so this delivery is the only possible source for either lookup.
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "block-delivery-coalesced-annotations",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            // The highest certified bound admits the block, while any finalized-height
+            // mismatch must veto finalized storage for the entire coalesced request set.
+            let height = Height::new(7);
+            let block = make_raw_block(Sha256::hash(&[b"parent"]), height, 700);
+            let digest = block.digest();
+            let mut subscribers = NonEmptyVec::new((
+                handler::Annotation::Certified {
+                    height: Height::new(6),
+                },
+                tracing::Span::none(),
+            ));
+            subscribers.extend([
+                (
+                    handler::Annotation::Certified { height },
+                    tracing::Span::none(),
+                ),
+                (
+                    handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
+                    tracing::Span::none(),
+                ),
+                (
+                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                        height: height.next(),
+                    }),
+                    tracing::Span::none(),
+                ),
+            ]);
+
+            // Submit every local reason in one delivery to exercise the actor's aggregation.
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(StandardHarness::commitment(&block)),
+                            subscribers,
+                        },
+                        value: block.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "coalesced block delivery should validate"
+            );
+
+            // The finalized archive remains empty, but the independently authorized certified
+            // cache still makes the block available by digest.
+            assert!(
+                mailbox.get_block(height).await.is_none(),
+                "one mismatched finalized-height annotation must prevent finalized storage"
+            );
+            let cached = mailbox
+                .get_block(&digest)
+                .await
+                .expect("the highest certified bound should authorize certified caching");
+            assert_eq!(cached.digest(), digest);
+            assert_eq!(cached.height(), height);
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_notarized_delivery_wakes_fetch_by_round_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
