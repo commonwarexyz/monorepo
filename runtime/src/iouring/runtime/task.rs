@@ -295,6 +295,9 @@ pub(super) struct Tasks {
     /// Latches the event loop's out-of-band wake state so a parked executor
     /// (futex or `submit_and_wait`) observes the enqueue from any thread.
     unpark: RingWaker,
+    /// One registration boundary callback used by deterministic race tests.
+    #[cfg(test)]
+    register_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Tasks {
@@ -313,6 +316,8 @@ impl Tasks {
             owner: current_thread_id(),
             delivering_events: AtomicBool::new(false),
             unpark,
+            #[cfg(test)]
+            register_hook: Mutex::new(None),
         }
     }
 
@@ -348,6 +353,9 @@ impl Tasks {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        #[cfg(test)]
+        arc_self.run_register_hook();
+
         let cell = {
             let mut running = arc_self.running.lock();
             let Some(running) = running.as_mut() else {
@@ -520,6 +528,30 @@ impl Tasks {
         if let Some(payload) = first_panic {
             std::panic::resume_unwind(payload);
         }
+    }
+}
+
+#[cfg(test)]
+impl Tasks {
+    /// Install a callback for the next registration attempt.
+    fn hook_register_once(&self, hook: impl FnOnce() + Send + 'static) {
+        let mut slot = self.register_hook.lock();
+        assert!(slot.is_none(), "registration hook already installed");
+        *slot = Some(Box::new(hook));
+    }
+
+    /// Run the callback after releasing its slot lock so it may coordinate
+    /// with teardown, which needs to acquire other task locks.
+    fn run_register_hook(&self) {
+        let hook = self.register_hook.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// Whether teardown has closed the task arena.
+    fn is_closed(&self) -> bool {
+        self.running.lock().is_none()
     }
 }
 
@@ -1202,6 +1234,62 @@ mod tests {
         waker.wake_by_ref();
         waker.clone().wake();
         drop(waker);
+    }
+
+    /// Spawns registered from a dedicated worker onto a worker that is
+    /// paused immediately before registration must be rejected when the
+    /// target worker closes its arena in the interim.
+    #[test]
+    fn test_cross_worker_spawn_rejected_after_arena_closes() {
+        let polled = Arc::new(AtomicBool::new(false));
+        let polled_by_task = Arc::clone(&polled);
+        let (result_send, result_recv) = std::sync::mpsc::channel();
+
+        Runner::default().start(move |context| async move {
+            let tasks = context.executor().tasks.clone();
+            let target = context.child("target");
+            let (paused_send, paused_recv) = oneshot::channel();
+            let observed_tasks = Arc::downgrade(&tasks);
+            tasks.hook_register_once(move || {
+                paused_send
+                    .send(())
+                    .expect("root worker dropped pause signal");
+                let tasks = observed_tasks
+                    .upgrade()
+                    .expect("task arena dropped during registration");
+                while !tasks.is_closed() {
+                    std::thread::yield_now();
+                }
+            });
+
+            let _dedicated = context
+                .child("dedicated")
+                .dedicated()
+                .spawn(move |_| async move {
+                    let handle = target.spawn(move |_| {
+                        std::future::poll_fn(move |_| {
+                            polled_by_task.store(true, Ordering::Release);
+                            Poll::Ready(())
+                        })
+                    });
+                    let result = handle.await;
+                    result_send
+                        .send(result)
+                        .expect("test dropped spawn result receiver");
+                });
+
+            paused_recv.await.expect("registration did not reach hook");
+        });
+
+        let result = result_recv.recv().expect("dedicated worker dropped");
+        assert!(
+            matches!(&result, Err(Error::Closed)),
+            "spawn returned an unexpected result: {result:?}"
+        );
+        assert!(
+            !polled.load(Ordering::Acquire),
+            "rejected task must not be polled"
+        );
     }
 
     /// Spawns registered from a dedicated worker onto a worker that is
