@@ -341,7 +341,6 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 }
 
 /// Signature-to-leader mapping used by [`Random`].
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RandomVersion {
     /// Maps the encoded threshold signature directly to a participant.
