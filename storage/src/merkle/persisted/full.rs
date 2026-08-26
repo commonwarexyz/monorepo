@@ -126,11 +126,10 @@ pub struct Config<S: Strategy> {
     /// The page cache to use for caching data.
     pub page_cache: CacheRef,
 
-    /// Capacity (in entries, rounded up to a multiple of the shard count and preallocated
-    /// eagerly) of the position-keyed node cache serving historical node reads that escape
-    /// the in-memory structure. `None` disables it. The cache pays off for access patterns
-    /// that repeatedly read the same positions, such as grafted reads over hot regions or
-    /// repeated proof generation.
+    /// Capacity (in entries, rounded up to a multiple of the shard count and preallocated eagerly)
+    /// of the position-keyed node cache serving historical node reads. `None` disables it. The
+    /// cache pays off for access patterns that repeatedly read the same positions, such as grafted
+    /// reads over hot regions or repeated proof generation.
     pub node_cache_size: Option<NonZeroUsize>,
 }
 
@@ -184,10 +183,10 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
 
-    /// A position-keyed cache of node digests read from the journal; `None` when disabled.
-    /// Journal node positions are written exactly once (append-only), so entries need no
-    /// coherence protocol; rewind (which lets new appends reuse truncated positions) clears
-    /// the cache wholesale.
+    /// A position-keyed cache of node digests read from the journal; `None` when disabled. Journal
+    /// node positions are written exactly once (append-only), so entries need no coherence
+    /// protocol; rewind (which lets new appends reuse truncated positions) clears the cache
+    /// wholesale.
     pub(crate) node_cache: Option<node_cache::NodeCache<D>>,
 }
 
@@ -660,9 +659,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Ok(Some(node));
         }
 
-        // Probe the cache only for retained positions: entries below the pruning
-        // boundary linger until CLOCK eviction, and serving one would return
-        // `Ok(Some(..))` where the contract (and any cold instance) returns `Ok(None)`.
+        // Per contract, nodes outside the journal bounds must return `None`, so probe the
+        // cache only for retained positions.
         if *position >= self.journal.bounds().start
             && let Some(node) = self
                 .node_cache
@@ -698,33 +696,18 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         );
         let bounds = self.journal.bounds();
         let mut nodes = vec![None; positions.len()];
-        let mut journal_positions = Vec::with_capacity(positions.len());
+        let mut journal_misses = Vec::with_capacity(positions.len());
         for (slot, &position) in nodes.iter_mut().zip(positions) {
             if let Some(node) = self.mem.get_node(position) {
                 *slot = Some(node);
-            } else if *position >= bounds.start {
-                // In-subsequence order is preserved, so this stays strictly increasing.
-                journal_positions.push(*position);
-            } else {
+            } else if *position < bounds.start {
                 return Err(Error::ElementPruned(position));
+            } else if let Some(node) = self.node_cache.as_ref().and_then(|c| c.get(*position)) {
+                *slot = Some(node);
+            } else {
+                // In-subsequence order is preserved, so this stays strictly increasing.
+                journal_misses.push(*position);
             }
-        }
-
-        // Serve node-cache hits directly; only the residue pays a journal read. Hits fill
-        // their `nodes` slots here, identified by walking the None slots in order (the
-        // journal subsequence preserves position order).
-        let mut journal_misses = journal_positions;
-        if let Some(cache) = &self.node_cache {
-            let mut misses = Vec::with_capacity(journal_misses.len());
-            let mut probe = journal_misses.iter();
-            for slot in nodes.iter_mut().filter(|slot| slot.is_none()) {
-                let position = *probe.next().expect("one journal position per empty slot");
-                match cache.get(position) {
-                    Some(node) => *slot = Some(node),
-                    None => misses.push(position),
-                }
-            }
-            journal_misses = misses;
         }
 
         // Within-bounds reads are guaranteed not to return `ItemPruned` (see
@@ -732,9 +715,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let items = if journal_misses.is_empty() {
             Vec::new()
         } else if let Some(cache) = &self.node_cache {
-            // The cache retains these digests, so the journal pages backing them are read
-            // exactly once: skip page-cache admission, which would only churn that cache
-            // and serialize concurrent bulk readers on its lock.
+            // The node cache retains these digests, so their backing pages are read only
+            // once. Skipping page-cache admission avoids churning that cache and its lock.
             let items = self
                 .journal
                 .read_many_uncached(&journal_misses)
@@ -1047,8 +1029,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         if new_size < journal_size {
             self.journal = self.journal.rewind(*new_size).await?.sync().await?;
 
-            // Truncated positions can be reused by new appends, which breaks the
-            // position-immutability rule the node cache relies on: drop every entry.
+            // Clear the entire cache to avoid serving entries that become stale due to the rewind.
             if let Some(cache) = &self.node_cache {
                 cache.clear();
             }

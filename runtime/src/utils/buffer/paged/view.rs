@@ -192,7 +192,7 @@ impl<B: Blob> View<'_, B> {
     }
 
     /// Like [`Self::read_many_into`], but cache misses read from the blob without
-    /// admitting pages into the page cache (see `CacheRef::read_uncached`).
+    /// admitting pages into the page cache (see `CacheRef::read_uncached_many`).
     pub async fn read_many_into_uncached(
         &self,
         buf: &mut [u8],
@@ -215,9 +215,9 @@ impl<B: Blob> View<'_, B> {
         }
 
         // Slow path: read remaining ranges from the underlying blob, concurrently, without
-        // admitting their pages. Misses that share a page are served by one page fetch.
+        // admitting their pages. Each distinct page covered by the misses is read once.
         self.cache_ref
-            .read_uncached_many(self.blob, self.id, &mut cache_ranges)
+            .read_uncached_many(self.blob, &mut cache_ranges)
             .await?;
 
         Ok(offsets.len() - blob_reads)
