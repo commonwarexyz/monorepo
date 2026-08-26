@@ -3,6 +3,26 @@
 //! Callers submit logical operations through the driver, which constructs a
 //! [Request] that owns all resources (buffers, FDs, progress cursors) needed
 //! to build follow-up SQEs and produce a typed [Output].
+//!
+//! ## Request policy
+//!
+//! Each row describes one logical request, not one SQE. "Transient" means
+//! `EAGAIN`, `EWOULDBLOCK`, or `EINTR`. "Reason" maps
+//! [`CancelReason::Deadline`] to [`Error::Timeout`] and
+//! [`CancelReason::Shutdown`] to [`Error::Closed`]. A terminal success wins a
+//! cancellation race. An `ECANCELED` CQE is cancellation only while the
+//! waiter is in [`WaiterState::CancelRequested`]. Cache fallback retries
+//! without `RWF_DONTCACHE` after `EOPNOTSUPP`.
+//!
+//! | Kind | SQE family | Partial progress | Zero CQE | Deadline | Orphan continuation | Retry | Cancellation |
+//! | --- | --- | --- | --- | --- | --- | --- | --- |
+//! | [`Request::Send`] | `Send` or `Writev` | Resubmit to empty | [`Error::SendFailed`] | Optional | No | Transient while active | Reason |
+//! | [`Request::Recv`] | `Recv` | Resubmit to target when exact | [`Error::RecvFailed`] | Optional | No | Transient while active | Reason |
+//! | [`Request::Accept`] | `Accept` | None | Accepted fd `0` | Optional | No | Transient while active | Reason |
+//! | [`Request::Connect`] | `Connect` | None | Success | Optional | No | Transient while active, `EALREADY` always | Reason |
+//! | [`Request::ReadAt`] | `Read` | Resubmit to requested length | [`Error::BlobInsufficientLength`] | None | No | Transient, cache fallback | Shutdown to [`Error::Closed`], deadline to `Io(ECANCELED)` |
+//! | [`Request::WriteAt`] | `Write` or `Writev`, optional `Fsync` | Resubmit to empty, then sync | [`Error::WriteFailed`] while writing, success while syncing | None | Yes | Transient, cache fallback | Shutdown to [`Error::Closed`], deadline to `Io(ECANCELED)` |
+//! | [`Request::Sync`] | `Fsync` | None | Success | None | Yes | Transient | Shutdown to [`Error::Closed`], deadline to `Io(ECANCELED)` |
 
 use super::waiter::{CancelReason, WaiterId, WaiterState};
 use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs};
@@ -186,12 +206,19 @@ impl WriteBuffers {
 /// terminal [Output]. [interrupt](Self::interrupt) and [fail](Self::fail)
 /// resolve requests the kernel never completed.
 pub(super) enum Request {
+    /// Sends the full remaining payload over a socket.
     Send(SendRequest),
+    /// Receives into an owned buffer, optionally requiring the full target.
     Recv(RecvRequest),
+    /// Accepts one connection and captures its peer address.
     Accept(AcceptRequest),
+    /// Connects a socket to one target address.
     Connect(ConnectRequest),
+    /// Reads the requested byte range from a file.
     ReadAt(ReadAtRequest),
+    /// Writes a full byte range and optionally data-syncs it.
     WriteAt(WriteAtRequest),
+    /// Data-syncs a file.
     Sync(SyncRequest),
 }
 
@@ -211,12 +238,19 @@ pub(super) enum Request {
 /// is large and errors are cold. Success-path moves should not pay for
 /// error-variant width.
 pub(super) enum Output {
+    /// Send completion without a retained payload.
     Send(Result<(), Box<Error>>),
+    /// Receive completion that returns the buffer on success or failure.
     Recv(Result<(IoBufMut, usize), Box<(IoBufMut, Error)>>),
+    /// Accept completion with the connected descriptor and peer address.
     Accept(Result<(OwnedFd, SocketAddr), Box<Error>>),
+    /// Connect completion without a retained payload.
     Connect(Result<(), Box<Error>>),
+    /// Positioned-read completion that returns the buffer on success or failure.
     ReadAt(Result<IoBufMut, Box<(IoBufMut, Error)>>),
+    /// Positioned-write completion without a retained payload.
     WriteAt(Result<(), Box<Error>>),
+    /// Data-sync completion without a retained payload.
     Sync(Result<(), Box<Error>>),
 }
 

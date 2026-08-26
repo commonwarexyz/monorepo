@@ -1,11 +1,51 @@
 //! Waiter identity and lifecycle state for tracked io_uring requests.
 //!
-//! This module manages independently generational waiter and ticket-completion
-//! IDs, request lifecycle transitions, and outstanding-operation tracking.
-//! Waiters own kernel-referenced request state only until terminal completion.
-//! Ordinary op results remain parked in their waiter, while detached ticket
-//! results move to [TicketCompletions] so their waiter slot can be recycled
-//! before the ticket is consumed.
+//! A waiter combines [`WaiterState`], [`Lifecycle`], and [`Observer`] as
+//! independent axes of one tracked operation:
+//!
+//! ```text
+//! admit
+//!   |
+//!   v
+//! Lifecycle::Pending(Request) + WaiterState::Active + Observer::Op/Ticket
+//!   +-- pre-stage cancellation or expired deadline -> local terminal --+
+//!   +-- otherwise                                                       |
+//!       | future deadline: record timeout tick                          |
+//!       | stage SQE: in_flight = true                                   |
+//!       v                                                               |
+//! waiter owns Request, kernel may reference it
+//!   | operation CQE delivery: in_flight = false
+//!   +-- nonterminal --> backlog --> stage again
+//!   +-- terminal -----------------------------------------------+
+//!   |                                                           |
+//!   +-- timeout or shutdown --> WaiterState::CancelRequested    |
+//!   +-- observer drop --------> Observer::Orphaned               |
+//!       +-- stop --> WaiterState::CancelRequested                |
+//!       +-- detach: remain active until terminal ----------------+
+//! WaiterState::CancelRequested                                  |
+//!   +-- idle: complete locally ----------------------------------+
+//!   +-- in flight: cancel SQE, then operation CQE                |
+//!       +-- terminal ---------------------------------------------+
+//!       +-- nonterminal --> backlog --> complete locally --------+
+//!                                                                   v
+//! terminal retention follows Observer
+//!   +-- Observer::Op --> Lifecycle::Ready(Output) --> op poll --> recycle waiter
+//!   +-- Observer::Ticket --> Lifecycle::TicketComplete
+//!                             | publish
+//!                             v
+//!                       TicketCompletions: Ready(Output)
+//!                             |                    |
+//!                             v                    v
+//!                       recycle waiter      ticket poll, recycle entry
+//!   +-- Observer::Orphaned --> drop output --> recycle waiter
+//! ```
+//!
+//! [`Lifecycle::Pending`] owns every request resource throughout this flow.
+//! While `in_flight` is true, the kernel may still reference those resources.
+//! A cancel CQE only acknowledges cancellation. Kernel referenceability ends
+//! with operation CQE delivery, or with local completion when no SQE is in
+//! flight. Terminal output is retained only by its selected owner: in the
+//! waiter for an op, or in [`TicketCompletions`] for a ticket.
 
 use super::{
     Tick, UserData,

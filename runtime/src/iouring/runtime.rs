@@ -27,6 +27,39 @@
 //! reserved for event work. Either lane may use capacity the other lane leaves
 //! idle, and the root and driver still receive a service point after the batch.
 //!
+//! ## Panic flow
+//!
+//! Task wrappers catch panics raised while polling. Dedicated worker wrappers
+//! also catch the spawn closure. With [`Config::with_catch_panics`] enabled,
+//! `Panicker` absorbs a panic that reaches either wrapper and the task handle
+//! reports [`Error::Exited`]. Otherwise the catch boundary stamps the payload
+//! before `Panicker` delivers it to the root interrupt or the shared fallback
+//! retains it when delivery is no longer possible.
+//!
+//! ```text
+//! task catch -- catch_panics=true ----------------------> Error::Exited
+//!      |
+//!      +-- false --> source stamp --> Panicker --> root interrupt
+//!                                      `---------> retained fallback
+//!
+//! worker-loop catch ------> source stamp --\
+//! cleanup panic isolation -> source stamp ---+-> close -> ring drain -> unwind
+//!                                             |
+//! worker unwind -> opportunistic reap --------+
+//!                `-> final joins -------------+-> earliest source sequence
+//! root unwind --------------------------------/              |
+//!                                                   isolated output drop
+//!                                                            |
+//!                                                       final resume
+//! ```
+//!
+//! Worker teardown isolates cleanup callbacks, closes and drains the ring, and
+//! resumes only after quiescence. A panic inside [`Driver::drain`] aborts
+//! instead of unwinding ring state. [`crate::Runner::start`] joins every worker
+//! before selecting the earliest source sequence and resuming its payload.
+//! Losing payloads and panic-capable output drops are isolated, and later
+//! adversarial payloads are forgotten without running their destructors.
+//!
 //! Ordinary tasks run inline on the executor thread. Tasks spawned with
 //! [crate::Spawner::dedicated] or [crate::Spawner::shared] with
 //! `blocking == true` run as the root of a [Worker] on their own thread with

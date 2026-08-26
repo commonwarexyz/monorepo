@@ -125,8 +125,27 @@ impl Drop for PendingOperations {
     }
 }
 
-/// io_uring event loop state.
+/// State owned by one io_uring event loop.
+///
+/// [`IoUringLoop`] and its ring remain on one runtime worker. Front-end
+/// futures share [`Handle`], whose affinity cell exposes [`Ops`] only on that
+/// worker.
+///
+/// ```text
+/// owner runtime thread
+/// +-- IoUringLoop: shutdown, metrics, timeouts, idle/wake, scratch
+/// `-- Handle -> Ops (thread-affine): waiters, completions, queues, capacity
+/// foreign-thread drops -> Handle orphan mailbox -> owner loop
+/// ```
+///
+/// The three `Vec` fields are scratch, not logical state. Each is empty at its
+/// stated reuse boundary and draining it preserves capacity for the next batch.
 pub(crate) struct IoUringLoop {
+    /// Optional cancellation grace measured from shutdown drain entry.
+    ///
+    /// `None` lets requests finish or reach their own deadlines. Once a grace
+    /// elapses, outstanding waiters are cancelled, but kernel retirement is
+    /// still awaited, so this is not a total shutdown bound.
     shutdown_timeout: Option<Duration>,
     /// Number of logical requests retained by the driver. Internal SQEs (the
     /// wake poll and async cancels) are not counted. Tracked waiters and Ready
@@ -135,18 +154,52 @@ pub(crate) struct IoUringLoop {
     /// temporarily vary from the exact retained-operation count between update
     /// points.
     pending_operations: PendingOperations,
-    /// Shared op state, also reachable from the front-ends' op futures.
+    /// Loop-owned clone of the shared operation handle.
+    ///
+    /// This keeps [`Ops`] and its kernel-referenced resources alive through
+    /// ring drain. Owner-thread futures borrow the affinity cell directly,
+    /// while foreign-thread drops publish only to the orphan mailbox.
     handle: Handle,
+    /// Owner-loop index of active admitted-request deadlines.
+    ///
+    /// It is mutated only while matching waiter state in [`Ops`] is borrowed.
+    /// Every scheduled deadline has one active-count removal, while waiter
+    /// generation checks reject stale bucket entries.
     timeout_wheel: TimeoutWheel,
+    /// Owner-local adaptive controller for deadline-free, fully idle parks.
+    ///
+    /// Its budget persists across parks and is never applied while ring work
+    /// or a deadline requires an eventfd-backed wait.
     idle_spinner: Spinner,
+    /// Shared futex and eventfd wake source.
+    ///
+    /// Producers latch notifications through [`Waker::wake`]. The owner loop
+    /// consumes the latch, acknowledges wake CQEs, and manages poll rearming.
     waker: Waker,
+    /// Whether a multishot eventfd poll SQE must be staged.
+    ///
+    /// `true` means no wake poll is known to be live or already staged. It is
+    /// set initially and when a wake CQE lacks the kernel `MORE` flag, then
+    /// cleared only after [`Waker::reinstall`] accepts a new SQE. It must be
+    /// `false` before eventfd-backed blocking. The fully idle futex path does
+    /// not require the poll to be armed.
     wake_rearm_needed: bool,
     /// Scratch list of state panics, task-waker drops, and callbacks collected
-    /// under the owner-state borrow and handled after it is released.
+    /// under the [`Ops`] borrow and handled after it is released.
+    ///
+    /// Empty at each outer turn or drain iteration boundary. Draining invokes
+    /// no callback under the affinity borrow and retains the batch capacity.
     pending_waker_actions: Vec<handle::WakerAction>,
     /// Reusable batch of foreign-thread drop notifications.
+    ///
+    /// Empty before every mailbox drain and after every orphan-processing
+    /// pass. Draining retains capacity up to the largest observed batch.
     pending_orphans: Vec<handle::Orphan>,
     /// Reusable batch of timeout-wheel entries due in one turn.
+    ///
+    /// Empty before every [`TimeoutWheel::advance_into`] call and after every
+    /// expiry scan. Draining retains capacity, and entries are candidates
+    /// whose waiter generations still require validation.
     expired_timeouts: Vec<timeout::TimeoutEntry>,
 }
 

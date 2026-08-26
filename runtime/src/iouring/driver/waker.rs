@@ -26,6 +26,36 @@
 //! - bit 0: waiting on futex
 //! - bit 1: waiting on eventfd
 //! - bit 2: wake already signalled
+//!
+//! Packed states use `wake | eventfd | futex` bit order:
+//!
+//! ```text
+//! Running 000
+//!   |-- wake ------------------------------> Latched 100
+//!   |-- park_idle -------------------------> FutexArmed 001
+//!   |                                          |-- wake + futex signal --> FutexSignalled 101
+//!   |-- arm -------------------------------> EventfdArmed 010
+//!                                              |-- wake + eventfd signal -> EventfdSignalled 110
+//!
+//! Latched 100
+//!   |-- park_idle + skip blocking ---------> FutexSignalled 101
+//!   |-- arm + skip blocking ---------------> EventfdSignalled 110
+//!
+//! {FutexArmed 001, FutexSignalled 101,
+//!  EventfdArmed 010, EventfdSignalled 110}
+//!   |-- clear_wait ------------------------> Running 000
+//!
+//! Impossible: 011 and 111
+//! ```
+//!
+//! [`Waker::wake`] sets the sticky wake bit. With no armed target it only
+//! latches the wake. With one armed target it also signals that target, and
+//! repeated wakes coalesce in the corresponding signalled state. Arming via
+//! [`Waker::park_idle`] or [`Waker::arm`] preserves an existing latch and skips
+//! blocking. [`Waker::clear_wait`] ends the wait epoch by clearing every packed
+//! bit. Both targets cannot be armed because the loop is the sole armer, each
+//! arming path asserts that no target is already armed, and `wake` never sets a
+//! target bit.
 
 use super::UserData;
 use io_uring::squeue::SubmissionQueue;
