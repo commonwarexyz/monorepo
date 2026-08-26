@@ -680,13 +680,13 @@ where
 
     // Split the `init_concurrency` budget between decode tasks and insert workers. When there is at
     // least one decode task, this task only forwards batches and is mostly idle, so it does not
-    // count against the concurrency budget. At a concurrency budget of two, this task counts
-    // against the budget because it performs decoding and forwarding.
+    // count against the concurrency budget. At budgets of three or less, this task decodes inline
+    // and counts against the budget.
     let concurrency = init_concurrency.get();
 
     // Inserts cost more CPU than decoding: across widths on both journal types, throughput peaks
     // near two decoders per five tasks. Spawned decoding always uses at least two decoders, since
-    // a lone decoder starves the workers; below four tasks this task decodes inline instead.
+    // a lone decoder starves the workers. Below four tasks this task decodes inline instead.
     let decoders = if concurrency <= 3 {
         0
     } else {
