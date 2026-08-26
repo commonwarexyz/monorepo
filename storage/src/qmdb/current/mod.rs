@@ -484,7 +484,8 @@ where
 
         // Join the readers in lane order, aborting the rest on the first failure so no
         // reader outlives a failed init.
-        let lanes = crate::qmdb::join_all_or_abort::<_, _, crate::qmdb::Error<F>>(readers).await?;
+        let lanes =
+            commonware_runtime::AbortOnDrop::join_all::<crate::qmdb::Error<F>>(readers).await?;
         let mut nodes = Vec::with_capacity(positions.len());
         for lane in lanes {
             nodes.extend(lane);
