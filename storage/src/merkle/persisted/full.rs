@@ -4028,8 +4028,16 @@ pub(crate) mod node_cache {
     use commonware_utils::{cache::Clock, sync::RwLock};
     use core::num::NonZeroUsize;
 
-    /// Shard count; matches the geometry of the qmdb record cache.
+    /// Shard count, bounding writer-lock contention across concurrent readers.
     const SHARDS: usize = 16;
+
+    /// Mix `position` before selecting a shard. Hot positions (grafted subtree roots) are
+    /// regularly strided with constant low bits, which unmixed modulo selection would
+    /// collapse into a single shard, wasting the other shards' capacity.
+    fn shard_index(position: u64) -> usize {
+        (position.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (u64::BITS - SHARDS.trailing_zeros()))
+            as usize
+    }
 
     /// See the module docs.
     pub(crate) struct NodeCache<D> {
@@ -4058,7 +4066,7 @@ pub(crate) mod node_cache {
 
         /// The digest cached at `position`, if any. A miss counts as a fault.
         pub(crate) fn get(&self, position: u64) -> Option<D> {
-            let node = self.shards[(position as usize) % SHARDS]
+            let node = self.shards[shard_index(position)]
                 .read()
                 .get(&position)
                 .copied();
@@ -4070,7 +4078,7 @@ pub(crate) mod node_cache {
 
         /// Caches the digest at `position` unless already present.
         pub(crate) fn insert(&self, position: u64, node: D) {
-            let mut shard = self.shards[(position as usize) % SHARDS].write();
+            let mut shard = self.shards[shard_index(position)].write();
             if shard.get(&position).is_none() {
                 shard.put(position, node);
             }
@@ -4081,6 +4089,29 @@ pub(crate) mod node_cache {
         pub(crate) fn clear(&self) {
             for shard in self.shards.iter() {
                 shard.write().retain(|_, _| false);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{SHARDS, shard_index};
+
+        /// Grafted subtree roots at height `h` sit at positions `k * 2^(h+1) + c`, so entire
+        /// hot working sets share their low bits. Shard selection must still use every shard.
+        #[test]
+        fn test_shard_index_spreads_strided_positions() {
+            for shift in 4..=16u32 {
+                let stride = 1u64 << shift;
+                let offset = stride - 2;
+                let mut hit = [false; SHARDS];
+                for k in 0..1024u64 {
+                    hit[shard_index(k * stride + offset)] = true;
+                }
+                assert!(
+                    hit.iter().all(|&used| used),
+                    "stride {stride} leaves shards unused"
+                );
             }
         }
     }

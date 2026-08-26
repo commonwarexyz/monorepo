@@ -215,17 +215,10 @@ impl<B: Blob> View<'_, B> {
         }
 
         // Slow path: read remaining ranges from the underlying blob, concurrently, without
-        // admitting their pages.
-        let mut reads = cache_ranges
-            .iter_mut()
-            .map(|(item_buf, offset)| {
-                self.cache_ref
-                    .read_uncached(self.blob, self.id, item_buf, *offset)
-            })
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = reads.next().await {
-            result?;
-        }
+        // admitting their pages. Misses that share a page are served by one page fetch.
+        self.cache_ref
+            .read_uncached_many(self.blob, self.id, &mut cache_ranges)
+            .await?;
 
         Ok(offsets.len() - blob_reads)
     }

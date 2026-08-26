@@ -5,7 +5,7 @@ use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache::Clock, sync::RwLock};
-use futures::{FutureExt, future::Shared};
+use futures::{FutureExt, StreamExt as _, future::Shared, stream::FuturesUnordered};
 use std::{
     collections::hash_map::Entry,
     future::Future,
@@ -368,6 +368,63 @@ impl CacheRef {
             buf = &mut buf[count..];
         }
 
+        Ok(())
+    }
+
+    /// Like [`Self::read_uncached`], but for many ranges at once: consecutive ranges that
+    /// lie within the same page are served by a single page fetch. `ranges` must be sorted
+    /// by offset. Ranges that cross a page boundary take the per-range path.
+    pub(super) async fn read_uncached_many<B: Blob>(
+        &self,
+        blob: &B,
+        blob_id: u64,
+        ranges: &mut [(&mut [u8], u64)],
+    ) -> Result<(), Error> {
+        let fits = |buf: &[u8], offset: u64| {
+            let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
+            (offset_in_page as usize + buf.len() <= self.page_size as usize).then_some(page_num)
+        };
+        let mut groups = ranges
+            .chunk_by_mut(|(a_buf, a_off), (b_buf, b_off)| {
+                match (fits(a_buf, *a_off), fits(b_buf, *b_off)) {
+                    (Some(a_page), Some(b_page)) => a_page == b_page,
+                    _ => false,
+                }
+            })
+            .map(|group| self.read_uncached_group(blob, blob_id, group))
+            .collect::<FuturesUnordered<_>>();
+        while let Some(result) = groups.next().await {
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Serve one same-page group of `ranges` with a single page fetch. Singleton groups
+    /// (including page-crossing ranges) delegate to [`Self::read_uncached`].
+    async fn read_uncached_group<B: Blob>(
+        &self,
+        blob: &B,
+        blob_id: u64,
+        group: &mut [(&mut [u8], u64)],
+    ) -> Result<(), Error> {
+        if let [(buf, offset)] = group {
+            return self.read_uncached(blob, blob_id, buf, *offset).await;
+        }
+
+        let (page_num, _) = Cache::offset_to_page(self.page_size, group[0].1);
+        let page =
+            super::get_page_from_blob(blob, page_num, self.page_size, ReadOptions::default())
+                .await?;
+        let page = page.as_ref();
+        for (buf, offset) in group.iter_mut() {
+            let (_, offset_in_page) = Cache::offset_to_page(self.page_size, *offset);
+            let offset_in_page = offset_in_page as usize;
+            assert!(
+                page.len() >= offset_in_page + buf.len(),
+                "read past the blob's last valid page"
+            );
+            buf.copy_from_slice(&page[offset_in_page..offset_in_page + buf.len()]);
+        }
         Ok(())
     }
 

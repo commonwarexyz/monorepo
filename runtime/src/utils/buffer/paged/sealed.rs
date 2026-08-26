@@ -717,6 +717,8 @@ mod tests {
 
     /// `Sealed::read_many_into_uncached` serves cold reads correctly and leaves the page
     /// cache cold: a subsequent sync probe of the same offsets still misses everything.
+    /// Offsets cover same-page clusters (served by one page fetch each) and a range that
+    /// crosses a page boundary.
     #[test_traced("DEBUG")]
     fn test_sealed_read_many_into_uncached_leaves_cache_cold() {
         let executor = deterministic::Runner::default();
@@ -737,7 +739,8 @@ mod tests {
             // Drop pages admitted during the writer's flushes so the uncached read is cold.
             cache_ref.clear();
 
-            let offsets = [0u64, page_size as u64, (page_size * 3) as u64];
+            let p = page_size as u64;
+            let offsets = [0u64, 8, 40, p, p + 8, 2 * p - 2, 3 * p];
             let item_size = 4usize;
             let mut out = vec![0u8; offsets.len() * item_size];
             sealed
@@ -754,7 +757,7 @@ mod tests {
             // Nothing was admitted: every offset still requires a blob read.
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
-            assert_eq!(misses, vec![0, 1, 2]);
+            assert_eq!(misses, vec![0, 1, 2, 3, 4, 5, 6]);
         });
     }
 
