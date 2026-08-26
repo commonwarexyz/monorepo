@@ -30,8 +30,8 @@
 //! reporting the total build time.
 //!
 //! `init` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
-//! `0` = off) and `concurrency` (`1` = serial, `N` = N total build tasks, so N-1 workers alongside
-//! the init task). It reports the replay-region size `R` (so a full-coverage cache is `cache = R`)
+//! `0` = off) and `concurrency` (`1` = serial, `2` adds one insert worker, and larger values
+//! split between decode and insert tasks while the init task merely forwards). It reports the replay-region size `R` (so a full-coverage cache is `cache = R`)
 //! and the elapsed time. Sweep cache/concurrency by driving the command from a shell loop.
 //!
 //! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
