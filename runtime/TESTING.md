@@ -63,9 +63,9 @@ loop {
 
 # io_uring runtime testing
 
-The `iouring` runtime (Linux 6.1 or newer, behind the `iouring` feature) has its own test surfaces:
+The `iouring` runtime is available on Linux behind the `iouring` feature. It has distinct test surfaces:
 
-- Driver, network, and storage unit tests drive the event loop directly through the `iouring::testing::TestLoop` harness (`block_on`, `poll_once`, and `shutdown`) instead of starting a runtime.
-- The `_slow_` stress tests are excluded from the default nextest profile and run under the `slow` profile: `cargo nextest run -p commonware-runtime --features iouring --profile slow`.
-- The wake protocol's loom models run with `just test-loom --features iouring`.
-- All of the above require Linux 6.1 or newer (the ring is configured with `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN`).
+- Focused driver, network, and storage tests drive a real ring directly through the `iouring::testing::TestLoop` harness (`block_on`, `poll_once`, and `shutdown`). Use `just test -p commonware-runtime --features iouring <test_name>` for focused iteration.
+- Runtime lifecycle and end-to-end tests start a real `iouring::Runner`. The shared network stress test also uses a real runner. Its `#[test_group("slow")]` annotation gives it the `_slow_` suffix, so it is excluded from the default nextest profile and selected by `just test -p commonware-runtime --features iouring --profile slow`.
+- Tests backed by the runtime's configured ring through `TestLoop` or `Runner` require Linux 6.1 or newer because those rings use `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN`. Low-level tests that call `IoUring::new` directly do not inherit those setup flags and depend on the io_uring operations they exercise. Pure state and arithmetic helper tests construct no ring. All of these tests still require a Linux target because the `iouring` module is Linux-only.
+- The wake protocol's Loom tests run with `just test-loom --features iouring`. They require a Linux target because the `iouring` module is Linux-only, but they use userspace mutexes, condition variables, and counters to model the futex and eventfd portions of the protocol. They do not construct a ring or require Linux 6.1, and they do not model io_uring submission, CQE ordering, `io_uring_enter`, or wake-poll rearming.

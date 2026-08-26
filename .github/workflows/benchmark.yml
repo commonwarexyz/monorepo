@@ -51,6 +51,11 @@ jobs:
           - package: commonware-utils
             cargo_flags: ""
             benchmark_name: "commonware-utils"
+          - package: commonware-runtime
+            cargo_flags: "--features iouring"
+            bench_target: "--bench iouring_scheduler"
+            benchmark_name: "commonware-runtime-iouring-scheduler"
+            storage_backends: true
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Run setup
@@ -64,13 +69,13 @@ jobs:
       - name: Compile benchmarks
         env:
           RUSTFLAGS: "--cfg full_bench"
-        run: cargo bench ${{ matrix.cargo_flags }} --benches -p ${{ matrix.package }} --no-run
+        run: cargo bench ${{ matrix.cargo_flags }} ${{ matrix.bench_target || '--benches' }} -p ${{ matrix.package }} --no-run
       - name: Run benchmarks
         env:
           RUSTFLAGS: "--cfg full_bench"
         run: |
           cargo bench ${{ matrix.cargo_flags }} \
-            --benches -p ${{ matrix.package }} \
+            ${{ matrix.bench_target || '--benches' }} -p ${{ matrix.package }} \
             -- --output-format bencher \
             | tee "${{ matrix.benchmark_name }}.txt"
       - name: Upload benchmark result
@@ -78,6 +83,62 @@ jobs:
         with:
           name: benchmark-${{ matrix.benchmark_name }}
           path: "${{ matrix.benchmark_name }}.txt"
+          if-no-files-found: error
+
+      - name: Compile storage backends
+        if: matrix.storage_backends
+        run: |
+          cargo bench -p commonware-runtime --bench storage --no-run
+          cargo bench -p commonware-runtime --bench storage --features iouring --no-run
+
+      - name: Run matched storage workloads
+        if: matrix.storage_backends
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-storage-results
+
+          common_args=(
+            --duration 30
+            --io-size 4096
+            --inflight 32
+            --worker-threads 1
+            --file-size 256M
+            --seed 0
+            --output json
+          )
+
+          run_storage() {
+            local output="$1"
+            shift
+            : > "$output"
+            cargo bench -p commonware-runtime --bench storage "$@" -- \
+              "${common_args[@]}" --workload read_rand --cache warm >> "$output"
+            cargo bench -p commonware-runtime --bench storage "$@" -- \
+              "${common_args[@]}" --workload write_rand >> "$output"
+            cargo bench -p commonware-runtime --bench storage "$@" -- \
+              "${common_args[@]}" --workload write_sync >> "$output"
+          }
+
+          run_storage runtime-storage-results/tokio.jsonl
+          run_storage runtime-storage-results/iouring.jsonl --features iouring
+
+          jq -s -e '
+            length == 3 and
+            map(.workload) == ["read_rand", "write_rand", "write_sync"] and
+            all(.[]; .backend == "tokio" and .worker_threads == 1)
+          ' runtime-storage-results/tokio.jsonl > /dev/null
+          jq -s -e '
+            length == 3 and
+            map(.workload) == ["read_rand", "write_rand", "write_sync"] and
+            all(.[]; .backend == "iouring" and .worker_threads == null)
+          ' runtime-storage-results/iouring.jsonl > /dev/null
+
+      - name: Upload matched storage results
+        if: matrix.storage_backends
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-commonware-runtime-storage-backends
+          path: runtime-storage-results
           if-no-files-found: error
 
   publish:
@@ -101,6 +162,8 @@ jobs:
             benchmark_name: "commonware-formatting"
           - package: commonware-utils
             benchmark_name: "commonware-utils"
+          - package: commonware-runtime
+            benchmark_name: "commonware-runtime-iouring-scheduler"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Download benchmark result
