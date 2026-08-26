@@ -200,9 +200,7 @@ pub enum Annotation {
 /// Metadata for a finalized block requested by commitment.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Finalized {
-    /// The block's finalized height is known before the request.
-    ///
-    /// A commitment-matching block with a different decoded height is delivered but not stored.
+    /// The finalized height is known before the request.
     ByHeight { height: Height },
     /// Only the finalization round is known before the request.
     ///

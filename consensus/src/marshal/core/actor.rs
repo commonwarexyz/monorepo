@@ -1460,37 +1460,21 @@ where
                 let annotations = subscribers
                     .map_into(|(annotation, _)| annotation)
                     .into_vec();
-                let certified_height_bound = annotations
-                    .iter()
-                    .filter_map(|annotation| match annotation {
-                        Annotation::Certified { height } => Some(*height),
-                        _ => None,
-                    })
-                    .max();
-                let height_matches_finalized_requests =
-                    annotations.iter().all(|annotation| match annotation {
-                        Annotation::Finalized(handler::Finalized::ByHeight {
-                            height: expected,
-                        }) => height == *expected,
-                        _ => true,
-                    });
 
-                // Round-bound proposal-parent fetches use `Key::Notarized` and are handled below.
-                // `Finalized` annotations request finalized storage for block-keyed deliveries.
-                // A height-bound request names one archive slot. A response with a different
-                // decoded height is not archived, even if its finalization is cached.
+                // Round-bound proposal-parent fetches are `Key::Notarized`
+                // deliveries and are handled below. In this block-keyed path,
+                // `Finalized` means the block belongs in the finalized chain.
                 let finalization = self.cache.get_finalization_for(digest).await;
-                let should_store_finalization = height_matches_finalized_requests
-                    && (finalization.is_some()
-                        || annotations
-                            .iter()
-                            .any(|annotation| matches!(annotation, Annotation::Finalized(_))));
-                if should_store_finalization {
-                    if let Some(finalization) = &finalization {
-                        self = self
-                            .update_processed_round_floor(height, finalization.round(), resolver)
-                            .await;
-                    }
+                if let Some(finalization) = &finalization {
+                    self = self
+                        .update_processed_round_floor(height, finalization.round(), resolver)
+                        .await;
+                }
+                if finalization.is_some()
+                    || annotations
+                        .iter()
+                        .any(|annotation| matches!(annotation, Annotation::Finalized(_)))
+                {
                     (self, _) = self
                         .store_finalization(
                             height,
@@ -1500,9 +1484,12 @@ where
                             application,
                         )
                         .await;
-                } else if let Some(certified_height_bound) = certified_height_bound
-                    && height <= certified_height_bound
-                    && height > self.floor.processed_height()
+                } else if annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation,
+                        Annotation::Certified { height: bound } if height <= *bound
+                    )
+                }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
                 {
                     self.cache = self

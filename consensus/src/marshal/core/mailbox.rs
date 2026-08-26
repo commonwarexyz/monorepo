@@ -824,7 +824,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         });
     }
 
-    /// Returns a stream over the ancestry of a given block, leading toward genesis.
+    /// Returns a stream over the ancestry of a given block, leading up to genesis.
     ///
     /// This stream may fetch missing parents because callers should only request
     /// ancestry for data they already have locally and are willing to build on,
