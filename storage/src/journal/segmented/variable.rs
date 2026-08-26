@@ -766,13 +766,13 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                                     let (section, valid_offset) =
                                         (current.section, current.valid_offset);
                                     self.repairing = true;
-                                    let repaired =
-                                        repair_blob(&mut self.journal, section, valid_offset).await;
-                                    self.repairing = false;
-                                    if let Err(err) = repaired {
+                                    if let Err(err) =
+                                        repair_blob(&mut self.journal, section, valid_offset).await
+                                    {
                                         self.sections.pop_front();
                                         return self.fail(err);
                                     }
+                                    self.repairing = false;
                                 }
                                 self.sections.pop_front();
                                 continue;
@@ -797,12 +797,11 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                     );
                     let (section, valid_offset) = (current.section, current.valid_offset);
                     self.repairing = true;
-                    let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
-                    self.repairing = false;
-                    if let Err(err) = repaired {
+                    if let Err(err) = repair_blob(&mut self.journal, section, valid_offset).await {
                         self.sections.pop_front();
                         return self.fail(err);
                     }
+                    self.repairing = false;
                     self.sections.pop_front();
                     continue;
                 }
@@ -908,7 +907,7 @@ mod tests {
         context: &deterministic::Context,
         partition: &str,
         later_section: bool,
-    ) -> (Journal<deterministic::Context, u64>, Config<()>) {
+    ) -> Journal<deterministic::Context, u64> {
         const LOGICAL_PAGE_SIZE: u64 = 64;
         const FIRST_SECTION: u64 = 0;
         const TORN_SECTION: u64 = 1;
@@ -941,10 +940,9 @@ mod tests {
 
         corrupt_page(context, &cfg.partition, TORN_SECTION, 1, LOGICAL_PAGE_SIZE).await;
 
-        let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+        Journal::<_, u64>::init(context.child("recover"), cfg)
             .await
-            .unwrap();
-        (journal, cfg)
+            .unwrap()
     }
 
     #[test_traced]
@@ -1968,7 +1966,7 @@ mod tests {
             // a prefetched later page fails validation. FIRST_SECTION establishes the ordered
             // lifecycle boundary: replay setup and consumption of an earlier section must not
             // read or repair this later section.
-            let (journal, _) = journal_with_torn_interior_page(&context, PARTITION, false).await;
+            let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
             let original_size = context
                 .open(PARTITION, &TORN_SECTION.to_be_bytes())
                 .await
@@ -2024,7 +2022,7 @@ mod tests {
             const SECTION: u64 = 1;
             const START_OFFSET: u64 = 72;
 
-            let (journal, _) = journal_with_torn_interior_page(&context, PARTITION, false).await;
+            let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
             let original_size = context
                 .open(PARTITION, &SECTION.to_be_bytes())
                 .await
@@ -2061,7 +2059,7 @@ mod tests {
     fn test_segmented_variable_replay_stops_after_failed_interior_repair() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (journal, _) = journal_with_torn_interior_page(
+            let journal = journal_with_torn_interior_page(
                 &context,
                 "segmented-variable-failed-interior-repair",
                 true,
@@ -2083,6 +2081,47 @@ mod tests {
                 .unwrap();
             assert!(matches!(replay.next().await, Some(Ok((0, 0, _, u64::MAX)))));
             assert!(matches!(replay.next().await, Some(Err(Error::Runtime(_)))));
+            assert!(matches!(
+                replay.next().await,
+                Some(Err(Error::ReplayInterrupted))
+            ));
+            assert!(replay.next().await.is_none());
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_variable_replay_stops_after_failed_tail_repair() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = journal_with_torn_interior_page(
+                &context,
+                "segmented-variable-failed-tail-repair",
+                true,
+            )
+            .await;
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+
+            assert!(matches!(replay.next().await, Some(Ok((0, 0, _, u64::MAX)))));
+            for expected in 0..7 {
+                let (section, offset, _, value) = replay.next().await.unwrap().unwrap();
+                assert_eq!((section, offset, value), (1, expected * 9, expected));
+            }
+
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: Probability!(1.0),
+                    retention_rate: Probability!(1.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                ..Default::default()
+            };
+            assert!(matches!(replay.next().await, Some(Err(Error::Runtime(_)))));
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
             assert!(matches!(
                 replay.next().await,
                 Some(Err(Error::ReplayInterrupted))

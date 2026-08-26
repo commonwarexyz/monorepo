@@ -63,15 +63,14 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
 }
 
 enum PreflightMode<B> {
-    Floors,
+    Floors(BTreeMap<u64, u64>),
     Restore {
-        current: Option<(B, u64, u64)>,
+        current: Option<(B, u64)>,
         discard: Vec<Vec<u8>>,
     },
 }
 
 struct Validated<A, B> {
-    recoverable: BTreeMap<u64, u64>,
     boundaries: BTreeMap<u64, (u64, Option<A>)>,
     mode: PreflightMode<B>,
 }
@@ -89,8 +88,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
     }
 
     pub(crate) async fn finish(self) -> Result<Journal<E, A>, Error> {
+        let Validated { mode, .. } = self.validated;
         Ok(Journal(Box::new(
-            Inner::init(self.context, self.cfg, Some(self.validated)).await?,
+            Inner::init(self.context, self.cfg, Some(mode)).await?,
         )))
     }
 }
@@ -176,9 +176,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         }
 
         Ok(Validated {
-            recoverable: recoverable_lengths,
             boundaries,
-            mode: PreflightMode::Floors,
+            mode: PreflightMode::Floors(recoverable_lengths),
         })
     }
 
@@ -269,8 +268,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 Some(A::decode(captured.as_slice()).map_err(Error::Codec)?)
             };
             boundaries.insert(candidate, (boundary_size, entry));
-            if candidate == section {
-                current = Some((blob, physical_size, current_physical));
+            if is_current && physical_size > current_physical {
+                current = Some((blob, current_physical));
             }
         }
         boundaries.entry(section).or_insert((size, None));
@@ -282,7 +281,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             .map(|(_, name)| name.clone())
             .collect();
         Ok(Validated {
-            recoverable: BTreeMap::new(),
             boundaries,
             mode: PreflightMode::Restore { current, discard },
         })
@@ -292,29 +290,19 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     async fn init(
         context: E,
         cfg: Config,
-        validated: Option<Validated<A, E::Blob>>,
+        mode: Option<PreflightMode<E::Blob>>,
     ) -> Result<Self, Error> {
-        let (prevalidated, restore) = match validated {
+        let (prevalidated, restore) = match mode {
             None => (BTreeMap::new(), false),
-            Some(Validated {
-                recoverable,
-                boundaries: _,
-                mode: PreflightMode::Floors,
-            }) => (recoverable, false),
-            Some(Validated {
-                recoverable,
-                boundaries: _,
-                mode: PreflightMode::Restore { current, discard },
-            }) => {
+            Some(PreflightMode::Floors(recoverable)) => (recoverable, false),
+            Some(PreflightMode::Restore { current, discard }) => {
                 for name in discard {
                     context.remove(&cfg.partition, Some(&name)).await?;
                 }
-                if let Some((blob, physical_size, target)) = current
-                    && physical_size > target
-                {
+                if let Some((blob, target)) = current {
                     blob.resize(target).await?;
                 }
-                (recoverable, true)
+                (BTreeMap::new(), true)
             }
         };
 

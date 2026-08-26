@@ -86,7 +86,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                 Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), config())
                     .await
                     .expect("initial metadata init failed");
-            let mut baseline = BTreeMap::from([
+            let baseline = BTreeMap::from([
                 (0, value(&phase_input, 0x10)),
                 (1, value(&phase_input, 0x11)),
             ]);
@@ -147,7 +147,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                 }
             }
 
-            (std::mem::take(&mut baseline), candidate)
+            (baseline, candidate)
         }
     });
 

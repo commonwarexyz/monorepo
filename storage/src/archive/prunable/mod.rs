@@ -270,14 +270,15 @@ mod tests {
 
     fn test_config<E: BufferPooler>(
         context: &E,
+        partition_prefix: &str,
         items_per_section: NonZeroU64,
     ) -> Config<FourCap, ()> {
         Config {
             translator: FourCap,
-            metadata_partition: "test-metadata".into(),
-            key_partition: "test-index".into(),
+            metadata_partition: format!("{partition_prefix}-metadata"),
+            key_partition: format!("{partition_prefix}-index"),
             key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            value_partition: "test-value".into(),
+            value_partition: format!("{partition_prefix}-value"),
             codec_config: (),
             compression: None,
             key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -320,7 +321,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -362,7 +363,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -381,7 +382,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -442,7 +443,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -479,7 +480,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -526,7 +527,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -587,7 +588,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -638,7 +639,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -687,7 +688,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -740,7 +741,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -774,7 +775,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -814,7 +815,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -841,7 +842,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -860,7 +861,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -883,7 +884,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "test", NZU64!(1));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -902,7 +903,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -937,10 +938,7 @@ mod tests {
     fn test_archive_truncates_at_first_invalid_value() {
         deterministic::Runner::default().start(|context| async move {
             for (name, bad_position, retained) in [("first", 0, 0), ("middle", 1, 1)] {
-                let mut cfg = test_config(&context, NZU64!(4));
-                cfg.key_partition = format!("invalid-{name}-index");
-                cfg.metadata_partition = format!("invalid-{name}-metadata");
-                cfg.value_partition = format!("invalid-{name}-values");
+                let cfg = test_config(&context, &format!("invalid-{name}"), NZU64!(4));
 
                 let mut archive = Archive::init(context.child(name), cfg.clone())
                     .await
@@ -996,10 +994,7 @@ mod tests {
     #[test_traced]
     fn test_archive_completes_interrupted_rewind_to_empty_section() {
         deterministic::Runner::default().start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(4));
-            cfg.key_partition = "empty-rewind-index".into();
-            cfg.metadata_partition = "empty-rewind-metadata".into();
-            cfg.value_partition = "empty-rewind-values".into();
+            let cfg = test_config(&context, "empty-rewind", NZU64!(4));
 
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
@@ -1093,10 +1088,7 @@ mod tests {
     fn test_validation_marker_skips_previously_validated_values() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(4));
-            cfg.key_partition = "marker-skip-index".into();
-            cfg.metadata_partition = "marker-skip-metadata".into();
-            cfg.value_partition = "marker-skip-values".into();
+            let cfg = test_config(&context, "marker-skip", NZU64!(4));
 
             let mut archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
@@ -1145,44 +1137,18 @@ mod tests {
         }
 
         deterministic::Runner::default().start(|context| async move {
-            for (name, damage, children) in [
-                (
-                    "missing_index",
-                    Damage::MissingIndex,
-                    ["missing_index_first", "missing_index_second"],
-                ),
-                (
-                    "missing_values",
-                    Damage::MissingValues,
-                    ["missing_values_first", "missing_values_second"],
-                ),
-                (
-                    "truncated_index",
-                    Damage::TruncatedIndex,
-                    ["truncated_index_first", "truncated_index_second"],
-                ),
-                (
-                    "truncated_values",
-                    Damage::TruncatedValues,
-                    ["truncated_values_first", "truncated_values_second"],
-                ),
-                (
-                    "corrupt_index",
-                    Damage::CorruptIndex,
-                    ["corrupt_index_first", "corrupt_index_second"],
-                ),
-                (
-                    "corrupt_values",
-                    Damage::CorruptValues,
-                    ["corrupt_values_first", "corrupt_values_second"],
-                ),
+            for (name, damage) in [
+                ("missing_index", Damage::MissingIndex),
+                ("missing_values", Damage::MissingValues),
+                ("truncated_index", Damage::TruncatedIndex),
+                ("truncated_values", Damage::TruncatedValues),
+                ("corrupt_index", Damage::CorruptIndex),
+                ("corrupt_values", Damage::CorruptValues),
             ] {
-                let mut cfg = test_config(&context, NZU64!(4));
-                cfg.key_partition = format!("{name}_index");
-                cfg.metadata_partition = format!("{name}_metadata");
-                cfg.value_partition = format!("{name}_values");
+                let case = context.child(name);
+                let cfg = test_config(&case, name, NZU64!(4));
 
-                let archive = Archive::init(context.child(name), cfg.clone())
+                let archive = Archive::init(case.child("seed"), cfg.clone())
                     .await
                     .unwrap();
                 let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
@@ -1250,12 +1216,10 @@ mod tests {
                     }
                 };
 
-                for child in children {
-                    let result = Archive::<_, _, FixedBytes<64>, i32>::init(
-                        context.child(child),
-                        cfg.clone(),
-                    )
-                    .await;
+                for child in ["first", "second"] {
+                    let result =
+                        Archive::<_, _, FixedBytes<64>, i32>::init(case.child(child), cfg.clone())
+                            .await;
                     assert!(
                         matches!(result, Err(Error::Journal(JournalError::Corruption(_)))),
                         "damaged marked section must remain visible as corruption"
@@ -1292,10 +1256,7 @@ mod tests {
     #[test_traced]
     fn test_validation_floor_rejection_precedes_index_suffix_repair() {
         deterministic::Runner::default().start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(4));
-            cfg.key_partition = "floor-order-index".into();
-            cfg.metadata_partition = "floor-order-metadata".into();
-            cfg.value_partition = "floor-order-values".into();
+            let cfg = test_config(&context, "floor-order", NZU64!(4));
 
             let archive =
                 Archive::<_, _, FixedBytes<64>, i32>::init(context.child("seed"), cfg.clone())
@@ -1321,13 +1282,7 @@ mod tests {
                 .coalesce();
             drop(index);
 
-            let (values, _) = context
-                .open(&cfg.value_partition, &0u64.to_be_bytes())
-                .await
-                .unwrap();
-            values.resize(0).await.unwrap();
-            values.sync().await.unwrap();
-            drop(values);
+            corrupt_value_frame(&context, &cfg.value_partition, 0, 0).await;
 
             for child in ["first", "second"] {
                 let result =
@@ -1356,10 +1311,7 @@ mod tests {
     #[test_traced]
     fn test_startup_publishes_validated_marker_without_data_resync() {
         deterministic::Runner::default().start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(4));
-            cfg.key_partition = "startup-order-index".into();
-            cfg.metadata_partition = "startup-order-metadata".into();
-            cfg.value_partition = "startup-order-values".into();
+            let cfg = test_config(&context, "startup-order", NZU64!(4));
 
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
@@ -1420,10 +1372,7 @@ mod tests {
     #[test_traced]
     fn test_startup_marker_failure_fails_next_sync() {
         deterministic::Runner::default().start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(4));
-            cfg.key_partition = "startup-marker-failure-index".into();
-            cfg.metadata_partition = "startup-marker-failure-metadata".into();
-            cfg.value_partition = "startup-marker-failure-values".into();
+            let cfg = test_config(&context, "startup-marker-failure", NZU64!(4));
 
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
@@ -1451,31 +1400,21 @@ mod tests {
     #[test_traced]
     fn test_validation_marker_partition_must_be_dedicated() {
         deterministic::Runner::default().start(|context| async move {
-            let mut key_collision = test_config(&context, NZU64!(4));
-            key_collision.metadata_partition = key_collision.key_partition.clone();
-            let err = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.child("key_collision"),
-                key_collision,
-            )
-            .await
-            .unwrap_err();
-            assert!(matches!(
-                err,
-                Error::Journal(JournalError::InvalidConfiguration(_))
-            ));
-
-            let mut value_collision = test_config(&context, NZU64!(4));
-            value_collision.metadata_partition = value_collision.value_partition.clone();
-            let err = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.child("value_collision"),
-                value_collision,
-            )
-            .await
-            .unwrap_err();
-            assert!(matches!(
-                err,
-                Error::Journal(JournalError::InvalidConfiguration(_))
-            ));
+            for (name, collides_with_key) in [("key_collision", true), ("value_collision", false)] {
+                let mut cfg = test_config(&context, name, NZU64!(4));
+                cfg.metadata_partition = if collides_with_key {
+                    cfg.key_partition.clone()
+                } else {
+                    cfg.value_partition.clone()
+                };
+                let err = Archive::<_, _, FixedBytes<64>, i32>::init(context.child(name), cfg)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    err,
+                    Error::Journal(JournalError::InvalidConfiguration(_))
+                ));
+            }
         });
     }
 
@@ -1483,10 +1422,7 @@ mod tests {
     fn test_start_sync_lazily_publishes_previous_durable_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(4));
-            cfg.key_partition = "marker-lag-index".into();
-            cfg.metadata_partition = "marker-lag-metadata".into();
-            cfg.value_partition = "marker-lag-values".into();
+            let cfg = test_config(&context, "marker-lag", NZU64!(4));
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1540,10 +1476,7 @@ mod tests {
     fn test_sync_lazily_publishes_previous_durable_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(4));
-            cfg.key_partition = "blocking-marker-lag-index".into();
-            cfg.metadata_partition = "blocking-marker-lag-metadata".into();
-            cfg.value_partition = "blocking-marker-lag-values".into();
+            let cfg = test_config(&context, "blocking-marker-lag", NZU64!(4));
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1635,10 +1568,7 @@ mod tests {
     fn test_sync_delays_immediately_ready_durable_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(4));
-            cfg.key_partition = "ready-marker-lag-index".into();
-            cfg.metadata_partition = "ready-marker-lag-metadata".into();
-            cfg.value_partition = "ready-marker-lag-values".into();
+            let cfg = test_config(&context, "ready-marker-lag", NZU64!(4));
 
             let archive = Archive::init(context.child("archive"), cfg.clone())
                 .await
@@ -1673,10 +1603,7 @@ mod tests {
     fn test_sync_publishes_previous_durable_sections_across_section_changes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(1));
-            cfg.key_partition = "cross-section-marker-lag-index".into();
-            cfg.metadata_partition = "cross-section-marker-lag-metadata".into();
-            cfg.value_partition = "cross-section-marker-lag-values".into();
+            let cfg = test_config(&context, "cross-section-marker-lag", NZU64!(1));
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1730,10 +1657,7 @@ mod tests {
     fn test_empty_sync_publishes_final_durable_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(1));
-            cfg.key_partition = "empty-sync-marker-index".into();
-            cfg.metadata_partition = "empty-sync-marker-metadata".into();
-            cfg.value_partition = "empty-sync-marker-values".into();
+            let cfg = test_config(&context, "empty-sync-marker", NZU64!(1));
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1773,10 +1697,7 @@ mod tests {
     fn test_prune_clears_validation_marker_before_section_reuse() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_config(&context, NZU64!(2));
-            cfg.key_partition = "marker-reuse-index".into();
-            cfg.metadata_partition = "marker-reuse-metadata".into();
-            cfg.value_partition = "marker-reuse-values".into();
+            let cfg = test_config(&context, "marker-reuse", NZU64!(2));
 
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
@@ -2393,7 +2314,7 @@ mod tests {
     fn test_has_at() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let cfg = test_config(&context, NZU64!(2));
+            let cfg = test_config(&context, "test", NZU64!(2));
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -2425,7 +2346,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, NZU64!(2));
+            let cfg = test_config(&context, "test", NZU64!(2));
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -2449,7 +2370,7 @@ mod tests {
     fn test_has_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, NZU64!(2));
+            let cfg = test_config(&context, "test", NZU64!(2));
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");

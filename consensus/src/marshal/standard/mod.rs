@@ -7174,33 +7174,6 @@ mod tests {
         }
     }
 
-    fn prunable_actor_config<P>(
-        context: &deterministic::Context,
-        partition_prefix: &str,
-        provider: P,
-    ) -> Config<P, FixedEpocher, Sequential, B, B, D>
-    where
-        P: Provider<Scope = Epoch, Scheme = S>,
-    {
-        Config {
-            provider,
-            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            mailbox_size: NZUsize!(100),
-            view_retention: ViewDelta::new(10),
-            max_repair: NZUsize!(10),
-            max_pending_acks: NZUsize!(1),
-            block_codec_config: (),
-            partition_prefix: partition_prefix.to_string(),
-            prunable_items_per_section: NZU64!(10),
-            replay_buffer: NZUsize!(1024),
-            key_write_buffer: NZUsize!(1024),
-            value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            strategy: Sequential,
-        }
-    }
-
     /// Initialize the two real prunable stores used by Marshal's finalized path.
     #[allow(clippy::type_complexity)]
     async fn prunable_finalized_stores<E: StorageContext>(
@@ -7423,7 +7396,23 @@ mod tests {
                 }
 
                 let provider = ConstantProvider::new(schemes[0].clone());
-                let config = prunable_actor_config(&context, PREFIX, provider);
+                let config = Config {
+                    provider,
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                    mailbox_size: NZUsize!(100),
+                    view_retention: ViewDelta::new(10),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    block_codec_config: (),
+                    partition_prefix: PREFIX.to_string(),
+                    prunable_items_per_section: NZU64!(10),
+                    replay_buffer: NZUsize!(1024),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
+                };
                 let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
                     context.child("actor"),
                     finalizations,

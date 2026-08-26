@@ -51,7 +51,7 @@ use std::{
 };
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_INITIAL_E2E";
-const EPOCH_LENGTH: NonZeroU64 = NZU64!(16);
+const EPOCH_LENGTH: NonZeroU64 = NZU64!(17);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
 const VOTES: u64 = 0;

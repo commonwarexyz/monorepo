@@ -318,15 +318,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             replay.finish()?
         };
 
-        // Archive values are only reachable through index entries. An empty index section can be
-        // the durable half of an interrupted rewind, so replay has no entry from which to finish
-        // truncating its orphaned values.
-        for (&section, &items) in &section_lengths {
-            if items == 0 && oversized.value_section_size(section)? > 0 {
-                truncated.push((section, 0));
-            }
-        }
-
         let mut oversized = oversized;
         let mut section_lengths = section_lengths;
         for (section, items) in truncated {

@@ -208,15 +208,15 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             Recovery::Infer => {
                 let index = FixedJournal::init(index_context, index_cfg).await?;
                 let values = Glob::init(value_context, value_cfg).await?;
-                Self { index, values }.repair(None).await
+                Self { index, values }.repair().await
             }
             Recovery::Floors(minimum_items) => {
                 let preflight =
                     FixedJournal::preflight_floors(index_context, index_cfg, minimum_items).await?;
                 let values = Glob::init(value_context, value_cfg).await?;
-                Self::validate_value_floors(&values, minimum_items, &preflight)?;
+                Self::validate_value_floors(&values, &preflight).await?;
                 let index = preflight.finish().await?;
-                Self { index, values }.repair(Some(minimum_items)).await
+                Self { index, values }.repair().await
             }
             Recovery::Restore {
                 section,
@@ -226,9 +226,12 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                     FixedJournal::preflight_restore(index_context, index_cfg, section, index_size)
                         .await?;
                 let values = Glob::init(value_context, value_cfg).await?;
-                Self::validate_restore_values(&values, &preflight, section, index_size)?;
+                Self::validate_restore_values(&values, &preflight, section)?;
                 let index = preflight.finish().await?;
-                Self { index, values }.restore(section, index_size).await
+
+                // The non-mutating preflight proved every covered cross-journal boundary.
+                // Truncate to the checkpoint durably before appends can reuse discarded ranges.
+                Self { index, values }.rewind(section, index_size).await
             }
         }
     }
@@ -239,7 +242,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// are appended sequentially and value offsets are monotonically increasing within a
     /// section, all earlier entries must be range-valid (their value checksums are
     /// verified lazily at read).
-    async fn repair(mut self, minimum_items: Option<&BTreeMap<u64, u64>>) -> Result<Self, Error> {
+    async fn repair(mut self) -> Result<Self, Error> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
 
@@ -247,10 +250,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let mut rewound_values = Vec::new();
         for section in sections {
             let index_size = self.index.size(section)?;
-            if index_size == 0 {
-                continue;
-            }
-
             let glob_size = match self.values.size(section) {
                 Ok(size) => size,
                 Err(Error::AlreadyPrunedToSection(oldest)) => {
@@ -279,14 +278,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 rewound_index.push(section);
             }
 
-            // If there is nothing, we can exit early and rewind values to 0
+            // Values are reachable only through index entries.
             if entry_count == 0 {
-                warn!(
-                    section,
-                    index_size, "trailing bytes detected: truncating to 0"
-                );
-                self.values = self.values.rewind_section(section, 0).await?;
                 if glob_size > 0 {
+                    debug!(section, glob_size, "truncating orphaned value bytes");
+                    self.values = self.values.rewind_section(section, 0).await?;
                     rewound_values.push(section);
                 }
                 continue;
@@ -296,16 +292,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             let (valid_count, glob_target) = self
                 .find_last_valid_entry(section, entry_count, glob_size)
                 .await?;
-            let minimum = minimum_items
-                .and_then(|items| items.get(&section))
-                .copied()
-                .unwrap_or(0);
-            if valid_count < minimum {
-                return Err(Error::Corruption(format!(
-                    "section {section} retains {valid_count} valid items, below its validation \
-                     floor of {minimum}"
-                )));
-            }
 
             // Rewind index if any entries are invalid
             if valid_count < entry_count {
@@ -339,23 +325,14 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.cleanup_orphan_value_sections().await
     }
 
-    /// Verify that every floor's final index entry is backed by retained value bytes before repair
-    /// can rewind either journal. Value checksums within the floor were verified before publication
-    /// and are not read again here.
-    fn validate_value_floors(
+    /// Verify every floor's terminal value before repair can mutate either journal.
+    async fn validate_value_floors(
         values: &Glob<E, V>,
-        minimum_items: &BTreeMap<u64, u64>,
         preflight: &RecoveryPreflight<E, I>,
     ) -> Result<(), Error> {
-        for (&section, &minimum) in minimum_items {
-            if minimum == 0 {
+        for (&section, (_, entry)) in preflight.boundaries() {
+            let Some(entry) = entry else {
                 continue;
-            }
-
-            let Some((_, Some(entry))) = preflight.boundaries().get(&section) else {
-                return Err(Error::Corruption(format!(
-                    "section {section} validation floor ends at an unreadable index entry"
-                )));
             };
             let (offset, size) = entry.value_location();
             let required = offset.checked_add(u64::from(size)).ok_or_else(|| {
@@ -370,6 +347,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                      floor of {required}"
                 )));
             }
+            if !values.verify(section, offset, size).await? {
+                return Err(Error::Corruption(format!(
+                    "section {section} validation floor ends at a corrupt value"
+                )));
+            }
         }
         Ok(())
     }
@@ -378,23 +360,17 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         values: &Glob<E, V>,
         preflight: &RecoveryPreflight<E, I>,
         section: u64,
-        index_size: u64,
     ) -> Result<(), Error> {
-        for (&candidate, (size, entry)) in preflight.boundaries().range(..section) {
-            let required = match (size, entry) {
-                (0, None) => 0,
-                (_, Some(entry)) => {
+        for (&candidate, (_, entry)) in preflight.boundaries().range(..section) {
+            let required = match entry {
+                None => 0,
+                Some(entry) => {
                     let (offset, size) = entry.value_location();
                     offset.checked_add(u64::from(size)).ok_or_else(|| {
                         Error::Corruption(format!(
                             "section {candidate} has an overflowing committed value range"
                         ))
                     })?
-                }
-                _ => {
-                    return Err(Error::Corruption(format!(
-                        "section {candidate} has committed index bytes but no terminal entry"
-                    )));
                 }
             };
             let retained = values.size(candidate)?;
@@ -413,17 +389,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             )));
         }
 
-        if index_size > 0 {
-            let Some((boundary, Some(entry))) = preflight.boundaries().get(&section) else {
-                return Err(Error::Corruption(format!(
-                    "section {section} checkpoint ends at an unreadable index entry"
-                )));
-            };
-            if *boundary != index_size {
-                return Err(Error::Corruption(format!(
-                    "section {section} checkpoint boundary changed during preflight"
-                )));
-            }
+        let entry = &preflight.boundaries()[&section].1;
+        if let Some(entry) = entry {
             let (offset, size) = entry.value_location();
             let required = offset.checked_add(u64::from(size)).ok_or_else(|| {
                 Error::Corruption(format!(
@@ -439,15 +406,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         }
 
         Ok(())
-    }
-
-    /// Restore the journals to exactly the durable state `(section, index_size)`
-    /// describes (see [Self::init]).
-    async fn restore(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
-        // The non-mutating preflight proved every covered cross-journal boundary. Truncate to the
-        // checkpoint durably before later appends can reuse any discarded range.
-        self = self.rewind(section, index_size).await?;
-        Ok(self)
     }
 
     /// Remove any value sections that don't have corresponding index sections.
@@ -573,12 +531,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Return the number of index entries in `section`.
     pub(crate) fn section_len(&self, section: u64) -> Result<u64, Error> {
         self.index.section_len(section)
-    }
-
-    /// Return the number of bytes retained in a section's value blob, including bytes that are no
-    /// longer referenced by an index entry.
-    pub(crate) fn value_section_size(&self, section: u64) -> Result<u64, Error> {
-        self.values.size(section)
     }
 
     /// Consumes the journal and returns an owned [Replay] reader over index entries
@@ -4074,11 +4026,8 @@ mod tests {
             // Section 1 should still be tracked (blob exists but is empty)
             assert_eq!(oversized.oldest_section(), Some(1));
 
-            // Append to empty section 1
-            // Note: When index is truncated to 0 but the index blob still exists,
-            // the glob is NOT truncated (the section isn't considered an orphan).
-            // The glob still has orphan DATA from the old entries, but this doesn't
-            // affect correctness - new entries simply append after the orphan data.
+            // Values are reachable only through index entries, so recovery removes the orphaned
+            // bytes before the section can be reused.
             let new_value: TestValue = [99; 16];
             let new_entry = TestEntry::new(99, 0, 0);
             let (pos, offset, size);
@@ -4087,11 +4036,10 @@ mod tests {
                 .await
                 .expect("Failed to append to empty section");
             assert_eq!(pos, 0);
-            // Glob offset is non-zero because orphan data wasn't truncated
-            assert!(offset > 0);
+            assert_eq!(offset, 0);
             oversized = oversized.sync(1).await.expect("Failed to sync");
 
-            // Verify the new entry is readable despite orphan data before it
+            // Verify the new entry is readable after reusing the section.
             let entry = oversized.get(1, 0).await.expect("Failed to get");
             assert_eq!(entry.id, 99);
             let value = oversized
