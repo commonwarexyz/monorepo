@@ -14,8 +14,8 @@ commonware-cryptography-curve25519 = { workspace = true, features = [ "fuzz" ] }
 libfuzzer-sys.workspace = true
 
 [[bin]]
-name = "main"
-path = "fuzz_targets/main.rs"
+name = "curve25519"
+path = "fuzz_targets/curve25519.rs"
 test = false
 doc = false
 bench = false

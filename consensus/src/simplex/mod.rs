@@ -655,7 +655,7 @@ mod tests {
     use crate::{
         Monitor, Viewable,
         simplex::{
-            elector::{self, Config as _, Elector as _, Random, RoundRobin},
+            elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -697,7 +697,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, Probability, TestRng, ordered::Set, sync::Mutex,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, probability, sync::Mutex,
         test_rng,
     };
     use engine::Engine;
@@ -713,30 +713,31 @@ mod tests {
     use tracing::{debug, info, warn};
     use types::Activity;
 
-    // Invoke `$cb!($($args)*, $suffix, $elector, $fixture)` once per canonical
-    // (elector, scheme) fixture.
+    // Invoke `$cb!($($args)*, $suffix, $elector, $fixture, $elector_config)`
+    // once per canonical (elector, scheme) fixture.
     macro_rules! for_each_fixture {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, bls12381_threshold_vrf_min_pk, Random, bls12381_threshold_vrf::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_threshold_vrf_min_sig, Random, bls12381_threshold_vrf::fixture::<MinSig, _>);
-            $cb!($($args)*, bls12381_threshold_std_min_pk, RoundRobin, bls12381_threshold_std::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_threshold_std_min_sig, RoundRobin, bls12381_threshold_std::fixture::<MinSig, _>);
-            $cb!($($args)*, bls12381_multisig_min_pk, RoundRobin, bls12381_multisig::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_multisig_min_sig, RoundRobin, bls12381_multisig::fixture::<MinSig, _>);
-            $cb!($($args)*, ed25519, RoundRobin, ed25519::fixture);
-            $cb!($($args)*, secp256r1, RoundRobin, secp256r1::fixture);
+            $cb!($($args)*, bls12381_threshold_vrf_min_pk, Random, bls12381_threshold_vrf::fixture::<MinPk, _>, Random::new(RandomVersion::V1));
+            $cb!($($args)*, bls12381_threshold_vrf_min_sig, Random, bls12381_threshold_vrf::fixture::<MinSig, _>, Random::new(RandomVersion::V1));
+            $cb!($($args)*, bls12381_threshold_std_min_pk, RoundRobin, bls12381_threshold_std::fixture::<MinPk, _>, RoundRobin::default());
+            $cb!($($args)*, bls12381_threshold_std_min_sig, RoundRobin, bls12381_threshold_std::fixture::<MinSig, _>, RoundRobin::default());
+            $cb!($($args)*, bls12381_multisig_min_pk, RoundRobin, bls12381_multisig::fixture::<MinPk, _>, RoundRobin::default());
+            $cb!($($args)*, bls12381_multisig_min_sig, RoundRobin, bls12381_multisig::fixture::<MinSig, _>, RoundRobin::default());
+            $cb!($($args)*, ed25519, RoundRobin, ed25519::fixture, RoundRobin::default());
+            $cb!($($args)*, secp256r1, RoundRobin, secp256r1::fixture, RoundRobin::default());
         };
     }
 
     // Generate one `#[test_group("slow")] #[test_traced]` test per canonical
     // (elector, scheme) fixture, named `test_<callee>_<suffix>`. The helper takes
-    // the elector config type as its third generic parameter.
+    // the elector config type as its third generic parameter and the concrete
+    // config after the fixture argument.
     //
     // Supported forms:
-    //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
-    //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, arg)
+    //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture, config)
+    //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, config, arg)
     //   test_for_all_fixtures!(callee, arg, level = "INFO"); // arg with a trace-level override
-    //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture)
+    //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture, config)
     //   test_for_all_fixtures!(callee, level = "INFO");  // overrides the trace level
     macro_rules! test_for_all_fixtures {
         ($callee:ident) => {
@@ -754,22 +755,22 @@ mod tests {
         ($callee:ident, $arg:expr) => {
             for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [, _] [, $arg]));
         };
-        (@emit [$traced:meta] $callee:ident [$($generics:tt)*] [$($args:tt)*], $suffix:ident, $elector:ty, $fixture:expr) => {
+        (@emit [$traced:meta] $callee:ident [$($generics:tt)*] [$($args:tt)*], $suffix:ident, $elector:ty, $fixture:expr, $elector_config:expr) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[$traced]
                 fn [<test_ $callee _ $suffix>]() {
-                    $callee::<_, _, $elector $($generics)*>($fixture $($args)*);
+                    $callee::<_, _, $elector $($generics)*>($fixture, $elector_config $($args)*);
                 }
             }
         };
-        (@seeded $n:expr, $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+        (@seeded $n:expr, $callee:ident, $suffix:ident, $elector:ty, $fixture:expr, $elector_config:expr) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[test_traced]
                 fn [<test_ $callee _ $suffix>]() {
                     for seed in 0..$n {
-                        $callee::<_, _, $elector>(seed, $fixture);
+                        $callee::<_, _, $elector>(seed, $fixture, $elector_config);
                     }
                 }
             }
@@ -1048,6 +1049,7 @@ mod tests {
 
     fn all_online<S, F, L, T>(
         mut fixture: F,
+        elector: L,
         strategy: impl FnOnce(&mut deterministic::Context) -> T + Send + 'static,
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -1084,12 +1086,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1293,18 +1294,20 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
-        all_online::<_, _, Random, _>(bls12381_threshold_vrf::fixture::<MinPk, _>, |context| {
-            context.strategy(NZUsize!(2))
-        });
+        all_online::<_, _, Random, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+            |context| context.strategy(NZUsize!(2)),
+        );
     }
 
-    fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F)
+    fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        non_genesis_floor_joiner_catches_tip_with_term::<S, F, L>(L::default(), fixture);
+        non_genesis_floor_joiner_catches_tip_with_term::<S, F, L>(elector, fixture);
     }
 
     fn non_genesis_floor_joiner_catches_tip_with_term<S, F, L>(elector: L, mut fixture: F)
@@ -1340,7 +1343,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, active, Action::Link(link.clone()), None).await;
 
@@ -1614,7 +1617,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -1860,7 +1863,7 @@ mod tests {
                 Link {
                     latency: link_latency,
                     jitter: Duration::from_millis(0),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 },
                 TermLength::new(NZU32!(128)),
                 ViewDelta::new(128),
@@ -1911,7 +1914,7 @@ mod tests {
                 Link {
                     latency: Duration::from_millis(1_000),
                     jitter: Duration::from_millis(1),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 },
                 TermLength::new(NZU32!(1000)),
                 ViewDelta::new(100),
@@ -2003,7 +2006,7 @@ mod tests {
         });
     }
 
-    fn observer<S, F, L>(mut fixture: F)
+    fn observer<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2047,12 +2050,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
 
@@ -2158,13 +2160,13 @@ mod tests {
 
     test_for_all_fixtures!(observer);
 
-    fn unclean_shutdown<S, F, L>(fixture: F)
+    fn unclean_shutdown<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        unclean_shutdown_with_term::<S, F, L>(L::default(), fixture);
+        unclean_shutdown_with_term::<S, F, L>(elector, fixture);
     }
 
     fn unclean_shutdown_with_term<S, F, L>(elector: L, mut fixture: F)
@@ -2220,7 +2222,7 @@ mod tests {
                 let link = Link {
                     latency: Duration::from_millis(50),
                     jitter: Duration::from_millis(50),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 };
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -2380,16 +2382,7 @@ mod tests {
         );
     }
 
-    fn backfill<S, F, L>(fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
-    {
-        backfill_with_term::<S, F, L>(L::default(), fixture);
-    }
-
-    fn backfill_with_term<S, F, L>(elector: L, mut fixture: F)
+    fn backfill<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2418,7 +2411,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2521,7 +2514,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_secs(3),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2560,7 +2553,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(3),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2645,7 +2638,8 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_backfill_stable_leader_optimistic() {
-        backfill_with_term::<_, _, RoundRobin>(
+        backfill::<_, _, RoundRobin>(
+            ed25519::fixture,
             // Keep the stall timeout long so the healthy prefix of the run
             // (finalizing with one validator offline) never stall-nullifies.
             RoundRobin::default().with_term(
@@ -2653,17 +2647,16 @@ mod tests {
                 Duration::from_secs(51),
                 ViewDelta::new(2),
             ),
-            ed25519::fixture,
         );
     }
 
-    fn one_offline<S, F, L>(fixture: F)
+    fn one_offline<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        one_offline_with_term::<S, F, L>(L::default(), fixture);
+        one_offline_with_term::<S, F, L>(elector, fixture);
     }
 
     fn one_offline_with_term<S, F, L>(elector: L, mut fixture: F)
@@ -2697,7 +2690,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2908,7 +2901,7 @@ mod tests {
         );
     }
 
-    fn slow_validator<S, F, L>(mut fixture: F)
+    fn slow_validator<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2937,12 +2930,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3083,7 +3075,7 @@ mod tests {
 
     test_for_all_fixtures!(slow_validator);
 
-    fn all_recovery<S, F, L>(mut fixture: F)
+    fn all_recovery<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3112,12 +3104,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_secs(3),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3223,7 +3214,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -3281,7 +3272,7 @@ mod tests {
 
     test_for_all_fixtures!(all_recovery);
 
-    fn all_crash_after_nullify<S, F, L>(mut fixture: F)
+    fn all_crash_after_nullify<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3308,7 +3299,6 @@ mod tests {
 
             // Participant 0 never starts an engine and no links exist yet, so no
             // view can produce a certificate before the crash below.
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3420,7 +3410,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -3521,13 +3511,13 @@ mod tests {
 
     test_for_all_fixtures!(all_crash_after_nullify);
 
-    fn partition<S, F, L>(fixture: F)
+    fn partition<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        partition_with_term::<S, F, L>(L::default(), fixture);
+        partition_with_term::<S, F, L>(elector, fixture);
     }
 
     fn partition_with_term<S, F, L>(elector: L, mut fixture: F)
@@ -3559,7 +3549,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
@@ -3724,13 +3714,13 @@ mod tests {
         );
     }
 
-    fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, fixture: F) -> String
+    fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, fixture: F, elector: L) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        slow_and_lossy_links_seeded_with_term::<S, F, L>(L::default(), seed, fixture)
+        slow_and_lossy_links_seeded_with_term::<S, F, L>(elector, seed, fixture)
     }
 
     fn slow_and_lossy_links_seeded_with_term<S, F, L>(
@@ -3769,7 +3759,7 @@ mod tests {
             let degraded_link = Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
-                success_rate: Probability!(0.5),
+                success_rate: probability!(0.5),
             };
             link_validators(
                 &mut oracle,
@@ -3879,13 +3869,13 @@ mod tests {
         })
     }
 
-    fn slow_and_lossy_links<S, F, L>(fixture: F) -> String
+    fn slow_and_lossy_links<S, F, L>(fixture: F, elector: L) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        slow_and_lossy_links_seeded::<_, _, L>(6, fixture)
+        slow_and_lossy_links_seeded::<_, _, L>(6, fixture, elector)
     }
 
     test_for_all_fixtures!(slow_and_lossy_links);
@@ -3904,7 +3894,7 @@ mod tests {
         );
     }
 
-    fn determinism<S, F, L>(seed: u64, fixture: F)
+    fn determinism<S, F, L>(seed: u64, fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
@@ -3913,8 +3903,8 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         assert_eq!(
-            slow_and_lossy_links_seeded::<_, _, L>(seed, fixture),
-            slow_and_lossy_links_seeded::<_, _, L>(seed, fixture),
+            slow_and_lossy_links_seeded::<_, _, L>(seed, fixture, elector.clone()),
+            slow_and_lossy_links_seeded::<_, _, L>(seed, fixture, elector),
         );
     }
 
@@ -3925,10 +3915,10 @@ mod tests {
     fn test_distinct_states() {
         // Sanity check that different schemes produce different audit states.
         macro_rules! collect {
-            ($vec:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+            ($vec:ident, $suffix:ident, $elector:ty, $fixture:expr, $elector_config:expr) => {
                 $vec.push((
                     stringify!($suffix),
-                    slow_and_lossy_links_seeded::<_, _, $elector>(7, $fixture),
+                    slow_and_lossy_links_seeded::<_, _, $elector>(7, $fixture, $elector_config),
                 ));
             };
         }
@@ -3943,7 +3933,7 @@ mod tests {
         }
     }
 
-    fn conflicter<S, F, L>(seed: u64, mut fixture: F)
+    fn conflicter<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3975,12 +3965,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -4111,7 +4100,7 @@ mod tests {
 
     test_for_all_fixtures!(conflicter, seeds = 5);
 
-    fn invalid<S, F, L>(seed: u64, mut fixture: F)
+    fn invalid<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4158,12 +4147,12 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = wrapped::Config(L::default());
+            let elector = wrapped::Config(elector);
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -4279,7 +4268,7 @@ mod tests {
     test_for_all_fixtures!(invalid, seeds = 5);
 
     // Test that when a node receives finalizations, it reports them.
-    fn received_certificates_are_reported<S, F, L>(mut fixture: F)
+    fn received_certificates_are_reported<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4316,7 +4305,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(100),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             fn link_graph(_: usize, i: usize, j: usize) -> bool {
                 if i == 0 || j == 0 {
@@ -4332,7 +4321,6 @@ mod tests {
             )
             .await;
 
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -4448,7 +4436,7 @@ mod tests {
 
     test_for_all_fixtures!(received_certificates_are_reported);
 
-    fn survives_burst<S, F, L>(mut fixture: F)
+    fn survives_burst<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4479,7 +4467,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(injector_pk.clone(), me.clone(), link)
@@ -4528,7 +4516,6 @@ mod tests {
                 injector_sender.send(Recipients::One(me.clone()), certificate.encode(), true);
             }
 
-            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -4591,7 +4578,7 @@ mod tests {
 
     test_for_all_fixtures!(survives_burst);
 
-    fn impersonator<S, F, L>(seed: u64, mut fixture: F)
+    fn impersonator<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4623,12 +4610,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -4743,13 +4729,13 @@ mod tests {
 
     test_for_all_fixtures!(impersonator, seeds = 5);
 
-    fn equivocator_seeded<S, F, L>(seed: u64, fixture: F) -> bool
+    fn equivocator_seeded<S, F, L>(seed: u64, fixture: F, elector: L) -> bool
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        equivocator_seeded_with_term::<S, F, L>(seed, L::default(), fixture)
+        equivocator_seeded_with_term::<S, F, L>(seed, elector, fixture)
     }
 
     fn equivocator_seeded_with_term<S, F, L>(seed: u64, elector: L, mut fixture: F) -> bool
@@ -4784,7 +4770,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -4992,13 +4978,14 @@ mod tests {
         })
     }
 
-    fn equivocator<S, F, L>(fixture: F)
+    fn equivocator<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
         L: elector::Config<S>,
     {
-        let detected = (0..5).any(|seed| equivocator_seeded::<_, _, L>(seed, fixture));
+        let detected =
+            (0..5).any(|seed| equivocator_seeded::<_, _, L>(seed, fixture, elector.clone()));
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
@@ -5027,7 +5014,7 @@ mod tests {
         );
     }
 
-    fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
+    fn reconfigurer<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5059,12 +5046,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -5178,7 +5164,7 @@ mod tests {
 
     test_for_all_fixtures!(reconfigurer, seeds = 5);
 
-    fn nuller<S, F, L>(seed: u64, mut fixture: F)
+    fn nuller<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5210,12 +5196,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -5342,7 +5327,7 @@ mod tests {
 
     test_for_all_fixtures!(nuller, seeds = 5);
 
-    fn outdated<S, F, L>(seed: u64, mut fixture: F)
+    fn outdated<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5374,12 +5359,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -5486,7 +5470,7 @@ mod tests {
 
     test_for_all_fixtures!(outdated, seeds = 5);
 
-    fn run_1k<S, F, L>(mut fixture: F)
+    fn run_1k<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5516,12 +5500,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
-                success_rate: Probability!(0.98),
+                success_rate: probability!(0.98),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -5622,10 +5605,10 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k() {
-        run_1k::<_, _, RoundRobin>(scheme_mocks::fixture);
+        run_1k::<_, _, RoundRobin>(scheme_mocks::fixture, RoundRobin::default());
     }
 
-    fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, graceful: bool)
+    fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, elector: L, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5653,12 +5636,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engine
-            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -5759,29 +5741,29 @@ mod tests {
         });
     }
 
-    fn children_shutdown_on_engine_abort<S, F, L>(seed: u64, fixture: F)
+    fn children_shutdown_on_engine_abort<S, F, L>(seed: u64, fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        engine_shutdown::<S, F, L>(seed, fixture, false);
+        engine_shutdown::<S, F, L>(seed, fixture, elector, false);
     }
 
     test_for_all_fixtures!(children_shutdown_on_engine_abort, seeds = 10);
 
-    fn graceful_shutdown<S, F, L>(seed: u64, fixture: F)
+    fn graceful_shutdown<S, F, L>(seed: u64, fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        engine_shutdown::<S, F, L>(seed, fixture, true);
+        engine_shutdown::<S, F, L>(seed, fixture, elector, true);
     }
 
     test_for_all_fixtures!(graceful_shutdown, seeds = 10);
 
-    fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
+    fn attributable_reporter_filtering<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5812,12 +5794,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines with `AttributableReporter` wrapper
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -5967,7 +5948,7 @@ mod tests {
 
     test_for_all_fixtures!(attributable_reporter_filtering);
 
-    fn split_views_no_lockup<S, F, L>(mut fixture: F)
+    fn split_views_no_lockup<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -6089,7 +6070,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for p in participants.iter() {
                 oracle
@@ -6141,7 +6122,6 @@ mod tests {
             // Start engines after preloading certificates into each participant's
             // recovered channel (ensuring processing before any leader attempts to issue a
             // conflicting vote).
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -6339,7 +6319,7 @@ mod tests {
     /// the fourth Byzantine validator stays silent. A group leader builds on parent 2.
     /// Targeted repair supplies the missing nullification, so group-led view 11
     /// becomes the first new finalization.
-    fn certified_split_heals_in_group_led_view<S, F, L>(mut fixture: F)
+    fn certified_split_heals_in_group_led_view<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -6371,7 +6351,7 @@ mod tests {
             // lone participant leads view 13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
-            let schedule = L::default().build(&participant_set);
+            let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
             let byzantine = leader_of(10);
@@ -6422,7 +6402,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for p in participants.iter() {
                 oracle
@@ -6460,7 +6440,6 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -6620,14 +6599,17 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_in_group_led_view() {
-        certified_split_heals_in_group_led_view::<_, _, RoundRobin>(ed25519::fixture);
+        certified_split_heals_in_group_led_view::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Heals a certified-notarization/nullification split when the holder leads first.
     ///
     /// The group fetches and certifies Notarization(3) from the leader. The
     /// recovered parent becomes the first new finalization.
-    fn certified_split_heals_when_lone_holder_leads_first<S, F, L>(mut fixture: F)
+    fn certified_split_heals_when_lone_holder_leads_first<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -6659,7 +6641,7 @@ mod tests {
             // the group leads views 12..=13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
-            let schedule = L::default().build(&participant_set);
+            let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
             let byzantine = leader_of(10);
@@ -6710,7 +6692,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for p in participants.iter() {
                 oracle
@@ -6748,7 +6730,6 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -6912,7 +6893,10 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_when_lone_holder_leads_first() {
-        certified_split_heals_when_lone_holder_leads_first::<_, _, RoundRobin>(ed25519::fixture);
+        certified_split_heals_when_lone_holder_leads_first::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Repairs ancestry gaps below a displaced certified view.
@@ -6920,7 +6904,7 @@ mod tests {
     /// One validator certifies Notarization(5) but lacks Nullification(3..=5),
     /// which the group holds. Targeted repair fetches each gap in order and lets
     /// the first group-led proposal finalize.
-    fn certified_split_heals_with_displaced_certified_view<S, F, L>(mut fixture: F)
+    fn certified_split_heals_with_displaced_certified_view<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -6952,7 +6936,7 @@ mod tests {
             // lone participant leads view 13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
-            let schedule = L::default().build(&participant_set);
+            let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
             let byzantine = leader_of(10);
@@ -7002,7 +6986,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for p in participants.iter() {
                 oracle
@@ -7042,7 +7026,6 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -7211,10 +7194,13 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_with_displaced_certified_view() {
-        certified_split_heals_with_displaced_certified_view::<_, _, RoundRobin>(ed25519::fixture);
+        certified_split_heals_with_displaced_certified_view::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
     }
 
-    fn tle<V, L>()
+    fn tle<V, L>(elector: L)
     where
         V: Variant,
         L: elector::Config<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
@@ -7241,12 +7227,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(5),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines and reporters
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -7357,8 +7342,8 @@ mod tests {
 
     #[test_traced]
     fn test_tle() {
-        tle::<MinPk, Random>();
-        tle::<MinSig, Random>();
+        tle::<MinPk, Random>(Random::new(RandomVersion::V1));
+        tle::<MinSig, Random>(Random::new(RandomVersion::V1));
     }
 
     fn run_hailstorm<S, F, L>(
@@ -7396,7 +7381,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -7680,15 +7665,15 @@ mod tests {
 
     // The hailstorm run must be deterministic: two runs with identical inputs
     // must produce identical audit state.
-    fn hailstorm<S, F, L>(fixture: F)
+    fn hailstorm<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
         L: elector::Config<S>,
     {
         assert_eq!(
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), elector.clone(), fixture,),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), elector, fixture),
         );
     }
 
@@ -8221,7 +8206,7 @@ mod tests {
     const TWINS_LINK: Link = Link {
         latency: Duration::from_millis(500),
         jitter: Duration::from_millis(500),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     };
 
     /// Runs `campaign` with `elector` over a fast link and the slow [TWINS_LINK].
@@ -8230,7 +8215,7 @@ mod tests {
             Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(10),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             },
             TWINS_LINK,
         ] {
@@ -8323,7 +8308,7 @@ mod tests {
         );
     }
 
-    fn twins<S, F, L>(fixture: F)
+    fn twins<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -8332,7 +8317,7 @@ mod tests {
         twins_campaign::<_, _, L>(
             &mut test_rng(),
             TWINS_CAMPAIGN,
-            L::default(),
+            elector,
             TWINS_LINK,
             fixture,
         );
