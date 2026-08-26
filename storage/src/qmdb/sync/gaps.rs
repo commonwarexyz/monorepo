@@ -37,7 +37,7 @@ pub fn find_next<F: Family>(
     let mut fetched_ops_iter = fetched_operations
         .iter()
         .map(|(&start_loc, &operation_count)| {
-            let end_loc = start_loc.checked_add(operation_count).unwrap();
+            let end_loc = start_loc.checked_add(operation_count).unwrap_or(range.end);
             start_loc..end_loc
         })
         .peekable();
