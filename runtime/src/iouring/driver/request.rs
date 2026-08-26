@@ -1663,6 +1663,31 @@ mod tests {
     }
 
     #[test]
+    fn test_cached_positional_io_reports_unsupported_as_terminal_error() {
+        let mut read = make_read_request(Cache::Enabled);
+        let read_result = read
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+            .expect("cached read EOPNOTSUPP should be terminal");
+        match read_result {
+            Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::EOPNOTSUPP)),
+            other => panic!("expected EOPNOTSUPP read failure, got {other:?}"),
+        }
+        assert_eq!(read.read, 0);
+
+        let mut write = make_write_request(Cache::Enabled, WriteAtState::Writing);
+        let write_result = write
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+            .expect("cached write EOPNOTSUPP should be terminal");
+        match write_result {
+            Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::EOPNOTSUPP)),
+            other => panic!("expected EOPNOTSUPP write failure, got {other:?}"),
+        }
+        assert_eq!(write.written, 0);
+        assert_eq!(write.write.remaining_len(), 5);
+        assert!(matches!(write.state, WriteAtState::Writing));
+    }
+
+    #[test]
     fn test_queued_cache_fallbacks_retry() {
         let supported = Arc::new(AtomicBool::new(true));
         let mut first = make_read_request(Cache::Disabled(supported.clone()));

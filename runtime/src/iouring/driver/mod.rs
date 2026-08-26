@@ -3283,6 +3283,84 @@ mod tests {
         assert_eq!(harness.tracked(), 0);
     }
 
+    #[test]
+    fn test_drop_terminal_op_grants_capacity_once() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+
+        // Complete an ordinary recv but leave its terminal output unobserved
+        // in the only waiter slot.
+        let (first_left, mut first_right) = UnixStream::pair().unwrap();
+        let mut first = Box::pin(handle.recv(
+            Arc::new(first_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut first).is_pending());
+        first_right.write_all(b"x").unwrap();
+        let start = Instant::now();
+        while harness.pending() != 0 {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            harness.driver().turn();
+            if harness.pending() != 0 {
+                harness.driver().park(Some(Duration::from_millis(10)));
+            }
+        }
+        harness.handle.with(|ops| {
+            assert_eq!(ops.waiters.len(), 1);
+            assert_eq!(ops.waiters.pending(), 0);
+        });
+
+        // The second recv cannot acquire capacity until dropping the first
+        // future recycles its terminal waiter. That drop grants the queued
+        // owner and invokes its callback exactly once.
+        let (second_left, _second_right) = UnixStream::pair().unwrap();
+        let mut second = Box::pin(handle.recv(
+            Arc::new(second_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let count_waker = arc_waker(count.clone());
+        let mut count_cx = Context::from_waker(&count_waker);
+        assert!(second.as_mut().poll(&mut count_cx).is_pending());
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 1);
+            assert_eq!(ops.capacity.reserved(), 0);
+        });
+        assert_eq!(count.0.load(Ordering::Acquire), 0);
+
+        drop(first);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.waiters.len(), 0);
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+        assert_eq!(count.0.load(Ordering::Acquire), 1);
+
+        // Unrelated loop progress cannot re-grant or re-wake the owner.
+        harness.driver().turn();
+        assert_eq!(count.0.load(Ordering::Acquire), 1);
+        drop(second);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 0);
+            assert_eq!(ops.capacity.reserved(), 0);
+        });
+        assert_eq!(count.0.load(Ordering::Acquire), 1);
+        assert_eq!(harness.tracked(), 0);
+    }
+
     /// A capacity callback may synchronously poll its operation. Work admitted
     /// by that reentrant poll must be staged before the turn can return.
     #[test]
@@ -4336,6 +4414,63 @@ mod tests {
             .handle
             .with(|ops| assert!(ops.pending_cancels.is_empty()));
         assert_recv_capacity_reused(&mut harness);
+    }
+
+    #[test]
+    fn test_backlogged_request_expires_before_first_staging_without_sqe() {
+        let mut harness = TestLoop::new(RingConfig {
+            timeout_wheel_tick: Duration::from_millis(1),
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+        let (left, _right) = UnixStream::pair().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            deadline,
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        harness.handle.with(|ops| {
+            assert_eq!(ops.backlog.len(), 1);
+            assert_eq!(ops.waiters.pending(), 1);
+        });
+
+        // Advance the idle wheel beyond the admitted deadline before the
+        // backlog receives its first staging pass. Staging must commit the
+        // timeout locally and leave the submission queue untouched.
+        let expired_at = deadline
+            .checked_add(Duration::from_millis(1))
+            .expect("test deadline should be representable");
+        let driver_state = harness.handle.clone();
+        let driver = harness.driver();
+        assert!(
+            !driver
+                .inner
+                .timeout_wheel
+                .advance_into(expired_at, &mut driver.inner.expired_timeouts)
+        );
+        driver_state.with(|ops| {
+            let mut submission_queue = driver.ring.submission();
+            assert!(submission_queue.is_empty());
+            assert!(!driver.inner.stage_backlog(ops, &mut submission_queue));
+            assert!(submission_queue.is_empty());
+            assert!(ops.backlog.is_empty());
+            assert!(ops.pending_cancels.is_empty());
+            assert_eq!(ops.waiters.len(), 1);
+            assert_eq!(ops.waiters.pending(), 0);
+        });
+        assert_eq!(driver.inner.timeout_wheel.next_deadline(), None);
+        driver.inner.flush_wakers();
+
+        assert!(matches!(
+            poll_once(&harness, &mut recv),
+            Poll::Ready(Err((_, Error::Timeout)))
+        ));
+        assert_eq!(harness.tracked(), 0);
     }
 
     #[test]
