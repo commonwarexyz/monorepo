@@ -1,4 +1,4 @@
-use super::Header;
+use super::{Header, Layout};
 use crate::{
     Buf, BufferPool, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     deterministic::AuditHasher,
@@ -15,7 +15,14 @@ fn resolve_header(
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
     let raw = &content[..Header::resolve_len(content.len() as u64)];
-    super::header::resolve(raw, content.len() as u64, versions, partition, name)
+    super::header::resolve(
+        raw,
+        content.len() as u64,
+        versions,
+        &Layout::ALL,
+        partition,
+        name,
+    )
 }
 
 type BlobKey = (String, Vec<u8>);
@@ -624,7 +631,7 @@ mod tests {
         {
             let mut partitions = storage.partitions.lock();
             let partition = partitions.get_mut("partition").unwrap();
-            let raw = crate::storage::header::tests::v0_blob_bytes(0, data);
+            let raw = crate::storage::tests::v0_blob_bytes(0, data);
             partition.insert(b"v0".to_vec(), raw);
         }
         let (blob, size, _) = storage

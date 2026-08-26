@@ -4,7 +4,7 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use crate::{Buf, BufMut};
+    use crate::{BlobHeaderLayout as Layout, Buf, BufMut};
     use commonware_codec::{DecodeExt, Encode, FixedSize, Read as CodecRead, Write as CodecWrite};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
@@ -20,6 +20,10 @@ stability_scope!(BETA {
         UnsupportedRuntimeVersion {
             expected: u16,
             found: u16,
+        },
+        LayoutMismatch {
+            expected: RangeInclusive<Layout>,
+            found: Layout,
         },
         VersionMismatch {
             expected: RangeInclusive<u16>,
@@ -65,6 +69,9 @@ stability_scope!(BETA {
                     hex(name),
                     format!("unsupported runtime version: expected {expected}, found {found}"),
                 ),
+                Self::LayoutMismatch { expected, found } => {
+                    crate::Error::BlobHeaderLayoutMismatch { expected, found }
+                }
                 Self::VersionMismatch { expected, found } => {
                     crate::Error::BlobVersionMismatch { expected, found }
                 }
@@ -90,23 +97,19 @@ stability_scope!(BETA {
         }
     }
 
-    /// Version of a [crate::Blob]'s on-disk header layout.
-    ///
-    /// This versions the runtime's on-disk container (where data begins), not the blob's
-    /// contents: the application-owned blob version passed to
-    /// [crate::Storage::open_versioned] is a separate field and is unaffected by the layout.
-    ///
-    /// New blobs are always created with the latest layout. Reopening an existing blob honors
-    /// the layout recorded in its header.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum Layout {
-        /// An 8-byte header, with data beginning immediately after it.
-        V0,
-        /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
-        V1,
-    }
-
     impl Layout {
+        /// Header layout used for newly created blobs.
+        pub(crate) const LATEST: Self = Self::V1;
+
+        /// Whether `layouts` is a non-empty, fully supported range that permits creation.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub(crate) fn valid_range(layouts: &RangeInclusive<Self>) -> bool {
+            !layouts.is_empty()
+                && Self::ALL.contains(layouts.start())
+                && Self::ALL.contains(layouts.end())
+                && layouts.contains(&Self::LATEST)
+        }
+
         /// The runtime version recorded in a header of this layout.
         pub(crate) const fn runtime_version(self) -> u16 {
             match self {
@@ -319,7 +322,7 @@ stability_scope!(BETA {
         /// every partial state in the canonical-prefix model then remains classifiable as an
         /// interrupted creation.
         pub(crate) fn create(versions: &RangeInclusive<u16>) -> (Vec<u8>, u16) {
-            let layout = Layout::V1;
+            let layout = Layout::LATEST;
             let blob_version = *versions.end();
             let header = Self {
                 magic: layout.magic(),
@@ -343,11 +346,19 @@ stability_scope!(BETA {
             raw: &[u8],
             raw_len: u64,
             versions: &RangeInclusive<u16>,
+            layouts: &RangeInclusive<Layout>,
         ) -> Result<(u64, u16, u64), HeaderError> {
             let header: Self = Self::decode(&raw[..Self::PRELUDE_SIZE])
                 .expect("header decode should never fail for correct size input");
             let layout = header.validate()?;
             layout.validate_region(raw, raw_len)?;
+
+            if !layouts.contains(&layout) {
+                return Err(HeaderError::LayoutMismatch {
+                    expected: layouts.clone(),
+                    found: layout,
+                });
+            }
 
             // The blob version is checked only once the region is intact, so every earlier
             // error still describes a header that may merely be incompletely written.
@@ -427,6 +438,7 @@ stability_scope!(BETA {
         raw: &[u8],
         raw_len: u64,
         versions: &RangeInclusive<u16>,
+        layouts: &RangeInclusive<Layout>,
         partition: &str,
         name: &[u8],
     ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
@@ -440,7 +452,7 @@ stability_scope!(BETA {
             return Ok(None);
         }
 
-        let err = match Header::parse(raw, raw_len, versions) {
+        let err = match Header::parse(raw, raw_len, versions, layouts) {
             Ok(resolved) => return Ok(Some(resolved)),
             Err(err) => err,
         };
@@ -525,7 +537,7 @@ pub(crate) mod tests {
 
         // The region round-trips through parsing.
         let (size, parsed_blob_version, data_offset) =
-            Header::parse(&region, Layout::V1.data_offset(), &(0..=7)).unwrap();
+            Header::parse(&region, Layout::V1.data_offset(), &(0..=7), &Layout::ALL).unwrap();
         assert_eq!(size, 0);
         assert_eq!(parsed_blob_version, 7);
         assert_eq!(data_offset, Layout::V1.data_offset());
@@ -551,7 +563,7 @@ pub(crate) mod tests {
     fn test_header_extension_rejects_bad_crc() {
         let (mut region, _) = Header::create(&(0..=0));
         region[Header::PARSE_LEN - 1] ^= 0x01;
-        let result = Header::parse(&region, Layout::V1.data_offset(), &(0..=0));
+        let result = Header::parse(&region, Layout::V1.data_offset(), &(0..=0), &Layout::ALL);
         assert!(matches!(result, Err(HeaderError::InvalidChecksum)));
     }
 
@@ -562,6 +574,7 @@ pub(crate) mod tests {
             &region[..Layout::V1.data_offset() as usize - 1],
             Layout::V1.data_offset() - 1,
             &(0..=0),
+            &Layout::ALL,
         );
         assert!(matches!(
             result,
@@ -574,7 +587,7 @@ pub(crate) mod tests {
     fn test_header_v1_rejects_nonzero_padding() {
         let (mut region, _) = Header::create(&(0..=0));
         region[Header::PARSE_LEN] = 0x01;
-        let result = Header::parse(&region, Layout::V1.data_offset(), &(0..=0));
+        let result = Header::parse(&region, Layout::V1.data_offset(), &(0..=0), &Layout::ALL);
         assert!(matches!(result, Err(HeaderError::InvalidPadding)));
     }
 
@@ -582,8 +595,63 @@ pub(crate) mod tests {
     fn test_header_validate_success() {
         let header = v0_header(5);
         assert!(header.validate().is_ok());
-        assert!(Header::parse(&header.encode(), Layout::V0.data_offset(), &(3..=7)).is_ok());
-        assert!(Header::parse(&header.encode(), Layout::V0.data_offset(), &(5..=5)).is_ok());
+        assert!(
+            Header::parse(
+                &header.encode(),
+                Layout::V0.data_offset(),
+                &(3..=7),
+                &Layout::ALL,
+            )
+            .is_ok()
+        );
+        assert!(
+            Header::parse(
+                &header.encode(),
+                Layout::V0.data_offset(),
+                &(5..=5),
+                &Layout::ALL,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_layout_range_validation() {
+        assert!(Layout::valid_range(&(Layout::V0..=Layout::V1)));
+        assert!(Layout::valid_range(&(Layout::V1..=Layout::V1)));
+        assert!(!Layout::valid_range(&(Layout::V0..=Layout::V0)));
+        assert!(!Layout::valid_range(&(Layout::V1..=Layout::V0)));
+    }
+
+    #[test]
+    fn test_header_layout_restriction() {
+        let v0 = v0_blob_bytes(0, b"payload");
+        let result = Header::parse(&v0, v0.len() as u64, &(0..=0), &(Layout::V1..=Layout::V1));
+        assert!(matches!(
+            result,
+            Err(HeaderError::LayoutMismatch { expected, found })
+            if expected == (Layout::V1..=Layout::V1) && found == Layout::V0
+        ));
+
+        let v1 = v1_blob_bytes(0, b"payload");
+        let result = Header::parse(&v1, v1.len() as u64, &(0..=0), &(Layout::V0..=Layout::V0));
+        assert!(matches!(
+            result,
+            Err(HeaderError::LayoutMismatch { expected, found })
+            if expected == (Layout::V0..=Layout::V0) && found == Layout::V1
+        ));
+
+        // A malformed excluded layout remains corruption rather than masquerading as a policy
+        // mismatch.
+        let mut malformed = v1;
+        malformed[Header::PARSE_LEN] = 1;
+        let result = Header::parse(
+            &malformed,
+            malformed.len() as u64,
+            &(0..=0),
+            &(Layout::V0..=Layout::V0),
+        );
+        assert!(matches!(result, Err(HeaderError::InvalidPadding)));
     }
 
     #[test]
@@ -655,10 +723,20 @@ pub(crate) mod tests {
             crate::Error::BlobVersionMismatch { expected, found }
             if expected == (3..=7) && found == 10
         ));
+
+        let err = HeaderError::LayoutMismatch {
+            expected: Layout::V1..=Layout::V1,
+            found: Layout::V0,
+        };
+        assert!(matches!(
+            err.into_error("partition", b"name"),
+            crate::Error::BlobHeaderLayoutMismatch { expected, found }
+            if expected == (Layout::V1..=Layout::V1) && found == Layout::V0
+        ));
     }
 
-    /// Classification only triggers for parse failures a torn write can produce. A version
-    /// mismatch requires a validated CRC over a complete header region and stays loud.
+    /// Classification only triggers for parse failures a torn write can produce. Policy
+    /// mismatches require a complete, validated header region and stay loud.
     #[test]
     fn test_header_error_torn_creation_candidates() {
         assert!(HeaderError::InvalidMagic { found: [0; 4] }.may_be_torn_creation());
@@ -678,6 +756,13 @@ pub(crate) mod tests {
             .may_be_torn_creation()
         );
         assert!(!HeaderError::InvalidPadding.may_be_torn_creation());
+        assert!(
+            !HeaderError::LayoutMismatch {
+                expected: Layout::V1..=Layout::V1,
+                found: Layout::V0
+            }
+            .may_be_torn_creation()
+        );
         assert!(
             !HeaderError::VersionMismatch {
                 expected: 0..=0,
@@ -720,7 +805,12 @@ pub(crate) mod tests {
     #[test]
     fn test_header_v0_blob_version_out_of_range() {
         let header = v0_header(10);
-        let result = Header::parse(&header.encode(), Layout::V0.data_offset(), &(3..=7));
+        let result = Header::parse(
+            &header.encode(),
+            Layout::V0.data_offset(),
+            &(3..=7),
+            &Layout::ALL,
+        );
         assert!(matches!(
             result,
             Err(HeaderError::VersionMismatch { expected, found })
@@ -736,7 +826,7 @@ pub(crate) mod tests {
         let raw = v1_blob_bytes(10, b"");
 
         // Intact header, version out of range: mismatch.
-        let result = Header::parse(&raw, raw.len() as u64, &(3..=7));
+        let result = Header::parse(&raw, raw.len() as u64, &(3..=7), &Layout::ALL);
         assert!(matches!(
             result,
             Err(HeaderError::VersionMismatch { expected, found })
@@ -746,7 +836,7 @@ pub(crate) mod tests {
         // Torn version byte: the CRC fails before any version verdict.
         let mut torn = raw;
         torn[7] = 0;
-        let result = Header::parse(&torn, torn.len() as u64, &(3..=7));
+        let result = Header::parse(&torn, torn.len() as u64, &(3..=7), &Layout::ALL);
         assert!(matches!(result, Err(HeaderError::InvalidChecksum)));
     }
 

@@ -60,7 +60,8 @@ stability_scope!(BETA {
     pub mod metered;
 
     mod header;
-    pub(crate) use header::{Header, Layout};
+    pub(crate) use crate::BlobHeaderLayout as Layout;
+    pub(crate) use header::Header;
 
     /// Validate that a partition name contains only allowed characters.
     ///
@@ -80,6 +81,7 @@ stability_scope!(BETA {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    pub(crate) use super::header::tests::v0_blob_bytes;
     use crate::{
         Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Storage, WriteOptions,
     };

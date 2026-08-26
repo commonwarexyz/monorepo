@@ -20,7 +20,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
-use super::Header;
+use super::{Header, Layout};
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{self},
@@ -42,6 +42,7 @@ fn resolve_header(
     file: &mut File,
     raw_len: u64,
     versions: &RangeInclusive<u16>,
+    layouts: &RangeInclusive<Layout>,
     partition: &str,
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, Error> {
@@ -49,7 +50,7 @@ fn resolve_header(
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, partition, name)
+    super::header::resolve(&raw, raw_len, versions, layouts, partition, name)
 }
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -76,6 +77,8 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
+    /// Blob header layouts accepted by storage.
+    pub blob_layouts: RangeInclusive<Layout>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated io_uring worker thread.
@@ -86,6 +89,7 @@ pub struct Config {
 pub struct Storage {
     lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
+    blob_layouts: RangeInclusive<Layout>,
     io_handle: iouring::Handle,
     pool: BufferPool,
 }
@@ -95,6 +99,7 @@ impl Storage {
     pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
+            blob_layouts,
             mut iouring_config,
             thread_stack_size,
         } = cfg;
@@ -110,6 +115,7 @@ impl Storage {
         let storage = Self {
             lock: Arc::new(Mutex::new(())),
             storage_directory,
+            blob_layouts,
             io_handle,
             pool,
         };
@@ -155,7 +161,14 @@ impl crate::Storage for Storage {
 
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(&mut file, raw_len, &versions, partition, name)?;
+        let existing = resolve_header(
+            &mut file,
+            raw_len,
+            &versions,
+            &self.blob_layouts,
+            partition,
+            name,
+        )?;
         let (logical_len, blob_version, data_offset) = match existing {
             Some(resolved) => resolved,
             None => {
@@ -471,6 +484,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
@@ -963,6 +977,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_root.clone(),
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
@@ -998,6 +1013,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
@@ -1372,11 +1388,7 @@ mod tests {
         let partition_dir = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_dir).unwrap();
         let file_path = partition_dir.join(hex(b"v0"));
-        std::fs::write(
-            &file_path,
-            crate::storage::header::tests::v0_blob_bytes(0, payload),
-        )
-        .unwrap();
+        std::fs::write(&file_path, crate::storage::tests::v0_blob_bytes(0, payload)).unwrap();
 
         // The blob opens with its data intact and remains readable and writable in place.
         let (blob, size) = storage.open("partition", b"v0").await.unwrap();

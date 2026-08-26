@@ -78,6 +78,24 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+    /// Version of a [`Blob`]'s on-disk header layout.
+    ///
+    /// This versions the runtime-owned container, not the application-owned blob contents
+    /// version passed to [`Storage::open_versioned`].
+    #[repr(u16)]
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub enum BlobHeaderLayout {
+        /// An 8-byte header, with data beginning immediately after it.
+        V0 = 0,
+        /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
+        V1 = 1,
+    }
+
+    impl BlobHeaderLayout {
+        /// All blob header layouts supported by this runtime.
+        pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=Self::V1;
+    }
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
     pub enum Error {
@@ -125,6 +143,11 @@ stability_scope!(BETA {
         BlobInsufficientLength,
         #[error("blob corrupt: {0}/{1} reason: {2}")]
         BlobCorrupt(String, String, String),
+        #[error("blob header layout mismatch: expected one of {expected:?}, found {found:?}")]
+        BlobHeaderLayoutMismatch {
+            expected: std::ops::RangeInclusive<BlobHeaderLayout>,
+            found: BlobHeaderLayout,
+        },
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
         BlobVersionMismatch {
             expected: std::ops::RangeInclusive<u16>,
