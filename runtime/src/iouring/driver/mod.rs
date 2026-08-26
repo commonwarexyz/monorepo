@@ -308,7 +308,7 @@ impl IoUringLoop {
     pub(crate) fn turn(&mut self, ring: &mut IoUring) {
         let handle = self.handle.clone();
         loop {
-            let (needs_flush, kernel_idle) = handle.with(|ops| {
+            let (needs_flush, mut kernel_idle) = handle.with(|ops| {
                 // Wind down foreign-thread drops first: freed slots and
                 // cancel SQEs from the mailbox take effect this turn.
                 self.process_orphans(ops);
@@ -344,11 +344,19 @@ impl IoUringLoop {
             }
 
             // A callback may admit work or consume enough time for a request
-            // deadline to expire after the staging snapshot above. Reenter
-            // once after every nonempty batch so both queues and timeout time
-            // are refreshed before the turn can return to a blocking park.
+            // deadline to expire after the staging snapshot above. Refresh
+            // deadlines and owner-local queues without repeating the complete
+            // turn when the callback had no observable driver effect.
             if invoked_callbacks {
-                continue;
+                let follow_up = handle.with(|ops| {
+                    self.advance_timeouts(ops);
+                    kernel_idle = ops.waiters.pending() == 0;
+                    self.pending_operations.report(ops.operation_count());
+                    !ops.backlog.is_empty() || !ops.pending_cancels.is_empty()
+                });
+                if follow_up || !self.pending_waker_actions.is_empty() {
+                    continue;
+                }
             }
 
             // Without progressing waiters there is nothing to flush or reap:
@@ -2142,6 +2150,97 @@ mod tests {
         assert_eq!(gauge.get(), 0);
 
         drop(ticket);
+    }
+
+    #[test]
+    fn test_pending_operations_refreshes_after_reentrant_completion_poll() {
+        /// Result produced by the receive consumed inside its completion callback.
+        type RecvResult = Result<(IoBufMut, usize), (IoBufMut, Error)>;
+
+        /// Waker that synchronously consumes the completed ordinary operation.
+        struct ConsumeCompletion {
+            future: Mutex<Option<Pin<Box<dyn Future<Output = RecvResult> + Send>>>>,
+            completed: AtomicBool,
+        }
+
+        impl ArcWake for ConsumeCompletion {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                let mut slot = arc_self.future.lock();
+                let future = slot
+                    .as_mut()
+                    .expect("receive callback invoked after completion");
+                let noop = futures::task::noop_waker();
+                let mut cx = Context::from_waker(&noop);
+                assert!(future.as_mut().poll(&mut cx).is_ready());
+                *slot = None;
+                arc_self.completed.store(true, Ordering::Release);
+            }
+        }
+
+        let mut registry = Registry::default();
+        let gauge: crate::telemetry::metrics::Gauge = Register::register(
+            &mut registry,
+            "pending_operations",
+            "Number of retained logical operations in the io_uring loop",
+            raw::Gauge::default(),
+        );
+        let (mut driver, handle) = Driver::new(
+            RingConfig::default(),
+            Duration::from_secs(60),
+            &mut registry,
+        )
+        .unwrap();
+        let (left, mut right) = UnixStream::pair().unwrap();
+        let recv_handle = handle.clone();
+        let consumer = Arc::new(ConsumeCompletion {
+            future: Mutex::new(Some(Box::pin(async move {
+                recv_handle
+                    .recv(
+                        Arc::new(left.into()),
+                        IoBufMut::with_capacity(1),
+                        0,
+                        1,
+                        false,
+                        Instant::now() + Duration::from_secs(60),
+                    )
+                    .await
+            }))),
+            completed: AtomicBool::new(false),
+        });
+        let completion_waker = arc_waker(Arc::clone(&consumer));
+        let mut cx = Context::from_waker(&completion_waker);
+        assert!(
+            consumer
+                .future
+                .lock()
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut cx)
+                .is_pending()
+        );
+        driver.turn();
+        assert_eq!(gauge.get(), 1);
+
+        right.write_all(b"x").unwrap();
+        let start = Instant::now();
+        while !consumer.completed.load(Ordering::Acquire) {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            driver.turn();
+            if !consumer.completed.load(Ordering::Acquire) {
+                driver.park(Some(Duration::from_millis(10)));
+            }
+        }
+
+        // The completion callback removed the final ordinary operation after
+        // the turn's first metric report. The lightweight callback refresh
+        // must fold that removal into the gauge before returning.
+        assert_eq!(handle.with(|ops| ops.operation_count()), 0);
+        assert_eq!(gauge.get(), 0);
+        drop(completion_waker);
+        drop(consumer);
+        driver.close();
+        driver.drain();
     }
 
     #[test]
