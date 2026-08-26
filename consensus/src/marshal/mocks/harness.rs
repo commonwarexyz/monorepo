@@ -49,7 +49,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, Probability, TestRng, test_rng, vec::NonEmptyVec};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability, test_rng, vec::NonEmptyVec};
 use futures::StreamExt;
 use rand::{
     RngExt as _,
@@ -88,12 +88,12 @@ pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
 pub const LINK: Link = Link {
     latency: Duration::from_millis(100),
     jitter: Duration::from_millis(1),
-    success_rate: Probability!(1.0),
+    success_rate: probability!(1.0),
 };
 pub const UNRELIABLE_LINK: Link = Link {
     latency: Duration::from_millis(200),
     jitter: Duration::from_millis(50),
-    success_rate: Probability!(0.7),
+    success_rate: probability!(0.7),
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
@@ -3894,8 +3894,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
     });
 }
 
-/// Regression test: commitment-fetched blocks must wake subscribers and cache by
-/// decoded height even when the local pruning hint is far ahead.
+/// Commitment fetch height metadata bounds caching without changing response delivery.
 pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
@@ -3981,6 +3980,47 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
             .await
             .expect("height-hint-mismatched fetch should cache by decoded height");
         assert_eq!(cached.height(), actual_height);
+
+        let expected_height = Height::new(7);
+        let actual_height = Height::new(1_000_000);
+        let block = H::make_test_block(
+            Sha256::hash(&[b"commitment-fetch-height-above-hint"]),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            actual_height,
+            8,
+            NUM_VALIDATORS as u16,
+        );
+        let commitment = H::commitment(&block);
+        H::propose(
+            &mut server_handle,
+            Round::new(Epoch::zero(), View::new(8)),
+            &block,
+        )
+        .await;
+
+        let subscription = victim_handle.mailbox.subscribe_by_commitment(
+            commitment,
+            CommitmentFallback::FetchByCommitment {
+                height: expected_height,
+            },
+        );
+        let received = select! {
+            result = subscription => {
+                result.expect("commitment subscription should receive the block above its hint")
+            },
+            _ = context.sleep(Duration::from_secs(5)) => {
+                panic!("commitment subscription was not woken by block above height hint");
+            },
+        };
+        assert_eq!(received.height(), actual_height);
+        assert!(
+            victim_handle
+                .mailbox
+                .get_block(&received.digest())
+                .await
+                .is_none(),
+            "block above the local height hint must not be cached"
+        );
     });
 }
 

@@ -32,8 +32,9 @@ use commonware_consensus::{
         resolver::p2p as resolver,
     },
     simplex::{
-        Engine, Floor, ForwardingPolicy, Plan, config, elector::Config as ElectorConfig,
-        scheme::Scheme as SimplexScheme, types::Context as SimplexContext,
+        Engine, Floor, ForwardPolicy, Plan, SkipBudget, SkipPolicy, config,
+        elector::Config as ElectorConfig, scheme::Scheme as SimplexScheme,
+        types::Context as SimplexContext,
     },
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
@@ -305,7 +306,7 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
     relay: R,
     marshal_mailbox: Mailbox<SchemeOf<P>, CodingVariant<P>>,
     genesis_commitment: Commitment,
-    forwarding: ForwardingPolicy,
+    forwarding: ForwardPolicy,
     vote: (
         impl Sender<PublicKey = PublicKeyOf<P>>,
         impl Receiver<PublicKey = PublicKeyOf<P>>,
@@ -342,12 +343,15 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
-            skip_timeout: Duration::from_secs(11),
+            skip: SkipPolicy::Enabled {
+                timeout: Duration::from_secs(11),
+                budget: SkipBudget::Participants,
+            },
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
-            forwarding,
+            forward: forwarding,
             track_historical_votes: false,
         },
     );

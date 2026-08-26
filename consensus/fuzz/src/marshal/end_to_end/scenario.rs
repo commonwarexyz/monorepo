@@ -60,7 +60,7 @@ use commonware_consensus::{
             harness::{LINK, NUM_VALIDATORS},
         },
     },
-    simplex::ForwardingPolicy,
+    simplex::ForwardPolicy,
     types::{Epoch, Round, TermLength, View},
 };
 use commonware_cryptography::{
@@ -68,7 +68,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::{Link, Oracle};
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, Probability};
+use commonware_utils::{FuzzRng, probability};
 use std::{collections::BTreeSet, time::Duration};
 
 /// View the byzantine node leads and alone notarizes. The round-robin elector
@@ -380,7 +380,7 @@ pub struct ScenarioOutcome {
     pub template: ScenarioTemplate,
     /// Generated actions spliced into the template's stages.
     pub actions: usize,
-    pub forwarding: ForwardingPolicy,
+    pub forwarding: ForwardPolicy,
     pub byzantine_policy: ByzantinePolicy,
     /// Highest finalized height each correct node had delivered at GST.
     pub baselines: Vec<(&'static str, u64)>,
@@ -724,7 +724,7 @@ async fn apply_action<K: PublicKey, D: commonware_cryptography::Digest>(
             let link = Link {
                 latency: Duration::from_millis(latency_ms.min(MAX_LATENCY_MILLIS).into()),
                 jitter: LINK.jitter,
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             topology.set(from.index(), to.index(), link).await;
         }
@@ -863,7 +863,7 @@ mod recovery {
                     template: ScenarioTemplate::SplitNotarization,
                     actions: Vec::new(),
                     byzantine_policy: ByzantinePolicy::ALL,
-                    forwarding: ForwardingPolicy::SilentVoters,
+                    forwarding: ForwardPolicy::SilentVoters,
                 };
                 let outcome =
                     run_scenario::<SimplexCertificateMock>(&input, move |wedge| match control {

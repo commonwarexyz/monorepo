@@ -44,7 +44,7 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     CertifiableAutomaton, Monitor, Relay as ConsensusRelay, Reporter, Reporters, Viewable,
     simplex::{
-        Engine, Floor, ForwardingPolicy, Plan, config,
+        Engine, Floor, ForwardPolicy, Plan, SkipBudget, SkipPolicy, config,
         elector::Config as ElectorConfig,
         mocks::{application, relay, reporter, twins},
         types::{Activity, Certificate, Context as SimplexContext, Vote},
@@ -64,8 +64,9 @@ use commonware_runtime::{
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
 };
 use commonware_utils::{
-    FuzzRng, NZU16, NZU32, NZUsize, Probability,
+    FuzzRng, NZU16, NZU32, NZUsize,
     channel::mpsc::{self, Receiver},
+    probability,
     sequence::U64,
     sync::Once,
 };
@@ -218,7 +219,7 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: Probability!(0.6),
+        success_rate: probability!(0.6),
     };
     for (peer_idx, peer) in participants.iter().enumerate() {
         if peer_idx == victim_idx {
@@ -463,7 +464,7 @@ pub struct FuzzInput {
     /// Per-iteration forwarding policy threaded into every engine the harness
     /// spawns. Sampling lets the fuzzer drive coverage of all three arms of
     /// `batcher::forward_targets` instead of pinning to `Disabled`.
-    pub forwarding: ForwardingPolicy,
+    pub forwarding: ForwardPolicy,
     /// Per-iteration certify policy threaded into every honest validator
     /// the harness spawns.
     pub certify: CertifyChoice,
@@ -539,9 +540,9 @@ impl Arbitrary<'_> for FuzzInput {
         //   33%  SilentVoters   - exercises `forward_targets` -> `missing_voters`
         //   34%  SilentLeader   - exercises `forward_targets` -> leader-only branch
         let forwarding = match u.int_in_range(0..=2)? {
-            0 => ForwardingPolicy::Disabled,
-            1 => ForwardingPolicy::SilentVoters,
-            _ => ForwardingPolicy::SilentLeader,
+            0 => ForwardPolicy::Disabled,
+            1 => ForwardPolicy::SilentVoters,
+            _ => ForwardPolicy::SilentLeader,
         };
 
         // Single-target cancel/pending variants require N4F0C4, where disabling
@@ -698,7 +699,7 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
     let link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     };
     link_peers(
         &mut oracle,
@@ -1099,7 +1100,7 @@ pub(crate) fn build_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
+    forwarding: ForwardPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
@@ -1165,7 +1166,7 @@ fn start_validator_engine<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
+    forwarding: ForwardPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
@@ -1211,12 +1212,15 @@ where
         timeout_retry: Duration::from_secs(10),
         fetch_timeout: Duration::from_secs(1),
         view_retention: Delta::new(10),
-        skip_timeout: Duration::from_secs(11),
+        skip: SkipPolicy::Enabled {
+            timeout: Duration::from_secs(11),
+            budget: SkipBudget::Participants,
+        },
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
-        forwarding,
+        forward: forwarding,
         track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
@@ -1401,7 +1405,7 @@ pub(crate) fn build_validator_with_reporter<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
+    forwarding: ForwardPolicy,
     partition: String,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
@@ -1503,7 +1507,7 @@ pub(crate) fn spawn_filtered_honest_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
+    forwarding: ForwardPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
@@ -1571,7 +1575,7 @@ fn spawn_filtered_audited_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
+    forwarding: ForwardPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
@@ -1640,7 +1644,7 @@ fn spawn_filtered_validator_with_reporter<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
+    forwarding: ForwardPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
@@ -1709,7 +1713,7 @@ fn default_link() -> Link {
     Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     }
 }
 
@@ -3104,12 +3108,15 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: Delta::new(10),
-                skip_timeout: Duration::from_secs(11),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(11),
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
-                forwarding: self.input.forwarding,
+                forward: self.input.forwarding,
                 track_historical_votes: false,
             },
         );
@@ -3133,7 +3140,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             Action::Update(Link {
                 latency: Duration::from_millis(500),
                 jitter: Duration::from_millis(500),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             }),
             self.input.partition.set_partition(),
         )
@@ -4148,7 +4155,7 @@ mod tests {
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
             mailbox_size: DEFAULT_MAILBOX_SIZE,
-            forwarding: ForwardingPolicy::Disabled,
+            forwarding: ForwardPolicy::Disabled,
             certify: CertifyChoice::Always,
             block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,

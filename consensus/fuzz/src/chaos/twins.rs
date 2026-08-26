@@ -63,7 +63,7 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     Monitor as _, Viewable as _,
     simplex::{
-        Engine, Floor, config,
+        Engine, Floor, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
     },
@@ -345,7 +345,10 @@ where
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
-            skip_timeout: Duration::from_secs(11),
+            skip: SkipPolicy::Enabled {
+                timeout: Duration::from_secs(11),
+                budget: SkipBudget::Participants,
+            },
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(
@@ -354,7 +357,7 @@ where
                 crate::PAGE_CACHE_SIZE,
             ),
             strategy: Sequential,
-            forwarding: input.forwarding,
+            forward: input.forwarding,
             track_historical_votes: false,
         };
         Engine::new(primary_context.child("engine"), engine_cfg).start(
@@ -403,7 +406,10 @@ where
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
-            skip_timeout: Duration::from_secs(11),
+            skip: SkipPolicy::Enabled {
+                timeout: Duration::from_secs(11),
+                budget: SkipBudget::Participants,
+            },
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(
@@ -412,7 +418,7 @@ where
                 crate::PAGE_CACHE_SIZE,
             ),
             strategy: Sequential,
-            forwarding: input.forwarding,
+            forward: input.forwarding,
             track_historical_votes: false,
         };
         Engine::new(secondary_context.child("engine"), engine_cfg).start(

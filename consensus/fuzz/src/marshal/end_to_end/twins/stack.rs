@@ -32,7 +32,7 @@ use commonware_consensus::{
         standard::{Deferred, Inline, Standard},
     },
     simplex::{
-        Engine, Floor, Plan, config,
+        Engine, Floor, Plan, SkipBudget, SkipPolicy, config,
         elector::Config as ElectorConfig,
         types::{Context as SimplexContext, Finalization},
     },
@@ -633,7 +633,7 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
     mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
     genesis: Sha256Digest,
     partition: String,
-    forwarding: commonware_consensus::simplex::ForwardingPolicy,
+    forwarding: commonware_consensus::simplex::ForwardPolicy,
     vote: (
         impl Sender<PublicKey = PublicKeyOf<P>>,
         impl Receiver<PublicKey = PublicKeyOf<P>>,
@@ -722,12 +722,15 @@ pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
-            skip_timeout: Duration::from_secs(11),
+            skip: SkipPolicy::Enabled {
+                timeout: Duration::from_secs(11),
+                budget: SkipBudget::Participants,
+            },
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
-            forwarding,
+            forward: forwarding,
             track_historical_votes: false,
         },
     );

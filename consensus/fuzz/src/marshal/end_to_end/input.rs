@@ -16,7 +16,7 @@ use crate::{
     utils::{Partition, SetPartition},
 };
 use arbitrary::Arbitrary;
-use commonware_consensus::{simplex::ForwardingPolicy, types::TermLength};
+use commonware_consensus::{simplex::ForwardPolicy, types::TermLength};
 use commonware_utils::NZU32;
 
 const MIN_REQUIRED: u64 = 1;
@@ -52,7 +52,7 @@ pub struct MarshalDisrupterInput {
     pub degraded_network: bool,
     pub partition: Partition,
     pub strategy: StrategyChoice,
-    pub forwarding: ForwardingPolicy,
+    pub forwarding: ForwardPolicy,
 }
 
 impl Arbitrary<'_> for MarshalDisrupterInput {
@@ -87,9 +87,9 @@ impl Arbitrary<'_> for MarshalDisrupterInput {
         };
 
         let forwarding = match u.int_in_range(0..=2)? {
-            0 => ForwardingPolicy::Disabled,
-            1 => ForwardingPolicy::SilentVoters,
-            _ => ForwardingPolicy::SilentLeader,
+            0 => ForwardPolicy::Disabled,
+            1 => ForwardPolicy::SilentVoters,
+            _ => ForwardPolicy::SilentLeader,
         };
 
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
@@ -160,7 +160,7 @@ pub struct NotarizationBlockSplitScenarioInput {
     /// Which of the byzantine node's omissions are armed.
     pub byzantine_policy: ByzantinePolicy,
     /// Simplex forwarding policy used by every engine.
-    pub forwarding: ForwardingPolicy,
+    pub forwarding: ForwardPolicy,
 }
 
 impl Arbitrary<'_> for NotarizationBlockSplitScenarioInput {
@@ -193,9 +193,9 @@ impl Arbitrary<'_> for NotarizationBlockSplitScenarioInput {
         // anything: every correct node that certifies the attack view pushes
         // its block to the peers that did not vote for it, the victim included.
         let forwarding = match u.int_in_range(0..=9)? {
-            0..=7 => ForwardingPolicy::SilentVoters,
-            8 => ForwardingPolicy::SilentLeader,
-            _ => ForwardingPolicy::Disabled,
+            0..=7 => ForwardPolicy::SilentVoters,
+            8 => ForwardPolicy::SilentLeader,
+            _ => ForwardPolicy::Disabled,
         };
 
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
@@ -230,7 +230,7 @@ pub struct MarshalTwinsInput {
     /// Number of honest blocks required after the adversarial prefix.
     pub trailing_blocks: u8,
     /// Simplex forwarding policy used by every engine.
-    pub forwarding: ForwardingPolicy,
+    pub forwarding: ForwardPolicy,
 }
 
 impl Arbitrary<'_> for MarshalTwinsInput {
@@ -273,9 +273,9 @@ impl Arbitrary<'_> for MarshalTwinsInput {
         };
         let trailing_blocks = u.int_in_range(1..=MAX_TWINS_TRAILING_BLOCKS)?;
         let forwarding = match u.int_in_range(0..=2)? {
-            0 => ForwardingPolicy::Disabled,
-            1 => ForwardingPolicy::SilentVoters,
-            _ => ForwardingPolicy::SilentLeader,
+            0 => ForwardPolicy::Disabled,
+            1 => ForwardPolicy::SilentVoters,
+            _ => ForwardPolicy::SilentLeader,
         };
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {

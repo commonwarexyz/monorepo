@@ -36,7 +36,7 @@ use commonware_runtime::{
     Clock, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_utils::{
-    FuzzRng, NZU16, NZU64, NZUsize, NonZeroDuration, Probability, ordered::Set, sequence::U64,
+    FuzzRng, NZU16, NZU64, NZUsize, NonZeroDuration, ordered::Set, probability, sequence::U64,
 };
 use futures::future::join_all;
 use std::{
@@ -195,7 +195,7 @@ fn link(input: &FuzzInput) -> Link {
     Link {
         latency: Duration::from_millis(input.latency_ms),
         jitter: Duration::from_millis(input.jitter_ms),
-        success_rate: Probability!(u64::from(input.success_rate_percent), PERCENT_DENOMINATOR),
+        success_rate: probability!(u64::from(input.success_rate_percent), PERCENT_DENOMINATOR),
     }
 }
 

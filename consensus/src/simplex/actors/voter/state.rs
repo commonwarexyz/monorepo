@@ -119,6 +119,7 @@ pub struct Config<S: certificate::Scheme, L: Elector<S>> {
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
+    pub skip_budget: u64,
 }
 
 /// Per-[Epoch] state machine.
@@ -137,6 +138,7 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     leader_timeout: Duration,
     certification_timeout: Duration,
     timeout_retry: Duration,
+    skip_budget: u64,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
@@ -230,7 +232,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let nullifications = context.family("nullifications", "nullifications");
 
         let lookahead = Lookahead::new(&cfg.elector.terms());
-
         Self {
             context,
             scheme: cfg.scheme,
@@ -241,6 +242,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             leader_timeout: cfg.leader_timeout,
             certification_timeout: cfg.certification_timeout,
             timeout_retry: cfg.timeout_retry,
+            skip_budget: cfg.skip_budget,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
@@ -441,6 +443,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn next_timeout(&mut self) -> (SystemTime, TimeoutReason) {
         let now = self.context.current();
         let timeout_retry = self.timeout_retry;
+        let allow_latched_timeout = self.has_skip_budget();
         let round_timeout = {
             // The current round always has a pending timeout:
             // `Round::next_timeout` only returns `None` for rounds that are
@@ -452,7 +455,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 .get_mut(&self.view)
                 .expect("current round must exist");
             round
-                .next_timeout(now, timeout_retry)
+                .next_timeout(now, timeout_retry, allow_latched_timeout)
                 .expect("current round must always have a timeout")
         };
 
@@ -471,6 +474,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .filter(|&deadline| deadline <= round_timeout.0 && now < round_timeout.0)
             .map(|deadline| (deadline, TimeoutReason::StallTimeout))
             .unwrap_or(round_timeout)
+    }
+
+    /// Returns whether the current term has skip budget remaining.
+    const fn has_skip_budget(&self) -> bool {
+        let term_length = self.term_length();
+        let first_unfinalized = self.last_finalized.next().term_index(term_length);
+        let current = self.view.term_index(term_length);
+        let spent = current
+            .checked_sub(first_unfinalized)
+            .expect("current term must not precede the first unfinalized term");
+        spent < self.skip_budget
     }
 
     /// Returns the oldest entered, unfinalized view's stall deadline in
@@ -849,7 +863,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .and_then(|round| round.elapsed_since_start(now))
     }
 
-    /// Immediately expires `view` on first timeout, forcing a timeout to fire on the next tick.
+    /// Immediately expires `view` on its first timeout when skip budget is
+    /// available, forcing a timeout to fire on the next tick. Otherwise, the
+    /// timeout remains latched until budget becomes available.
     ///
     /// If the round has already been marked timed out, this preserves the existing
     /// retry schedule.
@@ -1624,7 +1640,10 @@ mod tests {
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
-    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::{
+        certificate::{Scheme as _, mocks::Fixture},
+        sha256::Digest as Sha256Digest,
+    };
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
@@ -1729,6 +1748,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: verifier.participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -1772,6 +1792,7 @@ mod tests {
         epoch: u64,
         view_retention: u64,
         term_length: u32,
+        skip_budget: u64,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
         let namespace = b"ns".to_vec();
         let fixture = ed25519::fixture(
@@ -1798,6 +1819,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget,
             },
         );
         let mut state = state;
@@ -1807,6 +1829,7 @@ mod tests {
 
     /// Like [setup_state], but signs as `schemes[signer]` (rather than the
     /// verifier) and parameterizes `optimistic_views`.
+    #[allow(clippy::too_many_arguments)]
     fn setup_state_with(
         context: &mut deterministic::Context,
         validators: usize,
@@ -1815,6 +1838,7 @@ mod tests {
         view_retention: u64,
         term_length: TermLength,
         optimistic_views: ViewDelta,
+        skip_budget: u64,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
         let namespace = b"ns".to_vec();
         let fixture = ed25519::fixture(
@@ -1823,21 +1847,27 @@ mod tests {
             validators.try_into().expect("validator count fits in u32"),
         );
         let scheme = fixture.schemes[signer].clone();
+        let elector = if term_length == TermLength::ONE {
+            round_robin(&scheme)
+        } else {
+            round_robin_with_term(
+                &scheme,
+                term_length,
+                Duration::from_secs(4),
+                optimistic_views,
+            )
+        };
         let mut state = State::new(
             context.child("state"),
             Config {
-                scheme: scheme.clone(),
-                elector: round_robin_with_term(
-                    &scheme,
-                    term_length,
-                    Duration::from_secs(4),
-                    optimistic_views,
-                ),
+                scheme,
+                elector,
                 epoch: Epoch::new(epoch),
                 view_retention: ViewDelta::new(view_retention),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget,
             },
         );
         state.set_genesis(test_genesis());
@@ -1899,6 +1929,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: verifier.participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -1958,6 +1989,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
+                skip_budget: local_scheme.participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2034,6 +2066,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2090,6 +2123,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2140,6 +2174,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2203,6 +2238,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2300,6 +2336,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(11),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2346,6 +2383,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(10),
                 certification_timeout: Duration::from_millis(20),
                 timeout_retry: retry,
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2408,6 +2446,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2465,6 +2504,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2509,6 +2549,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2546,6 +2587,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2577,6 +2619,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2629,6 +2672,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout,
                     timeout_retry: Duration::from_secs(30),
+                    skip_budget: schemes[1].participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2682,6 +2726,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
 
             let parent = propose_and_notarize_view1(&mut state, 120);
@@ -2725,6 +2770,7 @@ mod tests {
                 leader_timeout,
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2774,6 +2820,170 @@ mod tests {
     }
 
     #[test]
+    fn skip_budget_allows_repeated_leaders() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                2,
+                0,
+                7,
+                10,
+                TermLength::ONE,
+                ViewDelta::zero(),
+                3,
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+            let first_leader = state.leader_index(View::new(1));
+
+            for view in 1..=3 {
+                let view = View::new(view);
+                assert_eq!(state.current_view(), view);
+                let now = context.current();
+                state.trigger_timeout(view, TimeoutReason::Inactivity);
+                assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+                assert!(
+                    !state
+                        .construct_nullify(view, TimeoutReason::Inactivity)
+                        .expect("skip nullify")
+                        .0
+                );
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+
+            assert_eq!(state.leader_index(View::new(3)), first_leader);
+
+            let view = View::new(4);
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    #[test]
+    fn skip_budget_counts_terms() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state_with(
+                &mut context,
+                4,
+                0,
+                7,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::zero(),
+                2,
+            );
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+            for view in [View::new(1), View::new(6)] {
+                assert_eq!(state.current_view(), view);
+                let now = context.current();
+                state.trigger_timeout(view, TimeoutReason::Inactivity);
+                assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+                assert!(
+                    state
+                        .construct_nullify(view, TimeoutReason::Inactivity)
+                        .is_some()
+                );
+                let nullification =
+                    build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), view));
+                assert!(state.add_nullification(nullification));
+            }
+
+            let view = View::new(11);
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    #[test]
+    fn finalization_restores_pending_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state(&mut context, 4, 9, 10, 1, 1);
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([123u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &proposal);
+            assert!(state.add_notarization(notarization).0);
+            assert_eq!(state.certify_candidates().0, vec![proposal.clone()]);
+            assert!(state.certified(View::new(1), true).is_some());
+            assert_eq!(state.current_view(), View::new(2));
+
+            let now = context.current();
+            state.trigger_timeout(View::new(2), TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+
+            let finalization = build_finalization(&verifier, &schemes, &proposal);
+            assert!(state.add_finalization(finalization).0);
+            assert_eq!(state.current_view(), View::new(2));
+            assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+        });
+    }
+
+    #[test]
+    fn disabled_skip_defers_inactivity_to_leader_deadline() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (_, mut state) = setup_state(&mut context, 4, 7, 10, 1, 0);
+            let view = state.current_view();
+            let now = context.current();
+
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    #[test]
+    fn disabled_skip_defers_leader_nullify() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (_, mut state) = setup_state(&mut context, 4, 7, 10, 1, 0);
+            let view = state.current_view();
+            let now = context.current();
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([124u8; 32]),
+            );
+            assert!(state.set_proposal(view, proposal));
+
+            state.trigger_timeout(view, TimeoutReason::LeaderNullify);
+            assert_eq!(
+                state.next_timeout(),
+                (
+                    now + Duration::from_secs(2),
+                    TimeoutReason::CertificationTimeout
+                )
+            );
+        });
+    }
+
+    #[test]
     fn nullify_only_records_metric_once() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -2791,6 +3001,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2851,6 +3062,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: local_scheme.participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2905,6 +3117,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -2956,6 +3169,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: local_scheme.participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3014,7 +3228,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 5, 1);
+            ) = setup_state(&mut context, 4, 1, 5, 1, 4);
 
             // Create parent proposal and certificate
             let parent_view = View::new(1);
@@ -3053,7 +3267,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 20, 5);
+            ) = setup_state(&mut context, 4, 1, 20, 5, 4);
 
             let parent_view = View::new(3);
             let parent_payload = Sha256Digest::from([42u8; 32]);
@@ -3091,7 +3305,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 20, 5);
+            ) = setup_state(&mut context, 4, 1, 20, 5, 4);
 
             let parent_view = View::new(3);
             let parent_payload = Sha256Digest::from([42u8; 32]);
@@ -3131,7 +3345,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 20, 5);
+            ) = setup_state(&mut context, 4, 1, 20, 5, 4);
 
             let parent_view = View::new(3);
             let parent_payload = Sha256Digest::from([42u8; 32]);
@@ -3172,7 +3386,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 20, 5);
+            ) = setup_state(&mut context, 4, 1, 20, 5, 4);
 
             let parent_view = View::new(3);
             let parent_proposal = Proposal::new(
@@ -3226,6 +3440,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(0),
+                4,
             );
 
             let parent = propose_and_notarize_view1(&mut state, 93);
@@ -3275,6 +3490,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             // Nullify term 1 to enter term 2 at view 6. One nullification
@@ -3337,6 +3553,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             let parent = propose_and_notarize_view1(&mut state, 101);
@@ -3411,6 +3628,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             certify_first_view(&mut state, &verifier, &schemes);
@@ -3487,6 +3705,7 @@ mod tests {
                 20,
                 TermLength::new(NZU32!(10)),
                 ViewDelta::new(2),
+                4,
             );
 
             // Certify view 1. The optimistic frontier assigns leaders only up
@@ -3559,6 +3778,7 @@ mod tests {
                 20,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             // Certify view 1 (term 1 spans views 1..=5).
@@ -3604,6 +3824,7 @@ mod tests {
                 20,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             // Term 2 starts at view 6. Its parent (view 1) is not certified
@@ -3640,6 +3861,7 @@ mod tests {
                 20,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
             certify_first_view(&mut state, &verifier, &schemes);
 
@@ -3680,6 +3902,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
 
             let first_payload = Sha256Digest::from([95u8; 32]);
@@ -3733,6 +3956,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
             let Fixture { verifier, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let skip_budget = verifier.participants().len() as u64;
             let mut state = State::new(
                 context,
                 Config {
@@ -3746,6 +3970,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget,
                 },
             );
             state.set_genesis(test_genesis());
@@ -3783,6 +4008,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             let parent = Proposal::new(
@@ -3827,6 +4053,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             let parent = Proposal::new(
@@ -3864,7 +4091,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 13, 10, 1);
+            ) = setup_state(&mut context, 4, 13, 10, 1, 4);
 
             let view = View::new(1);
             let proposal = Proposal::new(
@@ -3913,6 +4140,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             let parent_a = Proposal::new(
@@ -3974,6 +4202,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             let parent_a = Proposal::new(
@@ -4038,6 +4267,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             let parent_a = Proposal::new(
@@ -4094,6 +4324,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
 
             let parent = Proposal::new(
@@ -4161,6 +4392,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             // Directly notarize two consecutive views in the same term.
@@ -4210,6 +4442,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
 
             let parent = propose_and_notarize_view1(&mut state, 118);
@@ -4253,6 +4486,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             for view in [View::new(1), View::new(2), View::new(3)] {
@@ -4301,6 +4535,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
 
             let parent = Proposal::new(
@@ -4347,6 +4582,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(10)),
                 ViewDelta::new(3),
+                4,
             );
 
             // Certify view 1 so only view 2 is initially ready.
@@ -4396,6 +4632,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             certify_first_view(&mut state, &verifier, &schemes);
@@ -4438,6 +4675,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             propose_and_notarize_view1(&mut state, 98);
@@ -4484,6 +4722,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(131)),
                 ViewDelta::new(64),
+                4,
             );
 
             // Build the densest proposal prefix admitted from view 1. A
@@ -4550,6 +4789,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(20)),
                 ViewDelta::new(2),
+                4,
             );
 
             // A notarization for a far-future same-term view arrives first.
@@ -4596,6 +4836,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
 
             let parent = propose_and_notarize_view1(&mut state, 101);
@@ -4652,6 +4893,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             propose_and_notarize_view1(&mut state, 111);
@@ -4697,6 +4939,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
             assert!(state.enter_view(View::new(2)));
 
@@ -4742,6 +4985,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             // Peers notarize view 1 without our participation.
@@ -4784,6 +5028,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             let proposal_v1 = Proposal::new(
@@ -4825,6 +5070,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
 
             // View 1 is finalized without us ever seeing its notarization, so
@@ -4883,6 +5129,7 @@ mod tests {
                 1,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             for (view, payload) in [(1u64, 140u8), (2, 141)] {
@@ -4941,6 +5188,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             // Peers notarize view 1; we never certify it.
@@ -4994,6 +5242,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
 
             let proposal = Proposal::new(
@@ -5030,7 +5279,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 20, 5);
+            ) = setup_state(&mut context, 4, 1, 20, 5, 4);
 
             let view = View::new(1);
             let nullification =
@@ -5057,7 +5306,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 20, 1);
+            ) = setup_state(&mut context, 4, 1, 20, 1, 4);
 
             let view = View::new(1);
             let proposal = Proposal::new(
@@ -5100,7 +5349,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 5, 1);
+            ) = setup_state(&mut context, 4, 1, 5, 1, 4);
 
             // Add nullification certificate for view 1
             let nullification =
@@ -5127,7 +5376,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 5, 1);
+            ) = setup_state(&mut context, 4, 1, 5, 1, 4);
 
             // Add finalization
             let proposal_a = Proposal::new(
@@ -5164,7 +5413,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 20, 5);
+            ) = setup_state(&mut context, 4, 1, 20, 5, 4);
 
             // Certify view 1 so it can serve as a valid parent.
             let parent_view = View::new(1);
@@ -5219,6 +5468,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
+                    skip_budget: verifier.participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -5276,6 +5526,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
+                    skip_budget: verifier.participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -5326,6 +5577,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
+                    skip_budget: verifier.participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -5380,6 +5632,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: schemes[0].participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -5435,14 +5688,18 @@ mod tests {
             let leader_idx = usize::from(elector.elect(Rnd::new(epoch, View::new(1)), None));
             let local_idx = (leader_idx + 1) % schemes.len();
 
-            let config = |scheme, elector| Config {
-                scheme,
-                elector,
-                epoch,
-                view_retention: ViewDelta::new(10),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
+            let config = |scheme: ed25519::Scheme, elector| {
+                let skip_budget = scheme.participants().len() as u64;
+                Config {
+                    scheme,
+                    elector,
+                    epoch,
+                    view_retention: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    skip_budget,
+                }
             };
 
             // Follow the live path through a local view-1 notarize vote and an
@@ -5519,6 +5776,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: schemes[0].participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -5559,6 +5817,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: local_scheme.participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -5590,6 +5849,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: local_scheme.participants().len() as u64,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -5628,6 +5888,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: schemes[1].participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -5712,6 +5973,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: local_scheme.participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -5744,6 +6006,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: local_scheme.participants().len() as u64,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -5780,6 +6043,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(1),
+                4,
             );
             let Fixture {
                 schemes, verifier, ..
@@ -5851,6 +6115,7 @@ mod tests {
                 10,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(2),
+                4,
             );
 
             // The leader's view 1 proposal stamps the stable leader on view 2,
@@ -5907,6 +6172,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: verifier.participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -6021,6 +6287,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -6079,7 +6346,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 10, 1);
+            ) = setup_state(&mut context, 4, 1, 10, 1, 4);
 
             let view = View::new(2);
             let proposal = Proposal::new(
@@ -6111,7 +6378,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state(&mut context, 4, 1, 10, 1);
+            ) = setup_state(&mut context, 4, 1, 10, 1, 4);
 
             let view = View::new(2);
             let proposal = Proposal::new(
@@ -6164,6 +6431,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: schemes[1].participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -6267,6 +6535,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: local_scheme.participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -6323,6 +6592,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: local_scheme.participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -6392,6 +6662,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: schemes[2].participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -6442,6 +6713,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: schemes[3].participants().len() as u64,
                 },
             );
             state.set_genesis(test_genesis());
@@ -6498,6 +6770,7 @@ mod tests {
                 20,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(3),
+                4,
             );
             // Every certificate is minted by the other three participants: a
             // bare quorum that never includes our vote.
@@ -6585,6 +6858,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
+                skip_budget: local_scheme.participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -6654,6 +6928,7 @@ mod tests {
             leader_timeout: Duration::from_secs(10),
             certification_timeout: Duration::from_secs(10),
             timeout_retry: Duration::from_secs(30),
+            skip_budget: local_scheme.participants().len() as u64,
         };
         let mut state = State::new(context.child("state"), cfg);
         state.set_genesis(test_genesis());
@@ -6964,7 +7239,7 @@ mod tests {
             // Stable leaders use three-view terms. A nullification covers the
             // rest of its term. The covering certificate for a parent may sit
             // at an earlier view.
-            let (fixture, mut state) = setup_state(&mut context, 4, 1, 10, 3);
+            let (fixture, mut state) = setup_state(&mut context, 4, 1, 10, 3, 4);
             let (schemes, verifier) = (fixture.schemes, fixture.verifier);
 
             // A nullification at view 1 covers views 1..=3 and advances to
@@ -7055,6 +7330,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -7104,6 +7380,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -7144,6 +7421,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -7195,6 +7473,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -7234,6 +7513,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -7314,6 +7594,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -7370,6 +7651,7 @@ mod tests {
                 20,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(0),
+                4,
             );
             assert!(state.enter_view(View::new(2)));
 
@@ -7415,6 +7697,7 @@ mod tests {
                 20,
                 TermLength::new(NZU32!(5)),
                 ViewDelta::new(0),
+                4,
             );
 
             // Construct a defensive state the actor cannot persist: live
@@ -7479,6 +7762,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
 
             // Helper that prepares a locally finalized parent at view 1 and a
@@ -7535,6 +7819,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: schemes[0].participants().len() as u64,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -7593,6 +7878,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -7662,6 +7948,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
+                    skip_budget: schemes[0].participants().len() as u64,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -7699,6 +7986,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -7760,6 +8048,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
+                skip_budget: schemes[0].participants().len() as u64,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());

@@ -265,7 +265,7 @@ mod tests {
         ReporterWiring, Standard, TwinsMutator, fuzz, strategy::StrategyChoice, utils::Partition,
     };
     use commonware_consensus::{
-        simplex::{ForwardingPolicy, mocks::application::Certifier},
+        simplex::{ForwardPolicy, mocks::application::Certifier},
         types::{Epoch, Round, TermLength, ViewDelta},
     };
     use commonware_macros::{test_group, test_traced};
@@ -368,7 +368,7 @@ mod tests {
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
             mailbox_size: crate::DEFAULT_MAILBOX_SIZE,
-            forwarding: ForwardingPolicy::Disabled,
+            forwarding: ForwardPolicy::Disabled,
             certify: CertifyChoice::Always,
             block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,

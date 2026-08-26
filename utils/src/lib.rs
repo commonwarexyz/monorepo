@@ -28,6 +28,7 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod bitmap;
     pub mod cache;
+    pub mod iter;
     pub mod ordered;
     pub mod probability;
     pub use probability::Probability;

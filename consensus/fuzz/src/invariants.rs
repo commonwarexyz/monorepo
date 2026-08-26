@@ -2739,7 +2739,7 @@ mod tests {
     use commonware_consensus::{
         Reporter as _,
         simplex::{
-            elector::{Random, RoundRobin},
+            elector::{Random, RandomVersion, RoundRobin},
             mocks::reporter::Config as ReporterConfig,
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
@@ -2751,7 +2751,7 @@ mod tests {
         types::{Epoch, Round, View, ViewDelta},
     };
     use commonware_cryptography::{
-        bls12381::primitives::variant::MinPk, ed25519::PublicKey as Ed25519PublicKey,
+        Sha256, bls12381::primitives::variant::MinPk, ed25519::PublicKey as Ed25519PublicKey,
     };
     use commonware_parallel::Sequential;
     use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
@@ -5806,7 +5806,7 @@ mod tests {
             ReporterConfig {
                 participants: Set::try_from(participants.to_vec()).expect("unique keys"),
                 scheme: schemes[0].clone(),
-                elector: Random,
+                elector: Random::new(RandomVersion::V1),
             },
         )
     }
@@ -5821,7 +5821,11 @@ mod tests {
         rep.report(Activity::Nullification(threshold_nullification(
             &schemes, 5,
         )));
-        check_certificate_leader_derivation(Random, TermLength::ONE, &[rep]);
+        check_certificate_leader_derivation(
+            Random::new(RandomVersion::V1),
+            TermLength::ONE,
+            &[rep],
+        );
     }
 
     #[test]
@@ -5830,7 +5834,7 @@ mod tests {
         let (participants, schemes) = threshold_vote_fixture();
         let mut rep = random_elector_reporter(&participants, &schemes);
         let notarization = threshold_notarization(&schemes, 0xA);
-        let elector = Random.build(&rep.participants);
+        let elector = Random::<Sha256>::new(RandomVersion::V1).build(&rep.participants);
         let expected = elector.elect(round(6), Some(&notarization.certificate));
         rep.report(Activity::Notarization(notarization));
 
@@ -5845,7 +5849,11 @@ mod tests {
             certificate: mismatched.certificate,
         };
         rep.nullifications.lock().insert(View::new(5), doctored);
-        check_certificate_leader_derivation(Random, TermLength::ONE, &[rep]);
+        check_certificate_leader_derivation(
+            Random::new(RandomVersion::V1),
+            TermLength::ONE,
+            &[rep],
+        );
     }
 
     // The non-attributable backing tests model the real N4F1C3 audit boundary:

@@ -161,7 +161,7 @@ fn fuzz(input: FuzzInput) {
             Op::OptimalHashers(expected_items, bits) => {
                 let k =
                     BloomFilter::<Sha256>::optimal_hashers(expected_items as usize, bits as usize);
-                assert!((1..=16).contains(&k));
+                assert!((1..=16).contains(&k.get()));
             }
             Op::DecodeWiderBits => {
                 // Decoding with a valid (power-of-two) bit count larger than the encoded

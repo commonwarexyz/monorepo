@@ -476,10 +476,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// latching is ignored once a nullify broadcast began (retry cadence
     /// governs the round from then on).
     ///
-    /// A latched timeout makes [`Self::next_timeout`] fire immediately (and
-    /// stably across polls, carrying the latched reason) without touching any
-    /// deadline: in particular, the stall deadline anchors term-level
-    /// stall protection and must not be reset by a per-view timeout.
+    /// When allowed, a latched timeout makes [`Self::next_timeout`] fire
+    /// immediately (and stably across polls, carrying the latched reason)
+    /// without touching any deadline: in particular, the stall deadline anchors
+    /// term-level stall protection and must not be reset by a per-view timeout.
     pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
         if self.latched_timeout.is_none() && !self.broadcast_nullify {
             self.latched_timeout = Some((now, reason));
@@ -512,6 +512,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         &mut self,
         now: SystemTime,
         retry_interval: Duration,
+        allow_latched_timeout: bool,
     ) -> Option<(SystemTime, TimeoutReason)> {
         if self.broadcast_finalize || self.finalization().is_some() {
             return None;
@@ -527,7 +528,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             self.retry_deadline = Some(next);
             return Some((next, TimeoutReason::Retry));
         }
-        if let Some(latched) = self.latched_timeout {
+        if allow_latched_timeout && let Some(latched) = self.latched_timeout {
             return Some(latched);
         }
         if self.proposal().is_none()
