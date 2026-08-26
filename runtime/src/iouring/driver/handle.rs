@@ -1059,12 +1059,12 @@ impl OrphanMailbox {
     ///
     /// A push racing the gate check lands on the next turn: its `wake` latch
     /// guarantees the loop runs again before parking indefinitely.
-    fn take(&self) -> Vec<Orphan> {
-        if !self.pending.load(Ordering::Acquire) {
-            return Vec::new();
+    fn drain_into(&self, destination: &mut Vec<Orphan>) {
+        assert!(destination.is_empty(), "orphan destination is not drained");
+        if !self.pending.swap(false, Ordering::Acquire) {
+            return;
         }
-        self.pending.store(false, Ordering::Relaxed);
-        std::mem::take(&mut *self.orphans.lock())
+        destination.append(&mut self.orphans.lock());
     }
 }
 
@@ -1122,9 +1122,9 @@ impl Handle {
         self.inner.orphans.push(orphan);
     }
 
-    /// Take all foreign-thread drops queued for the owning event loop.
-    pub(super) fn take_orphans(&self) -> Vec<Orphan> {
-        self.inner.orphans.take()
+    /// Drain foreign-thread drops into the event loop's reusable scratch.
+    pub(super) fn drain_orphans(&self, destination: &mut Vec<Orphan>) {
+        self.inner.orphans.drain_into(destination);
     }
 
     /// Close the op state: subsequent admissions fail with their

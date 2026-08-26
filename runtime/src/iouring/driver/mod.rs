@@ -144,6 +144,10 @@ pub(crate) struct IoUringLoop {
     /// Scratch list of state panics, task-waker drops, and callbacks collected
     /// under the owner-state borrow and handled after it is released.
     pending_waker_actions: Vec<handle::WakerAction>,
+    /// Reusable batch of foreign-thread drop notifications.
+    pending_orphans: Vec<handle::Orphan>,
+    /// Reusable batch of timeout-wheel entries due in one turn.
+    expired_timeouts: Vec<timeout::TimeoutEntry>,
 }
 
 impl IoUringLoop {
@@ -196,6 +200,8 @@ impl IoUringLoop {
                 waker,
                 wake_rearm_needed: true,
                 pending_waker_actions: Vec::new(),
+                pending_orphans: Vec::new(),
+                expired_timeouts: Vec::new(),
             },
         ))
     }
@@ -221,7 +227,8 @@ impl IoUringLoop {
     /// drop: admitted waiters orphan exactly as an on-thread drop would, and
     /// parked admission attempts release their capacity slots.
     fn process_orphans(&mut self, ops: &mut Ops) {
-        for orphan in self.handle.take_orphans() {
+        self.handle.drain_orphans(&mut self.pending_orphans);
+        for orphan in self.pending_orphans.drain(..) {
             match orphan {
                 handle::Orphan::Waiter(id) => {
                     handle::wind_down_orphan(ops, id, &mut self.pending_waker_actions);
@@ -413,7 +420,9 @@ impl IoUringLoop {
                 // When the first deadline arrives after an idle period, align
                 // wheel time once before converting deadlines to ticks.
                 if self.timeout_wheel.next_deadline().is_none() {
-                    assert!(self.timeout_wheel.advance(Instant::now()).is_none());
+                    assert!(!self
+                        .timeout_wheel
+                        .advance_into(Instant::now(), &mut self.expired_timeouts));
                 }
                 match self.timeout_wheel.target_tick(deadline) {
                     Some(tick) => {
@@ -646,18 +655,20 @@ impl IoUringLoop {
         }
 
         // No newly expired entries at this tick.
-        let Some(expired) = self.timeout_wheel.advance(now) else {
+        let (timeout_wheel, expired_timeouts) =
+            (&mut self.timeout_wheel, &mut self.expired_timeouts);
+        if !timeout_wheel.advance_into(now, expired_timeouts) {
             return;
-        };
+        }
 
         // Mark expired waiters as cancel-requested and queue their IDs for
         // later cancel SQE staging.
-        for entry in expired {
+        for entry in expired_timeouts.drain(..) {
             // `false` means stale timeout entry (slot reused) or waiter already
             // transitioned to cancel-requested/completed.
             if ops.waiters.cancel(entry.waiter_id) {
                 // Once cancel is requested, this waiter is no longer deadline-active.
-                self.timeout_wheel.remove(entry.target_tick);
+                timeout_wheel.remove(entry.target_tick);
                 // Only timed-out waiters with an outstanding op SQE need
                 // AsyncCancel. Waiters parked in the backlog have no kernel
                 // op to cancel and will time out locally when restaged.
@@ -832,7 +843,6 @@ impl IoUringLoop {
             drop(arm);
         }
 
-        let handle = self.handle.clone();
         handle.with(|ops| {
             self.pending_operations.report(ops.operation_count());
         });

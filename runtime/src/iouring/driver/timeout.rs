@@ -332,24 +332,23 @@ impl TimeoutWheel {
         self.min_scheduled_tick = self.compute_min_scheduled_tick();
     }
 
-    /// Advance wheel time to `now` and drain any buckets that became due.
+    /// Advance wheel time to `now` and drain due buckets into `expired`.
     ///
-    /// Returns `Some(entries)` when one or more buckets are drained.
-    /// Returns `None` when no buckets are drained.
-    ///
-    /// Returned entries are timeout candidates and may include stale waiter ids.
-    /// Callers should call [`Self::remove`] only for entries that were still active
-    /// at cancellation time.
+    /// Returns whether one or more timeout candidates were appended. Entries
+    /// may include stale waiter ids. Callers should call [`Self::remove`] only
+    /// for entries that were still active at cancellation time, then drain
+    /// `expired` before the next call so its allocation can be reused.
     ///
     /// When no active deadlines exist, this still advances `current_tick` and may
     /// purge stale occupied buckets.
-    pub fn advance(&mut self, now: Instant) -> Option<Vec<TimeoutEntry>> {
+    pub fn advance_into(&mut self, now: Instant, expired: &mut Vec<TimeoutEntry>) -> bool {
+        assert!(expired.is_empty(), "timeout destination is not drained");
         let elapsed = now.saturating_duration_since(self.start);
         let now_tick = Self::duration_to_nanos_saturating(elapsed) / self.tick_nanos;
 
         if now_tick <= self.current_tick {
             // Time did not advance in wheel domain.
-            return None;
+            return false;
         }
 
         // Update current tick
@@ -361,21 +360,20 @@ impl TimeoutWheel {
             if self.occupied_slots != 0 {
                 self.drain_occupied_buckets(Vec::clear);
             }
-            return None;
+            return false;
         }
 
         if self.current_tick < self.min_scheduled_tick {
             // Earliest active deadline is still in the future.
-            return None;
+            return false;
         }
 
-        let mut expired = Vec::new();
         let elapsed = self.current_tick - previous_tick;
         if elapsed >= self.buckets.len() as Tick {
             // If we advanced by at least one full revolution, all buckets in
             // the wheel domain are expired and can be drained in one pass.
             self.drain_occupied_buckets(|bucket| expired.append(bucket));
-            return Some(expired);
+            return true;
         }
 
         let start_slot = self.slot_index(previous_tick + 1);
@@ -383,18 +381,21 @@ impl TimeoutWheel {
 
         if start_slot <= end_slot {
             // Range does not wrap around the ring boundary.
-            self.drain_occupied_range(start_slot, end_slot + 1, &mut expired);
+            self.drain_occupied_range(start_slot, end_slot + 1, expired);
         } else {
             // Range wraps around, drain tail then head.
-            self.drain_occupied_range(start_slot, self.buckets.len(), &mut expired);
-            self.drain_occupied_range(0, end_slot + 1, &mut expired);
+            self.drain_occupied_range(start_slot, self.buckets.len(), expired);
+            self.drain_occupied_range(0, end_slot + 1, expired);
         }
 
-        if expired.is_empty() {
-            None
-        } else {
-            Some(expired)
-        }
+        !expired.is_empty()
+    }
+
+    /// Test convenience wrapper that returns an owned expiry batch.
+    #[cfg(test)]
+    pub fn advance(&mut self, now: Instant) -> Option<Vec<TimeoutEntry>> {
+        let mut expired = Vec::new();
+        self.advance_into(now, &mut expired).then_some(expired)
     }
 
     /// Return timeout duration until the next active deadline tick.
