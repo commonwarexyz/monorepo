@@ -2,8 +2,10 @@
 //!
 //! A spawned task is one [TaskCell] allocation: the concrete future stored
 //! inline, the identity behind an `ArcWake` waker sharing that allocation,
-//! and a queued latch that coalesces repeated wakes into one ready-lane
-//! entry. Polling crosses a single type-erased boundary ([Erased]) so the
+//! and a compact state machine that coalesces repeated wakes into one ready-lane
+//! entry. A notification received while polling is queued only if that poll
+//! returns `Pending`, so wake-then-complete futures leave no stale token.
+//! Polling crosses a single type-erased boundary ([Erased]) so the
 //! compiler sees the concrete future type inside the monomorphized cell.
 //! [Tasks] owns normal and event-ready FIFO lanes plus the arena of running
 //! tasks. Initial polls, task self-wakes, and foreign-thread wakes use the
@@ -39,6 +41,11 @@ use std::{
     thread::ThreadId,
 };
 
+#[cfg(feature = "loom")]
+use loom::sync::atomic::AtomicU8;
+#[cfg(not(feature = "loom"))]
+use std::sync::atomic::AtomicU8;
+
 /// Type-erased boundary for a task in the arena.
 ///
 /// The concrete future lives inline in the task's single `Arc` allocation,
@@ -70,23 +77,123 @@ where
     slot: usize,
     /// Re-enqueue target for wakes.
     tasks: Weak<Tasks>,
-    /// Whether the task is already in a ready lane (or terminally done).
-    ///
-    /// A waker may legally fire many times before its task is polled, and
-    /// each unguarded push is a full re-poll (a future waking itself twice per
-    /// poll would double the queue every executor turn). Only the wake that
-    /// transitions this latch selects and enters a lane, and the rest
-    /// coalesce. This also prevents an event wake from promoting a normal
-    /// token already queued. The latch is released immediately before polling
-    /// a live future and set terminally once the future is gone, so late wakes
-    /// on a completed or cleared cell buy at most one dead poll.
-    queued: AtomicBool,
+    /// Scheduling state that coalesces wakes and defers notifications received
+    /// during a poll until that poll returns `Pending`.
+    state: TaskState,
     /// The future, polled and cleared only on the owning worker thread (a
     /// spawning thread builds the cell but never touches the future), so no
     /// lock is needed.
     ///
     /// `None` once the future completed or teardown cleared it.
     future: Affine<RefCell<Option<F>>>,
+}
+
+/// Task scheduling states stored in [TaskState].
+const TASK_IDLE: u8 = 0;
+const TASK_QUEUED: u8 = 1;
+const TASK_RUNNING: u8 = 2;
+const TASK_NOTIFIED: u8 = 3;
+const TASK_COMPLETE: u8 = 4;
+
+/// Atomic scheduling state for one task.
+///
+/// The ready queue owns the task while it is `QUEUED`. Polling changes that
+/// state to `RUNNING`. A concurrent wake changes `RUNNING` to `NOTIFIED`
+/// without adding a token. The polling thread publishes the successor token
+/// only after observing `Pending`, or discards the notification after
+/// `Ready`. `COMPLETE` is terminal and also covers teardown.
+struct TaskState(
+    /// Current `TASK_*` state, synchronized with ready-token publication.
+    AtomicU8,
+);
+
+impl TaskState {
+    /// Build a state for a task whose first poll is already queued.
+    // Loom's AtomicU8 constructor is not const, so this definition must remain
+    // usable with both atomic backends.
+    #[allow(clippy::missing_const_for_fn)]
+    fn queued() -> Self {
+        Self(AtomicU8::new(TASK_QUEUED))
+    }
+
+    /// Build an idle state for tests that exercise wake-driven admission.
+    #[cfg(test)]
+    // Loom's AtomicU8 constructor is not const, so this definition must remain
+    // usable with both atomic backends.
+    #[allow(clippy::missing_const_for_fn)]
+    fn idle() -> Self {
+        Self(AtomicU8::new(TASK_IDLE))
+    }
+
+    /// Record a wake, returning true only when the caller must publish a new
+    /// ready token.
+    fn notify(&self) -> bool {
+        let mut state = self.0.load(Ordering::Acquire);
+        loop {
+            let (next, publish) = match state {
+                TASK_IDLE => (TASK_QUEUED, true),
+                // A same-value RMW publishes changes made before a coalesced
+                // wake to the poller's acquiring QUEUED -> RUNNING transition.
+                TASK_QUEUED => (TASK_QUEUED, false),
+                TASK_RUNNING => (TASK_NOTIFIED, false),
+                TASK_NOTIFIED => (TASK_NOTIFIED, false),
+                TASK_COMPLETE => return false,
+                _ => unreachable!("invalid task state: {state}"),
+            };
+            match self
+                .0
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return publish,
+                Err(actual) => state = actual,
+            }
+        }
+    }
+
+    /// Claim a queued token for polling.
+    fn start_poll(&self) -> bool {
+        self.0
+            .compare_exchange(
+                TASK_QUEUED,
+                TASK_RUNNING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Finish a pending poll, returning true when a wake received during the
+    /// poll must now be published.
+    fn finish_pending(&self) -> bool {
+        let mut state = self.0.load(Ordering::Acquire);
+        loop {
+            let (next, publish) = match state {
+                TASK_RUNNING => (TASK_IDLE, false),
+                TASK_NOTIFIED => (TASK_QUEUED, true),
+                TASK_COMPLETE => return false,
+                _ => unreachable!("task left poll in invalid state: {state}"),
+            };
+            match self
+                .0
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return publish,
+                Err(actual) => state = actual,
+            }
+        }
+    }
+
+    /// Mark a successfully polled task terminal, discarding any notification
+    /// received during its final poll.
+    fn complete(&self) {
+        let previous = self.0.swap(TASK_COMPLETE, Ordering::AcqRel);
+        debug_assert!(matches!(previous, TASK_RUNNING | TASK_NOTIFIED));
+    }
+
+    /// Mark a task terminal before teardown drops its future.
+    fn clear(&self) {
+        self.0.swap(TASK_COMPLETE, Ordering::AcqRel);
+    }
 }
 
 /// Mark a pinned future slot empty after its in-place drop glue finishes,
@@ -107,20 +214,40 @@ impl<F> TaskCell<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    /// Re-enqueue this task for polling.
+    /// Publish a by-reference wake that changed an idle task to queued.
     ///
     /// If the upgrade fails, the runtime already exited and the wake is a
     /// no-op (e.g. data holding a waker dropped after `start` returned).
-    fn enqueue(self: &Arc<Self>) {
-        // Coalesce repeated wakes: only the latch transition queues the task.
-        if self.queued.swap(true, Ordering::AcqRel) {
+    fn notify_by_ref(self: &Arc<Self>) {
+        if !self.state.notify() {
             return;
         }
         if let Some(tasks) = self.tasks.upgrade() {
-            // Publish only after winning the queued-latch transition. A
-            // coalesced wake above cannot move an existing token.
             tasks.queue_wake(Arc::clone(self) as Arc<dyn Erased>);
         }
+    }
+
+    /// Publish a by-value wake without cloning the waker's task reference.
+    fn notify_by_val(self: Arc<Self>) {
+        if !self.state.notify() {
+            return;
+        }
+        let Some(tasks) = self.tasks.upgrade() else {
+            return;
+        };
+        tasks.queue_wake(self as Arc<dyn Erased>);
+    }
+
+    /// Publish the notification retained during a poll that returned
+    /// `Pending`, transferring the ready token already owned by that poll.
+    fn queue_after_pending(self: Arc<Self>) {
+        let Some(tasks) = self.tasks.upgrade() else {
+            return;
+        };
+        // A notification received while the task was running always belongs
+        // to the normal lane. Event delivery cannot poll tasks, and a direct
+        // unit-test event guard must not change this handoff's classification.
+        tasks.queue_normal(self as Arc<dyn Erased>);
     }
 }
 
@@ -128,8 +255,12 @@ impl<F> ArcWake for TaskCell<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    fn wake(self: Arc<Self>) {
+        self.notify_by_val();
+    }
+
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.enqueue();
+        arc_self.notify_by_ref();
     }
 }
 
@@ -138,44 +269,51 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     fn poll(self: Arc<Self>) -> Option<usize> {
+        // A token racing teardown or completion is inert. Normal operation
+        // has exactly one token for each QUEUED state.
+        if !self.state.start_poll() {
+            return None;
+        }
+
         // Borrow the task allocation while polling. Futures that retain the
         // waker still clone it into an owned `ArcWake` waker as usual.
-        let waker = waker_ref(&self);
-        let mut cx = task::Context::from_waker(&waker);
-        self.future.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            // A wake that raced completion may re-poll a dead cell: its slot
-            // was already freed, so report no completion. The queued latch
-            // stays set (the wake that scheduled this poll set it), so later
-            // wakes cannot re-queue the cell again.
-            let future = slot.as_mut()?;
-            // Release the queued latch before polling so wakes during the
-            // poll re-queue the task. The acquiring swap pairs with the
-            // release half of coalesced wakes' latch RMWs (which bypass the
-            // ready-queue mutex), making their published state visible to
-            // this poll.
-            self.queued.swap(false, Ordering::AcqRel);
-            // SAFETY: the future lives inside this task's Arc allocation and
-            // is never moved out of it: completion (below) and teardown
-            // ([Erased::clear]) both drop it in place by overwriting the
-            // option with None.
-            let future = unsafe { Pin::new_unchecked(future) };
-            match future.poll(&mut cx) {
-                Poll::Ready(()) => {
-                    *slot = None;
-                    // Terminal: late wakes must not re-queue a dead cell.
-                    self.queued.store(true, Ordering::Relaxed);
-                    Some(self.slot)
+        let result = {
+            let waker = waker_ref(&self);
+            let mut cx = task::Context::from_waker(&waker);
+            self.future.with(|cell| {
+                let mut slot = cell.borrow_mut();
+                let future = slot
+                    .as_mut()
+                    .expect("queued task must retain its future");
+                // SAFETY: the future lives inside this task's Arc allocation
+                // and is never moved out of it: completion (below) and
+                // teardown ([Erased::clear]) both drop it in place by
+                // overwriting the option with None.
+                let future = unsafe { Pin::new_unchecked(future) };
+                match future.poll(&mut cx) {
+                    Poll::Ready(()) => {
+                        // Publish the terminal state before user drop glue
+                        // runs. A destructor may wake this task or panic, and
+                        // either path must observe a completed cell.
+                        self.state.complete();
+                        *slot = None;
+                        Some(self.slot)
+                    }
+                    Poll::Pending => None,
                 }
-                Poll::Pending => None,
-            }
-        })
+            })
+        };
+
+        if result.is_none() && self.state.finish_pending() {
+            self.queue_after_pending();
+        }
+        result
     }
 
     fn clear(&self) {
-        // Terminal latch first: teardown-era late wakes must not re-queue a
+        // Terminal state first: teardown-era late wakes must not re-queue a
         // cell nothing will poll again.
-        self.queued.store(true, Ordering::Relaxed);
+        self.state.clear();
         self.future.with(|cell| {
             let mut slot = cell.borrow_mut();
             let Some(future) = slot.as_mut() else {
@@ -231,6 +369,8 @@ enum ReadyLane {
 /// normal service based on one consistent snapshot while preserving FIFO
 /// order within each lane.
 struct Ready {
+    /// Whether teardown has permanently closed ready-token admission.
+    closed: bool,
     /// Ordinary readiness in arrival order.
     normal: VecDeque<Arc<dyn Erased>>,
     /// Event-delivered readiness in arrival order.
@@ -300,6 +440,7 @@ impl Tasks {
     pub(super) fn new(unpark: RingWaker) -> Self {
         Self {
             ready: Mutex::new(Ready {
+                closed: false,
                 normal: VecDeque::new(),
                 event: VecDeque::new(),
             }),
@@ -363,8 +504,7 @@ impl Tasks {
             let cell = Arc::new(TaskCell {
                 slot,
                 tasks: Arc::downgrade(arc_self),
-                // Latched: the cell is queued for its first poll below.
-                queued: AtomicBool::new(true),
+                state: TaskState::queued(),
                 // Pin the cell to the worker that polls it, not to the
                 // registering thread: spawns may arrive from any thread
                 // through a moved context.
@@ -379,13 +519,19 @@ impl Tasks {
         true
     }
 
-    /// Enqueue a task's initial poll at the back of the normal lane.
+    /// Enqueue an initial poll or deferred running notification at the back
+    /// of the normal lane, unless teardown has closed ready admission.
     fn queue_normal(&self, task: Arc<dyn Erased>) {
-        self.ready.lock().normal.push_back(task);
+        let mut ready = self.ready.lock();
+        if ready.closed {
+            return;
+        }
+        ready.normal.push_back(task);
+        drop(ready);
         self.unpark_foreign();
     }
 
-    /// Classify and enqueue a wake that won its task's queued latch.
+    /// Classify and enqueue a wake that changed an idle task to queued.
     ///
     /// One current-thread lookup determines both event eligibility and
     /// whether the ring needs a foreign wake. Only an owner-thread wake inside
@@ -400,6 +546,9 @@ impl Tasks {
             ReadyLane::Normal
         };
         let mut ready = self.ready.lock();
+        if ready.closed {
+            return;
+        }
         match lane {
             ReadyLane::Normal => ready.normal.push_back(task),
             ReadyLane::Event => ready.event.push_back(task),
@@ -493,24 +642,26 @@ impl Tasks {
 
     /// Clear all tasks and reject future registrations.
     pub(super) fn clear(&self) {
-        // Detach both ready lanes so Arc destruction runs outside their lock.
-        let (normal, event) = {
-            let mut ready = self.ready.lock();
-            (
-                std::mem::take(&mut ready.normal),
-                std::mem::take(&mut ready.event),
-            )
-        };
-
-        // Close and detach the arena before invoking task destructors so
-        // racing registrations are rejected and every callback runs outside
-        // the arena lock.
+        // Close and detach the arena before closing ready admission. A
+        // registration that already owns a slot may reach queue_normal after
+        // this point, where the ready lock rejects its publication.
         let slots = self
             .running
             .lock()
             .take()
             .map(|running| running.slots)
             .unwrap_or_default();
+
+        // Close ready admission and detach both lanes atomically with respect
+        // to every publisher. Arc destruction runs after releasing the lock.
+        let (normal, event) = {
+            let mut ready = self.ready.lock();
+            ready.closed = true;
+            (
+                std::mem::take(&mut ready.normal),
+                std::mem::take(&mut ready.event),
+            )
+        };
 
         let mut first_panic = None;
         for task in normal.into_iter().chain(event) {
@@ -569,7 +720,11 @@ mod tests {
         Arc::new(TaskCell {
             slot,
             tasks: Arc::downgrade(tasks),
-            queued: AtomicBool::new(queued),
+            state: if queued {
+                TaskState::queued()
+            } else {
+                TaskState::idle()
+            },
             future: Affine::pinned(
                 std::thread::current().id(),
                 RefCell::new(Some(std::future::pending())),
@@ -582,7 +737,7 @@ mod tests {
         Arc::new(TaskCell {
             slot,
             tasks: Arc::downgrade(tasks),
-            queued: AtomicBool::new(true),
+            state: TaskState::queued(),
             future: Affine::pinned(
                 std::thread::current().id(),
                 RefCell::new(Some(std::future::ready(()))),
@@ -615,7 +770,7 @@ mod tests {
         let cell = Arc::new(TaskCell {
             slot: 0,
             tasks: Arc::downgrade(&tasks),
-            queued: AtomicBool::new(true),
+            state: TaskState::queued(),
             future: Affine::pinned(
                 std::thread::current().id(),
                 RefCell::new(Some(std::future::pending::<()>())),
@@ -785,7 +940,7 @@ mod tests {
         let cell = Arc::new(TaskCell {
             slot: 5,
             tasks: Arc::downgrade(&tasks),
-            queued: AtomicBool::new(true),
+            state: TaskState::queued(),
             future: Affine::pinned(std::thread::current().id(), RefCell::new(Some(WakePending))),
         });
         queue_token(&tasks, cell as Arc<dyn Erased>, ReadyLane::Normal);
@@ -799,6 +954,111 @@ mod tests {
         assert!(ready.event.is_empty());
         drop(ready);
         tasks.clear();
+    }
+
+    /// A notification deferred by a running task uses the normal lane even
+    /// if a direct unit test polls that task under an event-delivery guard.
+    #[test]
+    fn test_deferred_wake_uses_normal_lane() {
+        struct WakePending;
+
+        impl Future for WakePending {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let cell = Arc::new(TaskCell {
+            slot: 13,
+            tasks: Arc::downgrade(&tasks),
+            state: TaskState::queued(),
+            future: Affine::pinned(std::thread::current().id(), RefCell::new(Some(WakePending))),
+        });
+
+        let result = {
+            let _event_delivery = tasks.event_delivery();
+            (cell as Arc<dyn Erased>).poll()
+        };
+        assert_eq!(result, None);
+
+        let ready = tasks.ready.lock();
+        assert_eq!(ready.normal.len(), 1);
+        assert!(ready.event.is_empty());
+        drop(ready);
+        tasks.clear();
+    }
+
+    /// A by-value wake racing a poll is retained only when that poll returns
+    /// `Pending`. The polling thread publishes the successor token after
+    /// releasing the future borrow, while a final poll discards the wake.
+    #[test]
+    fn test_foreign_wake_during_poll_follows_poll_result() {
+        struct ForeignWake {
+            waker: Option<std::sync::mpsc::SyncSender<Waker>>,
+            acknowledged: std::sync::mpsc::Receiver<()>,
+            ready: bool,
+        }
+
+        impl Future for ForeignWake {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                self.waker.take().unwrap().send(cx.waker().clone()).unwrap();
+                self.acknowledged.recv().unwrap();
+                if self.ready {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        for ready in [false, true] {
+            let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+            assert!(tasks.take_root_ready());
+            let (waker_send, waker_recv) = std::sync::mpsc::sync_channel(0);
+            let (acknowledged_send, acknowledged_recv) = std::sync::mpsc::sync_channel(0);
+            let cell = Arc::new(TaskCell {
+                slot: 12,
+                tasks: Arc::downgrade(&tasks),
+                state: TaskState::queued(),
+                future: Affine::pinned(
+                    std::thread::current().id(),
+                    RefCell::new(Some(ForeignWake {
+                        waker: Some(waker_send),
+                        acknowledged: acknowledged_recv,
+                        ready,
+                    })),
+                ),
+            });
+            queue_token(&tasks, cell as Arc<dyn Erased>, ReadyLane::Normal);
+
+            let foreign = std::thread::spawn(move || {
+                waker_recv.recv().unwrap().wake();
+                acknowledged_send.send(()).unwrap();
+            });
+            let mut scratch = Vec::new();
+            tasks.drain_into(&mut scratch, 1, 1);
+            let result = scratch.pop().unwrap().poll();
+            foreign.join().unwrap();
+
+            if ready {
+                assert_eq!(result, Some(12));
+                assert!(!tasks.has_ready());
+            } else {
+                assert_eq!(result, None);
+                let queued = tasks.ready.lock();
+                assert_eq!(queued.normal.len(), 1);
+                assert!(queued.event.is_empty());
+                drop(queued);
+            }
+            tasks.clear();
+        }
     }
 
     /// A foreign-thread wake remains normal even while the owner holds an
@@ -866,10 +1126,11 @@ mod tests {
         tasks.clear();
     }
 
-    /// An event token made stale by completion still consumes its batch slot,
-    /// leaving one of two normal tokens for the next drain.
+    /// A wake received during a final poll must be discarded even when an
+    /// event-delivery phase is active, so later ready work retains the full
+    /// bounded batch.
     #[test]
-    fn test_stale_event_completion_consumes_batch_budget() {
+    fn test_wake_then_ready_discards_event_phase_notification() {
         struct WakeThenReady;
 
         impl Future for WakeThenReady {
@@ -886,7 +1147,7 @@ mod tests {
         let completing = Arc::new(TaskCell {
             slot: 8,
             tasks: Arc::downgrade(&tasks),
-            queued: AtomicBool::new(true),
+            state: TaskState::queued(),
             future: Affine::pinned(
                 std::thread::current().id(),
                 RefCell::new(Some(WakeThenReady)),
@@ -901,17 +1162,13 @@ mod tests {
             let _event_delivery = tasks.event_delivery();
             assert_eq!(completing_token.poll(), Some(8));
         }
+        assert!(!tasks.has_ready());
         queue_token(&tasks, ready_cell(&tasks, 9), ReadyLane::Normal);
         queue_token(&tasks, ready_cell(&tasks, 10), ReadyLane::Normal);
 
         tasks.drain_into(&mut scratch, 2, 1);
-        let stale = scratch.remove(0);
-        assert_eq!(stale.poll(), None);
-        assert_eq!(completed_slots(&mut scratch), vec![9]);
-        let ready = tasks.ready.lock();
-        assert_eq!(ready.normal.len(), 1);
-        assert!(ready.event.is_empty());
-        drop(ready);
+        assert_eq!(completed_slots(&mut scratch), vec![9, 10]);
+        assert!(!tasks.has_ready());
         tasks.clear();
     }
 
@@ -928,8 +1185,85 @@ mod tests {
         let ready = tasks.ready.lock();
         assert!(ready.normal.is_empty());
         assert!(ready.event.is_empty());
+        assert!(ready.closed);
         drop(ready);
         assert!(!tasks.has_ready());
+    }
+
+    /// A wake that claims an idle task before teardown but delays publication
+    /// until afterward must not reinsert a token into the closed ready queue.
+    #[test]
+    fn test_clear_rejects_claimed_but_unpublished_wake() {
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let cell = pending_cell(&tasks, 14, false);
+
+        assert!(cell.state.notify(), "idle wake must claim publication");
+        tasks.clear();
+        tasks.queue_normal(cell as Arc<dyn Erased>);
+
+        let ready = tasks.ready.lock();
+        assert!(ready.closed);
+        assert!(ready.normal.is_empty());
+        assert!(ready.event.is_empty());
+        drop(ready);
+        assert!(!tasks.has_ready());
+    }
+
+    /// A ready future's destructor may wake its own task and panic. The task
+    /// is terminal before that destructor runs, and later teardown neither
+    /// queues the wake nor invokes the destructor a second time.
+    #[test]
+    fn test_ready_drop_panic_is_terminal_and_dropped_once() {
+        struct WakeAndPanicOnDrop {
+            waker: Option<Waker>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Future for WakeAndPanicOnDrop {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                self.waker = Some(cx.waker().clone());
+                Poll::Ready(())
+            }
+        }
+
+        impl Drop for WakeAndPanicOnDrop {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::AcqRel);
+                self.waker.take().unwrap().wake();
+                panic!("ready future drop panic");
+            }
+        }
+
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        assert!(tasks.take_root_ready());
+        let drops = Arc::new(AtomicUsize::new(0));
+        assert!(Tasks::register(
+            &tasks,
+            WakeAndPanicOnDrop {
+                waker: None,
+                drops: Arc::clone(&drops),
+            }
+        ));
+
+        let mut scratch = Vec::new();
+        tasks.drain_into(&mut scratch, 1, 1);
+        let task = scratch.pop().unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.poll()));
+        let payload = result.expect_err("ready future drop must panic");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"ready future drop panic"));
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        {
+            let ready = tasks.ready.lock();
+            assert!(ready.normal.is_empty());
+            assert!(ready.event.is_empty());
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tasks.clear()));
+        assert!(result.is_ok(), "teardown must not drop the future again");
+        assert_eq!(drops.load(Ordering::Acquire), 1);
     }
 
     /// A panic from one task destructor must not skip later task destructors,
@@ -1054,12 +1388,11 @@ mod tests {
         tasks.clear();
     }
 
-    /// A task can wake itself and then complete, leaving one stale token in
-    /// the ready queue. That token consumes a bounded-drain slot and remains
-    /// inert, while a replacement reusing the same arena slot stays queued
-    /// for the next drain.
+    /// A task that wakes itself and then completes must discard that
+    /// notification, leaving the full next batch available to a replacement
+    /// that immediately reuses its arena slot.
     #[test]
-    fn test_stale_self_wake_consumes_batch_budget() {
+    fn test_self_wake_then_ready_leaves_no_stale_token() {
         struct WakeThenReady;
 
         impl Future for WakeThenReady {
@@ -1081,16 +1414,10 @@ mod tests {
         let slot = task.poll().expect("live task must complete");
         tasks.remove(slot);
 
-        // The self-wake token precedes this replacement in FIFO order, and
-        // the completed task's arena slot is immediately reused.
+        // The completed task's arena slot is immediately reused, without a
+        // stale self-wake token preceding its replacement.
         assert!(Tasks::register(&tasks, std::future::ready(())));
-        assert_eq!(tasks.ready.lock().normal.len(), 2);
-
-        tasks.drain_into(&mut scratch, 1, 1);
-        let stale = scratch.pop().unwrap();
-        assert_eq!(stale.poll(), None, "completed self-wake must be inert");
         assert_eq!(tasks.ready.lock().normal.len(), 1);
-        assert!(tasks.has_ready(), "replacement must remain ready");
 
         tasks.drain_into(&mut scratch, 1, 1);
         let replacement = scratch.pop().unwrap();
@@ -1100,10 +1427,9 @@ mod tests {
         tasks.clear();
     }
 
-    /// A task that wakes itself multiple times per poll (by ref and by
-    /// value) must complete exactly once, and any queue entries polled after
-    /// completion must be inert: arena slots freed at completion are
-    /// immediately reused by later spawns.
+    /// A task that wakes itself multiple times per poll (by ref and by value)
+    /// must complete exactly once, coalesce to one successor after each
+    /// pending poll, and leave its immediately reused arena slot intact.
     #[test]
     // The by-value wake is deliberate: it exercises the consuming waker
     // vtable path alongside `wake_by_ref`.
@@ -1130,8 +1456,7 @@ mod tests {
             let storm = context.child("storm").spawn(|_| SelfWakeStorm { polls: 0 });
             assert_eq!(storm.await.unwrap(), 4);
 
-            // Stale queued pointers from the storm must not have freed or
-            // corrupted the reused slots.
+            // Repeated self-wakes must not corrupt immediately reused slots.
             for i in 0..32u32 {
                 let handle = context.child("reuse").spawn(move |_| async move { i });
                 assert_eq!(handle.await.unwrap(), i);
@@ -1404,5 +1729,98 @@ mod tests {
 
         // A late remove after clear is harmless.
         tasks.remove(0);
+    }
+}
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests {
+    //! Exhaustive weak-memory checks for the task notification handoff.
+
+    use super::TaskState;
+    use loom::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+    };
+
+    /// A wake racing the end of a pending poll transfers exactly one ready
+    /// token, regardless of which side wins the atomic handoff.
+    #[test]
+    fn test_pending_wake_handoff_publishes_once() {
+        loom::model(|| {
+            let state = Arc::new(TaskState::queued());
+            assert!(state.start_poll());
+
+            let wake = thread::spawn({
+                let state = Arc::clone(&state);
+                move || state.notify()
+            });
+            let poll_publishes = state.finish_pending();
+            let wake_publishes = wake.join().unwrap();
+
+            assert_ne!(poll_publishes, wake_publishes);
+            assert!(state.start_poll());
+            state.complete();
+        });
+    }
+
+    /// A wake racing a ready poll is always discarded by the terminal state.
+    #[test]
+    fn test_ready_wake_handoff_never_publishes() {
+        loom::model(|| {
+            let state = Arc::new(TaskState::queued());
+            assert!(state.start_poll());
+
+            let wake = thread::spawn({
+                let state = Arc::clone(&state);
+                move || state.notify()
+            });
+            state.complete();
+
+            assert!(!wake.join().unwrap());
+            assert!(!state.notify());
+            assert!(!state.start_poll());
+        });
+    }
+
+    /// Every successful successor claim observes writes published before the
+    /// wake, including when the wake coalesces through a same-value RMW.
+    #[test]
+    fn test_wake_handoff_publishes_payload() {
+        loom::model(|| {
+            let state = Arc::new(TaskState::queued());
+            let payload = Arc::new(AtomicUsize::new(0));
+
+            let producer = thread::spawn({
+                let state = Arc::clone(&state);
+                let payload = Arc::clone(&payload);
+                move || {
+                    payload.store(1, Ordering::Relaxed);
+                    state.notify();
+                }
+            });
+            let consumer = thread::spawn({
+                let state = Arc::clone(&state);
+                let payload = Arc::clone(&payload);
+                move || {
+                    assert!(state.start_poll());
+                    if payload.load(Ordering::Acquire) == 1 {
+                        state.clear();
+                        return;
+                    }
+                    state.finish_pending();
+                    while !state.start_poll() {
+                        thread::yield_now();
+                    }
+                    assert_eq!(payload.load(Ordering::Acquire), 1);
+                    state.complete();
+                }
+            });
+
+            producer.join().unwrap();
+            consumer.join().unwrap();
+        });
     }
 }
