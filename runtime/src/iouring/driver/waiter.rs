@@ -16,6 +16,31 @@ use io_uring::squeue::Entry as SqueueEntry;
 use std::task::Waker;
 use tracing::warn;
 
+/// Install an already-cloned observer waker and detach the superseded clone.
+///
+/// The caller owns `incoming` outside the driver-state borrow. This helper
+/// only moves wakers, so RawWaker clone and drop callbacks remain outside the
+/// waiter and completion arenas.
+fn replace_waker(stored: &mut Option<Waker>, incoming: &mut Option<Waker>) -> Option<Waker> {
+    let next = incoming
+        .as_ref()
+        .expect("poll missing incoming waker");
+    if stored.as_ref().is_some_and(|current| current.will_wake(next)) {
+        return incoming.take();
+    }
+    stored.replace(incoming.take().expect("poll waker consumed twice"))
+}
+
+/// Callback-free first phase of polling a waiter or ticket completion.
+pub enum PollState {
+    /// The terminal output was removed from its arena.
+    Ready(Output),
+    /// The stored waker already wakes the current task.
+    PendingCurrent,
+    /// A different waker must be cloned outside the driver-state borrow.
+    PendingNeedsWaker,
+}
+
 /// Stable waiter identity packed into SQE/CQE `user_data`.
 ///
 /// Layout:
@@ -398,36 +423,55 @@ impl TicketCompletions {
     ///
     /// A recycled slot keeps its vector allocation and receives its next
     /// generation. A fresh slot starts at generation zero.
-    pub fn insert_pending(
+    pub fn insert_pending_deferred(
         &mut self,
-        waker: Waker,
+        incoming_waker: &mut Option<Waker>,
         insert_waiter: impl FnOnce(CompletionId) -> WaiterId,
     ) -> (CompletionId, WaiterId) {
         let id = self.free.last().copied().unwrap_or_else(|| {
             let index = u32::try_from(self.entries.len()).expect("completion slot index overflow");
             CompletionId::new(index, 0)
         });
+        let index = id.index() as usize;
+        if index == self.entries.len() {
+            self.entries.reserve(1);
+        } else {
+            assert_eq!(self.free.last(), Some(&id), "completion free list order changed");
+            assert!(
+                self.entries[index].is_none(),
+                "free completion slot still occupied"
+            );
+        }
         let waiter_id = insert_waiter(id);
         let entry = TicketCompletion {
             id,
             completion: Completion::Pending {
                 waiter_id,
-                waker: Some(waker),
+                waker: Some(
+                    incoming_waker
+                        .take()
+                        .expect("completion waker consumed twice"),
+                ),
             },
         };
-        let index = id.index() as usize;
         if index == self.entries.len() {
             self.entries.push(Some(entry));
         } else {
-            let recycled = self
-                .free
-                .pop()
-                .expect("reused completion missing from free list");
-            assert_eq!(recycled, id, "completion free list order changed");
-            let replaced = self.entries[index].replace(entry);
-            assert!(replaced.is_none(), "free completion slot still occupied");
+            self.free.pop();
+            self.entries[index] = Some(entry);
         }
         (id, waiter_id)
+    }
+
+    /// Convenience wrapper that transfers an owned waker into a completion.
+    #[cfg(test)]
+    pub fn insert_pending(
+        &mut self,
+        waker: Waker,
+        insert_waiter: impl FnOnce(CompletionId) -> WaiterId,
+    ) -> (CompletionId, WaiterId) {
+        let mut incoming = Some(waker);
+        self.insert_pending_deferred(&mut incoming, insert_waiter)
     }
 
     /// Publish a ticket's terminal output and return its task waker.
@@ -466,6 +510,31 @@ impl TicketCompletions {
         waker
     }
 
+    /// Poll without invoking a RawWaker vtable function.
+    ///
+    /// Ready output is removed immediately. Pending state only compares waker
+    /// identity, allowing the caller to avoid a clone when the stored waker is
+    /// already current.
+    pub fn poll_state(&mut self, completion_id: CompletionId, waker: &Waker) -> PollState {
+        let index = completion_id.index() as usize;
+        let entry = self.entry_mut(completion_id, "poll_state");
+        match &entry.completion {
+            Completion::Pending { waker: stored, .. } => {
+                if stored.as_ref().is_some_and(|stored| stored.will_wake(waker)) {
+                    PollState::PendingCurrent
+                } else {
+                    PollState::PendingNeedsWaker
+                }
+            }
+            Completion::Ready(_) => {
+                let Completion::Ready(output) = self.take(index) else {
+                    unreachable!("completion verified ready above");
+                };
+                PollState::Ready(output)
+            }
+        }
+    }
+
     /// Take a ready output, or refresh the pending ticket waker.
     ///
     /// Taking a ready output recycles its completion slot and advances its
@@ -473,24 +542,35 @@ impl TicketCompletions {
     /// latest task waker. Returns `None` while pending.
     ///
     /// Panics if `completion_id` is stale or untracked.
-    pub fn poll_take(&mut self, completion_id: CompletionId, waker: &Waker) -> Option<Output> {
+    pub fn poll_take_deferred(
+        &mut self,
+        completion_id: CompletionId,
+        incoming_waker: &mut Option<Waker>,
+    ) -> (Option<Output>, Option<Waker>) {
         let index = completion_id.index() as usize;
         let entry = self.entry_mut(completion_id, "poll_take");
         match &mut entry.completion {
             Completion::Pending { waker: stored, .. } => {
-                match stored {
-                    Some(existing) => existing.clone_from(waker),
-                    None => *stored = Some(waker.clone()),
-                }
-                None
+                let detached = replace_waker(stored, incoming_waker);
+                (None, detached)
             }
             Completion::Ready(_) => {
                 let Completion::Ready(output) = self.take(index) else {
                     unreachable!("completion verified ready above");
                 };
-                Some(output)
+                (Some(output), None)
             }
         }
+    }
+
+    /// Test-only convenience wrapper around [Self::poll_take_deferred].
+    #[cfg(test)]
+    pub fn poll_take(&mut self, completion_id: CompletionId, waker: &Waker) -> Option<Output> {
+        let mut incoming = Some(waker.clone());
+        let (output, detached) = self.poll_take_deferred(completion_id, &mut incoming);
+        drop(detached);
+        drop(incoming);
+        output
     }
 
     /// Remove a ticket's completion state and recycle its slot.
@@ -532,6 +612,12 @@ impl TicketCompletions {
     #[cfg(test)]
     pub const fn arena_len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Return whether every completion slot is recyclable.
+    #[cfg(test)]
+    pub const fn is_empty(&self) -> bool {
+        self.entries.len() == self.free.len()
     }
 
     /// Look up a live completion after validating its full generation-stamped ID.
@@ -655,8 +741,29 @@ impl Waiters {
     ///
     /// Panics if no free slot is available.
     #[inline]
+    #[cfg(test)]
     pub fn insert(&mut self, request: Request, waker: Waker) -> WaiterId {
-        self.insert_with_observer(request, Observer::Op(Some(waker)))
+        let mut incoming = Some(waker);
+        self.insert_deferred(request, &mut incoming)
+    }
+
+    /// Insert an ordinary request from an outer-owned waker slot.
+    ///
+    /// Capacity and slot invariants are checked before taking the waker, so an
+    /// invariant panic cannot run its RawWaker destructor under the Ops borrow.
+    #[inline]
+    pub fn insert_deferred(
+        &mut self,
+        request: Request,
+        incoming_waker: &mut Option<Waker>,
+    ) -> WaiterId {
+        let id = self.prepare_insert();
+        let observer = Observer::Op(Some(
+            incoming_waker
+                .take()
+                .expect("waiter waker consumed twice"),
+        ));
+        self.insert_prepared(id, request, observer)
     }
 
     /// Insert a request owned by a detached ticket.
@@ -667,7 +774,8 @@ impl Waiters {
     ///
     /// Panics if no free slot is available.
     pub fn insert_ticket(&mut self, request: Request, completion_id: CompletionId) -> WaiterId {
-        self.insert_with_observer(request, Observer::Ticket(completion_id))
+        let id = self.prepare_insert();
+        self.insert_prepared(id, request, Observer::Ticket(completion_id))
     }
 
     /// Insert a pending request with the observer that will own its output.
@@ -678,20 +786,34 @@ impl Waiters {
     /// accounting.
     ///
     /// Panics if no free slot is available.
-    fn insert_with_observer(&mut self, request: Request, observer: Observer) -> WaiterId {
-        let id = self
+    fn prepare_insert(&self) -> WaiterId {
+        let id = *self
             .free
-            .pop()
+            .last()
             .expect("waiters should not exceed configured capacity");
         let index = id.index() as usize;
-        let replaced = self.entries[index].replace(Waiter {
+        assert!(
+            self.entries[index].is_none(),
+            "free slot should not contain waiter"
+        );
+        id
+    }
+
+    /// Commit a waiter after [Self::prepare_insert] validated its slot.
+    fn insert_prepared(&mut self, id: WaiterId, request: Request, observer: Observer) -> WaiterId {
+        let popped = self
+            .free
+            .pop()
+            .expect("prepared waiter slot disappeared");
+        debug_assert_eq!(popped, id);
+        let index = id.index() as usize;
+        self.entries[index] = Some(Waiter {
             id,
             state: WaiterState::Active { target_tick: None },
             in_flight: false,
             observer,
             lifecycle: Lifecycle::Pending(request),
         });
-        assert!(replaced.is_none(), "free slot should not contain waiter");
         self.pending += 1;
         id
     }
@@ -1030,7 +1152,11 @@ impl Waiters {
     /// ordinary op frees a non-orphaned slot, so a miss is an invariant
     /// violation.
     #[inline]
-    pub fn poll_take(&mut self, waiter_id: WaiterId, waker: &Waker) -> Option<Output> {
+    pub fn poll_take_deferred(
+        &mut self,
+        waiter_id: WaiterId,
+        incoming_waker: &mut Option<Waker>,
+    ) -> (Option<Output>, Option<Waker>) {
         let index = waiter_id.index() as usize;
         let slot = self
             .entries
@@ -1048,20 +1174,67 @@ impl Waiters {
                 let Lifecycle::Ready(output) = self.take(index) else {
                     unreachable!("lifecycle verified ready above");
                 };
-                Some(output)
+                (Some(output), None)
             }
             Lifecycle::Pending(_) => {
                 let Observer::Op(stored) = &mut slot.observer else {
                     unreachable!("observer verified op above");
                 };
-                match stored {
-                    Some(existing) => existing.clone_from(waker),
-                    None => *stored = Some(waker.clone()),
-                }
-                None
+                let detached = replace_waker(stored, incoming_waker);
+                (None, detached)
             }
             Lifecycle::TicketComplete => panic!("op waiter reached ticket terminal state"),
         }
+    }
+
+    /// Poll without invoking a RawWaker vtable function.
+    ///
+    /// Ready output is removed immediately. Pending state only compares waker
+    /// identity, allowing the caller to clone after releasing Ops when an
+    /// update is actually required.
+    #[inline]
+    pub fn poll_state(&mut self, waiter_id: WaiterId, waker: &Waker) -> PollState {
+        let index = waiter_id.index() as usize;
+        let slot = self
+            .entries
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .expect("poll_state called for untracked waiter");
+        assert_eq!(slot.id, waiter_id, "poll_state called with stale waiter id");
+        assert!(
+            matches!(slot.observer, Observer::Op(_)),
+            "poll_state called for ticket waiter"
+        );
+
+        match &slot.lifecycle {
+            Lifecycle::Ready(_) => {
+                let Lifecycle::Ready(output) = self.take(index) else {
+                    unreachable!("lifecycle verified ready above");
+                };
+                PollState::Ready(output)
+            }
+            Lifecycle::Pending(_) => {
+                let Observer::Op(stored) = &slot.observer else {
+                    unreachable!("observer verified op above");
+                };
+                if stored.as_ref().is_some_and(|stored| stored.will_wake(waker)) {
+                    PollState::PendingCurrent
+                } else {
+                    PollState::PendingNeedsWaker
+                }
+            }
+            Lifecycle::TicketComplete => panic!("op waiter reached ticket terminal state"),
+        }
+    }
+
+    /// Test-only convenience wrapper around [Self::poll_take_deferred].
+    #[cfg(test)]
+    pub fn poll_take(&mut self, waiter_id: WaiterId, waker: &Waker) -> Option<Output> {
+        let mut incoming = Some(waker.clone());
+        let (output, detached) = self.poll_take_deferred(waiter_id, &mut incoming);
+        drop(detached);
+        drop(incoming);
+        output
     }
 
     /// Recycle a terminal ticket waiter after its output is published.

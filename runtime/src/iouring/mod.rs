@@ -209,8 +209,9 @@
 //!   later queued requests, otherwise the loop can deadlock.
 //! - Ready detached tickets do not count toward waiter capacity. Their waiter is recycled before
 //!   the ticket waker runs, so retaining a completed accept or sync ticket cannot block admission.
-//!   Capacity waiters themselves have no deadline protection because deadlines apply only after
-//!   admission.
+//! - A timed request's deadline includes time spent waiting for capacity. The event loop parks no
+//!   longer than the earliest admission or in-flight deadline, so a saturated waiter slab cannot
+//!   hide timeout progress.
 
 pub(crate) mod driver;
 #[cfg(test)]

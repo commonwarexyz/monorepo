@@ -313,10 +313,14 @@ impl IoUringLoop {
     /// Wakes on CQE arrival or on an out-of-band wake (e.g. a task woken from
     /// another thread).
     pub(crate) fn park(&mut self, ring: &mut IoUring, limit: Option<Duration>) {
-        let deadline = match (self.timeout_wheel.next_deadline(), limit) {
-            (Some(wheel), Some(limit)) => Some(wheel.min(limit)),
-            (wheel, limit) => wheel.or(limit),
-        };
+        let now = Instant::now();
+        let capacity_deadline = self
+            .handle
+            .with(|ops| ops.capacity.next_deadline(now));
+        let deadline = [self.timeout_wheel.next_deadline(), capacity_deadline, limit]
+            .into_iter()
+            .flatten()
+            .min();
 
         let fully_idle = self.handle.with(|ops| {
             ops.waiters.pending() == 0 && ops.backlog.is_empty() && ops.pending_cancels.is_empty()
@@ -619,6 +623,15 @@ impl IoUringLoop {
 
     /// Advance timeout processing to an explicit monotonic instant.
     fn advance_timeouts_at(&mut self, ops: &mut Ops, now: Instant) {
+        // Admission wait is part of the operation budget. Expire capacity
+        // registrations before touching admitted requests so a saturated ring
+        // cannot hide a network deadline from the event loop.
+        ops.capacity.expire(
+            now,
+            ops.waiters.free_len(),
+            &mut self.pending_waker_actions,
+        );
+
         // Release deadline accounting for ops whose tickets were dropped: the
         // wheel is loop-owned, so drop paths queue removals instead. Without
         // this the wheel would report the stale tick as the next deadline
@@ -1120,7 +1133,7 @@ mod tests {
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
-        task::{Context, Poll, RawWaker, RawWakerVTable, Waker as TaskWaker},
+        task::{Context, Poll},
         time::{Duration, Instant},
     };
 
@@ -1639,6 +1652,179 @@ mod tests {
         unsafe { buf_b.set_len(read_b) };
         assert_eq!(buf_a.as_ref(), &[1]);
         assert_eq!(buf_b.as_ref(), &[2]);
+    }
+
+    #[test]
+    fn test_capacity_wait_counts_toward_connect_deadline() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+
+        // Keep the only waiter slot occupied by a recv whose own deadline is
+        // deliberately much longer than the connect budget.
+        let (blocker, _blocker_peer) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(handle.recv(
+            Arc::new(blocker.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut blocker).is_pending());
+        harness.driver().turn();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut connect = Box::pin(handle.connect(
+            Arc::new(OwnedFd::from(stream)),
+            listener.local_addr().unwrap(),
+            Instant::now() + Duration::from_millis(20),
+        ));
+        assert!(poll_once(&harness, &mut connect).is_pending());
+        handle.with(|ops| assert_eq!(ops.capacity.queued(), 1));
+
+        let parked_at = Instant::now();
+        harness
+            .driver()
+            .park(Some(Duration::from_millis(500)));
+        assert!(
+            parked_at.elapsed() < Duration::from_millis(250),
+            "park ignored the queued connect deadline: {:?}",
+            parked_at.elapsed()
+        );
+        harness.driver().turn();
+        assert!(matches!(
+            poll_once(&harness, &mut connect),
+            Poll::Ready(Err(Error::Timeout))
+        ));
+        handle.with(|ops| assert_eq!(ops.capacity.registered(), 0));
+    }
+
+    #[test]
+    fn test_capacity_wait_counts_toward_send_deadline() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+
+        let (blocker, _blocker_peer) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(handle.recv(
+            Arc::new(blocker.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut blocker).is_pending());
+        harness.driver().turn();
+
+        let (sender, _receiver) = UnixStream::pair().unwrap();
+        let mut send = Box::pin(handle.send(
+            Arc::new(sender.into()),
+            IoBufs::from(IoBuf::from(vec![1])),
+            Instant::now() + Duration::from_millis(20),
+        ));
+        assert!(poll_once(&harness, &mut send).is_pending());
+        handle.with(|ops| assert_eq!(ops.capacity.queued(), 1));
+
+        std::thread::sleep(Duration::from_millis(50));
+        harness.driver().turn();
+        assert!(matches!(
+            poll_once(&harness, &mut send),
+            Poll::Ready(Err(Error::Timeout))
+        ));
+        handle.with(|ops| assert_eq!(ops.capacity.registered(), 0));
+    }
+
+    #[test]
+    fn test_capacity_wait_counts_toward_recv_deadline() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+
+        let (blocker, _blocker_peer) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(handle.recv(
+            Arc::new(blocker.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut blocker).is_pending());
+        harness.driver().turn();
+
+        let (receiver, _sender) = UnixStream::pair().unwrap();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(receiver.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_millis(20),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        handle.with(|ops| assert_eq!(ops.capacity.queued(), 1));
+
+        std::thread::sleep(Duration::from_millis(50));
+        harness.driver().turn();
+        assert!(matches!(
+            poll_once(&harness, &mut recv),
+            Poll::Ready(Err((_, Error::Timeout)))
+        ));
+        handle.with(|ops| assert_eq!(ops.capacity.registered(), 0));
+    }
+
+    #[test]
+    fn test_capacity_wait_counts_toward_accept_deadline() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+
+        let (blocker, _blocker_peer) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(handle.recv(
+            Arc::new(blocker.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut blocker).is_pending());
+        harness.driver().turn();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut accept = Box::pin(handle.start_accept(
+            Arc::new(OwnedFd::from(listener)),
+            Instant::now() + Duration::from_millis(20),
+        ));
+        assert!(poll_once(&harness, &mut accept).is_pending());
+        handle.with(|ops| assert_eq!(ops.capacity.queued(), 1));
+
+        std::thread::sleep(Duration::from_millis(50));
+        harness.driver().turn();
+        let Poll::Ready(mut ticket) = poll_once(&harness, &mut accept) else {
+            panic!("accept admission did not observe its capacity timeout");
+        };
+        let noop = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&noop);
+        assert!(matches!(
+            Pin::new(&mut ticket).poll(&mut cx),
+            Poll::Ready(Err(Error::Timeout))
+        ));
+        handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 0);
+            assert!(ops.completions.is_empty());
+        });
     }
 
     #[test]
@@ -2465,88 +2651,6 @@ mod tests {
         }
     }
 
-    /// Counters observed by the clone-panic capacity test waker.
-    struct ClonePanicWakerState {
-        /// Number of attempted RawWaker clones.
-        clones: AtomicUsize,
-        /// Number of consuming wake callbacks.
-        wakes: AtomicUsize,
-    }
-
-    /// Clone the capacity test waker, panicking on its second clone attempt.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be an `Arc<ClonePanicWakerState>` pointer owned by this
-    /// vtable.
-    unsafe fn clone_panicking_capacity_waker(data: *const ()) -> RawWaker {
-        // SAFETY: every data pointer in this vtable comes from Arc::into_raw
-        // for Arc<ClonePanicWakerState>. ManuallyDrop retains the source
-        // RawWaker's reference while a successful clone creates one new
-        // reference.
-        let state = std::mem::ManuallyDrop::new(unsafe {
-            Arc::<ClonePanicWakerState>::from_raw(data.cast())
-        });
-        if state.clones.fetch_add(1, Ordering::AcqRel) == 1 {
-            panic!("capacity waker clone panic");
-        }
-        let clone = Arc::clone(&state);
-        RawWaker::new(
-            Arc::into_raw(clone).cast(),
-            &CLONE_PANICKING_CAPACITY_WAKER_VTABLE,
-        )
-    }
-
-    /// Consume one capacity test waker reference and record its wake.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be an `Arc<ClonePanicWakerState>` pointer owned by this
-    /// vtable.
-    unsafe fn wake_clone_panicking_capacity_waker(data: *const ()) {
-        // SAFETY: wake consumes the RawWaker reference represented by data.
-        let state = unsafe { Arc::<ClonePanicWakerState>::from_raw(data.cast()) };
-        state.wakes.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// Observe a capacity test wake without consuming its reference.
-    ///
-    /// The callback intentionally has no effect because successor progress is
-    /// measured with a separate flag waker.
-    unsafe fn wake_by_ref_clone_panicking_capacity_waker(_: *const ()) {}
-
-    /// Release one capacity test waker reference.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be an `Arc<ClonePanicWakerState>` pointer owned by this
-    /// vtable.
-    unsafe fn drop_clone_panicking_capacity_waker(data: *const ()) {
-        // SAFETY: drop consumes the RawWaker reference represented by data.
-        drop(unsafe { Arc::<ClonePanicWakerState>::from_raw(data.cast()) });
-    }
-
-    /// Raw-waker callbacks for the clone-panic capacity regressions.
-    static CLONE_PANICKING_CAPACITY_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        clone_panicking_capacity_waker,
-        wake_clone_panicking_capacity_waker,
-        wake_by_ref_clone_panicking_capacity_waker,
-        drop_clone_panicking_capacity_waker,
-    );
-
-    /// Build a task waker whose second clone resumes a controlled test panic.
-    fn clone_panicking_waker(state: Arc<ClonePanicWakerState>) -> TaskWaker {
-        // SAFETY: the vtable owns the Arc reference transferred into the raw
-        // pointer and balances it in wake or drop. Clone deliberately panics
-        // once, before creating a new reference.
-        unsafe {
-            TaskWaker::from_raw(RawWaker::new(
-                Arc::into_raw(state).cast(),
-                &CLONE_PANICKING_CAPACITY_WAKER_VTABLE,
-            ))
-        }
-    }
-
     unsafe fn clone_panicking_drop_waker(_: *const ()) -> std::task::RawWaker {
         std::task::RawWaker::new(std::ptr::null(), &PANICKING_DROP_WAKER_VTABLE)
     }
@@ -2973,226 +3077,6 @@ mod tests {
     }
 
     #[test]
-    fn test_clone_panicking_capacity_head_after_ready_op_does_not_wedge() {
-        let mut harness = TestLoop::new(RingConfig {
-            size: 1,
-            ..Default::default()
-        });
-        let handle = harness.handle.clone();
-
-        let (first_left, mut first_right) = UnixStream::pair().unwrap();
-        let mut first = Box::pin(handle.recv(
-            Arc::new(first_left.into()),
-            IoBufMut::with_capacity(1),
-            0,
-            1,
-            false,
-            Instant::now() + Duration::from_secs(60),
-        ));
-        assert!(poll_once(&harness, &mut first).is_pending());
-        first_right.write_all(b"x").unwrap();
-        let start = Instant::now();
-        while harness.pending() != 0 {
-            assert!(start.elapsed() < Duration::from_secs(5));
-            harness.driver().turn();
-            harness.driver().park(Some(Duration::from_millis(10)));
-        }
-
-        let panic_state = Arc::new(ClonePanicWakerState {
-            clones: AtomicUsize::new(0),
-            wakes: AtomicUsize::new(0),
-        });
-        let panic_waker = clone_panicking_waker(Arc::clone(&panic_state));
-        let mut panic_cx = Context::from_waker(&panic_waker);
-        let (failed_left, _failed_right) = UnixStream::pair().unwrap();
-        let mut failed = Box::pin(handle.recv(
-            Arc::new(failed_left.into()),
-            IoBufMut::with_capacity(1),
-            0,
-            1,
-            false,
-            Instant::now() + Duration::from_secs(60),
-        ));
-        assert!(failed.as_mut().poll(&mut panic_cx).is_pending());
-
-        let valid_flag = Arc::new(WokenFlag(AtomicBool::new(false)));
-        let valid_waker = arc_waker(Arc::clone(&valid_flag));
-        let mut valid_cx = Context::from_waker(&valid_waker);
-        let (valid_left, _valid_right) = UnixStream::pair().unwrap();
-        let mut valid = Box::pin(handle.recv(
-            Arc::new(valid_left.into()),
-            IoBufMut::with_capacity(1),
-            0,
-            1,
-            false,
-            Instant::now() + Duration::from_secs(60),
-        ));
-        assert!(valid.as_mut().poll(&mut valid_cx).is_pending());
-        harness.handle.with(|ops| {
-            assert_eq!(ops.waiters.len(), 1);
-            assert_eq!(ops.capacity.registered(), 2);
-            assert_eq!(ops.capacity.queued(), 2);
-            assert_eq!(ops.capacity.reserved(), 0);
-            assert_eq!(ops.capacity.arena_len(), 2);
-        });
-
-        let completed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let noop = futures::task::noop_waker();
-            let mut cx = Context::from_waker(&noop);
-            assert!(first.as_mut().poll(&mut cx).is_ready());
-        }));
-        let payload = completed.expect_err("capacity clone panic was not resumed");
-        assert_eq!(
-            payload.downcast_ref::<&'static str>(),
-            Some(&"capacity waker clone panic")
-        );
-        assert_eq!(panic_state.clones.load(Ordering::Acquire), 2);
-        assert_eq!(panic_state.wakes.load(Ordering::Acquire), 1);
-        assert!(valid_flag.0.load(Ordering::Acquire));
-        harness.handle.with(|ops| {
-            assert_eq!(ops.waiters.len(), 0);
-            assert_eq!(ops.capacity.registered(), 1);
-            assert_eq!(ops.capacity.queued(), 0);
-            assert_eq!(ops.capacity.reserved(), 1);
-            assert_eq!(ops.capacity.arena_len(), 2);
-        });
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(first))).is_ok());
-
-        // The failed head owns a stale generation after recovery. Its drop is
-        // a no-op and cannot revoke the valid successor's reservation.
-        drop(failed);
-        harness.handle.with(|ops| {
-            assert_eq!(ops.capacity.registered(), 1);
-            assert_eq!(ops.capacity.reserved(), 1);
-        });
-
-        // A fresh admission cannot barge ahead of that reservation.
-        let barger_count = Arc::new(WakeCount(AtomicUsize::new(0)));
-        let barger_waker = arc_waker(Arc::clone(&barger_count));
-        let mut barger_cx = Context::from_waker(&barger_waker);
-        let (barger_left, _barger_right) = UnixStream::pair().unwrap();
-        let mut barger = Box::pin(handle.recv(
-            Arc::new(barger_left.into()),
-            IoBufMut::with_capacity(1),
-            0,
-            1,
-            false,
-            Instant::now() + Duration::from_secs(60),
-        ));
-        assert!(barger.as_mut().poll(&mut barger_cx).is_pending());
-        harness.handle.with(|ops| {
-            assert_eq!(ops.capacity.registered(), 2);
-            assert_eq!(ops.capacity.queued(), 1);
-            assert_eq!(ops.capacity.reserved(), 1);
-        });
-        assert_eq!(barger_count.0.load(Ordering::Acquire), 0);
-
-        // No manual reconcile is needed. The valid waiter consumes the grant
-        // and enters the waiter table while the fresh attempt stays queued.
-        assert!(valid.as_mut().poll(&mut valid_cx).is_pending());
-        harness.handle.with(|ops| {
-            assert_eq!(ops.waiters.len(), 1);
-            assert_eq!(ops.capacity.registered(), 1);
-            assert_eq!(ops.capacity.queued(), 1);
-            assert_eq!(ops.capacity.reserved(), 0);
-        });
-        assert_eq!(barger_count.0.load(Ordering::Acquire), 0);
-
-        drop(valid);
-        harness.driver().turn();
-        assert_eq!(barger_count.0.load(Ordering::Acquire), 1);
-        drop(barger);
-        assert_eq!(harness.tracked(), 0);
-    }
-
-    #[test]
-    fn test_ticket_completion_clone_panic_grants_valid_successor_before_resume() {
-        let mut harness = TestLoop::new(RingConfig {
-            size: 1,
-            ..Default::default()
-        });
-        let handle = harness.handle.clone();
-        let (sync_left, _sync_right) = UnixStream::pair().unwrap();
-        // SAFETY: sync_left is a valid owned fd and is transferred into File.
-        let file = unsafe { File::from_raw_fd(sync_left.into_raw_fd()) };
-        let ticket = harness.block_on(handle.start_sync(Arc::new(file)));
-
-        let panic_state = Arc::new(ClonePanicWakerState {
-            clones: AtomicUsize::new(0),
-            wakes: AtomicUsize::new(0),
-        });
-        let panic_waker = clone_panicking_waker(Arc::clone(&panic_state));
-        let mut panic_cx = Context::from_waker(&panic_waker);
-        let (failed_left, _failed_right) = UnixStream::pair().unwrap();
-        let mut failed = Box::pin(handle.recv(
-            Arc::new(failed_left.into()),
-            IoBufMut::with_capacity(1),
-            0,
-            1,
-            false,
-            Instant::now() + Duration::from_secs(60),
-        ));
-        assert!(failed.as_mut().poll(&mut panic_cx).is_pending());
-
-        let valid_flag = Arc::new(WokenFlag(AtomicBool::new(false)));
-        let valid_waker = arc_waker(Arc::clone(&valid_flag));
-        let mut valid_cx = Context::from_waker(&valid_waker);
-        let (valid_left, _valid_right) = UnixStream::pair().unwrap();
-        let mut valid = Box::pin(handle.recv(
-            Arc::new(valid_left.into()),
-            IoBufMut::with_capacity(1),
-            0,
-            1,
-            false,
-            Instant::now() + Duration::from_secs(60),
-        ));
-        assert!(valid.as_mut().poll(&mut valid_cx).is_pending());
-
-        let start = Instant::now();
-        let payload = loop {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                harness.driver().turn();
-            }));
-            if let Err(payload) = result {
-                break payload;
-            }
-            assert!(start.elapsed() < Duration::from_secs(5));
-            if harness.pending() != 0 {
-                harness.driver().park(Some(Duration::from_millis(10)));
-            }
-        };
-        assert_eq!(
-            payload.downcast_ref::<&'static str>(),
-            Some(&"capacity waker clone panic")
-        );
-        assert_eq!(panic_state.clones.load(Ordering::Acquire), 2);
-        assert_eq!(panic_state.wakes.load(Ordering::Acquire), 1);
-        assert!(valid_flag.0.load(Ordering::Acquire));
-        harness.handle.with(|ops| {
-            assert_eq!(ops.waiters.len(), 0);
-            assert_eq!(ops.completions.ready(), 1);
-            assert_eq!(ops.operation_count(), 1);
-            assert_eq!(ops.capacity.registered(), 1);
-            assert_eq!(ops.capacity.queued(), 0);
-            assert_eq!(ops.capacity.reserved(), 1);
-            assert_eq!(ops.capacity.arena_len(), 2);
-        });
-
-        drop(failed);
-        drop(ticket);
-        assert!(valid.as_mut().poll(&mut valid_cx).is_pending());
-        harness.handle.with(|ops| {
-            assert_eq!(ops.waiters.len(), 1);
-            assert_eq!(ops.completions.ready(), 0);
-            assert_eq!(ops.capacity.registered(), 0);
-            assert_eq!(ops.capacity.reserved(), 0);
-        });
-        drop(valid);
-        harness.driver().turn();
-        assert_eq!(harness.tracked(), 0);
-    }
-
-    #[test]
     fn test_ready_ticket_survives_driver_close() {
         let mut harness = TestLoop::new(RingConfig::default());
         let handle = harness.handle.clone();
@@ -3259,8 +3143,8 @@ mod tests {
             .handle
             .with(|ops| assert_eq!(ops.capacity.arena_len(), 1));
 
-        // A registration invalidated by close is ignored by a later cancel
-        // through its stale generation.
+        // Close retains a generation-live terminal tombstone until its owner
+        // observes closure or drops the registration.
         let (left, _right) = UnixStream::pair().unwrap();
         let mut parked = Box::pin(handle.recv(
             Arc::new(left.into()),
@@ -3274,8 +3158,11 @@ mod tests {
         harness.driver().close();
         harness
             .handle
-            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
+            .with(|ops| assert_eq!(ops.capacity.registered(), 1));
         drop(parked);
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
     }
 
     #[test]

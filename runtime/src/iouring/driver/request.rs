@@ -344,7 +344,6 @@ impl Request {
 
     /// Return a timeout result, moving any owned buffer out of the request.
     /// Used when a deadline expires before the current SQE could complete.
-    #[cfg(test)]
     pub fn timeout(&mut self) -> Output {
         self.interrupt(Error::Timeout)
     }

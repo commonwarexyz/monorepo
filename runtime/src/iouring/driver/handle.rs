@@ -32,10 +32,12 @@
 //!       |
 //!       v
 //! Queued CapacityId --slot freed--> Granted CapacityId
+//!       |       |                          |       |
+//!       |       +--deadline--------------->|-------+--> Expired
 //!       |                                  |
-//!       | drop                             | owner repolls
+//!       | drop or close                    | owner repolls
 //!       v                                  v
-//!     Free <-------------------------- waiter owns request
+//! Free or Closed <-------------------- waiter owns request
 //!                                          |
 //!                    +---------------------+---------------------+
 //!                    |                                           |
@@ -61,7 +63,8 @@ use super::{
         WriteAtState,
     },
     waiter::{
-        CompletionDropOutcome, CompletionId, DropOutcome, TicketCompletions, WaiterId, Waiters,
+        CompletionDropOutcome, CompletionId, DropOutcome, PollState, TicketCompletions, WaiterId,
+        Waiters,
     },
     waker::Waker as RingWaker,
 };
@@ -69,7 +72,8 @@ use crate::{Error, IoBufMut, IoBufs, WriteOptions};
 use commonware_utils::sync::Mutex;
 use std::{
     cell::RefCell,
-    collections::VecDeque,
+    cmp::Reverse,
+    collections::{BinaryHeap, VecDeque},
     fs::File,
     future::Future,
     net::SocketAddr,
@@ -81,7 +85,7 @@ use std::{
     },
     task::{Context, Poll, Waker},
     thread::{self, ThreadId},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 thread_local! {
@@ -184,8 +188,6 @@ impl Ops {
 pub(super) enum WakerAction {
     /// Drop a stored waker after its owner state is disarmed.
     Drop(Waker),
-    /// Resume a panic caught while committing owner state.
-    Panic(Box<dyn std::any::Any + Send>),
     /// Invoke a waker after the state change it observes is committed.
     Wake(Waker),
 }
@@ -216,9 +218,8 @@ impl CapacityActionSink for Vec<WakerAction> {
 /// Deferred actions produced by one capacity transition.
 ///
 /// Ordinary admission, cancellation, and grant paths produce at most two
-/// actions, so they remain allocation-free. A clone-panicking FIFO head can
-/// produce an additional recovery action while reconciliation continues, and
-/// only that adversarial overflow uses the heap.
+/// actions, so they remain allocation-free. The overflow vector keeps the
+/// sink general for batched teardown paths.
 pub(super) struct CapacityActions {
     /// Allocation-free storage for the ordinary action count.
     inline: [Option<WakerAction>; 2],
@@ -269,8 +270,7 @@ impl IntoIterator for CapacityActions {
     }
 }
 
-/// Run every detached waker action, then resume the earliest state panic or,
-/// if none was recorded, the earliest callback panic.
+/// Run every detached waker action, then resume the earliest callback panic.
 ///
 /// Capacity state changes are committed before their wakers leave [Ops]. A
 /// panic from an earlier callback must therefore not strand later callbacks
@@ -278,19 +278,9 @@ impl IntoIterator for CapacityActions {
 /// user RawWaker code on drop, so their destruction follows the same ordering
 /// and unwind isolation.
 pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
-    let mut first_state_panic = None;
     let mut first_callback_panic = None;
     for action in actions {
         match action {
-            WakerAction::Panic(payload) => {
-                if first_state_panic.is_none() {
-                    first_state_panic = Some(payload);
-                } else {
-                    // Dropping an adversarial secondary payload could panic
-                    // and prevent the remaining callbacks from running.
-                    std::mem::forget(payload);
-                }
-            }
             WakerAction::Drop(waker) => {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                     drop(waker);
@@ -317,12 +307,6 @@ pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
             }
         }
     }
-    if let Some(payload) = first_state_panic {
-        if let Some(callback_payload) = first_callback_panic {
-            std::mem::forget(callback_payload);
-        }
-        std::panic::resume_unwind(payload);
-    }
     if let Some(payload) = first_callback_panic {
         std::panic::resume_unwind(payload);
     }
@@ -347,15 +331,32 @@ pub(super) struct CapacityWaiters {
     free: Option<usize>,
     /// Number of live [CapacityState::Granted] nodes.
     reserved: usize,
+    /// Earliest-first deadlines for queued and granted registrations.
+    ///
+    /// Admission and cancellation leave generation-stamped tombstones behind.
+    /// They are pruned when the heap head is inspected, so those hot paths do
+    /// not need arbitrary heap removal.
+    deadlines: BinaryHeap<Reverse<CapacityDeadline>>,
+    /// Number of stale entries currently retained in `deadlines`.
+    deadline_tombstones: usize,
 }
 
 /// Generation-validated registration in [CapacityWaiters].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct CapacityId {
     /// Arena slot containing this registration.
     index: usize,
     /// Slot generation captured when the registration was created.
     generation: u64,
+}
+
+/// One deadline-heap entry for a capacity registration.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CapacityDeadline {
+    /// Absolute request deadline computed by the front-end.
+    deadline: Instant,
+    /// Generation-tagged arena owner of this entry.
+    id: CapacityId,
 }
 
 /// One slot in the capacity registration arena.
@@ -381,12 +382,28 @@ enum CapacityState {
         next: Option<usize>,
         /// Owner waker retained until grant, cancellation, or close.
         waker: Waker,
+        /// Absolute operation deadline, if the request is timed.
+        deadline: Option<Instant>,
     },
     /// Live registration holding one reserved waiter-table slot.
+    ///
+    /// The queued waker moved into the deferred wake action when this state
+    /// was published. The owner's next poll supplies the observer waker used
+    /// by the admitted waiter.
     Granted {
-        /// Owner waker retained until the grant is consumed or cancelled.
-        waker: Waker,
+        /// Absolute operation deadline, retained until waiter insertion.
+        deadline: Option<Instant>,
     },
+    /// Deadline elapsed before admission.
+    ///
+    /// The queued waker moved into the deferred wake action. The node remains
+    /// generation-live until the owner repolls or drops, preventing a stale
+    /// registration from silently rejoining the FIFO.
+    Expired,
+    /// Driver closure won the race with the operation deadline.
+    ///
+    /// Queued owners have already been moved into the close wake batch.
+    Closed,
 }
 
 /// Result of one atomic capacity-admission transition.
@@ -396,11 +413,15 @@ enum CapacityState {
 /// publish the waiter and retain the observer without a second external clone.
 enum CapacityAdmission {
     /// Admit directly from an unreserved authoritative free slot.
-    Direct(Waker),
+    Direct,
     /// Consume the caller's previously reserved FIFO grant.
-    Granted(Waker),
+    Granted,
     /// Keep or create a FIFO registration and wait for a grant.
     Queued,
+    /// The request deadline elapsed while it waited for capacity.
+    Expired,
+    /// The driver closed while the request waited for capacity.
+    Closed,
 }
 
 /// Payload-free admission result used by capacity state-machine tests.
@@ -413,6 +434,10 @@ enum CapacityAdmissionKind {
     Granted,
     /// The poll remains registered in the FIFO.
     Queued,
+    /// The poll observes a pre-admission deadline expiry.
+    Expired,
+    /// The poll observes driver closure before admission.
+    Closed,
 }
 
 #[cfg(test)]
@@ -420,9 +445,11 @@ impl CapacityAdmission {
     /// Return the payload-free result for state-machine assertions.
     const fn kind(&self) -> CapacityAdmissionKind {
         match self {
-            Self::Direct(_) => CapacityAdmissionKind::Direct,
-            Self::Granted(_) => CapacityAdmissionKind::Granted,
+            Self::Direct => CapacityAdmissionKind::Direct,
+            Self::Granted => CapacityAdmissionKind::Granted,
             Self::Queued => CapacityAdmissionKind::Queued,
+            Self::Expired => CapacityAdmissionKind::Expired,
+            Self::Closed => CapacityAdmissionKind::Closed,
         }
     }
 }
@@ -436,6 +463,8 @@ impl CapacityWaiters {
             tail: None,
             free: None,
             reserved: 0,
+            deadlines: BinaryHeap::new(),
+            deadline_tombstones: 0,
         }
     }
 
@@ -444,7 +473,8 @@ impl CapacityWaiters {
         &mut self,
         registration: &mut Option<CapacityId>,
         free_len: usize,
-        waker: &Waker,
+        deadline: Option<Instant>,
+        incoming_waker: &mut Option<Waker>,
         actions: &mut impl CapacityActionSink,
     ) -> CapacityAdmission {
         assert!(
@@ -455,17 +485,34 @@ impl CapacityWaiters {
         if let Some(id) = *registration {
             let Some(state) = self.live_state(id) else {
                 *registration = None;
-                return self.poll(registration, free_len, waker, actions);
+                return self.poll(
+                    registration,
+                    free_len,
+                    deadline,
+                    incoming_waker,
+                    actions,
+                );
             };
             match state {
                 CapacityState::Queued { waker: stored, .. } => {
-                    if !stored.will_wake(waker) {
-                        actions.reserve(1);
-                        let replacement = waker.clone();
+                    let incoming = incoming_waker
+                        .as_ref()
+                        .expect("capacity poll missing incoming waker");
+                    actions.reserve(1);
+                    if stored.will_wake(incoming) {
+                        actions.push(WakerAction::Drop(
+                            incoming_waker
+                                .take()
+                                .expect("capacity waker consumed twice"),
+                        ));
+                    } else {
+                        let replacement = incoming_waker
+                            .take()
+                            .expect("capacity waker consumed twice");
                         let CapacityState::Queued { waker: stored, .. } =
                             &mut self.nodes[id.index].state
                         else {
-                            unreachable!("capacity state changed during waker clone")
+                            unreachable!("capacity state changed during waker replacement")
                         };
                         let old = std::mem::replace(stored, replacement);
                         actions.push(WakerAction::Drop(old));
@@ -473,11 +520,7 @@ impl CapacityWaiters {
                     return CapacityAdmission::Queued;
                 }
                 CapacityState::Granted { .. } => {
-                    // Clone the observer before consuming the reservation. A
-                    // RawWaker panic must leave the grant available to retry.
-                    actions.reserve(1);
-                    let observer = waker.clone();
-                    let CapacityState::Granted { waker: stored } = self
+                    let CapacityState::Granted { deadline } = self
                         .take_live(id)
                         .expect("validated capacity grant disappeared")
                     else {
@@ -487,21 +530,172 @@ impl CapacityWaiters {
                         .reserved
                         .checked_sub(1)
                         .expect("capacity reservation underflow");
+                    if deadline.is_some() {
+                        self.deadline_tombstones += 1;
+                        self.compact_deadlines();
+                    }
                     *registration = None;
-                    actions.push(WakerAction::Drop(stored));
-                    return CapacityAdmission::Granted(observer);
+                    return CapacityAdmission::Granted;
+                }
+                CapacityState::Expired => {
+                    actions.reserve(1);
+                    let CapacityState::Expired = self
+                        .take_live(id)
+                        .expect("validated capacity expiry disappeared")
+                    else {
+                        unreachable!("validated capacity expiry changed state")
+                    };
+                    *registration = None;
+                    actions.push(WakerAction::Drop(
+                        incoming_waker
+                            .take()
+                            .expect("capacity waker consumed twice"),
+                    ));
+                    return CapacityAdmission::Expired;
+                }
+                CapacityState::Closed => {
+                    actions.reserve(1);
+                    let CapacityState::Closed = self
+                        .take_live(id)
+                        .expect("validated capacity closure disappeared")
+                    else {
+                        unreachable!("validated capacity closure changed state")
+                    };
+                    *registration = None;
+                    actions.push(WakerAction::Drop(
+                        incoming_waker
+                            .take()
+                            .expect("capacity waker consumed twice"),
+                    ));
+                    return CapacityAdmission::Closed;
                 }
                 CapacityState::Free { .. } => unreachable!("free capacity node reported live"),
             }
         }
 
         if self.head.is_none() && self.reserved < free_len {
-            return CapacityAdmission::Direct(waker.clone());
+            return CapacityAdmission::Direct;
         }
 
-        let id = self.push_back(waker.clone());
+        let id = self.push_back(incoming_waker, deadline);
         *registration = Some(id);
         CapacityAdmission::Queued
+    }
+
+    /// Return the delay until the earliest live capacity deadline.
+    ///
+    /// Generation-stale heap entries are removed before reporting the head.
+    pub(super) fn next_deadline(&mut self, now: Instant) -> Option<Duration> {
+        self.prune_deadlines();
+        self.deadlines
+            .peek()
+            .map(|entry| entry.0.deadline.saturating_duration_since(now))
+    }
+
+    /// Expire every queued registration whose deadline is at or before `now`.
+    ///
+    /// Each expired node remains generation-live for its owner, but leaves the
+    /// FIFO and no longer participates in grants. Its waker runs only after
+    /// the surrounding [Ops] borrow is released.
+    pub(super) fn expire(
+        &mut self,
+        now: Instant,
+        free_len: usize,
+        actions: &mut impl CapacityActionSink,
+    ) {
+        let mut changed = false;
+        loop {
+            self.prune_deadlines();
+            let Some(entry) = self.deadlines.peek().copied() else {
+                break;
+            };
+            if entry.0.deadline > now {
+                break;
+            }
+
+            let id = entry.0.id;
+            if matches!(self.live_state(id), Some(CapacityState::Queued { .. })) {
+                actions.reserve(1);
+            }
+            self.deadlines.pop();
+            let state = std::mem::replace(&mut self.nodes[id.index].state, CapacityState::Expired);
+            match state {
+                CapacityState::Queued {
+                    prev, next, waker, ..
+                } => {
+                    self.unlink(prev, next);
+                    actions.push(WakerAction::Wake(waker));
+                }
+                CapacityState::Granted { .. } => {
+                    self.reserved = self
+                        .reserved
+                        .checked_sub(1)
+                        .expect("capacity reservation underflow");
+                }
+                _ => unreachable!("live capacity deadline had a terminal state"),
+            }
+            changed = true;
+        }
+        if changed {
+            self.reconcile(free_len, actions);
+        }
+    }
+
+    /// Remove stale heap heads left by admission, cancellation, or slot reuse.
+    fn prune_deadlines(&mut self) {
+        while self
+            .deadlines
+            .peek()
+            .is_some_and(|entry| !self.deadline_is_live(entry.0))
+        {
+            self.deadlines.pop();
+            self.deadline_tombstones = self
+                .deadline_tombstones
+                .checked_sub(1)
+                .expect("capacity deadline tombstone underflow");
+        }
+    }
+
+    /// Rebuild the deadline heap when cancelled entries dominate it.
+    ///
+    /// One long-lived capacity waiter must not let later admission churn retain
+    /// an unbounded tail of stale deadlines. Rebuilding at a fixed minimum and
+    /// a 50 percent stale ratio keeps removal amortized while preserving the
+    /// allocation high-water mark.
+    fn compact_deadlines(&mut self) {
+        const MIN_COMPACTION_LEN: usize = 64;
+        if self.deadlines.len() < MIN_COMPACTION_LEN
+            || self.deadline_tombstones.saturating_mul(2) < self.deadlines.len()
+        {
+            return;
+        }
+        let nodes = &self.nodes;
+        self.deadlines
+            .retain(|entry| Self::deadline_is_live_in(nodes, entry.0));
+        self.deadline_tombstones = 0;
+    }
+
+    /// Return whether a deadline entry still names the queued node that owns it.
+    fn deadline_is_live(&self, entry: CapacityDeadline) -> bool {
+        Self::deadline_is_live_in(&self.nodes, entry)
+    }
+
+    /// Check one heap entry against an arena slice.
+    fn deadline_is_live_in(nodes: &[CapacityNode], entry: CapacityDeadline) -> bool {
+        matches!(
+            nodes.get(entry.id.index),
+            Some(CapacityNode {
+                generation,
+                state:
+                    CapacityState::Queued {
+                        deadline: Some(deadline),
+                        ..
+                    }
+                    | CapacityState::Granted {
+                        deadline: Some(deadline),
+                    },
+            }) if *generation == entry.id.generation && *deadline == entry.deadline
+        )
     }
 
     /// Cancel a queued or granted admission and transfer any reserved permit.
@@ -516,38 +710,44 @@ impl CapacityWaiters {
         let Some(state) = self.live_state(id) else {
             return;
         };
-        let was_granted = matches!(state, CapacityState::Granted { .. });
-        actions.reserve(1 + usize::from(was_granted && self.head.is_some()));
+        actions.reserve(usize::from(matches!(state, CapacityState::Queued { .. })));
         match self
             .take_live(id)
             .expect("validated capacity registration disappeared")
         {
             CapacityState::Queued {
-                prev, next, waker, ..
+                prev,
+                next,
+                waker,
+                deadline,
             } => {
                 self.unlink(prev, next);
+                if deadline.is_some() {
+                    self.deadline_tombstones += 1;
+                    self.compact_deadlines();
+                }
                 actions.push(WakerAction::Drop(waker));
             }
-            CapacityState::Granted { waker } => {
+            CapacityState::Granted { deadline } => {
                 self.reserved = self
                     .reserved
                     .checked_sub(1)
                     .expect("capacity reservation underflow");
-                actions.push(WakerAction::Drop(waker));
+                if deadline.is_some() {
+                    self.deadline_tombstones += 1;
+                }
                 self.reconcile(free_len, actions);
             }
+            CapacityState::Expired | CapacityState::Closed => {}
             CapacityState::Free { .. } => unreachable!("free capacity node reported live"),
         }
     }
 
     /// Reserve authoritative free slots for FIFO heads and defer their effects.
     ///
-    /// Heads are processed individually so each successful clone is followed
-    /// immediately by the matching `Queued` to `Granted` transition. A panic
-    /// from externally controlled `RawWaker::clone` generation-removes only
-    /// that head, defers both its stored wake and the panic, then continues
-    /// granting every authoritative free slot. The caller runs the resulting
-    /// callbacks before [wake_batch] resumes the earliest recorded state panic.
+    /// Each transition moves the queued waker into a deferred wake action and
+    /// leaves a payload-free grant behind. No RawWaker vtable function runs
+    /// while the capacity arena is borrowed.
     pub(super) fn reconcile(&mut self, free_len: usize, actions: &mut impl CapacityActionSink) {
         assert!(
             self.reserved <= free_len,
@@ -557,72 +757,54 @@ impl CapacityWaiters {
             let Some(index) = self.head else {
                 break;
             };
-            // Reserve before cloning so the successful transition cannot be
-            // followed by action-buffer growth while it is half-published.
+            // Reserve before mutation so action-buffer growth cannot leave a
+            // half-published grant.
             actions.reserve(1);
-            let clone = {
-                let CapacityState::Queued { waker, .. } = &self.nodes[index].state else {
-                    panic!("capacity FIFO contains a non-queued node")
-                };
-                // RawWaker clone is the only externally controlled operation
-                // in this state transition, so isolate it before mutation.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.clone()))
+            let CapacityState::Queued {
+                prev,
+                next,
+                waker,
+                deadline,
+            } = std::mem::replace(
+                &mut self.nodes[index].state,
+                CapacityState::Granted { deadline: None },
+            )
+            else {
+                panic!("capacity FIFO contains a non-queued node")
             };
-
-            match clone {
-                Ok(wake) => {
-                    let CapacityState::Queued { prev, next, waker } = std::mem::replace(
-                        &mut self.nodes[index].state,
-                        CapacityState::Free { next: None },
-                    ) else {
-                        unreachable!("capacity FIFO head changed state")
-                    };
-                    assert!(prev.is_none(), "capacity FIFO head has a predecessor");
-                    self.unlink(prev, next);
-                    // Preserve the registration generation while changing the
-                    // FIFO head into its owner-only reserved state.
-                    self.nodes[index].state = CapacityState::Granted { waker };
-                    self.reserved += 1;
-                    actions.push(WakerAction::Wake(wake));
-                }
-                Err(payload) => {
-                    // The head can no longer be granted through its stored
-                    // waker. Generation-remove it, wake its owner to obtain a
-                    // fresh registration, and keep granting from the same
-                    // authoritative free-slot count before resuming the panic.
-                    actions.reserve(2);
-                    let id = CapacityId {
-                        index,
-                        generation: self.nodes[index].generation,
-                    };
-                    let CapacityState::Queued { prev, next, waker } = self
-                        .take_live(id)
-                        .expect("capacity FIFO head disappeared after clone panic")
-                    else {
-                        unreachable!("capacity FIFO head changed state after clone panic")
-                    };
-                    assert!(prev.is_none(), "capacity FIFO head has a predecessor");
-                    self.unlink(prev, next);
-                    actions.push(WakerAction::Wake(waker));
-                    actions.push(WakerAction::Panic(payload));
-                }
-            }
+            assert!(prev.is_none(), "capacity FIFO head has a predecessor");
+            self.unlink(prev, next);
+            self.nodes[index].state = CapacityState::Granted { deadline };
+            self.reserved += 1;
+            actions.push(WakerAction::Wake(waker));
         }
+        self.compact_deadlines();
     }
 
-    /// Invalidate every live registration and return all stored wakers.
+    /// Mark every live registration closed and return queued owner wakers.
+    ///
+    /// Expired nodes preserve timeout-before-close precedence. Other live
+    /// nodes become closure tombstones until their generation owner repolls or
+    /// drops. Free slots and arena allocation remain reusable at high water.
     fn close(&mut self) -> Vec<Waker> {
-        let mut wakers = Vec::new();
+        let queued = self
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.state, CapacityState::Queued { .. }))
+            .count();
+        let mut wakers = Vec::with_capacity(queued);
         self.head = None;
         self.tail = None;
-        self.free = None;
         self.reserved = 0;
-        for node in self.nodes.drain(..).rev() {
-            match node.state {
-                CapacityState::Free { .. } => {}
-                CapacityState::Queued { waker, .. } | CapacityState::Granted { waker } => {
-                    wakers.push(waker);
-                }
+        self.deadlines.clear();
+        self.deadline_tombstones = 0;
+        for node in self.nodes.iter_mut().rev() {
+            let state = std::mem::replace(&mut node.state, CapacityState::Closed);
+            match state {
+                CapacityState::Queued { waker, .. } => wakers.push(waker),
+                CapacityState::Expired => node.state = CapacityState::Expired,
+                CapacityState::Free { next } => node.state = CapacityState::Free { next },
+                CapacityState::Granted { .. } | CapacityState::Closed => {}
             }
         }
         wakers
@@ -654,7 +836,17 @@ impl CapacityWaiters {
     }
 
     /// Append a new registration to the FIFO, reusing an arena slot if possible.
-    fn push_back(&mut self, waker: Waker) -> CapacityId {
+    fn push_back(
+        &mut self,
+        incoming_waker: &mut Option<Waker>,
+        deadline: Option<Instant>,
+    ) -> CapacityId {
+        if self.free.is_none() {
+            self.nodes.reserve(1);
+        }
+        if deadline.is_some() {
+            self.deadlines.reserve(1);
+        }
         let index = match self.free {
             Some(index) => {
                 let CapacityState::Free { next } = self.nodes[index].state else {
@@ -679,7 +871,10 @@ impl CapacityWaiters {
         self.nodes[index].state = CapacityState::Queued {
             prev,
             next: None,
-            waker,
+            waker: incoming_waker
+                .take()
+                .expect("capacity waker consumed twice"),
+            deadline,
         };
         match prev {
             Some(prev) => {
@@ -691,6 +886,10 @@ impl CapacityWaiters {
             None => self.head = Some(index),
         }
         self.tail = Some(index);
+        if let Some(deadline) = deadline {
+            self.deadlines
+                .push(Reverse(CapacityDeadline { deadline, id }));
+        }
         id
     }
 
@@ -760,9 +959,8 @@ impl CapacityWaiters {
 /// admission poll) and cancelled when the attempt is dropped while parked. A
 /// foreign-thread drop cannot touch the thread-affine arena, so it transfers
 /// the generation-tagged ID through [OrphanMailbox]. The loop cancels that ID
-/// and transfers any released permit on its next turn. A generation removed
-/// during clone-panic recovery is already cancelled, so a later owner or
-/// mailbox drop is a no-op.
+/// and transfers any released permit on its next turn. Expired registrations
+/// stay generation-live until this guard observes or cancels them.
 struct Registration<'a> {
     /// Affine driver state and cross-thread orphan mailbox.
     handle: &'a Handle,
@@ -1111,38 +1309,90 @@ fn poll_admission<T>(
     request: &mut Option<Request>,
     registration: &mut Registration<'_>,
     cx: &mut Context<'_>,
-    admit: impl FnOnce(&mut Ops, Request, Waker) -> (T, WaiterId),
+    admit: impl FnOnce(&mut Ops, Request, &mut Option<Waker>) -> (T, WaiterId),
 ) -> (Poll<Result<T, Output>>, CapacityActions) {
     let mut actions = CapacityActions::new();
+    // RawWaker clone callbacks are external code. Run them before borrowing
+    // Ops, then move or defer-drop the clone during the state transition.
+    let mut incoming_waker = Some(cx.waker().clone());
+    let deadline = request
+        .as_ref()
+        .expect("request missing before admission")
+        .deadline();
     let outcome = handle.with(|ops| {
+        if registration.slot.is_some_and(|id| {
+            matches!(
+                ops.capacity.live_state(id),
+                Some(CapacityState::Expired | CapacityState::Closed)
+            )
+        }) {
+            return match ops.capacity.poll(
+                &mut registration.slot,
+                ops.waiters.free_len(),
+                deadline,
+                &mut incoming_waker,
+                &mut actions,
+            ) {
+                CapacityAdmission::Expired => Admission::Expired,
+                CapacityAdmission::Closed => Admission::Closed,
+                _ => unreachable!("terminal capacity registration changed state"),
+            };
+        }
         if ops.closed {
             if let Some(slot) = registration.slot.take() {
                 ops.capacity
                     .cancel(slot, ops.waiters.free_len(), &mut actions);
             }
+            actions.reserve(1);
+            actions.push(WakerAction::Drop(
+                incoming_waker
+                    .take()
+                    .expect("admission waker consumed twice"),
+            ));
             return Admission::Closed;
         }
-        let observer_waker = match ops.capacity.poll(
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            if let Some(slot) = registration.slot.take() {
+                ops.capacity
+                    .cancel(slot, ops.waiters.free_len(), &mut actions);
+            }
+            actions.reserve(1);
+            actions.push(WakerAction::Drop(
+                incoming_waker
+                    .take()
+                    .expect("admission waker consumed twice"),
+            ));
+            return Admission::Expired;
+        }
+        match ops.capacity.poll(
             &mut registration.slot,
             ops.waiters.free_len(),
-            cx.waker(),
+            deadline,
+            &mut incoming_waker,
             &mut actions,
         ) {
             CapacityAdmission::Queued => return Admission::Full,
-            CapacityAdmission::Direct(waker) | CapacityAdmission::Granted(waker) => waker,
-        };
+            CapacityAdmission::Expired => return Admission::Expired,
+            CapacityAdmission::Closed => return Admission::Closed,
+            CapacityAdmission::Direct | CapacityAdmission::Granted => {}
+        }
         let request = request.take().expect("request consumed before admission");
-        let (id, waiter_id) = admit(ops, request, observer_waker);
+        let (id, waiter_id) = admit(ops, request, &mut incoming_waker);
         assert!(ops.capacity.reserved <= ops.waiters.free_len());
         ops.backlog.push_back(waiter_id);
         Admission::Admitted(id)
     });
+    debug_assert!(incoming_waker.is_none());
     let poll = match outcome {
         Admission::Admitted(id) => Poll::Ready(Ok(id)),
         Admission::Full => Poll::Pending,
         Admission::Closed => {
             let request = request.take().expect("request lost on closed driver");
             Poll::Ready(Err(request.fail()))
+        }
+        Admission::Expired => {
+            let mut request = request.take().expect("request lost on capacity timeout");
+            Poll::Ready(Err(request.timeout()))
         }
     };
     (poll, actions)
@@ -1153,16 +1403,42 @@ fn poll_admission<T>(
 /// A pending poll refreshes the stored task waker. Taking a result frees its
 /// slot, but the caller reconciles capacity only after publishing local Done.
 fn poll_op_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<Output> {
-    handle
-        .with(|ops| ops.waiters.poll_take(id, cx.waker()))
-        .map_or(Poll::Pending, Poll::Ready)
+    match handle.with(|ops| ops.waiters.poll_state(id, cx.waker())) {
+        PollState::Ready(output) => return Poll::Ready(output),
+        PollState::PendingCurrent => return Poll::Pending,
+        PollState::PendingNeedsWaker => {}
+    }
+
+    let mut incoming = Some(cx.waker().clone());
+    let (output, detached) =
+        handle.with(|ops| ops.waiters.poll_take_deferred(id, &mut incoming));
+    let mut actions = CapacityActions::new();
+    actions.reserve(2);
+    for waker in detached.into_iter().chain(incoming) {
+        actions.push(WakerAction::Drop(waker));
+    }
+    wake_batch(actions);
+    output.map_or(Poll::Pending, Poll::Ready)
 }
 
 /// Poll a detached ticket's completion entry.
 fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_>) -> Poll<Output> {
-    handle
-        .with(|ops| ops.completions.poll_take(id, cx.waker()))
-        .map_or(Poll::Pending, Poll::Ready)
+    match handle.with(|ops| ops.completions.poll_state(id, cx.waker())) {
+        PollState::Ready(output) => return Poll::Ready(output),
+        PollState::PendingCurrent => return Poll::Pending,
+        PollState::PendingNeedsWaker => {}
+    }
+
+    let mut incoming = Some(cx.waker().clone());
+    let (output, detached) =
+        handle.with(|ops| ops.completions.poll_take_deferred(id, &mut incoming));
+    let mut actions = CapacityActions::new();
+    actions.reserve(2);
+    for waker in detached.into_iter().chain(incoming) {
+        actions.push(WakerAction::Drop(waker));
+    }
+    wake_batch(actions);
+    output.map_or(Poll::Pending, Poll::Ready)
 }
 
 /// Reserve every destination an orphan transition can append to after it
@@ -1172,20 +1448,7 @@ fn reserve_orphan_wind_down(
     outcome: &DropOutcome,
     actions: &mut impl CapacityActionSink,
 ) {
-    let capacity_actions = if matches!(outcome, DropOutcome::Freed) {
-        // A freed waiter can inspect every queued registration if each
-        // preceding RawWaker clone panics. Each failure records a wake and a
-        // deferred panic before reconciliation continues.
-        ops.capacity
-            .nodes
-            .iter()
-            .filter(|node| matches!(node.state, CapacityState::Queued { .. }))
-            .count()
-            .checked_mul(2)
-            .expect("capacity action reservation overflowed")
-    } else {
-        0
-    };
+    let capacity_actions = usize::from(matches!(outcome, DropOutcome::Freed));
     actions.reserve(
         capacity_actions
             .checked_add(1)
@@ -1311,6 +1574,7 @@ enum Admission<T> {
     Admitted(T),
     Full,
     Closed,
+    Expired,
 }
 
 /// Progress state of an op future.
@@ -1368,8 +1632,8 @@ impl Future for Op<'_> {
                     request,
                     &mut this.registration,
                     cx,
-                    |ops, request, waker| {
-                        let waiter_id = ops.waiters.insert(request, waker);
+                    |ops, request, incoming_waker| {
+                        let waiter_id = ops.waiters.insert_deferred(request, incoming_waker);
                         (waiter_id, waiter_id)
                     },
                 );
@@ -1462,10 +1726,10 @@ impl Ticket {
                 &mut request,
                 &mut registration,
                 cx,
-                |ops, request, waker| {
+                |ops, request, incoming_waker| {
                     let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
                     let (completion_id, waiter_id) = completions
-                        .insert_pending(waker, |completion_id| {
+                        .insert_pending_deferred(incoming_waker, |completion_id| {
                             waiters.insert_ticket(request, completion_id)
                         });
                     (completion_id, waiter_id)
@@ -1561,6 +1825,7 @@ mod tests {
     use crate::iouring::driver::{request::RecvRequest, waiter::StageOutcome};
     use futures::task::{ArcWake, waker as arc_waker};
     use std::{
+        cell::Cell,
         os::unix::net::UnixStream,
         sync::{
             Arc,
@@ -1609,8 +1874,26 @@ mod tests {
         free_len: usize,
         waker: &Waker,
     ) -> CapacityAdmissionKind {
+        poll_capacity_with_deadline(capacity, registration, free_len, None, waker)
+    }
+
+    fn poll_capacity_with_deadline(
+        capacity: &mut CapacityWaiters,
+        registration: &mut Option<CapacityId>,
+        free_len: usize,
+        deadline: Option<Instant>,
+        waker: &Waker,
+    ) -> CapacityAdmissionKind {
         let mut actions = Vec::new();
-        let admission = capacity.poll(registration, free_len, waker, &mut actions);
+        let mut incoming = Some(waker.clone());
+        let admission = capacity.poll(
+            registration,
+            free_len,
+            deadline,
+            &mut incoming,
+            &mut actions,
+        );
+        actions.extend(incoming.map(WakerAction::Drop));
         wake_batch(actions);
         admission.kind()
     }
@@ -1708,22 +1991,192 @@ mod tests {
         assert_eq!(capacity.registered(), 5);
     }
 
-    unsafe fn panic_on_second_clone(data: *const ()) -> RawWaker {
-        // SAFETY: the test keeps the referenced atomic alive until every
-        // waker using this static vtable has been dropped.
-        let clones = unsafe { &*data.cast::<AtomicUsize>() };
-        if clones.fetch_add(1, Ordering::AcqRel) == 1 {
-            panic!("second waker clone panic");
-        }
-        RawWaker::new(data, &PANIC_ON_SECOND_CLONE_VTABLE)
+    #[test]
+    fn test_capacity_granted_deadline_transfers_permit_to_fifo_survivor() {
+        let now = Instant::now();
+        let mut capacity = CapacityWaiters::new();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let wakers = [log_waker(0, &log), log_waker(1, &log), log_waker(2, &log)];
+        let mut registrations = [None, None, None];
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut capacity,
+                &mut registrations[0],
+                0,
+                Some(now + Duration::from_millis(10)),
+                &wakers[0],
+            ),
+            CapacityAdmissionKind::Queued
+        );
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut capacity,
+                &mut registrations[1],
+                0,
+                Some(now + Duration::from_millis(20)),
+                &wakers[1],
+            ),
+            CapacityAdmissionKind::Queued
+        );
+        assert_eq!(
+            poll_capacity(
+                &mut capacity,
+                &mut registrations[2],
+                0,
+                &wakers[2],
+            ),
+            CapacityAdmissionKind::Queued
+        );
+
+        reconcile_capacity(&mut capacity, 1);
+        assert_eq!(*log.lock(), vec![0]);
+        assert_eq!(capacity.reserved(), 1);
+        assert_eq!(
+            capacity.next_deadline(now),
+            Some(Duration::from_millis(10))
+        );
+
+        let mut actions = Vec::new();
+        capacity.expire(now + Duration::from_millis(15), 1, &mut actions);
+        wake_batch(actions);
+        assert_eq!(*log.lock(), vec![0, 1]);
+        assert!(matches!(
+            capacity.live_state(registrations[0].unwrap()),
+            Some(CapacityState::Expired)
+        ));
+        assert!(matches!(
+            capacity.live_state(registrations[1].unwrap()),
+            Some(CapacityState::Granted { .. })
+        ));
+        assert_eq!(capacity.queued(), 1);
+        assert_eq!(capacity.reserved(), 1);
+        assert_eq!(
+            capacity.next_deadline(now + Duration::from_millis(15)),
+            Some(Duration::from_millis(5))
+        );
+
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut capacity,
+                &mut registrations[0],
+                1,
+                Some(now + Duration::from_millis(10)),
+                &wakers[0],
+            ),
+            CapacityAdmissionKind::Expired
+        );
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut capacity,
+                &mut registrations[1],
+                1,
+                Some(now + Duration::from_millis(20)),
+                &wakers[1],
+            ),
+            CapacityAdmissionKind::Granted
+        );
+        cancel_capacity(&mut capacity, registrations[2].unwrap(), 0);
+        assert_eq!(capacity.registered(), 0);
     }
 
-    static PANIC_ON_SECOND_CLONE_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        panic_on_second_clone,
-        noop_wake,
-        noop_wake_by_ref,
-        noop_drop,
-    );
+    #[test]
+    fn test_capacity_deadline_tombstones_compact_behind_live_root() {
+        let now = Instant::now();
+        let mut capacity = CapacityWaiters::new();
+        let waker = futures::task::noop_waker();
+        let mut anchor = None;
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut capacity,
+                &mut anchor,
+                0,
+                Some(now + Duration::from_secs(1)),
+                &waker,
+            ),
+            CapacityAdmissionKind::Queued
+        );
+
+        for offset in 0..256 {
+            let mut churn = None;
+            assert_eq!(
+                poll_capacity_with_deadline(
+                    &mut capacity,
+                    &mut churn,
+                    0,
+                    Some(now + Duration::from_secs(2) + Duration::from_millis(offset)),
+                    &waker,
+                ),
+                CapacityAdmissionKind::Queued
+            );
+            cancel_capacity(&mut capacity, churn.unwrap(), 0);
+        }
+
+        assert!(capacity.deadlines.len() < 64);
+        assert!(capacity.deadline_tombstones < 64);
+        assert_eq!(capacity.registered(), 1);
+        assert_eq!(capacity.arena_len(), 2);
+        cancel_capacity(&mut capacity, anchor.unwrap(), 0);
+        assert_eq!(capacity.next_deadline(now), None);
+        assert!(capacity.deadlines.is_empty());
+    }
+
+    #[test]
+    fn test_capacity_timeout_precedes_later_close() {
+        let now = Instant::now();
+        let mut capacity = CapacityWaiters::new();
+        let waker = futures::task::noop_waker();
+        let mut expired = None;
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut capacity,
+                &mut expired,
+                0,
+                Some(now + Duration::from_millis(1)),
+                &waker,
+            ),
+            CapacityAdmissionKind::Queued
+        );
+        let mut actions = Vec::new();
+        capacity.expire(now + Duration::from_millis(2), 0, &mut actions);
+        wake_batch(actions);
+        for waker in capacity.close() {
+            waker.wake();
+        }
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut capacity,
+                &mut expired,
+                0,
+                Some(now + Duration::from_millis(1)),
+                &waker,
+            ),
+            CapacityAdmissionKind::Expired
+        );
+
+        let mut closed = None;
+        let mut fresh = CapacityWaiters::new();
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut fresh,
+                &mut closed,
+                0,
+                Some(now + Duration::from_secs(1)),
+                &waker,
+            ),
+            CapacityAdmissionKind::Queued
+        );
+        drop(fresh.close());
+        assert_eq!(
+            poll_capacity_with_deadline(
+                &mut fresh,
+                &mut closed,
+                0,
+                Some(now + Duration::from_secs(1)),
+                &waker,
+            ),
+            CapacityAdmissionKind::Closed
+        );
+    }
 
     unsafe fn count_clone(data: *const ()) -> RawWaker {
         // SAFETY: the test keeps the referenced atomic alive until every
@@ -1735,85 +2188,6 @@ mod tests {
 
     static COUNT_CLONE_VTABLE: RawWakerVTable =
         RawWakerVTable::new(count_clone, noop_wake, noop_wake_by_ref, noop_drop);
-
-    /// Clone-panic recovery removes one generation and continues FIFO grants.
-    #[test]
-    fn test_capacity_reconcile_clone_panic_removes_head_and_grants_next() {
-        let clone_count = AtomicUsize::new(0);
-        // SAFETY: clone_count outlives the original waker, the capacity arena,
-        // and every clone. The vtable treats its pointer as an AtomicUsize.
-        let first_waker = unsafe {
-            Waker::from_raw(RawWaker::new(
-                std::ptr::from_ref(&clone_count).cast(),
-                &PANIC_ON_SECOND_CLONE_VTABLE,
-            ))
-        };
-        let mut capacity = CapacityWaiters::new();
-        let second_flag = Arc::new(FlagWaker(AtomicBool::new(false)));
-        let second_waker = arc_waker(Arc::clone(&second_flag));
-        let mut first = None;
-        let mut second = None;
-        assert_eq!(
-            poll_capacity(&mut capacity, &mut first, 0, &first_waker),
-            CapacityAdmissionKind::Queued
-        );
-        assert_eq!(
-            poll_capacity(&mut capacity, &mut second, 0, &second_waker),
-            CapacityAdmissionKind::Queued
-        );
-
-        let stale = first.expect("first registration missing");
-        let second_id = second.expect("second registration missing");
-        let mut actions = CapacityActions::new();
-        capacity.reconcile(1, &mut actions);
-        assert_eq!(actions.inline_len, 2);
-        assert_eq!(actions.overflow.len(), 1);
-        assert!(capacity.live_state(stale).is_none());
-        assert_eq!(
-            capacity.nodes[stale.index].generation,
-            stale.generation.checked_add(1).unwrap()
-        );
-        assert!(matches!(
-            capacity.live_state(second_id),
-            Some(CapacityState::Granted { .. })
-        ));
-        assert_eq!(capacity.reserved(), 1);
-        assert_eq!(capacity.queued(), 0);
-        assert_eq!(capacity.registered(), 1);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wake_batch(actions);
-        }));
-        let payload = result.expect_err("clone panic was not resumed");
-        assert_eq!(
-            payload.downcast_ref::<&'static str>(),
-            Some(&"second waker clone panic")
-        );
-        assert!(second_flag.0.load(Ordering::Acquire));
-        assert_eq!(clone_count.load(Ordering::Acquire), 2);
-
-        // Repolling the generation-removed head cannot barge ahead of the
-        // already granted successor. It receives a fresh generation and
-        // queues behind that reservation.
-        assert_eq!(
-            poll_capacity(&mut capacity, &mut first, 1, &first_waker),
-            CapacityAdmissionKind::Queued
-        );
-        let current = first.expect("first registration was not refreshed");
-        assert_eq!(current.index, stale.index);
-        assert_ne!(current.generation, stale.generation);
-        assert_eq!(capacity.reserved(), 1);
-        assert_eq!(capacity.queued(), 1);
-        assert_eq!(capacity.registered(), 2);
-
-        assert_eq!(
-            poll_capacity(&mut capacity, &mut second, 1, &second_waker),
-            CapacityAdmissionKind::Granted
-        );
-        cancel_capacity(&mut capacity, current, 0);
-        assert_eq!(capacity.registered(), 0);
-        assert_eq!(capacity.reserved(), 0);
-    }
 
     #[test]
     fn test_capacity_granted_cancellation_hands_permit_to_fifo_head() {
@@ -1925,7 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_capacity_queued_repoll_with_same_waker_avoids_replacement() {
+    fn test_capacity_queued_repoll_with_same_waker_retains_registration() {
         let mut capacity = CapacityWaiters::new();
         let clone_count = AtomicUsize::new(0);
         // SAFETY: clone_count outlives the waker and the capacity arena. The
@@ -1947,7 +2321,10 @@ mod tests {
             poll_capacity(&mut capacity, &mut registration, 0, &waker),
             CapacityAdmissionKind::Queued
         );
-        assert_eq!(clone_count.load(Ordering::Acquire), clones);
+        // Polling clones before entering the affine Ops borrow. The arena
+        // recognizes the equivalent waker and defers that clone's drop rather
+        // than replacing the stored registration.
+        assert_eq!(clone_count.load(Ordering::Acquire), clones + 1);
         assert_eq!(capacity.queued(), 1);
 
         cancel_capacity(
@@ -1958,7 +2335,7 @@ mod tests {
     }
 
     #[test]
-    fn test_capacity_close_invalidates_mixed_queued_and_granted_nodes() {
+    fn test_capacity_close_preserves_terminal_ownership() {
         let mut capacity = CapacityWaiters::new();
         let counts: Vec<_> = (0..3)
             .map(|_| Arc::new(CountWaker(AtomicUsize::new(0))))
@@ -1973,19 +2350,17 @@ mod tests {
         }
         let mut grant_actions = Vec::new();
         capacity.reconcile(2, &mut grant_actions);
-        drop(grant_actions);
+        wake_batch(grant_actions);
         assert_eq!(capacity.reserved(), 2);
         assert_eq!(capacity.queued(), 1);
 
         let closed = capacity.close();
-        assert_eq!(closed.len(), 3);
+        assert_eq!(closed.len(), 1);
         assert!(closed[0].will_wake(&wakers[2]));
-        assert!(closed[1].will_wake(&wakers[1]));
-        assert!(closed[2].will_wake(&wakers[0]));
-        assert_eq!(capacity.registered(), 0);
+        assert_eq!(capacity.registered(), 3);
         assert_eq!(capacity.reserved(), 0);
         assert_eq!(capacity.queued(), 0);
-        assert_eq!(capacity.arena_len(), 0);
+        assert_eq!(capacity.arena_len(), 3);
         for waker in closed {
             waker.wake();
         }
@@ -1995,8 +2370,7 @@ mod tests {
                 .all(|count| count.0.load(Ordering::Acquire) == 1)
         );
 
-        // IDs invalidated by close remain harmless on later owner or mailbox
-        // cancellation paths.
+        // Owner or mailbox cancellation recycles each closure tombstone once.
         for id in registrations.into_iter().flatten() {
             cancel_capacity(&mut capacity, id, 2);
         }
@@ -2046,6 +2420,206 @@ mod tests {
         // SAFETY: the vtable never dereferences the null data pointer. Clone
         // panics deliberately, and wake and drop are no-ops.
         unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &PANIC_CLONE_VTABLE)) }
+    }
+
+    /// RawWaker state that orphans one waiter from its drop callback.
+    struct ReentrantOrphan {
+        handle: Handle,
+        waiter: Cell<Option<WaiterId>>,
+    }
+
+    unsafe fn clone_reentrant_orphan(data: *const ()) -> RawWaker {
+        RawWaker::new(data, &REENTRANT_ORPHAN_VTABLE)
+    }
+
+    unsafe fn wake_reentrant_orphan(data: *const ()) {
+        // SAFETY: every waker built by `reentrant_orphan_waker` points to a
+        // ReentrantOrphan that outlives all of its raw waker clones.
+        unsafe { drop_reentrant_orphan(data) };
+    }
+
+    unsafe fn wake_by_ref_reentrant_orphan(_: *const ()) {}
+
+    unsafe fn drop_reentrant_orphan(data: *const ()) {
+        // SAFETY: every waker built by `reentrant_orphan_waker` points to a
+        // ReentrantOrphan that outlives all of its raw waker clones.
+        let state = unsafe { &*data.cast::<ReentrantOrphan>() };
+        if let Some(waiter_id) = state.waiter.take() {
+            orphan_waiter(&state.handle, waiter_id);
+        }
+    }
+
+    static REENTRANT_ORPHAN_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        clone_reentrant_orphan,
+        wake_reentrant_orphan,
+        wake_by_ref_reentrant_orphan,
+        drop_reentrant_orphan,
+    );
+
+    fn reentrant_orphan_waker(state: &ReentrantOrphan) -> Waker {
+        // SAFETY: the test keeps `state` alive until the original waker and
+        // every clone stored in driver state have been dropped.
+        unsafe {
+            Waker::from_raw(RawWaker::new(
+                std::ptr::from_ref(state).cast(),
+                &REENTRANT_ORPHAN_VTABLE,
+            ))
+        }
+    }
+
+    #[test]
+    fn test_op_waker_reentrant_drop_runs_after_ops_borrow() {
+        let handle = Handle::new(2, RingWaker::new().unwrap());
+        let target = handle.with(|ops| {
+            ops.waiters
+                .insert(recv_request(), futures::task::noop_waker())
+        });
+        let state = ReentrantOrphan {
+            handle: handle.clone(),
+            waiter: Cell::new(Some(target)),
+        };
+        let reentrant = reentrant_orphan_waker(&state);
+        let mut reentrant_cx = Context::from_waker(&reentrant);
+        let mut op = Op::new(&handle, recv_request());
+        assert!(Pin::new(&mut op).poll(&mut reentrant_cx).is_pending());
+
+        let noop = futures::task::noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Pin::new(&mut op).poll(&mut noop_cx)
+        }));
+        assert!(matches!(result, Ok(Poll::Pending)));
+        assert!(state.waiter.get().is_none());
+        handle.with(|ops| {
+            assert!(matches!(
+                ops.waiters.stage(target),
+                StageOutcome::Complete { freed: true, .. }
+            ));
+        });
+
+        let op_id = match op.state {
+            OpState::Waiting(id) => id,
+            _ => panic!("op did not retain its waiter"),
+        };
+        drop(op);
+        handle.with(|ops| {
+            assert!(matches!(
+                ops.waiters.stage(op_id),
+                StageOutcome::Complete { freed: true, .. }
+            ));
+            assert!(ops.waiters.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
+        let handle = Handle::new(2, RingWaker::new().unwrap());
+        let target = handle.with(|ops| {
+            ops.waiters
+                .insert(recv_request(), futures::task::noop_waker())
+        });
+        let state = ReentrantOrphan {
+            handle: handle.clone(),
+            waiter: Cell::new(Some(target)),
+        };
+        let reentrant = reentrant_orphan_waker(&state);
+        let (completion_id, ticket_waiter) = handle.with(|ops| {
+            let mut incoming = Some(reentrant.clone());
+            let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
+            completions.insert_pending_deferred(&mut incoming, |completion_id| {
+                waiters.insert_ticket(recv_request(), completion_id)
+            })
+        });
+
+        let noop = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&noop);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poll_ticket_completion(&handle, completion_id, &mut cx)
+        }));
+        assert!(matches!(result, Ok(Poll::Pending)));
+        assert!(state.waiter.get().is_none());
+        handle.with(|ops| {
+            assert!(matches!(
+                ops.waiters.stage(target),
+                StageOutcome::Complete { freed: true, .. }
+            ));
+        });
+
+        drop(Ticket {
+            handle: handle.clone(),
+            state: TicketState::Waiting(completion_id),
+        });
+        handle.with(|ops| {
+            assert!(matches!(
+                ops.waiters.stage(ticket_waiter),
+                StageOutcome::Complete { freed: true, .. }
+            ));
+            assert!(ops.waiters.is_empty());
+            assert!(ops.completions.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_pending_op_clone_panic_preserves_observer() {
+        let handle = Handle::new(1, RingWaker::new().unwrap());
+        let noop = futures::task::noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+        let mut op = Op::new(&handle, recv_request());
+        assert!(Pin::new(&mut op).poll(&mut noop_cx).is_pending());
+
+        let panicking = panic_clone_waker();
+        let mut panic_cx = Context::from_waker(&panicking);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Pin::new(&mut op).poll(&mut panic_cx)
+        }));
+        assert!(result.is_err());
+        assert!(Pin::new(&mut op).poll(&mut noop_cx).is_pending());
+
+        let waiter_id = match op.state {
+            OpState::Waiting(id) => id,
+            _ => panic!("op lost its waiter after clone panic"),
+        };
+        drop(op);
+        handle.with(|ops| {
+            assert!(matches!(
+                ops.waiters.stage(waiter_id),
+                StageOutcome::Complete { freed: true, .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn test_pending_ticket_clone_panic_preserves_observer() {
+        let handle = Handle::new(1, RingWaker::new().unwrap());
+        let noop = futures::task::noop_waker();
+        let (completion_id, waiter_id) = handle.with(|ops| {
+            let mut incoming = Some(noop.clone());
+            let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
+            completions.insert_pending_deferred(&mut incoming, |completion_id| {
+                waiters.insert_ticket(recv_request(), completion_id)
+            })
+        });
+
+        let panicking = panic_clone_waker();
+        let mut panic_cx = Context::from_waker(&panicking);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poll_ticket_completion(&handle, completion_id, &mut panic_cx)
+        }));
+        assert!(result.is_err());
+        let mut noop_cx = Context::from_waker(&noop);
+        assert!(poll_ticket_completion(&handle, completion_id, &mut noop_cx).is_pending());
+
+        drop(Ticket {
+            handle: handle.clone(),
+            state: TicketState::Waiting(completion_id),
+        });
+        handle.with(|ops| {
+            assert!(matches!(
+                ops.waiters.stage(waiter_id),
+                StageOutcome::Complete { freed: true, .. }
+            ));
+            assert!(ops.completions.is_empty());
+        });
     }
 
     #[test]
@@ -2189,7 +2763,7 @@ mod tests {
             0,
             1,
             false,
-            Instant::now(),
+            Instant::now() + Duration::from_secs(3600),
         ));
         let (left, _right) = UnixStream::pair().unwrap();
         let file = Arc::new(File::from(OwnedFd::from(left)));
@@ -2243,7 +2817,7 @@ mod tests {
     }
 
     #[test]
-    fn test_granted_drop_panic_still_hands_permit_to_fifo_head() {
+    fn test_queued_drop_panic_does_not_block_next_fifo_wake() {
         let mut capacity = CapacityWaiters::new();
         let first_waker = panicking_drop_waker();
         let second = Arc::new(FlagWaker(AtomicBool::new(false)));
@@ -2251,23 +2825,35 @@ mod tests {
         let mut first_registration = None;
         let mut second_registration = None;
         let mut actions = Vec::new();
+        let mut first_incoming = Some(first_waker.clone());
         assert_eq!(
             capacity
-                .poll(&mut first_registration, 0, &first_waker, &mut actions)
+                .poll(
+                    &mut first_registration,
+                    0,
+                    None,
+                    &mut first_incoming,
+                    &mut actions,
+                )
                 .kind(),
             CapacityAdmissionKind::Queued
         );
+        let mut second_incoming = Some(second_waker.clone());
         assert_eq!(
             capacity
-                .poll(&mut second_registration, 0, &second_waker, &mut actions)
+                .poll(
+                    &mut second_registration,
+                    0,
+                    None,
+                    &mut second_incoming,
+                    &mut actions,
+                )
                 .kind(),
             CapacityAdmissionKind::Queued
         );
         std::mem::forget(first_waker);
-        capacity.reconcile(1, &mut actions);
-        wake_batch(actions.drain(..));
-
         capacity.cancel(first_registration.unwrap(), 1, &mut actions);
+        capacity.reconcile(1, &mut actions);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             wake_batch(actions);
         }));
@@ -2356,24 +2942,4 @@ mod tests {
         assert!(flag.0.load(Ordering::Acquire));
     }
 
-    /// State panics outrank callback panics after every callback has run.
-    #[test]
-    fn test_wake_batch_state_panic_outranks_callbacks_and_runs_them_all() {
-        let flag = Arc::new(FlagWaker(AtomicBool::new(false)));
-        let actions = [
-            WakerAction::Wake(arc_waker(Arc::new(PayloadPanicWaker))),
-            WakerAction::Panic(Box::new("first state panic")),
-            WakerAction::Wake(arc_waker(Arc::clone(&flag))),
-            WakerAction::Panic(Box::new("second state panic")),
-        ];
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wake_batch(actions);
-        }));
-        let payload = result.expect_err("state panic was not resumed");
-        assert_eq!(
-            payload.downcast_ref::<&'static str>(),
-            Some(&"first state panic")
-        );
-        assert!(flag.0.load(Ordering::Acquire));
-    }
 }
