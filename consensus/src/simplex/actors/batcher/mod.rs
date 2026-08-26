@@ -5284,6 +5284,8 @@ mod tests {
         leader_certificate_marks_active(secp256r1::fixture);
     }
 
+    /// Verifies how the configured skip policy handles a buffered leader nullify
+    /// when its view becomes current.
     fn leader_nullify_on_view_entry<S, F>(mut fixture: F, skip: SkipPolicy)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -5377,6 +5379,8 @@ mod tests {
                 );
             context.sleep(Duration::from_millis(50)).await;
 
+            // Enter the buffered view with the same leader. Enabled skipping reports the
+            // leader nullify to the voter immediately; disabled skipping reports nothing.
             batcher_mailbox.update(Span::none(), buffered_view, leader_idx, View::zero(), None);
             if matches!(skip, SkipPolicy::Enabled { .. }) {
                 expect_timeout(
