@@ -678,12 +678,13 @@ where
 {
     let count = snapshot.partition_count();
 
-    // Split the concurrency between decode tasks and insert workers. With decode tasks this task
-    // only forwards batches and is mostly idle, so like the init overlap task it does not count
-    // against the concurrency. At a concurrency of two it decodes inline (chunked decode pays
-    // redundant reads a lone decoder cannot hide) and counts. Inserts cost more CPU than decoding,
-    // so an odd count gives the extra thread to the workers.
+    // Split the `init_concurrency` budget between decode tasks and insert workers. When there is at
+    // least one decode task, this task only forwards batches and is mostly idle, so it does not
+    // count against the concurrency budget. At a concurrency budget of two, this task counts
+    // against the budget because it performs decoding and forwarding.
     let concurrency = init_concurrency.get();
+
+    // Inserts cost more CPU than decoding, so an odd count gives the extra thread to the workers.
     let decoders = if concurrency <= 2 { 0 } else { concurrency / 2 };
     let workers = if decoders == 0 {
         concurrency.saturating_sub(1).min(count)
@@ -757,8 +758,8 @@ where
     // surfaces that worker's error, rather than panicking on the send.
     let mut pending = VecDeque::new();
     let routing_result: Result<RoutingOutcome, Error<F>> = async {
-        // With no decode tasks, decode and route on this task over one continuous replay to
-        // avoid per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
+        // With no decode tasks, decode and route on this task over one continuous replay to avoid
+        // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
         if decoders == 0 {
             let stream = log
                 .replay(floor, init_buffer, ReadOptions::default())
@@ -852,9 +853,9 @@ where
     let routing = routing_result?;
     let joined = joined?;
 
-    // Routing stops on a closed worker channel so the join above can surface that worker's
-    // failure. Every clean join with cut-short routing therefore dropped routed operations;
-    // fail rather than install a snapshot missing them.
+    // Routing stops on a closed worker channel so the join above can surface that worker's failure.
+    // Every clean join with cut-short routing therefore dropped routed operations; fail rather than
+    // install a snapshot missing them.
     if matches!(routing, RoutingOutcome::CutShort) {
         return Err(Error::DataCorrupted(
             "snapshot routing stopped without a worker failure",
