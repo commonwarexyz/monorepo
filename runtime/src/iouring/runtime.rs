@@ -1130,11 +1130,6 @@ impl Context {
         self.executor.upgrade().expect("executor already dropped")
     }
 
-    /// Access the [Metrics] of the runtime.
-    fn metrics(&self) -> Arc<Metrics> {
-        self.executor().shared.metrics.clone()
-    }
-
     /// Run `f` as the root task of a worker on its own thread.
     ///
     /// The handle is assembled from parts on the caller: the wrapper that
@@ -1313,7 +1308,8 @@ impl crate::Spawner for Context {
         };
 
         // Get metrics
-        let (_, metric) = spawn_metrics!(self);
+        let label = Label::task(self.name.clone(), self.execution);
+        let (_, metric) = spawn_metrics!(label, @record executor.shared.metrics.as_ref());
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);

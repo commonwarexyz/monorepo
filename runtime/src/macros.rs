@@ -29,9 +29,13 @@ macro_rules! spawn_metrics {
 
     // Increment the number of spawned tasks and return a metrics tracker that
     // keeps the running tasks gauge accurate
-    ($label:expr, @make $ctx:ident) => {{
+    ($label:expr, @make $ctx:ident) => {
+        $crate::spawn_metrics!($label, @record $ctx.metrics())
+    };
+
+    ($label:expr, @record $metrics:expr) => {{
         let label = $label;
-        let metrics = $ctx.metrics();
+        let metrics = $metrics;
         metrics.tasks_spawned.get_or_create(&label).inc();
         let metric =
             $crate::utils::MetricHandle::new(metrics.tasks_running.get_or_create(&label).clone());
