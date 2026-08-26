@@ -122,6 +122,7 @@ fn make_config(
     }
 }
 
+/// Committed key-value state tracked across batch boundaries.
 type State = HashMap<RawKey, RawValue>;
 
 /// Merge pending changes into committed after a successful commit.
@@ -317,6 +318,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             .await
             .expect("recovery must succeed");
 
+            // Read every observed key in one batch so the result must match one atomic snapshot.
             let keys = known_keys.iter().copied().map(Key::new).collect::<Vec<_>>();
             let key_refs = keys.iter().collect::<Vec<_>>();
             let recovered = db

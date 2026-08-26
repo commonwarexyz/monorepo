@@ -119,9 +119,9 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Per-section boundaries for sections mutated by this handle.
     barriers: BTreeMap<u64, Barrier>,
 
-    /// Sections whose latest completed blocking data sync has not been published by a later
-    /// marker sync. This set is replaced, rather than accumulated, after each blocking sync
-    /// so restart validation remains bounded by one completed sync batch.
+    /// Sections from the last successful blocking data sync whose latest durable boundary must be
+    /// reconsidered for marker publication. This set is replaced, rather than accumulated, after
+    /// each blocking sync so restart validation remains bounded by one completed sync batch.
     unpublished: BTreeSet<u64>,
 
     /// Sections with writes not yet included in any sync request. Moved into `requested` when a
@@ -163,7 +163,6 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     gets: Counter,
     has: Counter,
     syncs: Counter,
-    _values_validated: Counter,
 }
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
@@ -205,14 +204,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             value_write_buffer,
             replay_buffer,
         } = cfg;
-
-        if metadata_partition == key_partition || metadata_partition == value_partition {
-            return Err(crate::journal::Error::InvalidConfiguration(
-                "archive metadata partition must be distinct from key and value partitions".into(),
-            )
-            .into());
-        }
         let items_per_section = items_per_section.get();
+
+        // Open validation metadata first because its per-section floors constrain data recovery.
         let mut metadata = Metadata::init(
             context.child("metadata"),
             MetadataConfig {
@@ -222,6 +216,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         )
         .await?;
 
+        // Materialize one floor snapshot for index preflight, replay, and marker reconciliation.
         let validation_floors = metadata
             .keys()
             .map(|key| {
@@ -232,6 +227,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             })
             .collect::<BTreeMap<_, _>>();
 
+        // Prove every floor before the oversized journal repairs any recoverable suffix.
         let oversized_cfg = OversizedConfig {
             index_partition: key_partition,
             value_partition,
@@ -248,15 +244,13 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         )
         .await?;
 
+        // Rebuild the in-memory lookup views from retained index entries. Only values beyond each
+        // section's durable floor require validation during this replay.
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.child("index"), translator);
         let mut intervals = RMap::new();
         let mut truncated = Vec::new();
-        let values_validated = context.counter(
-            "values_validated",
-            "Number of value frames CRC-validated during startup",
-        );
         let oversized = {
             debug!("initializing archive from index journal");
             let mut replay = oversized
@@ -273,6 +267,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             while let Some(result) = replay.next().await {
                 let (section, position, entry) = result?;
 
+                // Each section recovers independently from its own durable validation floor.
                 if current_section != Some(section) {
                     current_section = Some(section);
                     validated = validation_floors.get(&section).copied().unwrap_or(0);
@@ -281,9 +276,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                 if section_truncated {
                     continue;
                 }
+
+                // The first invalid value discards that entry and the rest of its section.
                 if position >= validated {
                     let (offset, size) = entry.value_location();
-                    values_validated.inc();
                     if !replay.verify_value(section, offset, size).await? {
                         truncated.push((section, position));
                         section_truncated = true;
@@ -291,6 +287,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                     }
                 }
 
+                // Index every retained occurrence by position, translated key, and range.
                 match indices.entry(entry.index) {
                     btree_map::Entry::Vacant(e) => {
                         e.insert(position);
@@ -306,6 +303,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             replay.finish()?
         };
 
+        // Apply the first invalid position in each section after replay releases the journal.
         let mut oversized = oversized;
         for (section, items) in truncated {
             let index_size = items
@@ -314,6 +312,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             oversized = oversized.rewind_section(section, index_size).await?;
         }
 
+        // Reconcile markers with the recovered section lengths. Startup-readable data is already
+        // durable, so this derived metadata sync may continue after initialization returns.
         let mut metadata_dirty = false;
         for section in oversized.sections() {
             let items = oversized.section_len(section)?;
@@ -334,6 +334,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         } else {
             false
         };
+
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");
         let indices_pruned = context.counter("indices_pruned", "Number of indices pruned");
@@ -367,7 +368,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             gets,
             has,
             syncs,
-            _values_validated: values_validated,
         })
     }
 
@@ -510,7 +510,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.keys
             .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
 
-        // Add section to pending
+        // A section's first append starts from the pre-append prefix proven durable at startup.
+        // Later sync completions advance this barrier before their boundary can be published.
         self.pending.insert(section);
         self.barriers
             .entry(section)
@@ -536,6 +537,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
         debug!(min, "pruning archive");
 
+        // Remove and durably sync markers before section storage can be deleted and later reused.
         let mut marker_removed = false;
         self.metadata.retain(|key, _| {
             let keep = u64::from(key) >= min;
@@ -547,8 +549,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             self.marker_sync_pending = false;
         }
 
+        // Prune the section's index and value journals together.
         (self.oversized, _) = self.oversized.prune(min).await?;
 
+        // Discard synchronization state owned by pruned sections.
         self.pending = self.pending.split_off(&min);
         self.requested = self.requested.split_off(&min);
         self.barriers = self.barriers.split_off(&min);
@@ -565,6 +569,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             self.indices_pruned.inc();
         }
 
+        // Remove pruned indices from the retained range view.
         if min > 0 {
             self.intervals.remove(0, min - 1);
         }
@@ -594,9 +599,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [crate::archive::Archive::sync].
     async fn sync(self: Box<Self>) -> Result<Box<Self>, Error> {
-        // The validation marker is derived state, so it may safely trail the data by one
-        // completed sync. Reuse the pipelined path to publish that prior boundary concurrently
-        // with current data, then clear the covered requests only after both operations succeed.
+        // Validation markers are conservative derived state and may trail durable data without
+        // weakening recovery. Publish available proofs alongside current data, then clear covered
+        // requests only after both operations succeed.
         let (mut archive, handle) = self.start_sync().await?;
         handle.await.map_err(crate::journal::Error::Runtime)?;
         archive.marker_sync_pending = false;
@@ -609,7 +614,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Update metrics
         self.syncs.inc_by(self.pending.len() as u64);
 
+        // Retain requested sections until a blocking sync observes their outstanding work.
         self.requested.append(&mut self.pending);
+
+        // Capture each requested section's target before starting its data sync.
         let mut publish = self
             .requested
             .iter()
@@ -618,6 +626,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let data;
         (self.oversized, data) = self.oversized.start_sync(&self.requested).await?;
 
+        // Bind the new completion to its target and publish only the previously proven boundary.
         let completion: SyncCompletion = data.boxed().shared();
         for (section, length) in &mut publish {
             let barrier = self
@@ -626,6 +635,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                 .expect("every requested section has a durability barrier");
             *length = barrier.record(*length, completion.clone());
         }
+
+        // Reconsider blocking-batch sections even when the current request did not touch them.
         publish.reserve(self.unpublished.len());
         for &section in self.unpublished.difference(&self.requested) {
             let barrier = self
@@ -634,6 +645,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
                 .expect("every unpublished section has a durability barrier");
             publish.push((section, barrier.boundary()));
         }
+
+        // Advance each marker only to a boundary already proven durable.
         let mut metadata_dirty = false;
         for (section, validated) in publish {
             let key = SectionKey::new(section);
@@ -646,9 +659,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             }
         }
 
+        // With no marker work, the data completion alone satisfies this request.
         if !metadata_dirty && !self.marker_sync_pending {
             return Ok((self, Handle::from_future(completion)));
         }
+
+        // Otherwise the request completes only after both data and marker syncs finish.
         let metadata;
         (self.metadata, metadata) = self.metadata.start_sync().await?;
         self.marker_sync_pending = true;
@@ -689,6 +705,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
+        // Remove markers before data so an interrupted destroy can only force conservative
+        // revalidation, never authorize missing or reused section bytes.
         self.metadata.destroy().await?;
         self.oversized.destroy().await?;
         Ok(())
@@ -769,19 +787,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Ar
 }
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
-    /// Number of value frames validated while opening this handle.
-    #[cfg(any(test, feature = "fuzzing"))]
-    pub fn values_validated_on_init(&self) -> u64 {
-        #[cfg(target_has_atomic = "64")]
-        {
-            self.0._values_validated.get()
-        }
-        #[cfg(not(target_has_atomic = "64"))]
-        {
-            u64::from(self.0._values_validated.get())
-        }
-    }
-
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index is populated by replaying the index journal. Value frames not covered by

@@ -356,11 +356,14 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Ok(())
     }
 
+    /// Verify checkpoint-covered value extents against preflighted index boundaries.
     fn validate_restore_values(
         values: &Glob<E, V>,
         preflight: &RecoveryPreflight<E, I>,
         section: u64,
     ) -> Result<(), Error> {
+        // Every earlier section is immutable under the checkpoint, so its terminal index entry
+        // must end exactly at the retained value length.
         for (&candidate, entry) in preflight.boundaries().range(..section) {
             let required = match entry {
                 None => 0,
@@ -381,6 +384,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             }
         }
 
+        // A value-only section below the checkpoint proves that covered index data was lost.
         if let Some(orphan) = values.sections().find(|candidate| {
             *candidate < section && !preflight.boundaries().contains_key(candidate)
         }) {
@@ -389,6 +393,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             )));
         }
 
+        // The current section may retain a suffix, but it must cover its committed terminal value.
         let entry = &preflight.boundaries()[&section];
         if let Some(entry) = entry {
             let (offset, size) = entry.value_location();

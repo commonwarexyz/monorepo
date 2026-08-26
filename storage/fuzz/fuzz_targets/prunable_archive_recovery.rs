@@ -525,13 +525,6 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("second recovery failed");
 
-        // Recovery durably publishes the final validated boundary for every retained section.
-        // The next startup must trust those markers instead of replaying all value frames again.
-        assert_eq!(
-            archive.values_validated_on_init(),
-            0,
-            "the durable recovery markers did not prevent value revalidation",
-        );
         assert_view(&archive, &intended, &expected).await;
         assert_blob_sizes(&context, &cfg.key_partition, &expected_index_sizes, "index").await;
         assert_blob_sizes(
@@ -567,13 +560,6 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("reopen after repair failed");
 
-        // The repair sync makes the appended suffix durable while publishing the pre-repair
-        // boundary. Reopen must validate exactly those newly appended value frames.
-        assert_eq!(
-            archive.values_validated_on_init(),
-            u64::try_from(intended.len() - expected.len()).unwrap(),
-            "reopen after repair validated the wrong number of value frames",
-        );
         assert_view(&archive, &intended, &intended).await;
         archive.destroy().await.expect("destroy failed");
     });

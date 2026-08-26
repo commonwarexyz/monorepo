@@ -623,7 +623,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             .manager
             .get_mut(section)
             .expect("replayed section is present")
-            .recoverable_prefix_len_with_options(self.read_options)
+            .recoverable_prefix_len(self.buffer, self.read_options)
             .await
         {
             Ok(recoverable) => recoverable,

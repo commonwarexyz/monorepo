@@ -114,9 +114,6 @@ impl Storage {
     }
 
     /// Install durable raw contents without validating the blob's container header.
-    ///
-    /// This test-only hook retires any live generation so a later open observes only the supplied
-    /// crash image.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn set_raw_blob(&self, partition: &str, name: &[u8], content: Vec<u8>) {
         let key = (partition.to_string(), name.to_vec());

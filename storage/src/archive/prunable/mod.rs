@@ -115,10 +115,6 @@
 //! uses a page cache for caching, so hot entries are served from memory. Values are read directly
 //! from disk without caching to avoid polluting the page cache with large values.
 //!
-//! On startup, [Archive] CRC-validates entries after each section's durable validation boundary.
-//! If a value fails validation, that section is truncated at the corresponding index entry. Later
-//! entries in other sections are recovered independently.
-//!
 //! # Compression
 //!
 //! [Archive] supports compressing data before storing it on disk. This can be enabled by setting
@@ -188,10 +184,6 @@ pub struct Config<T: Translator, C> {
     pub translator: T,
 
     /// The partition to use for durable value-validation boundaries.
-    ///
-    /// This partition must be dedicated to one archive and distinct from `key_partition` and
-    /// `value_partition`. Existing archives can use a new empty partition. The first initialization
-    /// validates retained values and populates it.
     pub metadata_partition: String,
 
     /// The partition to use for the key journal (stores index+key metadata).
@@ -964,7 +956,6 @@ mod tests {
                     Archive::<_, _, FixedBytes<64>, i32>::init(context.child(name), cfg.clone())
                         .await
                         .unwrap();
-                assert_eq!(archive.values_validated_on_init(), bad_position + 1);
                 assert_eq!(
                     archive.ranges().collect::<Vec<_>>(),
                     if retained == 0 {
@@ -985,7 +976,6 @@ mod tests {
                 let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child(name), cfg)
                     .await
                     .unwrap();
-                assert_eq!(archive.values_validated_on_init(), 0);
                 assert_eq!(archive.last_index(), retained.checked_sub(1));
                 archive.destroy().await.unwrap();
             }
@@ -1111,12 +1101,6 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 2);
-            assert!(has_metric_value(
-                &context.encode(),
-                "first_open_values_validated_total",
-                2
-            ));
             assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 1)]);
             drop(archive);
 
@@ -1126,7 +1110,6 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 0);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
 
@@ -1138,11 +1121,37 @@ mod tests {
                 Archive::<_, _, FixedBytes<64>, i32>::init(context.child("third_open"), cfg)
                     .await
                     .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 2)]);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
             assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(30));
+        });
+    }
+
+    #[test_traced]
+    fn test_validation_marker_skips_covered_interior_values() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_config(&context, "marker-covered-interior", NZU64!(4));
+
+            // Publish a boundary covering both values. The terminal value remains the floor's
+            // cross-journal proof; the earlier value must not be revisited during startup.
+            let archive = Archive::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            let archive = archive.put(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.put(1, test_key("one"), 20).await.unwrap();
+            let archive = archive.sync().await.unwrap();
+            let archive = archive.sync().await.unwrap();
+            drop(archive);
+
+            // Damage only the covered interior frame. Initialization succeeds because the marker
+            // skips it, while a direct read still exposes its invalid checksum.
+            corrupt_value_frame(&context, &cfg.value_partition, 0, 0).await;
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert!(archive.get(Identifier::Index(0)).await.is_err());
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
         });
     }
 
@@ -1447,7 +1456,6 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(pending.calls(), 1);
-            assert_eq!(archive.values_validated_on_init(), 0);
             assert_eq!(archive.last_index(), Some(0));
             assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 0)]);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
@@ -1511,15 +1519,15 @@ mod tests {
 
             pending.unblock();
             let archive = task.await.unwrap().unwrap().sync().await.unwrap();
-            assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             drop(archive);
 
-            let archive =
-                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("marker_reopen"), cfg)
-                    .await
-                    .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 0);
+            Archive::<_, _, FixedBytes<64>, i32>::init(context.child("marker_reopen"), cfg)
+                .await
+                .unwrap()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1548,27 +1556,6 @@ mod tests {
 
             fail_pending_syncs(&pending);
             assert!(matches!(archive.sync().await, Err(Error::Metadata(_))));
-        });
-    }
-
-    #[test_traced]
-    fn test_validation_marker_partition_must_be_dedicated() {
-        deterministic::Runner::default().start(|context| async move {
-            for (name, collides_with_key) in [("key_collision", true), ("value_collision", false)] {
-                let mut cfg = test_config(&context, name, NZU64!(4));
-                cfg.metadata_partition = if collides_with_key {
-                    cfg.key_partition.clone()
-                } else {
-                    cfg.value_partition.clone()
-                };
-                let err = Archive::<_, _, FixedBytes<64>, i32>::init(context.child(name), cfg)
-                    .await
-                    .unwrap_err();
-                assert!(matches!(
-                    err,
-                    Error::Journal(JournalError::InvalidConfiguration(_))
-                ));
-            }
         });
     }
 
@@ -1614,15 +1601,15 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 1)]);
             drop(archive);
 
-            let archive =
-                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
-                    .await
-                    .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 0);
+            Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
+                .await
+                .unwrap()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1703,18 +1690,16 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
             drop(archive);
 
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                delayed.inner.child("second_reopen"),
-                cfg,
-            )
-            .await
-            .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 0);
+            Archive::<_, _, FixedBytes<64>, i32>::init(delayed.inner.child("second_reopen"), cfg)
+                .await
+                .unwrap()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1741,15 +1726,15 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             drop(archive);
 
-            let archive =
-                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
-                    .await
-                    .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 0);
+            Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
+                .await
+                .unwrap()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1785,25 +1770,25 @@ mod tests {
             // call 2: data section 1, marker section 0
             // call 3: data section 2, marker section 1
             //
-            // The marker may trail the data once, but changing sections must not strand every
-            // earlier proof and turn startup validation into an unbounded full-archive scan.
+            // Markers may trail durable data, but changing sections must not strand every earlier
+            // proof and turn startup validation into an unbounded full-archive scan.
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
                 context.child("first_reopen"),
                 cfg.clone(),
             )
             .await
             .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
             assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(30));
             drop(archive);
 
-            let archive =
-                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
-                    .await
-                    .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 0);
+            Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
+                .await
+                .unwrap()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1842,7 +1827,6 @@ mod tests {
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 0);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
         });
     }
@@ -1887,7 +1871,6 @@ mod tests {
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();
-            assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(20));
         });
     }

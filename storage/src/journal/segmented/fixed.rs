@@ -62,16 +62,22 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
+/// Recovery mutations authorized by a completed non-mutating preflight.
 enum PreflightMode<B> {
+    /// Reuse the contiguous lengths already proven for validation floors.
     Floors(BTreeMap<u64, u64>),
+    /// Restore one checkpoint section and discard every later section.
     Restore {
         current: Option<(B, u64)>,
         discard: Vec<Vec<u8>>,
     },
 }
 
+/// Index boundaries and recovery work proven safe to apply together.
 struct Validated<A, B> {
+    /// Terminal entry at each validated logical boundary.
     boundaries: BTreeMap<u64, Option<A>>,
+    /// Mutations permitted after sibling storage validates these boundaries.
     mode: PreflightMode<B>,
 }
 
@@ -83,10 +89,12 @@ pub(crate) struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
+    /// Terminal entries captured at each validated boundary.
     pub(crate) const fn boundaries(&self) -> &BTreeMap<u64, Option<A>> {
         &self.validated.boundaries
     }
 
+    /// Apply the preflighted recovery work and open the journal writer.
     pub(crate) async fn finish(self) -> Result<Journal<E, A>, Error> {
         let Validated { mode, .. } = self.validated;
         Ok(Journal(Box::new(
@@ -100,6 +108,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
+    /// Logical page size shared by all index blobs in this journal.
     fn page_size(cfg: &Config) -> NonZeroU16 {
         NonZeroU16::new(
             cfg.page_cache
@@ -110,12 +119,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         .expect("page cache size must be non-zero")
     }
 
+    /// Return canonical section names in numeric order without opening writers.
     async fn stored(context: &E, cfg: &Config) -> Result<BTreeMap<u64, Vec<u8>>, Error> {
+        // A missing partition represents an empty journal; every other scan error is fatal.
         let names = match context.scan(&cfg.partition).await {
             Ok(names) => names,
             Err(RError::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
+
+        // Blob names are the big-endian section number and reject every other representation.
         let mut stored = BTreeMap::new();
         for name in names {
             let hex_name = hex(&name);
@@ -128,6 +141,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         Ok(stored)
     }
 
+    /// Prove each validation floor and capture its terminal entry without mutating storage.
     async fn preflight_floors(
         context: &E,
         cfg: &Config,
@@ -139,6 +153,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let mut boundaries = BTreeMap::new();
 
         for (&section, &items) in minimum_items {
+            // Every advertised floor must name a retained, representable byte prefix.
             let Some(name) = stored.get(&section) else {
                 return Err(Error::Corruption(format!(
                     "section {section} has a validation floor but no blob"
@@ -154,6 +169,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 continue;
             }
 
+            // One forward scan proves the full prefix while capturing its terminal entry.
             let entry_offset = required - Self::CHUNK_SIZE_U64;
             let mut entry = vec![0u8; Self::CHUNK_SIZE];
             let (blob, physical_size) = context.open(&cfg.partition, name).await?;
@@ -162,6 +178,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 physical_size,
                 page_size,
                 Some((entry_offset, &mut entry)),
+                cfg.write_buffer,
                 ReadOptions::default(),
             )
             .await?;
@@ -170,6 +187,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                     "section {section} does not retain its {required}-byte validation floor"
                 )));
             }
+
+            // Bind the reusable scan length and terminal entry to this section's floor.
             let entry = A::decode(entry.as_slice()).map_err(Error::Codec)?;
             recoverable_lengths.insert(section, recoverable);
             boundaries.insert(section, Some(entry));
@@ -181,18 +200,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         })
     }
 
+    /// Prove every checkpoint-covered index boundary without mutating damaged storage.
     async fn preflight_restore(
         context: &E,
         cfg: &Config,
         section: u64,
         size: u64,
     ) -> Result<Validated<A, E::Blob>, Error> {
+        // The checkpoint can only identify a boundary between fixed-size items.
         if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::Corruption(format!(
                 "section {section} checkpoint size {size} is not item-aligned"
             )));
         }
 
+        // A non-empty current checkpoint requires its section blob to exist.
         let stored = Self::stored(context, cfg).await?;
         if size > 0 && !stored.contains_key(&section) {
             return Err(Error::Corruption(format!(
@@ -206,6 +228,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let mut current = None;
 
         for (&candidate, name) in stored.range(..=section) {
+            // Earlier sections must be wholly valid; the current section need only cover the
+            // checkpointed physical prefix.
             let (blob, physical_size) = context.open(&cfg.partition, name).await?;
             let is_current = candidate == section;
             if is_current && physical_size < current_physical {
@@ -233,6 +257,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 scan_physical,
                 page_size,
                 capture,
+                cfg.write_buffer,
                 ReadOptions::default(),
             )
             .await?;
@@ -248,6 +273,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 )));
             }
 
+            // Capture the entry that owns the terminal value boundary for sibling validation.
             let boundary_size = if is_current { size } else { recoverable };
             let entry = if boundary_size == 0 {
                 None
@@ -268,12 +294,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 Some(A::decode(captured.as_slice()).map_err(Error::Codec)?)
             };
             boundaries.insert(candidate, entry);
+
+            // Retain the already-open current blob only when recovery must truncate its suffix.
             if is_current && physical_size > current_physical {
                 current = Some((blob, current_physical));
             }
         }
         boundaries.entry(section).or_insert(None);
 
+        // Later sections are outside the checkpoint and are removed newest-first during finish.
         let discard = stored
             .iter()
             .rev()
@@ -292,6 +321,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         cfg: Config,
         mode: Option<PreflightMode<E::Blob>>,
     ) -> Result<Self, Error> {
+        let recovery_buffer = cfg.write_buffer;
         let (prevalidated, restore) = match mode {
             None => (BTreeMap::new(), false),
             Some(PreflightMode::Floors(recoverable)) => (recoverable, false),
@@ -335,7 +365,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                     manager
                         .get(section)?
                         .expect("listed section is present")
-                        .recoverable_prefix_len()
+                        .recoverable_prefix_len(recovery_buffer, ReadOptions::default())
                         .await?
                 }
             };
