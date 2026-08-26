@@ -84,8 +84,7 @@ cfg_if::cfg_if! {
         use loom::{
             cell::UnsafeCell,
             sync::{
-                Mutex,
-                MutexGuard,
+                Mutex, MutexGuard,
                 atomic::{AtomicBool, AtomicUsize},
             },
             thread,
@@ -150,7 +149,9 @@ impl Stripe {
     fn lock(&self) -> MutexGuard<'_, Vec<u32>> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "loom")] {
-                self.free.lock().expect("freelist mutex must not be poisoned")
+                self.free
+                    .lock()
+                    .expect("freelist mutex must not be poisoned")
             } else {
                 self.free.lock()
             }

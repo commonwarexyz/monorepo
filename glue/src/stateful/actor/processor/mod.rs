@@ -2906,7 +2906,10 @@ mod tests {
                     result.expect("finalized hook should remain reachable");
                     panic!("finalization reached the application hook before replay completed");
                 },
-                _ = harness.context_cell.as_present().sleep(Duration::from_millis(10)) => {},
+                _ = harness
+                    .context_cell
+                    .as_present()
+                    .sleep(Duration::from_millis(10)) => {},
             }
 
             owner.finish(Ok(()));
@@ -3316,7 +3319,9 @@ mod tests {
                     }),
                 ));
                 select! {
-                    result = &mut first => panic!("first rebuild completed before replay gate: {result:?}"),
+                    result = &mut first => {
+                        panic!("first rebuild completed before replay gate: {result:?}")
+                    },
                     result = first_started => result.expect("first replay should start"),
                 }
 
@@ -3366,10 +3371,18 @@ mod tests {
                         break;
                     }
                     select! {
-                        result = &mut first => panic!("first rebuild completed before cancellation: {result:?}"),
-                        result = &mut second => panic!("second rebuild completed before cancellation: {result:?}"),
-                        result = &mut third => panic!("third rebuild completed before cancellation: {result:?}"),
-                        result = &mut fourth => panic!("fourth rebuild completed before cancellation: {result:?}"),
+                        result = &mut first => {
+                            panic!("first rebuild completed before cancellation: {result:?}")
+                        },
+                        result = &mut second => {
+                            panic!("second rebuild completed before cancellation: {result:?}")
+                        },
+                        result = &mut third => {
+                            panic!("third rebuild completed before cancellation: {result:?}")
+                        },
+                        result = &mut fourth => {
+                            panic!("fourth rebuild completed before cancellation: {result:?}")
+                        },
                         result = &mut duplicate_started => {
                             result.expect("duplicate replay signal should remain available");
                             panic!("overlapping rebuilds executed the same ancestor concurrently");
@@ -3386,9 +3399,15 @@ mod tests {
                 drop(fourth_live);
                 let fourth_result = select! {
                     result = &mut fourth => result,
-                    result = &mut first => panic!("owner completed while cancelling waiter: {result:?}"),
-                    result = &mut second => panic!("live waiter completed while cancelling peer: {result:?}"),
-                    result = &mut third => panic!("live waiter completed while cancelling peer: {result:?}"),
+                    result = &mut first => {
+                        panic!("owner completed while cancelling waiter: {result:?}")
+                    },
+                    result = &mut second => {
+                        panic!("live waiter completed while cancelling peer: {result:?}")
+                    },
+                    result = &mut third => {
+                        panic!("live waiter completed while cancelling peer: {result:?}")
+                    },
                     _ = context.sleep(std::time::Duration::from_secs(1)) => {
                         panic!("cancelled replay waiter did not stop");
                     },
@@ -3411,8 +3430,12 @@ mod tests {
                 drop(first_live);
                 let first_result = select! {
                     result = &mut first => result,
-                    result = &mut second => panic!("waiter completed before owner cancellation: {result:?}"),
-                    result = &mut third => panic!("waiter completed before owner cancellation: {result:?}"),
+                    result = &mut second => {
+                        panic!("waiter completed before owner cancellation: {result:?}")
+                    },
+                    result = &mut third => {
+                        panic!("waiter completed before owner cancellation: {result:?}")
+                    },
                     _ = context.sleep(std::time::Duration::from_secs(1)) => {
                         panic!("cancelled replay owner did not stop");
                     },
@@ -3420,9 +3443,13 @@ mod tests {
                 assert_eq!(first_result, Err(PrepareBatchesError::Cancelled));
                 first_release.closed().await;
                 select! {
-                    result = &mut second => panic!("waiter completed before retry gate: {result:?}"),
+                    result = &mut second => {
+                        panic!("waiter completed before retry gate: {result:?}")
+                    },
                     result = &mut third => panic!("waiter completed before retry gate: {result:?}"),
-                    result = retry_started => result.expect("live waiter should acquire replay ownership"),
+                    result = retry_started => {
+                        result.expect("live waiter should acquire replay ownership")
+                    },
                     result = &mut duplicate_started => {
                         result.expect("duplicate replay signal should remain available");
                         panic!("multiple waiters acquired replay ownership");

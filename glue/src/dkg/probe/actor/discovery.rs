@@ -184,7 +184,10 @@ where
                 if self.pending.is_some() {
                     self.retry_boundary(&mut boundary_sender);
                 } else if self.sample.floor().is_none() {
-                    debug!(reason = "deadline elapsed", "re-soliciting latest finalizations");
+                    debug!(
+                        reason = "deadline elapsed",
+                        "re-soliciting latest finalizations"
+                    );
                     self.request_latest(&mut boundary_sender);
                 }
                 deadline = self.context.current() + self.retry_timeout.get();
