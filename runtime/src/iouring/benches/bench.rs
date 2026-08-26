@@ -1,4 +1,4 @@
-//! Scheduler benchmarks for the io_uring runtime and Tokio's current-thread runtime.
+//! Scheduler benchmarks for io_uring and Commonware's one-worker Tokio runtime.
 //!
 //! The suites cover fixed-total self-wake work, ready task spawn and join,
 //! fixed-total timer cancellation, and timer consumer latency under a
@@ -20,8 +20,9 @@
 //! batch construction are excluded. Dropping the batch includes future
 //! destruction, timer cancellation, tombstone accounting, and compaction.
 //!
-//! Tokio uses a current-thread runtime with I/O and time enabled, an event
-//! interval of 64, and a global queue interval of 31.
+//! Tokio rows use Commonware's Tokio runtime with one worker and a global queue
+//! interval of 31. Both backends therefore include the same public context,
+//! supervision, metrics, task handle, and result-transport abstractions.
 //!
 //! Results are intentionally reported independently. Compare the two backends
 //! from Criterion output rather than enforcing a ratio or threshold here.

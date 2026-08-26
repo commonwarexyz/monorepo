@@ -1,6 +1,6 @@
 //! Spawned timer consumer latency under a persistent self-waking task load.
 
-use super::support::{Backend, ReadyLoad, tokio_runtime};
+use super::support::{Backend, ReadyLoad, tokio_runner};
 use commonware_runtime::{Clock as _, Runner as _, Spawner as _, Supervisor as _, iouring};
 use criterion::Criterion;
 use futures::future::join_all;
@@ -66,30 +66,32 @@ fn measure_iouring(iters: u64) -> Duration {
     })
 }
 
-/// Sum Tokio timer-consumer latencies under persistent ready load.
+/// Sum Commonware Tokio timer-consumer latencies under persistent ready load.
 fn measure_tokio(iters: u64) -> Duration {
-    let runtime = tokio_runtime();
-    runtime.block_on(async move {
+    tokio_runner().start(move |context| async move {
         let stop = Arc::new(AtomicBool::new(false));
         let mut load = Vec::with_capacity(LOAD_WIDTH);
         for _ in 0..LOAD_WIDTH {
-            load.push(tokio::spawn(ReadyLoad::new(Arc::clone(&stop))));
+            load.push(context.child("load").spawn({
+                let stop = Arc::clone(&stop);
+                move |_| ReadyLoad::new(stop)
+            }));
         }
 
         let mut elapsed = Duration::ZERO;
         for _ in 0..iters {
-            let timer = tokio::spawn(async {
+            let timer = context.child("timer").spawn(|context| async move {
                 // Start inside the consumer so queueing before its first poll is setup.
                 let start = Instant::now();
-                tokio::time::sleep(DELAY).await;
+                context.sleep(DELAY).await;
                 start.elapsed()
             });
-            elapsed += timer.await.expect("Tokio timer task failed");
+            elapsed += timer.await.expect("Commonware Tokio timer task failed");
         }
 
         stop.store(true, Ordering::Relaxed);
         for result in join_all(load).await {
-            result.expect("Tokio load task failed");
+            result.expect("Commonware Tokio load task failed");
         }
         elapsed
     })

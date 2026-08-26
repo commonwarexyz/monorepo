@@ -1,6 +1,6 @@
 //! Fixed-total self-wake throughput at narrow and wide task counts.
 
-use super::support::{Backend, SelfWake, tokio_runtime};
+use super::support::{Backend, SelfWake, tokio_runner};
 use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, iouring};
 use criterion::Criterion;
 use futures::future::join_all;
@@ -52,18 +52,21 @@ fn measure_iouring(iters: u64, width: usize, wakes_per_task: usize) -> Duration 
     })
 }
 
-/// Measure Tokio self-wake work inside one `block_on` root.
+/// Measure Commonware Tokio self-wake work inside one runtime root.
 fn measure_tokio(iters: u64, width: usize, wakes_per_task: usize) -> Duration {
-    let runtime = tokio_runtime();
-    runtime.block_on(async move {
+    tokio_runner().start(move |context| async move {
         let start = Instant::now();
         for _ in 0..iters {
             let mut handles = Vec::with_capacity(width);
             for _ in 0..width {
-                handles.push(tokio::spawn(SelfWake::new(wakes_per_task)));
+                handles.push(
+                    context
+                        .child("self_wake")
+                        .spawn(move |_| SelfWake::new(wakes_per_task)),
+                );
             }
             for result in join_all(handles).await {
-                result.expect("Tokio self-wake task failed");
+                result.expect("Commonware Tokio self-wake task failed");
             }
         }
         start.elapsed()

@@ -1,5 +1,6 @@
 //! Shared primitives for scheduler benchmarks.
 
+use commonware_runtime::tokio;
 use std::{
     future::Future,
     pin::Pin,
@@ -15,7 +16,7 @@ use std::{
 pub enum Backend {
     /// Commonware's single-threaded io_uring runtime.
     IoUring,
-    /// Tokio's direct current-thread runtime.
+    /// Commonware's Tokio multi-thread scheduler configured with one worker.
     Tokio,
 }
 
@@ -27,19 +28,18 @@ impl Backend {
     pub const fn name(self) -> &'static str {
         match self {
             Self::IoUring => "iouring",
-            Self::Tokio => "tokio",
+            Self::Tokio => "tokio_multi_thread_1w",
         }
     }
 }
 
-/// Construct the Tokio baseline used by every comparative row.
-pub fn tokio_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .event_interval(64)
-        .global_queue_interval(31)
-        .build()
-        .expect("failed to build Tokio benchmark runtime")
+/// Construct the Commonware Tokio baseline used by every comparative row.
+pub fn tokio_runner() -> tokio::Runner {
+    tokio::Runner::new(
+        tokio::Config::default()
+            .with_worker_threads(1)
+            .with_global_queue_interval(31),
+    )
 }
 
 /// Future that wakes itself a fixed number of times before completing.

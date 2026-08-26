@@ -7,7 +7,7 @@
 //! heap compaction. Tokio's cooperative budget is disabled around the manual
 //! poll-and-drop loop so every sleep reaches timer registration.
 
-use super::support::{Backend, tokio_runtime};
+use super::support::{Backend, tokio_runner};
 use commonware_runtime::{Clock as _, Runner as _, iouring};
 use criterion::Criterion;
 use std::{
@@ -55,15 +55,14 @@ fn measure_iouring(iters: u64) -> Duration {
     })
 }
 
-/// Measure Tokio timer registration and cancellation inside one `block_on` root.
+/// Measure Commonware Tokio timer registration and cancellation inside one runtime root.
 fn measure_tokio(iters: u64) -> Duration {
-    let runtime = tokio_runtime();
-    runtime.block_on(async move {
+    tokio_runner().start(move |context| async move {
         let mut elapsed = Duration::ZERO;
         for _ in 0..iters {
             let mut sleeps = Vec::with_capacity(TOTAL_SLEEPS);
             for _ in 0..TOTAL_SLEEPS {
-                sleeps.push(Box::pin(tokio::time::sleep(DEADLINE)));
+                sleeps.push(Box::pin(context.sleep(DEADLINE)));
             }
 
             elapsed += tokio::task::unconstrained(poll_and_cancel(sleeps)).await;

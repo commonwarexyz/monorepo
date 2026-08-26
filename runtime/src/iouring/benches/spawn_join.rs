@@ -1,12 +1,12 @@
 //! Ready task spawn and join throughput at representative batch widths.
 
-use super::support::{Backend, tokio_runtime};
+use super::support::{Backend, tokio_runner};
 use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, iouring};
 use criterion::Criterion;
 use futures::future::join_all;
 use std::time::{Duration, Instant};
 
-const WIDTHS: [usize; 3] = [1, 64, 1024];
+const WIDTHS: [usize; 7] = [1, 29, 30, 31, 32, 64, 1024];
 
 /// Register ready spawn-and-join rows for both runtimes.
 pub fn bench(c: &mut Criterion) {
@@ -46,18 +46,17 @@ fn measure_iouring(iters: u64, width: usize) -> Duration {
     })
 }
 
-/// Measure Tokio batches inside one `block_on` root.
+/// Measure Commonware Tokio batches inside one runtime root.
 fn measure_tokio(iters: u64, width: usize) -> Duration {
-    let runtime = tokio_runtime();
-    runtime.block_on(async move {
+    tokio_runner().start(move |context| async move {
         let start = Instant::now();
         for _ in 0..iters {
             let mut handles = Vec::with_capacity(width);
             for _ in 0..width {
-                handles.push(tokio::spawn(async {}));
+                handles.push(context.child("ready").spawn(|_| async {}));
             }
             for result in join_all(handles).await {
-                result.expect("Tokio ready task failed");
+                result.expect("Commonware Tokio ready task failed");
             }
         }
         start.elapsed()
