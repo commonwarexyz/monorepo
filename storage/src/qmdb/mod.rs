@@ -657,9 +657,10 @@ where
     Ok((active_keys, activity))
 }
 
-/// Build a snapshot by splitting the log replay across parallel workers, each owning a contiguous
-/// range of the index's partitions (see [Partitioned]). Returns the number of active keys and
-/// the activity bitmap (see [SnapshotBuild::build_snapshot]).
+/// Build a snapshot by decoding the log replay in contiguous chunks on concurrent decode tasks
+/// and routing each keyed operation to the parallel insert worker owning its partition range
+/// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
+/// [SnapshotBuild::build_snapshot]).
 async fn build_snapshot_parallel<F, E, C, I>(
     snapshot: &mut I,
     context: E,
@@ -705,9 +706,9 @@ where
     let floor = *inactivity_floor_loc;
     let range_size = count.div_ceil(workers);
 
-    // `range_size` rounds up, so `range_size * workers` can exceed `count`, leaving trailing
-    // ranges empty (and a naive `count - lo` would underflow). Reduce to the number of
-    // non-empty ranges so routing (`p / range_size`) stays in `[0, workers)`.
+    // `range_size` rounds up, so the last ranges could start at or past `count`. Reduce
+    // `workers` to the number of non-empty ranges: every spawned worker then owns at least one
+    // partition and routing (`partition / range_size`) stays in `[0, workers)`.
     let workers = count.div_ceil(range_size);
     let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
     let end = log.bounds().end;
