@@ -685,9 +685,9 @@ where
     let concurrency = init_concurrency.get();
 
     // Inserts cost more CPU than decoding: across widths on both journal types, throughput peaks
-    // near two decoders per five tasks. Once decoding is spawned at all, use at least two
-    // decoders, since a lone decoder starves the workers.
-    let decoders = if concurrency <= 2 {
+    // near two decoders per five tasks. Spawned decoding always uses at least two decoders, since
+    // a lone decoder starves the workers; below four tasks this task decodes inline instead.
+    let decoders = if concurrency <= 3 {
         0
     } else {
         (concurrency * 2 / 5).max(2).min(concurrency / 2)
