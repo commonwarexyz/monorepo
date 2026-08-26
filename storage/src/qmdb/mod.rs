@@ -471,34 +471,6 @@ where
     Ok(None)
 }
 
-/// Join `guards` in order, collecting each task's output. On the first failure (a task
-/// error or a failed join), abort and join every remaining guard before surfacing it, so
-/// no task outlives the failure (dropping a guard only signals the abort without awaiting
-/// it).
-pub(crate) async fn join_all_or_abort<T, E1, E2>(
-    guards: Vec<AbortOnDrop<Result<T, E1>>>,
-) -> Result<Vec<T>, E2>
-where
-    T: Send + 'static,
-    E1: Send + 'static,
-    E2: From<E1> + From<commonware_runtime::Error>,
-{
-    let mut joined = Vec::with_capacity(guards.len());
-    let mut failure: Option<E2> = None;
-    for guard in guards {
-        if failure.is_some() {
-            guard.abort().await;
-            continue;
-        }
-        match guard.join().await {
-            Ok(Ok(output)) => joined.push(output),
-            Ok(Err(err)) => failure = Some(err.into()),
-            Err(err) => failure = Some(err.into()),
-        }
-    }
-    failure.map_or_else(|| Ok(joined), Err)
-}
-
 /// Bounded depth (in batches) of each per-worker channel during a parallel build. Backpressure keeps
 /// the replay from running arbitrarily far ahead of a slow worker.
 const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
@@ -524,28 +496,26 @@ struct SnapshotRouting {
 }
 
 /// Number of operations the snapshot replay batches per worker-channel send during a parallel
-/// build. Build throughput is mostly insensitive to this value, so it is a constant rather
-/// than configuration. Small in tests so ordinary logs exercise batch boundaries.
+/// build. Build throughput is mostly insensitive to this value, so it is a constant rather than
+/// configuration. Small in tests so ordinary logs exercise batch boundaries.
 #[cfg(not(test))]
 const SNAPSHOT_ROUTE_BATCH: usize = 4096;
 #[cfg(test)]
 const SNAPSHOT_ROUTE_BATCH: usize = 3;
 
-/// Operations per decode chunk in a parallel build. Decoding the replay stream is the
-/// build's serial bottleneck at large sizes, so contiguous chunks of this many locations
-/// are decoded (and partition-routed) on concurrent tasks while the coordinator forwards
-/// finished chunks in position order. Together with the decoder count this bounds the
-/// routed operations a build can hold in memory at once. Small in tests so ordinary logs
-/// exercise chunk boundaries.
+/// Operations per decode chunk in a parallel build. Decoding the replay stream is the build's
+/// serial bottleneck at large sizes, so contiguous chunks of this many locations are decoded (and
+/// partition-routed) on concurrent tasks while the coordinator forwards finished chunks in position
+/// order. Together with the decoder count this bounds the routed operations a build can hold in
+/// memory at once. Small in tests so ordinary logs exercise chunk boundaries.
 #[cfg(not(test))]
 const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
 /// Decode the `len` operations starting at `start` and stream each keyed op's routed batch
-/// (`partition_of(key) / range_size`) over `tx` in sub-batches of at most
-/// [SNAPSHOT_ROUTE_BATCH] ops. Returns without error if the receiver is dropped (routing
-/// was aborted).
+/// (`partition_of(key) / range_size`) over `tx` in sub-batches of at most [SNAPSHOT_ROUTE_BATCH]
+/// ops. Returns without error if the receiver is dropped (routing was aborted).
 async fn decode_snapshot_chunk<F, C>(
     log: Arc<C>,
     start: u64,
@@ -700,10 +670,10 @@ where
 {
     let count = snapshot.partition_count();
 
-    // Split the concurrency budget (less this task, which coordinates and is mostly idle)
-    // between decode tasks and insert workers. Inserts cost more CPU than decoding, so an
-    // odd budget gives the extra thread to the workers. A budget of one yields a single
-    // worker fed by this task decoding inline.
+    // Split the concurrency budget (less this task, which coordinates and is mostly idle) between
+    // decode tasks and insert workers. Inserts cost more CPU than decoding, so an odd budget gives
+    // the extra thread to the workers. A budget of one yields a single worker fed by this task
+    // decoding inline.
     let budget = init_concurrency.get() - 1;
     let decoders = budget / 2;
     let workers = (budget - decoders).min(count);
@@ -764,26 +734,24 @@ where
         handles.push(handle.abort_on_drop());
     }
 
-    // Replay the log and route each keyed op to the worker owning its partition. Decoding
-    // the stream is the build's serial bottleneck at large sizes, so when the budget
-    // grants decode tasks, contiguous position chunks are decoded (and routed) on those
-    // tasks; this task forwards each chunk's batches in position order, preserving the
-    // per-worker op order the insert path relies on. With no decode tasks, this task
-    // decodes and routes inline. Routing runs in an inner future so any decode failure is
-    // captured rather than returned immediately: returning while the worker handles are
-    // merely dropped would leave the workers running detached, retaining the log and
-    // their range allocations after init has already failed.
+    // Replay the log and route each keyed op to the worker owning its partition. Decoding the
+    // stream is the build's serial bottleneck at large sizes, so when the budget grants decode
+    // tasks, contiguous position chunks are decoded (and routed) on those tasks; this task forwards
+    // each chunk's batches in position order, preserving the per-worker op order the insert path
+    // relies on. With no decode tasks, this task decodes and routes inline. Routing runs in an
+    // inner future so any decode failure is captured rather than returned immediately: returning
+    // while the worker handles are merely dropped would leave the workers running detached,
+    // retaining the log and their range allocations after init has already failed.
     //
-    // A closed worker channel means that worker terminated early (e.g. returned an
-    // `Error<F>` while resolving a collision). Routing stops on the first such send
-    // failure and the join below surfaces that worker's error, rather than panicking on
-    // the send.
+    // A closed worker channel means that worker terminated early (e.g. returned an `Error<F>` while
+    // resolving a collision). Routing stops on the first such send failure and the join below
+    // surfaces that worker's error, rather than panicking on the send.
     let mut pending = VecDeque::new();
     let routing_result: Result<(), Error<F>> = async {
-        // With no decode tasks, decode and route on this task over one continuous replay.
-        // Per-chunk replays each open a fresh buffered reader that re-reads its window from
-        // the blob, redundant I/O the concurrent build hides by overlapping decoders but a
-        // serial build pays on its critical path (measured 265s vs 369s on a 1.66B-op log).
+        // With no decode tasks, decode and route on this task over one continuous replay. Per-chunk
+        // replays each open a fresh buffered reader that re-reads its window from the blob,
+        // redundant I/O the concurrent build hides by overlapping decoders but a serial build pays
+        // on its critical path (measured 265s vs 369s on a 1.66B-op log).
         if decoders == 0 {
             let stream = log
                 .replay(floor, init_buffer, ReadOptions::default())
@@ -818,10 +786,10 @@ where
             return Ok(());
         }
 
-        // Each chunk's channel holds the whole chunk (full sub-batches plus a final
-        // partial per worker), so a decoder never blocks mid-chunk: in-flight memory
-        // stays bounded by the decoder count times the chunk size while every decode
-        // task makes progress regardless of which chunk is being forwarded.
+        // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
+        // worker), so a decoder never blocks mid-chunk: in-flight memory stays bounded by the
+        // decoder count times the chunk size while every decode task makes progress regardless of
+        // which chunk is being forwarded.
         let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + workers;
         let routing = SnapshotRouting {
             workers,
@@ -866,15 +834,14 @@ where
     // Close the channels so each worker's stream terminates and it returns its index.
     drop(senders);
 
-    // Abort and join any decode chunks still in flight, so no decoder outlives a failed
-    // init.
+    // Abort and join any decode chunks still in flight, so no decoder outlives a failed init.
     while let Some((rx, decoder)) = pending.pop_front() {
         drop(rx);
         decoder.abort().await;
     }
 
     // Join workers before surfacing any replay failure, so none outlive a failed init.
-    let joined = join_all_or_abort::<_, _, Error<F>>(handles).await;
+    let joined = AbortOnDrop::join_all::<Error<F>>(handles).await;
     routing_result?;
     let joined = joined?;
 
