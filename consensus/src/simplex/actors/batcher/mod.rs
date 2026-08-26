@@ -214,14 +214,6 @@ mod tests {
         mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg)
     }
 
-    /// Builds an enabled skip policy whose budget scales with the test participant set.
-    const fn enabled_skip(timeout: Duration) -> SkipPolicy {
-        SkipPolicy::Enabled {
-            timeout,
-            budget: SkipBudget::Participants,
-        }
-    }
-
     /// Batcher [Config] fields that vary across tests; everything else is
     /// fixed by [test_config].
     struct BatcherOptions {
@@ -237,7 +229,10 @@ mod tests {
         fn default() -> Self {
             Self {
                 view_retention: ViewDelta::new(10),
-                skip: enabled_skip(Duration::from_secs(5)),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(5),
+                    budget: SkipBudget::Participants,
+                },
                 lookahead: Lookahead {
                     term_length: TermLength::ONE,
                     optimistic_views: ViewDelta::new(0),
@@ -4625,7 +4620,10 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
-                    skip: enabled_skip(Duration::from_secs(skip_timeout)),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(skip_timeout),
+                        budget: SkipBudget::Participants,
+                    },
                     ..Default::default()
                 },
             );
@@ -4755,7 +4753,10 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
-                    skip: enabled_skip(Duration::from_secs(skip_timeout)),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(skip_timeout),
+                        budget: SkipBudget::Participants,
+                    },
                     ..Default::default()
                 },
             );
@@ -5004,7 +5005,10 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
-                    skip: enabled_skip(Duration::from_secs(skip_timeout)),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(skip_timeout),
+                        budget: SkipBudget::Participants,
+                    },
                     ..Default::default()
                 },
             );
@@ -5152,7 +5156,10 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
-                    skip: enabled_skip(Duration::from_secs(skip_timeout)),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(skip_timeout),
+                        budget: SkipBudget::Participants,
+                    },
                     ..Default::default()
                 },
             );
@@ -5385,24 +5392,20 @@ mod tests {
         });
     }
 
-    fn leader_nullify_expire_on_view_entry<S, F>(fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-    {
-        leader_nullify_on_view_entry(fixture, enabled_skip(Duration::from_secs(5)));
-    }
-
     #[test_traced]
     fn test_leader_nullify_expire_on_view_entry() {
-        leader_nullify_expire_on_view_entry(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        leader_nullify_expire_on_view_entry(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        leader_nullify_expire_on_view_entry(bls12381_threshold_std::fixture::<MinPk, _>);
-        leader_nullify_expire_on_view_entry(bls12381_threshold_std::fixture::<MinSig, _>);
-        leader_nullify_expire_on_view_entry(bls12381_multisig::fixture::<MinPk, _>);
-        leader_nullify_expire_on_view_entry(bls12381_multisig::fixture::<MinSig, _>);
-        leader_nullify_expire_on_view_entry(ed25519::fixture);
-        leader_nullify_expire_on_view_entry(secp256r1::fixture);
+        let skip = SkipPolicy::Enabled {
+            timeout: Duration::from_secs(5),
+            budget: SkipBudget::Participants,
+        };
+        leader_nullify_on_view_entry(bls12381_threshold_vrf::fixture::<MinPk, _>, skip);
+        leader_nullify_on_view_entry(bls12381_threshold_vrf::fixture::<MinSig, _>, skip);
+        leader_nullify_on_view_entry(bls12381_threshold_std::fixture::<MinPk, _>, skip);
+        leader_nullify_on_view_entry(bls12381_threshold_std::fixture::<MinSig, _>, skip);
+        leader_nullify_on_view_entry(bls12381_multisig::fixture::<MinPk, _>, skip);
+        leader_nullify_on_view_entry(bls12381_multisig::fixture::<MinSig, _>, skip);
+        leader_nullify_on_view_entry(ed25519::fixture, skip);
+        leader_nullify_on_view_entry(secp256r1::fixture, skip);
     }
 
     #[test_traced]
