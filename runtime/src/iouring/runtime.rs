@@ -437,7 +437,7 @@ struct Shared {
     /// Configuration template used to construct workers.
     cfg: Config,
     registry: Registry,
-    metrics: Arc<Metrics>,
+    metrics: Metrics,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     network_buffer_pool: BufferPool,
@@ -1000,7 +1000,7 @@ impl crate::Runner for Runner {
         let mut runtime_registry = root_registry.sub_registry(METRICS_PREFIX);
 
         // Initialize metrics and panicker
-        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
+        let metrics = Metrics::init(&mut runtime_registry);
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
 
         // Initialize buffer pools
@@ -1351,7 +1351,7 @@ impl crate::Spawner for Context {
 
         // Get metrics
         let label = Label::task(self.name.clone(), self.execution);
-        let (_, metric) = spawn_metrics!(label, @record executor.shared.metrics.as_ref());
+        let (_, metric) = spawn_metrics!(label, @record &executor.shared.metrics);
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
