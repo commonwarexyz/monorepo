@@ -715,6 +715,49 @@ mod tests {
         });
     }
 
+    /// `Sealed::read_many_into_uncached` serves cold reads correctly and leaves the page
+    /// cache cold: a subsequent sync probe of the same offsets still misses everything.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_into_uncached_leaves_cache_cold() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany_cold").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 4).collect();
+            append.append(&data).await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+
+            // Drop pages admitted during the writer's flushes so the uncached read is cold.
+            cache_ref.clear();
+
+            let offsets = [0u64, page_size as u64, (page_size * 3) as u64];
+            let item_size = 4usize;
+            let mut out = vec![0u8; offsets.len() * item_size];
+            sealed
+                .read_many_into_uncached(&mut out, &offsets, NZUsize!(item_size))
+                .await
+                .unwrap();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &out[i * item_size..(i + 1) * item_size],
+                    &data[off as usize..off as usize + item_size],
+                );
+            }
+
+            // Nothing was admitted: every offset still requires a blob read.
+            let mut out = vec![0u8; offsets.len() * item_size];
+            let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
+            assert_eq!(misses, vec![0, 1, 2]);
+        });
+    }
+
     #[test_traced("DEBUG")]
     #[should_panic(expected = "ranges must be sorted and non-overlapping")]
     fn test_sealed_read_many_into_rejects_unsorted_offsets() {
