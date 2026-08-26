@@ -134,6 +134,8 @@ macro_rules! modes {
 
 /// A canonical packet of ordered mode values.
 ///
+/// `N` is the maximum number of modes and must be greater than zero.
+///
 /// The high bit indicates that another mode follows, and trailing zero-valued
 /// modes are omitted. Appending a new mode with value zero therefore preserves
 /// the existing encoding. A `Modes` value denotes a present packet. An all-zero
@@ -149,6 +151,12 @@ macro_rules! modes {
 /// assert_eq!(encoded.as_ref(), &[0x81, 0x80, 0x02]);
 /// assert_eq!(Modes::<3>::decode(encoded).unwrap(), modes);
 /// ```
+///
+/// ```compile_fail
+/// use commonware_codec::Modes;
+///
+/// let _ = Modes::<0>::new([]);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Modes<const N: usize> {
     encoded: [u8; N],
@@ -162,6 +170,10 @@ impl<const N: usize> Modes<N> {
     /// absent packet rather than an empty packet.
     ///
     pub fn new(modes: [Mode; N]) -> Option<Self> {
+        const {
+            assert!(N > 0, "N must be greater than 0");
+        }
+
         let mut encoded = modes.map(u8::from);
         let last = encoded.iter().rposition(|&mode| mode != 0)?;
         for mode in &mut encoded[..last] {
@@ -190,8 +202,8 @@ impl<const N: usize> Read for Modes<N> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        if N == 0 {
-            return Err(Error::Invalid("Modes", "no mode values configured"));
+        const {
+            assert!(N > 0, "N must be greater than 0");
         }
 
         // Preserve framing bits in the stored representation while locating the
@@ -218,8 +230,8 @@ impl<const N: usize> Read for Modes<N> {
 #[cfg(feature = "arbitrary")]
 impl<'a, const N: usize> arbitrary::Arbitrary<'a> for Modes<N> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        if N == 0 {
-            return Err(arbitrary::Error::IncorrectFormat);
+        const {
+            assert!(N > 0, "N must be greater than 0");
         }
 
         let len = u.int_in_range(1..=N)?;
@@ -247,8 +259,7 @@ mod tests {
 
     #[test]
     fn encodes_continuations() {
-        // Empty and all-default mode lists have no packet.
-        assert!(Modes::<0>::new([]).is_none());
+        // All-default mode lists have no packet.
         assert!(Modes::new([mode!(0), mode!(0)]).is_none());
 
         // A trailing default is absent, preserving the shorter encoding.
@@ -308,10 +319,6 @@ mod tests {
 
     #[test]
     fn rejects_truncated_and_oversized_packets() {
-        assert!(matches!(
-            Modes::<0>::decode(&[][..]),
-            Err(Error::Invalid("Modes", _))
-        ));
         assert!(matches!(
             Modes::<2>::decode(&[][..]),
             Err(Error::EndOfBuffer)
