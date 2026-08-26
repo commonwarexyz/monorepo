@@ -243,7 +243,7 @@ where
     /// journal) for recent activity.
     pub view_retention: ViewDelta,
 
-    /// Policy governing skips.
+    /// Policy governing whether `nullify(v)` may be broadcast before the normal round deadlines.
     pub skip: SkipPolicy,
 
     /// Timeout to wait for a peer to respond to a request.

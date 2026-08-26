@@ -26,9 +26,6 @@
 //! [`Config::floor`](config::Config::floor) supplies the initial finalized state. Voting begins
 //! at view 1, with the first proposal referencing genesis as its parent.
 //!
-//! [`SkipPolicy`] controls whether `nullify(v)` may be broadcast before the normal round deadlines.
-//! Those deadlines remain active when the policy does not permit a skip.
-//!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
@@ -448,9 +445,8 @@
 //!
 //! If a validator is the leader for a view but cannot build a valid payload yet (for example because
 //! it is still syncing), it should decline the [`Automaton::propose`](crate::Automaton::propose)
-//! request by dropping the response channel. Simplex treats this as a missing proposal and may
-//! broadcast `nullify(v)` before the normal round deadline. Other validators may do the same after
-//! receiving the leader's `nullify(v)`.
+//! request by dropping the response channel. Simplex treats this as a missing proposal, broadcasts
+//! `nullify(v)`, and other validators can use the leader-nullify fast path to skip the view.
 //!
 //! Once `propose` returns a payload, the local proposer is committed to that payload for verification
 //! and certification. [`Automaton::verify`](crate::Automaton::verify) and

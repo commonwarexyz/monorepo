@@ -125,7 +125,7 @@ pub struct SimplexConfig<L> {
     /// Number of views behind the finalized tip to retain validator activity.
     pub view_retention: ViewDelta,
 
-    /// Policy governing skips.
+    /// Policy governing whether `nullify(v)` may be broadcast before the normal round deadlines.
     pub skip: SkipPolicy,
 
     /// Track individual votes after certification.
