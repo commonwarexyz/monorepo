@@ -985,6 +985,7 @@ mod tests {
         fn random_select_leader_commit(seed: u64, version: Random) -> Vec<u8> {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
+            // Generate deterministic BLS threshold fixture (4-10 participants)
             let n = rng.random_range(4..=10);
             let Fixture {
                 participants,
@@ -996,9 +997,12 @@ mod tests {
             let quorum =
                 usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
 
+            // Generate deterministic round parameters
             let epoch = rng.random_range(0..1000);
             let view = rng.random_range(2..=101);
             let round = Round::new(Epoch::new(epoch), View::new(view));
+
+            // Create a valid threshold certificate
             let attestations: Vec<_> = schemes
                 .iter()
                 .take(quorum)
@@ -1006,10 +1010,14 @@ mod tests {
                 .collect();
             let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
 
+            // Elect leader using the certificate
             let leader = elector.elect(round, Some(&cert));
+
+            // Also test view 1 fallback (no certificate, round-robin)
             let round_v1 = Round::new(Epoch::new(epoch), View::new(1));
             let leader_v1 = elector.elect(round_v1, None);
 
+            // Commit both results
             let mut result = leader.encode_mut();
             leader_v1.write(&mut result);
             result.to_vec()
