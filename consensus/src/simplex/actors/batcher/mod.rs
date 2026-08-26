@@ -5,7 +5,10 @@ mod verifier;
 
 use crate::{
     Relay, Reporter,
-    simplex::{Lookahead, config::ForwardingPolicy},
+    simplex::{
+        Lookahead,
+        config::{ForwardPolicy, SkipPolicy},
+    },
     types::{Epoch, View, ViewDelta},
 };
 pub use actor::Actor;
@@ -14,7 +17,7 @@ use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
-use std::{num::NonZeroUsize, time::Duration};
+use std::num::NonZeroUsize;
 pub use verifier::Verifier;
 
 pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
@@ -29,13 +32,13 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     pub strategy: T,
 
     pub view_retention: ViewDelta,
-    pub skip_timeout: Duration,
+    pub skip: SkipPolicy,
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
 
     /// Controls term boundaries and how far ahead votes are processed optimistically.
     pub lookahead: Lookahead,
-    pub forwarding: ForwardingPolicy,
+    pub forward: ForwardPolicy,
 
     /// Highest finalized view at startup; anchors the viewport before
     /// the voter's first update.
@@ -50,7 +53,7 @@ mod tests {
         simplex::{
             Plan,
             actors::voter,
-            config::ForwardingPolicy,
+            config::{ForwardPolicy, SkipBudget},
             elector::RoundRobin,
             metrics::TimeoutReason,
             mocks, quorum,
@@ -215,9 +218,9 @@ mod tests {
     /// fixed by [test_config].
     struct BatcherOptions {
         view_retention: ViewDelta,
-        skip_timeout: Duration,
+        skip: SkipPolicy,
         lookahead: Lookahead,
-        forwarding: ForwardingPolicy,
+        forward: ForwardPolicy,
         track_historical_votes: bool,
         floor: View,
     }
@@ -226,12 +229,15 @@ mod tests {
         fn default() -> Self {
             Self {
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(5),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(5),
+                    budget: SkipBudget::Participants,
+                },
                 lookahead: Lookahead {
                     term_length: TermLength::ONE,
                     optimistic_views: ViewDelta::new(0),
                 },
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
                 floor: View::zero(),
             }
@@ -256,11 +262,11 @@ mod tests {
             relay,
             strategy: Sequential,
             view_retention: options.view_retention,
-            skip_timeout: options.skip_timeout,
+            skip: options.skip,
             epoch,
             mailbox_size: NZUsize!(128),
             lookahead: options.lookahead,
-            forwarding: options.forwarding,
+            forward: options.forward,
             floor: options.floor,
         }
     }
@@ -2587,7 +2593,7 @@ mod tests {
             let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(output, voter::Message::Verified { certificate: Certificate::Notarization(n), .. } if n.view() == view));
 
-            // ForwardingPolicy::Disabled must not produce any broadcasts
+            // ForwardPolicy::Disabled must not produce any broadcasts
             assert!(
                 relay.broadcasts.lock().is_empty(),
                 "disabled forwarding should produce no broadcasts"
@@ -2698,7 +2704,7 @@ mod tests {
                 reporter.clone(),
                 relay.clone(),
                 epoch,
-                BatcherOptions { forwarding: ForwardingPolicy::SilentVoters, ..Default::default() },
+                BatcherOptions { forward: ForwardPolicy::SilentVoters, ..Default::default() },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -2867,7 +2873,7 @@ mod tests {
                 reporter.clone(),
                 relay.clone(),
                 epoch,
-                BatcherOptions { forwarding: ForwardingPolicy::SilentLeader, ..Default::default() },
+                BatcherOptions { forward: ForwardPolicy::SilentLeader, ..Default::default() },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -3095,7 +3101,7 @@ mod tests {
                 reporter.clone(),
                 relay.clone(),
                 epoch,
-                BatcherOptions { forwarding: ForwardingPolicy::SilentVoters, ..Default::default() },
+                BatcherOptions { forward: ForwardPolicy::SilentVoters, ..Default::default() },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -3308,7 +3314,7 @@ mod tests {
                 reporter.clone(),
                 relay.clone(),
                 epoch,
-                BatcherOptions { forwarding: ForwardingPolicy::SilentVoters, ..Default::default() },
+                BatcherOptions { forward: ForwardPolicy::SilentVoters, ..Default::default() },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -3474,7 +3480,7 @@ mod tests {
                 reporter.clone(),
                 relay.clone(),
                 epoch,
-                BatcherOptions { forwarding: ForwardingPolicy::SilentVoters, ..Default::default() },
+                BatcherOptions { forward: ForwardPolicy::SilentVoters, ..Default::default() },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -3683,7 +3689,7 @@ mod tests {
                 reporter.clone(),
                 relay.clone(),
                 epoch,
-                BatcherOptions { forwarding: ForwardingPolicy::SilentVoters, ..Default::default() },
+                BatcherOptions { forward: ForwardPolicy::SilentVoters, ..Default::default() },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -4613,7 +4619,13 @@ mod tests {
                 reporter.clone(),
                 MockRelay::new(),
                 epoch,
-                BatcherOptions { skip_timeout: Duration::from_secs(skip_timeout), ..Default::default() },
+                BatcherOptions {
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(skip_timeout),
+                        budget: SkipBudget::Participants,
+                    },
+                    ..Default::default()
+                },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -4740,7 +4752,13 @@ mod tests {
                 reporter.clone(),
                 MockRelay::new(),
                 epoch,
-                BatcherOptions { skip_timeout: Duration::from_secs(skip_timeout), ..Default::default() },
+                BatcherOptions {
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(skip_timeout),
+                        budget: SkipBudget::Participants,
+                    },
+                    ..Default::default()
+                },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -4986,7 +5004,13 @@ mod tests {
                 reporter.clone(),
                 MockRelay::new(),
                 epoch,
-                BatcherOptions { skip_timeout: Duration::from_secs(skip_timeout), ..Default::default() },
+                BatcherOptions {
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(skip_timeout),
+                        budget: SkipBudget::Participants,
+                    },
+                    ..Default::default()
+                },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -5131,7 +5155,13 @@ mod tests {
                 reporter.clone(),
                 MockRelay::new(),
                 epoch,
-                BatcherOptions { skip_timeout: Duration::from_secs(skip_timeout), ..Default::default() },
+                BatcherOptions {
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(skip_timeout),
+                        budget: SkipBudget::Participants,
+                    },
+                    ..Default::default()
+                },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -5254,9 +5284,9 @@ mod tests {
         leader_certificate_marks_active(secp256r1::fixture);
     }
 
-    /// Test that if a leader nullify for `v+1` is buffered while current view is `v`,
-    /// entering `v+1` reports the leader inactive so the voter skips timeout immediately.
-    fn leader_nullify_expire_on_view_entry<S, F>(mut fixture: F)
+    /// Verifies how the configured skip policy handles a buffered leader nullify
+    /// when its view becomes current.
+    fn leader_nullify_on_view_entry<S, F>(mut fixture: F, skip: SkipPolicy)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5285,7 +5315,10 @@ mod tests {
                 reporter.clone(),
                 MockRelay::new(),
                 epoch,
-                BatcherOptions::default(),
+                BatcherOptions {
+                    skip,
+                    ..Default::default()
+                },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -5346,29 +5379,42 @@ mod tests {
                 );
             context.sleep(Duration::from_millis(50)).await;
 
-            // Move current view to 2 with that same leader; this should fast-path timeout
-            // through the voter mailbox.
+            // Enter the buffered view with the same leader. Enabled skipping reports the
+            // leader nullify to the voter immediately; disabled skipping reports nothing.
             batcher_mailbox.update(Span::none(), buffered_view, leader_idx, View::zero(), None);
-            expect_timeout(
-                &mut context,
-                &mut voter_receiver,
-                buffered_view,
-                TimeoutReason::LeaderNullify,
-            )
-            .await;
+            if matches!(skip, SkipPolicy::Enabled { .. }) {
+                expect_timeout(
+                    &mut context,
+                    &mut voter_receiver,
+                    buffered_view,
+                    TimeoutReason::LeaderNullify,
+                )
+                .await;
+            } else {
+                expect_no_timeout(&mut context, &mut voter_receiver).await;
+            }
         });
     }
 
     #[test_traced]
     fn test_leader_nullify_expire_on_view_entry() {
-        leader_nullify_expire_on_view_entry(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        leader_nullify_expire_on_view_entry(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        leader_nullify_expire_on_view_entry(bls12381_threshold_std::fixture::<MinPk, _>);
-        leader_nullify_expire_on_view_entry(bls12381_threshold_std::fixture::<MinSig, _>);
-        leader_nullify_expire_on_view_entry(bls12381_multisig::fixture::<MinPk, _>);
-        leader_nullify_expire_on_view_entry(bls12381_multisig::fixture::<MinSig, _>);
-        leader_nullify_expire_on_view_entry(ed25519::fixture);
-        leader_nullify_expire_on_view_entry(secp256r1::fixture);
+        let skip = SkipPolicy::Enabled {
+            timeout: Duration::from_secs(5),
+            budget: SkipBudget::Participants,
+        };
+        leader_nullify_on_view_entry(bls12381_threshold_vrf::fixture::<MinPk, _>, skip);
+        leader_nullify_on_view_entry(bls12381_threshold_vrf::fixture::<MinSig, _>, skip);
+        leader_nullify_on_view_entry(bls12381_threshold_std::fixture::<MinPk, _>, skip);
+        leader_nullify_on_view_entry(bls12381_threshold_std::fixture::<MinSig, _>, skip);
+        leader_nullify_on_view_entry(bls12381_multisig::fixture::<MinPk, _>, skip);
+        leader_nullify_on_view_entry(bls12381_multisig::fixture::<MinSig, _>, skip);
+        leader_nullify_on_view_entry(ed25519::fixture, skip);
+        leader_nullify_on_view_entry(secp256r1::fixture, skip);
+    }
+
+    #[test_traced]
+    fn test_disabled_skip_policy_ignores_leader_nullify_hint() {
+        leader_nullify_on_view_entry(ed25519::fixture, SkipPolicy::Disabled);
     }
 
     /// Test that we do not signal expiry when the sender is the current leader but the

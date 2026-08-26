@@ -67,7 +67,7 @@ mod tests {
         },
         simplex::{
             self, Plan,
-            config::ForwardingPolicy,
+            config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
@@ -2239,9 +2239,12 @@ mod tests {
                     certification_timeout: Duration::from_secs(4),
                     timeout_retry: Duration::from_secs(3),
                     view_retention: ViewDelta::new(10),
-                    skip_timeout: Duration::from_secs(6),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(6),
+                        budget: SkipBudget::Participants,
+                    },
                     fetch_timeout: Duration::from_secs(1),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 },
             );

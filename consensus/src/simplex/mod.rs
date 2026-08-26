@@ -31,8 +31,8 @@
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active for `skip_timeout` while a quorum of participants
-//!       has been, set both `t_l` and `t_a` to 0.
+//!     * If leader `l` has not been active for the configured skip timeout while a quorum of
+//!       participants has been, set both `t_l` and `t_a` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
@@ -117,8 +117,8 @@
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
 //! * Skip "leader timeout" and "certification timeout" if a designated leader has not participated
-//!   for `skip_timeout` while a quorum of participants has (again to trigger early view transition
-//!   for an unresponsive leader).
+//!   for the configured skip timeout while a quorum of participants has (again to trigger early
+//!   view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
@@ -457,10 +457,11 @@
 //!
 //! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
-//! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
-//! a fast-skip signal and can halt progress because certification requests are not retried during
-//! the same run. The safe way to stop working on certification is to keep the request pending until
-//! Simplex drops it after finalizing the block or a descendant.
+//! uncertifiable for that round and also causes a local nullify. Closing `certify` does not cause
+//! `nullify(v)` to be broadcast before the normal round deadline and can halt progress because
+//! certification requests are not retried during the same run. The safe way to stop working on
+//! certification is to keep the request pending until Simplex drops it after finalizing the block
+//! or a descendant.
 
 pub mod elector;
 pub mod scheme;
@@ -558,7 +559,7 @@ cfg_if::cfg_if! {
 
         mod actors;
         pub mod config;
-        pub use config::{Config, Floor, ForwardingPolicy};
+        pub use config::{Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
@@ -1142,11 +1143,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1402,7 +1406,10 @@ mod tests {
                     timeout_retry,
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(
@@ -1410,7 +1417,7 @@ mod tests {
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(validator_context.child("engine"), cfg);
@@ -1522,11 +1529,14 @@ mod tests {
                 timeout_retry,
                 fetch_timeout: Duration::from_secs(1),
                 view_retention,
-                skip_timeout,
+                skip: SkipPolicy::Enabled {
+                    timeout: skip_timeout,
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
@@ -1669,11 +1679,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1814,11 +1827,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(12),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(12),
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -2098,11 +2114,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2263,11 +2282,14 @@ mod tests {
                         timeout_retry: Duration::from_millis(500),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -2458,11 +2480,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2579,11 +2604,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention,
-                skip_timeout,
+                skip: SkipPolicy::Enabled {
+                    timeout: skip_timeout,
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -2730,11 +2758,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2967,11 +2998,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3127,11 +3161,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3319,11 +3356,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3436,11 +3476,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3564,11 +3607,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3776,11 +3822,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3984,11 +4033,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4152,11 +4204,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -4315,11 +4370,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -4500,11 +4558,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(11),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(11),
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -4620,11 +4681,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4781,11 +4845,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4874,11 +4941,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention,
-                skip_timeout,
+                skip: SkipPolicy::Enabled {
+                    timeout: skip_timeout,
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -5046,11 +5116,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5190,11 +5263,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5351,11 +5427,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5478,11 +5557,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -5599,11 +5681,14 @@ mod tests {
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
                 view_retention: ViewDelta::new(4),
-                skip_timeout: Duration::from_secs(2),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(2),
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -5773,11 +5858,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -6108,11 +6196,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(
@@ -6408,11 +6499,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(
@@ -6695,11 +6789,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(
@@ -6988,11 +7085,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(
@@ -7190,11 +7290,14 @@ mod tests {
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_millis(100),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -7335,11 +7438,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -7436,11 +7542,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -7867,11 +7976,14 @@ mod tests {
                             timeout_retry: Duration::from_secs(10),
                             fetch_timeout: Duration::from_secs(1),
                             view_retention,
-                            skip_timeout,
+                            skip: SkipPolicy::Enabled {
+                                timeout: skip_timeout,
+                                budget: SkipBudget::Participants,
+                            },
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                            forwarding: ForwardingPolicy::Disabled,
+                            forward: ForwardPolicy::Disabled,
                             track_historical_votes: false,
                         };
                         let engine = Engine::new(context.child("engine"), cfg);
@@ -7936,11 +8048,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
