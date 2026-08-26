@@ -672,7 +672,7 @@ mod tests {
         BlockFilterChoice, FuzzInput, ReporterWiring, simplex::SimplexCertificateMock,
         strategy::StrategyChoice,
     };
-    use commonware_consensus::simplex::ForwardingPolicy;
+    use commonware_consensus::simplex::ForwardPolicy;
     use std::num::NonZeroUsize;
 
     /// Episode length the ignored integration tests run: short (versus the
@@ -694,7 +694,7 @@ mod tests {
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
             mailbox_size: NonZeroUsize::new(1024).unwrap(),
-            forwarding: ForwardingPolicy::Disabled,
+            forwarding: ForwardPolicy::Disabled,
             certify: CertifyChoice::Always,
             block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,

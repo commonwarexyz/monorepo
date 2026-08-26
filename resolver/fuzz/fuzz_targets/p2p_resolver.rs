@@ -20,7 +20,7 @@ use commonware_resolver::{
 use commonware_runtime::{
     Clock, Quota, Runner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{FuzzRng, NZUsize, Probability, ordered::Set, vec::NonEmptyVec};
+use commonware_utils::{FuzzRng, NZUsize, ordered::Set, probability, vec::NonEmptyVec};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -394,7 +394,7 @@ fn link(latency_ms: u64, jitter_ms: u64, success_rate_percent: u8) -> Link {
     Link {
         latency: Duration::from_millis(latency_ms),
         jitter: Duration::from_millis(jitter_ms),
-        success_rate: Probability!(u64::from(success_rate_percent), PERCENT_DENOMINATOR),
+        success_rate: probability!(u64::from(success_rate_percent), PERCENT_DENOMINATOR),
     }
 }
 

@@ -17,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     FuzzRng, NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, ordered::Set,
-    vec::Bounded,
+    probability, vec::Bounded,
 };
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
@@ -294,7 +294,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         };
         let num_peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)?;
         let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
-        let network_success_rate = Probability!(
+        let network_success_rate = probability!(
             u.int_in_range(MIN_NETWORK_SUCCESS_PERCENT..=MAX_NETWORK_SUCCESS_PERCENT)?,
             PERCENT_DENOMINATOR
         );
@@ -342,7 +342,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 
 // Keep subscriptions alive without spawning one task per receiver. Ready
 // subscriptions are validated, while unresolved ones remain pending.
-fn drain_ready_subscriptions(pending: &mut Pool<Subscription>) {
+fn drain_ready_subscriptions(pending: &mut Pool<'_, Subscription>) {
     while let Some((digest, result)) = pending.next_completed().now_or_never() {
         if let Ok(message) = result {
             assert_eq!(message.digest(), digest);

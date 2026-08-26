@@ -87,7 +87,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, NZUsize, Probability, sync::Mutex};
+use commonware_utils::{FuzzRng, NZUsize, probability, sync::Mutex};
 use std::{
     fmt::{self, Write as _},
     num::NonZeroUsize,
@@ -150,7 +150,7 @@ async fn apply_degraded_network<P: Simplex>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: Probability!(0.6),
+        success_rate: probability!(0.6),
     };
     for peer in participants
         .iter()
@@ -688,7 +688,7 @@ where
 mod tests {
     use super::*;
     use crate::{SimplexCertificateMock, strategy::StrategyChoice, utils::Partition};
-    use commonware_consensus::simplex::ForwardingPolicy;
+    use commonware_consensus::simplex::ForwardPolicy;
 
     #[cfg(feature = "mocks")]
     #[test]
@@ -707,7 +707,7 @@ mod tests {
                 degraded_network: true,
                 partition: Partition::Connected,
                 strategy: StrategyChoice::AnyScope,
-                forwarding: ForwardingPolicy::Disabled,
+                forwarding: ForwardPolicy::Disabled,
             });
         }
     }
@@ -724,7 +724,7 @@ mod tests {
                 fault_rounds: 1,
                 fault_rounds_bound: 1,
             },
-            forwarding: ForwardingPolicy::Disabled,
+            forwarding: ForwardPolicy::Disabled,
         });
     }
 }

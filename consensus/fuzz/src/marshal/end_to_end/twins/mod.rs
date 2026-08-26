@@ -707,7 +707,7 @@ mod tests {
             sustained: false,
             strategy: StrategyChoice::AnyScope,
             trailing_blocks: 1,
-            forwarding: commonware_consensus::simplex::ForwardingPolicy::Disabled,
+            forwarding: commonware_consensus::simplex::ForwardPolicy::Disabled,
         };
 
         let rendered = format!("{:?}", MarshalTwinsInputDebug(&input));

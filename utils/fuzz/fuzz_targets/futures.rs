@@ -51,8 +51,8 @@ enum Operation {
 }
 
 enum PoolWrapper {
-    Regular(Pool<i32>),
-    Abortable(AbortablePool<i32>, Vec<Aborter>),
+    Regular(Pool<'static, i32>),
+    Abortable(AbortablePool<'static, i32>, Vec<Aborter>),
 }
 
 impl PoolWrapper {

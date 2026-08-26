@@ -437,7 +437,7 @@ where
 mod tests {
     use super::*;
     use crate::strategy::StrategyChoice;
-    use commonware_consensus::simplex::ForwardingPolicy;
+    use commonware_consensus::simplex::ForwardPolicy;
 
     #[test]
     fn coding_stack_selects_application_ack_depth_and_preserves_entropy() {
@@ -464,7 +464,7 @@ mod tests {
                 fault_rounds_bound: 1,
             },
             trailing_blocks: 1,
-            forwarding: ForwardingPolicy::Disabled,
+            forwarding: ForwardPolicy::Disabled,
         });
     }
 }

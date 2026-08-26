@@ -34,9 +34,13 @@ hash = "5a263f4dbf20f9ebc64a81bc0dfbf487055b136074809d8c01aa725e28b86f17"
 n_cases = 65536
 hash = "481cd68f2e6452c0dda512c75d74ddd2e19ac6c9fb19c642c1a152a0d830c1b2"
 
-["commonware_consensus::simplex::elector::tests::conformance::RandomSelectLeaderConformance"]
+["commonware_consensus::simplex::elector::tests::conformance::RandomV0SelectLeaderConformance"]
 n_cases = 512
 hash = "b67e7a2a61c54156c0422160a6dbc096b01f518c26784505def8b5849c597b74"
+
+["commonware_consensus::simplex::elector::tests::conformance::RandomV1SelectLeaderConformance"]
+n_cases = 512
+hash = "e203b657e753c8c8d10e5ad0d8c1893a88d9ea4fbda92d960667dc6007215cfe"
 
 ["commonware_consensus::simplex::elector::tests::conformance::RoundRobinShuffleConformance"]
 n_cases = 512
