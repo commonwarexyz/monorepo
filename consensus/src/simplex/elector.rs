@@ -386,7 +386,7 @@ impl<H: Hasher> Random<H> {
     /// Panics if `n` is zero, or if a seed signature is missing after view 1.
     #[allow(deprecated)]
     pub fn select_leader<V: Variant>(
-        self,
+        &self,
         round: Round,
         n: u32,
         seed_signature: Option<V::Signature>,
@@ -412,25 +412,15 @@ impl<H: Hasher> Random<H> {
 
 impl<H: Hasher> Clone for Random<H> {
     fn clone(&self) -> Self {
-        *self
+        Self::new(self.version)
     }
 }
-
-impl<H: Hasher> Copy for Random<H> {}
 
 impl<H: Hasher> fmt::Debug for Random<H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.version.fmt(f)
     }
 }
-
-impl<H: Hasher> PartialEq for Random<H> {
-    fn eq(&self, other: &Self) -> bool {
-        self.version == other.version
-    }
-}
-
-impl<H: Hasher> Eq for Random<H> {}
 
 impl<P, V, H> Config<bls12381_threshold_vrf::Scheme<P, V>> for Random<H>
 where
@@ -466,7 +456,7 @@ impl<S: Scheme, H: Hasher> Clone for RandomElector<S, H> {
     fn clone(&self) -> Self {
         Self {
             n: self.n,
-            version: self.version,
+            version: self.version.clone(),
             _phantom: PhantomData,
         }
     }
