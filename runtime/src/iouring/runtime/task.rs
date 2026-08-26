@@ -18,6 +18,7 @@
 // In scope for the intra-doc links in this module's documentation.
 #[allow(unused_imports)]
 use super::Executor;
+use super::capture_cleanup_panic;
 use crate::iouring::driver::{Affine, current_thread_id, waker::Waker as RingWaker};
 #[allow(unused_imports)]
 use crate::{Error, Handle};
@@ -85,6 +86,20 @@ where
     ///
     /// `None` once the future completed or teardown cleared it.
     future: Affine<RefCell<Option<F>>>,
+}
+
+/// Mark a pinned future slot empty after its in-place drop glue finishes,
+/// including when that drop glue unwinds.
+struct MarkCleared<F>(*mut Option<F>);
+
+impl<F> Drop for MarkCleared<F> {
+    fn drop(&mut self) {
+        // SAFETY: the pointer comes from the exclusive RefCell borrow held by
+        // TaskCell::clear. The pinned value's drop glue has completed or is
+        // unwinding, so writing None without reading or dropping the old
+        // representation cannot move the value and prevents a second drop.
+        unsafe { self.0.write(None) };
+    }
 }
 
 impl<F> TaskCell<F>
@@ -163,7 +178,18 @@ where
         // cell nothing will poll again.
         self.queued.store(true, Ordering::Relaxed);
         self.future.with(|cell| {
-            *cell.borrow_mut() = None;
+            let mut slot = cell.borrow_mut();
+            let Some(future) = slot.as_mut() else {
+                return;
+            };
+            let future = std::ptr::from_mut(future);
+            let mark_cleared = MarkCleared(std::ptr::from_mut(&mut *slot));
+            // SAFETY: the future is never moved after its TaskCell is pinned.
+            // MarkCleared writes None after this pinned in-place drop finishes
+            // or unwinds, preventing TaskCell destruction from dropping it a
+            // second time.
+            unsafe { std::ptr::drop_in_place(future) };
+            drop(mark_cleared);
         });
     }
 
@@ -464,22 +490,35 @@ impl Tasks {
 
     /// Clear all tasks and reject future registrations.
     pub(super) fn clear(&self) {
-        // Clear both ready lanes.
-        let mut ready = self.ready.lock();
-        ready.normal.clear();
-        ready.event.clear();
-        drop(ready);
+        // Detach both ready lanes so Arc destruction runs outside their lock.
+        let (normal, event) = {
+            let mut ready = self.ready.lock();
+            (
+                std::mem::take(&mut ready.normal),
+                std::mem::take(&mut ready.event),
+            )
+        };
 
-        // Clear running tasks and close the arena so registrations racing
-        // teardown are rejected rather than leaked.
+        // Close and detach the arena before invoking task destructors so
+        // racing registrations are rejected and every callback runs outside
+        // the arena lock.
         let slots = self
             .running
             .lock()
             .take()
             .map(|running| running.slots)
             .unwrap_or_default();
+
+        let mut first_panic = None;
+        for task in normal.into_iter().chain(event) {
+            capture_cleanup_panic(&mut first_panic, move || drop(task));
+        }
         for task in slots.into_iter().flatten() {
-            task.clear();
+            capture_cleanup_panic(&mut first_panic, || task.clear());
+            capture_cleanup_panic(&mut first_panic, move || drop(task));
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
         }
     }
 }
@@ -492,7 +531,7 @@ mod tests {
     };
     use crate::{Clock as _, Runner as _, Spawner as _, Supervisor as _};
     use commonware_utils::channel::oneshot;
-    use std::{task::Waker, time::Duration};
+    use std::{sync::atomic::AtomicUsize, task::Waker, time::Duration};
 
     /// Build an unregistered pending task cell for ready-lane tests.
     fn pending_cell(
@@ -859,6 +898,56 @@ mod tests {
         assert!(ready.event.is_empty());
         drop(ready);
         assert!(!tasks.has_ready());
+    }
+
+    /// A panic from one task destructor must not skip later task destructors,
+    /// and the earliest payload remains the one propagated by teardown.
+    #[test]
+    fn test_clear_continues_after_multiple_task_drop_panics() {
+        struct PanicOnDrop {
+            message: &'static str,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Future for PanicOnDrop {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<()> {
+                Poll::Pending
+            }
+        }
+
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::AcqRel);
+                panic!("{}", self.message);
+            }
+        }
+
+        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
+        let drops = Arc::new(AtomicUsize::new(0));
+        assert!(Tasks::register(
+            &tasks,
+            PanicOnDrop {
+                message: "first task drop panic",
+                drops: Arc::clone(&drops),
+            }
+        ));
+        assert!(Tasks::register(
+            &tasks,
+            PanicOnDrop {
+                message: "second task drop panic",
+                drops: Arc::clone(&drops),
+            }
+        ));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tasks.clear()));
+        let payload = result.expect_err("task teardown should propagate the first panic");
+        assert_eq!(
+            payload.downcast_ref::<String>().map(String::as_str),
+            Some("first task drop panic")
+        );
+        assert_eq!(drops.load(Ordering::Acquire), 2);
     }
 
     /// Repeated wakes of the same task before its next poll must coalesce

@@ -125,6 +125,21 @@ const READY_TASKS_PER_TURN: usize = 64;
 /// whenever normal work was present at the snapshot.
 const EVENT_READY_TASKS_PER_TURN: usize = READY_TASKS_PER_TURN / 2;
 
+/// Type-erased payload retained while teardown completes.
+type PanicPayload = Box<dyn std::any::Any + Send>;
+
+/// Run one cleanup step, retaining the earliest panic without dropping any
+/// later adversarial payloads.
+fn capture_cleanup_panic(first_panic: &mut Option<PanicPayload>, cleanup: impl FnOnce()) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(cleanup)) {
+        if first_panic.is_none() {
+            *first_panic = Some(payload);
+        } else {
+            std::mem::forget(payload);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: CounterFamily<Label>,
@@ -804,42 +819,58 @@ impl Worker {
             }
         }));
 
-        // Abort every task spawned under this worker's root so registrations
-        // racing teardown observe the abort.
-        tree.abort();
+        let (output, mut first_panic) = match result {
+            Ok(output) => (Some(output), None),
+            Err(payload) => (None, Some(payload)),
+        };
 
-        // Clear remaining tasks and the root: task futures run arbitrary user
-        // drop code, and a panic here must not skip the drain below while the
-        // waiter slab still owns kernel-referenced buffers, so capture it and
-        // resume after the ring is quiesced.
-        //
-        // It is critical that we wait to drop the strong reference to executor
-        // until after we have dropped all tasks (as they may attempt to
-        // upgrade their weak reference to the executor during drop).
-        let teardown = catch_unwind(AssertUnwindSafe(|| {
-            // Close the alarm queue (registrations racing teardown now fail
-            // loudly instead of landing in a heap nobody drains), then wake
-            // the discarded alarms outside the lock: a woken foreign waiter
-            // re-polls, observes the closed queue, and panics in its own
-            // task rather than hanging on a wake that will never arrive.
-            let sleeping = executor
-                .sleeping
-                .lock()
-                .take()
-                .expect("alarm queue closed twice");
-            for alarm in sleeping.alarms {
-                if let Some(waker) = alarm.waker.lock().take() {
-                    waker.wake();
+        // Close the alarm queue and detach every waker before invoking any
+        // teardown callback. Registrations racing teardown now fail loudly
+        // instead of landing in a heap nobody drains.
+        let mut alarm_wakers = Vec::new();
+        match executor.sleeping.lock().take() {
+            Some(sleeping) => {
+                alarm_wakers.reserve(sleeping.alarms.len());
+                for alarm in sleeping.alarms {
+                    if let Some(waker) = alarm.waker.lock().take() {
+                        alarm_wakers.push(waker);
+                    }
                 }
             }
-            executor.tasks.clear();
+            None => capture_cleanup_panic(&mut first_panic, || {
+                panic!("alarm queue closed twice");
+            }),
+        }
 
-            // Drop the root task (and the worker's own handles) to release
-            // any Context references still held.
-            drop(root);
-            drop(storage);
-            drop(network);
-        }));
+        // Abort every task spawned under this worker's root so registrations
+        // racing teardown observe the abort. Each callback and resource drop
+        // is isolated so later cleanup still runs.
+        capture_cleanup_panic(&mut first_panic, || tree.abort());
+        for waker in alarm_wakers {
+            capture_cleanup_panic(&mut first_panic, || waker.wake_by_ref());
+            capture_cleanup_panic(&mut first_panic, move || drop(waker));
+        }
+
+        // Task futures run arbitrary user drop code. Clearing all of them is
+        // what orphans their driver observers before the ring drain.
+        capture_cleanup_panic(&mut first_panic, || executor.tasks.clear());
+
+        // Drop the root and every worker-owned handle before the executor.
+        // Task and root destructors may still upgrade their executor weak
+        // references during their isolated cleanup callbacks.
+        capture_cleanup_panic(&mut first_panic, move || drop(root));
+        capture_cleanup_panic(&mut first_panic, move || drop(storage));
+        capture_cleanup_panic(&mut first_panic, move || drop(network));
+        capture_cleanup_panic(&mut first_panic, move || drop(scratch));
+        capture_cleanup_panic(&mut first_panic, move || drop(root_waker));
+        capture_cleanup_panic(&mut first_panic, move || drop(tree));
+
+        // Record the escaped-context diagnostic before releasing the last
+        // executor strong reference. It is reported only when no earlier
+        // worker or cleanup panic exists.
+        let escaped_executor = !executor.shared.spawned_workers.load(Ordering::Relaxed)
+            && Arc::weak_count(&executor) != 0;
+        capture_cleanup_panic(&mut first_panic, move || drop(executor));
 
         // Close the driver so late admissions fail with their kind-specific
         // error, then drain in-flight ring work so kernel-owned buffers and
@@ -853,7 +884,7 @@ impl Worker {
         // drain, so it is retained and resumed only after the ring is
         // quiesced. A panic inside the drain itself aborts the process
         // before unwinding can free ring state (see [Driver::drain]).
-        let close_wakers = catch_unwind(AssertUnwindSafe(|| driver.close()));
+        capture_cleanup_panic(&mut first_panic, || driver.close());
         driver.drain();
 
         // Assert no context escaped the runtime. The check is meaningful only
@@ -867,23 +898,20 @@ impl Worker {
         // usually a consequence of the pending panic (the root died before
         // releasing or joining whatever holds the reference), and this
         // diagnostic must not replace the payload that explains it.
-        if result.is_ok() && teardown.is_ok() && close_wakers.is_ok() {
-            let multi_worker = executor.shared.spawned_workers.load(Ordering::Relaxed);
-            assert!(
-                multi_worker || Arc::weak_count(&executor) == 0,
-                "executor still has weak references"
-            );
+        if first_panic.is_none() && escaped_executor {
+            capture_cleanup_panic(&mut first_panic, || {
+                panic!("executor still has weak references");
+            });
         }
 
-        // Handle the result: resume the original panic after cleanup if one
-        // was caught, preferring it over a panic from task teardown, and
-        // either over a close-waker panic.
-        match (result, teardown, close_wakers) {
-            (Err(payload), _, _) | (Ok(_), Err(payload), _) | (Ok(_), Ok(()), Err(payload)) => {
-                resume_unwind(payload)
-            }
-            (Ok(output), Ok(()), Ok(())) => output,
+        if first_panic.is_some() {
+            // A completed root may return a value with adversarial drop glue.
+            // Dispose of it before resuming the retained payload so a second
+            // panic cannot abort the process during unwind.
+            capture_cleanup_panic(&mut first_panic, move || drop(output));
+            resume_unwind(first_panic.expect("cleanup panic disappeared"));
         }
+        output.expect("root output missing without a panic")
     }
 }
 
@@ -2795,6 +2823,164 @@ mod tests {
             .copied()
             .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
         assert_eq!(message, Some("child drop panic"));
+    }
+
+    /// A task destructor panic must not strand a later task's submitted
+    /// operation. The later task must be cleared before the driver drains.
+    #[test]
+    fn test_child_drop_panic_clears_later_in_flight_task() {
+        struct PanicOnDrop;
+
+        impl Future for PanicOnDrop {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
+                Poll::Pending
+            }
+        }
+
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("first child drop panic");
+            }
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                let mut listener = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let _first = context.child("first").spawn(|_| PanicOnDrop);
+                let (started_send, started_recv) = oneshot::channel();
+                let _second = context.child("second").spawn(move |_| async move {
+                    let mut accept = Box::pin(listener.accept());
+                    let mut started_send = Some(started_send);
+                    let _ = std::future::poll_fn(move |cx| {
+                        let result = accept.as_mut().poll(cx);
+                        if result.is_pending()
+                            && let Some(send) = started_send.take()
+                        {
+                            let _ = send.send(());
+                        }
+                        result
+                    })
+                    .await;
+                });
+
+                started_recv.await.unwrap();
+                context.sleep(Duration::from_millis(10)).await;
+            })
+        }));
+        let payload = result.expect_err("first child drop panic should fail start");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("first child drop panic"));
+    }
+
+    /// An alarm waker panic must not skip a pending child's cleanup or leave
+    /// its submitted operation attached while the driver drains.
+    #[test]
+    fn test_alarm_wake_panic_clears_pending_child() {
+        struct PanicWake;
+
+        struct SetOnDrop(Arc<AtomicBool>);
+
+        impl std::task::Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("alarm wake panic");
+            }
+        }
+
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let child_dropped = Arc::new(AtomicBool::new(false));
+        let observed_child_drop = Arc::clone(&child_dropped);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                let executor = context.executor.upgrade().unwrap();
+                let mut listener = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let (started_send, started_recv) = oneshot::channel();
+                let _child = context.child("pending").spawn(move |_| async move {
+                    let _guard = SetOnDrop(observed_child_drop);
+                    let mut accept = Box::pin(listener.accept());
+                    let mut started_send = Some(started_send);
+                    let _ = std::future::poll_fn(move |cx| {
+                        let result = accept.as_mut().poll(cx);
+                        if result.is_pending()
+                            && let Some(send) = started_send.take()
+                        {
+                            let _ = send.send(());
+                        }
+                        result
+                    })
+                    .await;
+                });
+
+                started_recv.await.unwrap();
+                context.sleep(Duration::from_millis(10)).await;
+                executor.register_alarm(Arc::new(Alarm {
+                    time: Instant::now() + Duration::from_secs(3600),
+                    waker: Mutex::new(Some(Waker::from(Arc::new(PanicWake)))),
+                }));
+            })
+        }));
+        let payload = result.expect_err("alarm wake panic should fail start");
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("alarm wake panic")
+        );
+        assert!(
+            child_dropped.load(Ordering::Acquire),
+            "alarm wake panic skipped pending child cleanup"
+        );
+    }
+
+    /// A teardown panic must remain isolated from panic-capable drop glue on
+    /// the root's already-produced output.
+    #[test]
+    fn test_alarm_wake_panic_isolates_root_output_drop_panic() {
+        struct PanicWake;
+
+        #[derive(Debug)]
+        struct PanicOutput;
+
+        impl std::task::Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("alarm wake panic");
+            }
+        }
+
+        impl Drop for PanicOutput {
+            fn drop(&mut self) {
+                panic!("root output drop panic");
+            }
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                let executor = context.executor.upgrade().unwrap();
+                executor.register_alarm(Arc::new(Alarm {
+                    time: Instant::now() + Duration::from_secs(3600),
+                    waker: Mutex::new(Some(Waker::from(Arc::new(PanicWake)))),
+                }));
+                PanicOutput
+            })
+        }));
+        let payload = result.expect_err("alarm wake panic should fail start");
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("alarm wake panic")
+        );
     }
 
     /// A dedicated task's poll panic that races root completion must still
