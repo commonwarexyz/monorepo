@@ -524,7 +524,8 @@ struct SnapshotRouting {
 }
 
 /// Number of operations the snapshot replay batches per worker-channel send during a parallel
-/// build. Small in tests so ordinary logs exercise batch boundaries.
+/// build. Build throughput is mostly insensitive to this value, so it is a constant rather
+/// than configuration. Small in tests so ordinary logs exercise batch boundaries.
 #[cfg(not(test))]
 const SNAPSHOT_ROUTE_BATCH: usize = 4096;
 #[cfg(test)]
