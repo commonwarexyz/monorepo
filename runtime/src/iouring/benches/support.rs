@@ -76,7 +76,7 @@ pub struct ReadyLoad {
 
 impl ReadyLoad {
     /// Create a ready-load future controlled by `stop`.
-    pub fn new(stop: Arc<AtomicBool>) -> Self {
+    pub const fn new(stop: Arc<AtomicBool>) -> Self {
         Self { stop }
     }
 }
