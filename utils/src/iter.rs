@@ -4,9 +4,6 @@ use core::iter::{Chain, Once, once};
 
 /// An iterator source guaranteed to yield at least one item.
 ///
-/// `NonEmpty` is consumed when iterated so the first item cannot be removed before the value is
-/// passed to an API that requires non-empty input.
-///
 /// # Examples
 ///
 /// ```

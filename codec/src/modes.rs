@@ -52,6 +52,13 @@ impl From<Mode> for u8 {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Mode {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self(u.int_in_range(0..=(CONTINUATION_BIT - 1))?))
+    }
+}
+
 /// Creates a [`Mode`] from a `u8` literal or expression.
 ///
 /// Literals are validated at compile time. Expressions are validated at runtime.
@@ -216,12 +223,11 @@ impl<'a, const N: usize> arbitrary::Arbitrary<'a> for Modes<N> {
         }
 
         let len = u.int_in_range(1..=N)?;
-        let mut modes = [0; N];
+        let mut modes = [Mode(0); N];
         for mode in &mut modes[..len - 1] {
-            *mode = u.int_in_range(0..=0x7f)?;
+            *mode = u.arbitrary()?;
         }
-        modes[len - 1] = u.int_in_range(1..=0x7f)?;
-        let modes = modes.map(|mode| Mode::new(mode).expect("generated mode fits in seven bits"));
+        modes[len - 1] = Mode(u.int_in_range(1..=(CONTINUATION_BIT - 1))?);
         Self::new(modes).ok_or(arbitrary::Error::IncorrectFormat)
     }
 }
