@@ -360,15 +360,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         // Enforce signer bounds, uniqueness, and quorum before recovering the certificate.
         let quorum = self.polynomial();
-        let signers = Signers::new(
-            quorum.total().get(),
-            partials.iter().map(|partial| partial.index),
-        )?;
-        let expected = quorum.required();
-        let found = u32::try_from(signers.count()).expect("signer count exceeds u32::MAX");
-        if found < expected {
-            return Err(AssemblyError::InsufficientAttestations(expected, found));
-        }
+        Signers::try_from((quorum, partials.iter().map(|partial| partial.index)))?;
 
         // Recover the certificate only after these structural preconditions hold.
         let signature = threshold::recover(quorum, partials.iter(), strategy)

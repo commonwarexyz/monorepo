@@ -564,6 +564,16 @@ impl Signers {
         Ok(Self { bitmap })
     }
 
+    /// Requires at least `required` signers in an already validated set.
+    pub(crate) fn require(self, required: u32) -> Result<Self, AssemblyError> {
+        let found = u32::try_from(self.count()).expect("signer count exceeds u32::MAX");
+        if found < required {
+            return Err(AssemblyError::InsufficientAttestations(required, found));
+        }
+
+        Ok(self)
+    }
+
     /// Returns the length of the bitmap (the size of the participant set).
     #[allow(clippy::len_without_is_empty)]
     pub const fn len(&self) -> usize {
@@ -580,6 +590,23 @@ impl Signers {
         self.bitmap
             .ones_iter()
             .map(|index| Participant::from_usize(index as usize))
+    }
+}
+
+/// Builds [`Signers`] using the participant set as the valid signer-index range.
+///
+/// # Panics
+///
+/// Panics if the participant count exceeds `u32::MAX`.
+impl<'a, P, I> TryFrom<(&'a Set<P>, I)> for Signers
+where
+    I: IntoIterator<Item = Participant>,
+{
+    type Error = AssemblyError;
+
+    fn try_from((participants, signers): (&'a Set<P>, I)) -> Result<Self, Self::Error> {
+        let total = u32::try_from(participants.len()).expect("participant count exceeds u32::MAX");
+        Self::new(total, signers)
     }
 }
 
@@ -697,6 +724,32 @@ mod tests {
     #[test]
     fn test_new_not_increasing() {
         assert!(Signers::new(4, [2, 1].map(Participant::new)).is_ok());
+    }
+
+    #[test]
+    fn test_try_from_set_and_require() {
+        let participants = Set::from_iter_dedup(0..4);
+        let signers = Signers::try_from((&participants, [0, 2, 3].map(Participant::new)))
+            .unwrap()
+            .require(3)
+            .unwrap();
+        assert_eq!(signers.count(), 3);
+        assert_eq!(
+            Signers::try_from((&participants, [0, 2].map(Participant::new)))
+                .unwrap()
+                .require(3),
+            Err(AssemblyError::InsufficientAttestations(3, 2))
+        );
+    }
+
+    #[test]
+    fn test_try_from_set_checks_signer_bounds() {
+        let participants = Set::<u8>::default();
+        let signer = Participant::new(0);
+        assert_eq!(
+            Signers::try_from((&participants, [signer])),
+            Err(AssemblyError::UnknownSigner(signer))
+        );
     }
 
     #[test]

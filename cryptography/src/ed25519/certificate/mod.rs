@@ -200,14 +200,8 @@ impl<N: Namespace> Generic<N> {
         // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
-        let participants =
-            u32::try_from(self.participants.len()).expect("participant count exceeds u32::MAX");
-        let signers = Signers::new(participants, signer)?;
-        let expected = self.participants.quorum::<S::Faults>();
-        let found = u32::try_from(signers.count()).expect("signer count exceeds u32::MAX");
-        if found < expected {
-            return Err(AssemblyError::InsufficientAttestations(expected, found));
-        }
+        let signers = Signers::try_from((&self.participants, signer))?
+            .require(self.participants.quorum::<S::Faults>())?;
         let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Ok(Certificate {

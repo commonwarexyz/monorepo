@@ -343,14 +343,9 @@ where
             signers.push(attestation.signer);
         }
 
-        let participants =
-            u32::try_from(self.participants.len()).expect("participant count exceeds u32::MAX");
-        let signers = Signers::new(participants, signers).map_err(Self::assembly_error)?;
-        let expected = self.participants.quorum::<S::Faults>();
-        let found = u32::try_from(signers.count()).expect("signer count exceeds u32::MAX");
-        if found < expected {
-            return Err(AssemblyError::InsufficientAttestations(expected, found));
-        }
+        let signers =
+            Signers::try_from((&self.participants, signers)).map_err(Self::assembly_error)?;
+        let signers = signers.require(self.participants.quorum::<S::Faults>())?;
 
         let subject = signed_subject.expect("non-empty attestations establish a signed subject");
         let stored_subject = subject.clone();

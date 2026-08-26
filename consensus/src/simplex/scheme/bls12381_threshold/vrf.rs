@@ -913,15 +913,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
         // Enforce signer bounds, uniqueness, and quorum before recovering signatures.
         let quorum = self.polynomial();
-        let signers = Signers::new(
-            quorum.total().get(),
-            partials.iter().map(|(vote, _)| vote.index),
-        )?;
-        let expected = quorum.required();
-        let found = u32::try_from(signers.count()).expect("signer count exceeds u32::MAX");
-        if found < expected {
-            return Err(AssemblyError::InsufficientAttestations(expected, found));
-        }
+        Signers::try_from((quorum, partials.iter().map(|(vote, _)| vote.index)))?;
 
         // Recover paired vote and seed signatures from this same structurally valid signer set.
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();

@@ -253,14 +253,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         // Produce signers and aggregate signature.
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        let participants =
-            u32::try_from(self.participants.len()).expect("participant count exceeds u32::MAX");
-        let signers = Signers::new(participants, signers)?;
-        let expected = self.participants.quorum::<S::Faults>();
-        let found = u32::try_from(signers.count()).expect("signer count exceeds u32::MAX");
-        if found < expected {
-            return Err(AssemblyError::InsufficientAttestations(expected, found));
-        }
+        let signers = Signers::try_from((self.participants.keys(), signers))?
+            .require(self.participants.quorum::<S::Faults>())?;
         let signatures = non_empty![@signatures.iter()];
         let signature = aggregate::combine_signatures::<V, _>(signatures);
 
