@@ -128,8 +128,9 @@ pub struct Config<S: Strategy> {
 
     /// Capacity (in entries, rounded up to a multiple of the shard count and preallocated
     /// eagerly) of the position-keyed node cache serving historical node reads that escape
-    /// the in-memory structure; `None` disables it. Experimental: entry-count sizing is
-    /// for evaluation only and is replaced by a byte-bounded knob before stabilization.
+    /// the in-memory structure. `None` disables it. The cache pays off for access patterns
+    /// that repeatedly read the same positions, such as grafted reads over hot regions or
+    /// repeated proof generation.
     pub node_cache_size: Option<NonZeroUsize>,
 }
 
