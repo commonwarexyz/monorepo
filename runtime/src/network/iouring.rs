@@ -121,61 +121,22 @@ fn new_socket(addr: &SocketAddr) -> Result<OwnedFd, std::io::Error> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// Set or clear `TCP_NODELAY` on a socket.
-fn set_tcp_nodelay(fd: &OwnedFd, enable: bool) -> Result<(), std::io::Error> {
-    let value: libc::c_int = libc::c_int::from(enable);
-    // SAFETY: `fd` owns a live descriptor and `value` is a valid `c_int`
-    // read-only input of the provided length.
+/// Set a typed socket option.
+fn set_socket_option<T>(
+    fd: &OwnedFd,
+    level: libc::c_int,
+    option: libc::c_int,
+    value: &T,
+) -> Result<(), std::io::Error> {
+    // SAFETY: `fd` owns a live descriptor and `value` is a valid read-only
+    // input of the size supplied to the kernel.
     let rc = unsafe {
         libc::setsockopt(
             fd.as_raw_fd(),
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
-            (&raw const value).cast(),
-            size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if rc == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Set `SO_LINGER` to zero on a socket so close causes an immediate RST.
-fn set_zero_linger(fd: &OwnedFd) -> Result<(), std::io::Error> {
-    let value = libc::linger {
-        l_onoff: 1,
-        l_linger: 0,
-    };
-    // SAFETY: `fd` owns a live descriptor and `value` is a valid `linger`
-    // read-only input of the provided length.
-    let rc = unsafe {
-        libc::setsockopt(
-            fd.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_LINGER,
-            (&raw const value).cast(),
-            size_of::<libc::linger>() as libc::socklen_t,
-        )
-    };
-    if rc == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Set `SO_REUSEADDR` on a socket so rebinding does not wait out `TIME_WAIT`.
-fn set_reuseaddr(fd: &OwnedFd) -> Result<(), std::io::Error> {
-    let value: libc::c_int = 1;
-    // SAFETY: `fd` owns a live descriptor and `value` is a valid `c_int`
-    // read-only input of the provided length.
-    let rc = unsafe {
-        libc::setsockopt(
-            fd.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_REUSEADDR,
-            (&raw const value).cast(),
-            size_of::<libc::c_int>() as libc::socklen_t,
+            level,
+            option,
+            std::ptr::from_ref(value).cast(),
+            size_of::<T>() as libc::socklen_t,
         )
     };
     if rc == -1 {
@@ -198,37 +159,38 @@ fn local_addr(fd: &OwnedFd) -> Result<SocketAddr, std::io::Error> {
 }
 
 /// Apply configured per-connection socket options, logging failures.
-fn configure_socket(fd: &OwnedFd, tcp_nodelay: Option<bool>, zero_linger: bool) {
+fn configure_socket(fd: &OwnedFd, cfg: &Config) {
     // Set TCP_NODELAY if configured
-    if let Some(tcp_nodelay) = tcp_nodelay
-        && let Err(err) = set_tcp_nodelay(fd, tcp_nodelay)
+    if let Some(tcp_nodelay) = cfg.tcp_nodelay
+        && let Err(err) = set_socket_option(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            &libc::c_int::from(tcp_nodelay),
+        )
     {
         warn!(?err, "failed to set TCP_NODELAY");
     }
 
     // Set SO_LINGER to zero if configured
-    if zero_linger && let Err(err) = set_zero_linger(fd) {
-        warn!(?err, "failed to set SO_LINGER");
+    if cfg.zero_linger {
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        if let Err(err) = set_socket_option(fd, libc::SOL_SOCKET, libc::SO_LINGER, &linger) {
+            warn!(?err, "failed to set SO_LINGER");
+        }
     }
 }
 
 /// [crate::Network] implementation that uses io_uring to do async I/O.
 #[derive(Clone)]
 pub struct Network {
-    /// If Some, explicitly sets TCP_NODELAY on the socket.
-    /// Otherwise uses system default.
-    tcp_nodelay: Option<bool>,
-    /// Whether to set `SO_LINGER` to zero on the socket.
-    zero_linger: bool,
+    /// Network configuration.
+    cfg: Config,
     /// Used to submit operations to the io_uring event loop.
     handle: iouring::Handle,
-    /// Timeout for establishing an outbound TCP connection.
-    connect_timeout: Duration,
-    /// Timeout budget applied to each send/recv call and each in-flight
-    /// accept.
-    read_write_timeout: Duration,
-    /// Size of the read buffer for batching network reads.
-    read_buffer_size: usize,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
@@ -241,15 +203,7 @@ impl Network {
     /// Each in-flight send/recv to/from each connection consumes a ring slot, as
     /// does each in-flight accept and connect.
     pub(crate) const fn new(cfg: Config, handle: iouring::Handle, pool: BufferPool) -> Self {
-        Self {
-            tcp_nodelay: cfg.tcp_nodelay,
-            zero_linger: cfg.zero_linger,
-            handle,
-            connect_timeout: cfg.connect_timeout,
-            read_write_timeout: cfg.read_write_timeout,
-            read_buffer_size: cfg.read_buffer_size,
-            pool,
-        }
+        Self { cfg, handle, pool }
     }
 }
 
@@ -261,7 +215,13 @@ impl crate::Network for Network {
         // Create the listening socket inline: socket setup, bind, and listen
         // are cheap non-blocking syscalls.
         let fd = new_socket(&socket).map_err(|_| Error::BindFailed)?;
-        set_reuseaddr(&fd).map_err(|_| Error::BindFailed)?;
+        set_socket_option(
+            &fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            &libc::c_int::from(true),
+        )
+        .map_err(|_| Error::BindFailed)?;
         let raw = RawSocketAddr::from_socket_addr(&socket);
         // SAFETY: `fd` owns a live descriptor and the pointer references an
         // encoded address of the provided length.
@@ -277,13 +237,10 @@ impl crate::Network for Network {
         let local_addr = local_addr(&fd).map_err(|_| Error::BindFailed)?;
 
         Ok(Listener {
-            tcp_nodelay: self.tcp_nodelay,
-            zero_linger: self.zero_linger,
+            cfg: self.cfg.clone(),
             fd: Arc::new(fd),
             local_addr,
             handle: self.handle.clone(),
-            read_write_timeout: self.read_write_timeout,
-            read_buffer_size: self.read_buffer_size,
             pool: self.pool.clone(),
             pending: None,
         })
@@ -296,20 +253,20 @@ impl crate::Network for Network {
         let fd = Arc::new(new_socket(&socket).map_err(|_| Error::ConnectionFailed)?);
 
         // Apply socket options before connecting.
-        configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
+        configure_socket(&fd, &self.cfg);
 
         // Connect through the ring. Deadline expiry cancels the in-flight
         // connect and resolves the dial with [Error::Timeout].
-        let deadline = Instant::now() + self.connect_timeout;
+        let deadline = Instant::now() + self.cfg.connect_timeout;
         self.handle.connect(fd.clone(), socket, deadline).await?;
 
         Ok((
-            Sink::new(fd.clone(), self.handle.clone(), self.read_write_timeout),
+            Sink::new(fd.clone(), self.handle.clone(), self.cfg.read_write_timeout),
             Stream::new(
                 fd,
                 self.handle.clone(),
-                self.read_write_timeout,
-                self.read_buffer_size,
+                self.cfg.read_write_timeout,
+                self.cfg.read_buffer_size,
                 self.pool.clone(),
             ),
         ))
@@ -318,22 +275,14 @@ impl crate::Network for Network {
 
 /// Implementation of [crate::Listener] for an io-uring [Network].
 pub struct Listener {
-    /// If Some, explicitly sets TCP_NODELAY on the socket.
-    /// Otherwise uses system default.
-    tcp_nodelay: Option<bool>,
-    /// Whether to set `SO_LINGER` to zero on the socket.
-    zero_linger: bool,
+    /// Network configuration.
+    cfg: Config,
     /// Listening socket descriptor, shared with in-flight accept requests.
     fd: Arc<OwnedFd>,
     /// Address the listener is bound to.
     local_addr: SocketAddr,
     /// Used to submit operations to the io_uring event loop.
     handle: iouring::Handle,
-    /// Timeout budget applied to each in-flight accept and inherited by
-    /// accepted connections.
-    read_write_timeout: Duration,
-    /// Size of the read buffer for batching network reads.
-    read_buffer_size: usize,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
     /// In-flight accept, retained so a cancelled accept future resumes the
@@ -368,7 +317,7 @@ impl crate::Listener for Listener {
         loop {
             // Issue a fresh accept if none is in flight.
             if self.pending.is_none() {
-                let deadline = Instant::now() + self.read_write_timeout;
+                let deadline = Instant::now() + self.cfg.read_write_timeout;
                 self.pending = Some(self.handle.start_accept(self.fd.clone(), deadline).await);
             }
 
@@ -380,15 +329,15 @@ impl crate::Listener for Listener {
             match result {
                 Ok((fd, remote_addr)) => {
                     let fd = Arc::new(fd);
-                    configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
+                    configure_socket(&fd, &self.cfg);
                     return Ok((
                         remote_addr,
-                        Sink::new(fd.clone(), self.handle.clone(), self.read_write_timeout),
+                        Sink::new(fd.clone(), self.handle.clone(), self.cfg.read_write_timeout),
                         Stream::new(
                             fd,
                             self.handle.clone(),
-                            self.read_write_timeout,
-                            self.read_buffer_size,
+                            self.cfg.read_write_timeout,
+                            self.cfg.read_buffer_size,
                             self.pool.clone(),
                         ),
                     ));

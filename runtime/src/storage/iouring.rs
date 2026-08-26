@@ -276,6 +276,7 @@ impl crate::Storage for Storage {
 /// writes complete locally. [crate::Blob::resize] runs a synchronous `set_len`
 /// that blocks the calling worker (see the [module docs](self) for the blocking
 /// rules and lifecycle).
+#[derive(Clone)]
 pub struct Blob {
     /// The partition this blob lives in
     partition: String,
@@ -292,20 +293,6 @@ pub struct Blob {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: Arc<AtomicBool>,
-}
-
-impl Clone for Blob {
-    fn clone(&self) -> Self {
-        Self {
-            partition: self.partition.clone(),
-            name: self.name.clone(),
-            file: self.file.clone(),
-            io_handle: self.io_handle.clone(),
-            pool: self.pool.clone(),
-            data_offset: self.data_offset,
-            dont_cache_supported: self.dont_cache_supported.clone(),
-        }
-    }
 }
 
 impl Blob {
