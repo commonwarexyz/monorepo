@@ -53,11 +53,12 @@ use std::{
 /// type end to end.
 pub(super) trait Erased: Send + Sync {
     /// Poll the stored future, returning its arena slot only when this call
-    /// completed it (the caller then frees that slot).
+    /// completed it (the caller then frees that slot). `tasks` is the owner
+    /// that supplied this ready token and receives any deferred self-wake.
     ///
     /// A pending future or stale token for an already-cleared future returns
     /// `None`.
-    fn poll(self: Arc<Self>) -> Option<usize>;
+    fn poll(self: Arc<Self>, tasks: &Tasks) -> Option<usize>;
 
     /// Resolve the task without polling: drop the future in place (which
     /// resolves any join handle with [Error::Closed]).
@@ -238,10 +239,7 @@ where
 
     /// Publish the notification retained during a poll that returned
     /// `Pending`, transferring the ready token already owned by that poll.
-    fn queue_after_pending(self: Arc<Self>) {
-        let Some(tasks) = self.tasks.upgrade() else {
-            return;
-        };
+    fn queue_after_pending(self: Arc<Self>, tasks: &Tasks) {
         // A notification received while the task was running always belongs
         // to the normal lane. Event delivery cannot poll tasks, and a direct
         // unit-test event guard must not change this handoff's classification.
@@ -266,7 +264,11 @@ impl<F> Erased for TaskCell<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    fn poll(self: Arc<Self>) -> Option<usize> {
+    fn poll(self: Arc<Self>, tasks: &Tasks) -> Option<usize> {
+        debug_assert!(
+            std::ptr::eq(tasks, self.tasks.as_ptr()),
+            "task polled by non-owner"
+        );
         // A token racing teardown or completion is inert. Normal operation
         // has exactly one token for each QUEUED state.
         if !self.state.start_poll() {
@@ -301,7 +303,7 @@ where
         };
 
         if result.is_none() && self.state.finish_pending() {
-            self.queue_after_pending();
+            self.queue_after_pending(tasks);
         }
         result
     }
@@ -742,10 +744,10 @@ mod tests {
     }
 
     /// Poll a drained batch of ready tokens and return their completion slots.
-    fn completed_slots(tasks: &mut Vec<Arc<dyn Erased>>) -> Vec<usize> {
+    fn completed_slots(owner: &Tasks, tasks: &mut Vec<Arc<dyn Erased>>) -> Vec<usize> {
         tasks
             .drain(..)
-            .map(|task| task.poll().expect("ready token must complete"))
+            .map(|task| task.poll(owner).expect("ready token must complete"))
             .collect()
     }
 
@@ -795,10 +797,10 @@ mod tests {
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 4, 1);
         assert_eq!(scratch.len(), 4);
-        assert_eq!(completed_slots(&mut scratch), vec![10, 0, 1, 11]);
+        assert_eq!(completed_slots(&tasks, &mut scratch), vec![10, 0, 1, 11]);
 
         tasks.drain_into(&mut scratch, 4, 1);
-        assert_eq!(completed_slots(&mut scratch), vec![12, 13]);
+        assert_eq!(completed_slots(&tasks, &mut scratch), vec![12, 13]);
         assert!(!tasks.has_ready());
     }
 
@@ -820,7 +822,7 @@ mod tests {
         }
 
         tasks.drain_into(&mut scratch, 2, 1);
-        assert_eq!(completed_slots(&mut scratch), vec![10, 0]);
+        assert_eq!(completed_slots(&tasks, &mut scratch), vec![10, 0]);
         assert!(!tasks.has_ready());
     }
 
@@ -839,9 +841,12 @@ mod tests {
 
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 4, 2);
-        assert_eq!(completed_slots(&mut scratch), vec![10, 11, 0, 1]);
+        assert_eq!(
+            completed_slots(&tasks, &mut scratch),
+            vec![10, 11, 0, 1]
+        );
         tasks.drain_into(&mut scratch, 4, 2);
-        assert_eq!(completed_slots(&mut scratch), vec![12, 2]);
+        assert_eq!(completed_slots(&tasks, &mut scratch), vec![12, 2]);
         assert!(!tasks.has_ready());
     }
 
@@ -867,7 +872,7 @@ mod tests {
             EVENT_READY_TASKS_PER_TURN,
         );
         assert_eq!(
-            completed_slots(&mut scratch),
+            completed_slots(&tasks, &mut scratch),
             (1_000..1_000 + EVENT_READY_TASKS_PER_TURN)
                 .chain(0..READY_TASKS_PER_TURN - EVENT_READY_TASKS_PER_TURN)
                 .collect::<Vec<_>>()
@@ -879,7 +884,7 @@ mod tests {
             EVENT_READY_TASKS_PER_TURN,
         );
         assert_eq!(
-            completed_slots(&mut scratch),
+            completed_slots(&tasks, &mut scratch),
             (1_000 + EVENT_READY_TASKS_PER_TURN..1_000 + READY_TASKS_PER_TURN)
                 .chain(
                     READY_TASKS_PER_TURN - EVENT_READY_TASKS_PER_TURN
@@ -943,7 +948,7 @@ mod tests {
 
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 1, 1);
-        assert_eq!(scratch.pop().unwrap().poll(), None);
+        assert_eq!(scratch.pop().unwrap().poll(&tasks), None);
 
         let ready = tasks.ready.lock();
         assert_eq!(ready.normal.len(), 1);
@@ -978,7 +983,7 @@ mod tests {
 
         let result = {
             let _event_delivery = tasks.event_delivery();
-            (cell as Arc<dyn Erased>).poll()
+            (cell as Arc<dyn Erased>).poll(&tasks)
         };
         assert_eq!(result, None);
 
@@ -1040,7 +1045,7 @@ mod tests {
             });
             let mut scratch = Vec::new();
             tasks.drain_into(&mut scratch, 1, 1);
-            let result = scratch.pop().unwrap().poll();
+            let result = scratch.pop().unwrap().poll(&tasks);
             foreign.join().unwrap();
 
             if ready {
@@ -1156,14 +1161,14 @@ mod tests {
         let completing_token = scratch.pop().unwrap();
         {
             let _event_delivery = tasks.event_delivery();
-            assert_eq!(completing_token.poll(), Some(8));
+            assert_eq!(completing_token.poll(&tasks), Some(8));
         }
         assert!(!tasks.has_ready());
         queue_token(&tasks, ready_cell(&tasks, 9), ReadyLane::Normal);
         queue_token(&tasks, ready_cell(&tasks, 10), ReadyLane::Normal);
 
         tasks.drain_into(&mut scratch, 2, 1);
-        assert_eq!(completed_slots(&mut scratch), vec![9, 10]);
+        assert_eq!(completed_slots(&tasks, &mut scratch), vec![9, 10]);
         assert!(!tasks.has_ready());
         tasks.clear();
     }
@@ -1247,7 +1252,8 @@ mod tests {
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 1, 1);
         let task = scratch.pop().unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.poll()));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.poll(&tasks)));
         let payload = result.expect_err("ready future drop must panic");
         assert_eq!(
             payload.downcast_ref::<&str>(),
@@ -1370,7 +1376,7 @@ mod tests {
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, LIMIT, 1);
         assert_eq!(scratch.len(), LIMIT);
-        let first = completed_slots(&mut scratch);
+        let first = completed_slots(&tasks, &mut scratch);
         assert_eq!(first, (0..LIMIT).collect::<Vec<_>>());
         for slot in first {
             tasks.remove(slot);
@@ -1380,7 +1386,7 @@ mod tests {
 
         tasks.drain_into(&mut scratch, LIMIT, 1);
         assert_eq!(scratch.len(), 1);
-        assert_eq!(completed_slots(&mut scratch), vec![LIMIT]);
+        assert_eq!(completed_slots(&tasks, &mut scratch), vec![LIMIT]);
         tasks.remove(LIMIT);
         assert!(!tasks.has_ready());
 
@@ -1410,7 +1416,7 @@ mod tests {
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 1, 1);
         let task = scratch.pop().unwrap();
-        let slot = task.poll().expect("live task must complete");
+        let slot = task.poll(&tasks).expect("live task must complete");
         tasks.remove(slot);
 
         // The completed task's arena slot is immediately reused, without a
@@ -1420,7 +1426,7 @@ mod tests {
 
         tasks.drain_into(&mut scratch, 1, 1);
         let replacement = scratch.pop().unwrap();
-        assert_eq!(replacement.poll(), Some(slot));
+        assert_eq!(replacement.poll(&tasks), Some(slot));
         tasks.remove(slot);
         assert!(!tasks.has_ready());
         tasks.clear();
