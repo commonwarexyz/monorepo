@@ -485,13 +485,7 @@ impl CapacityWaiters {
         if let Some(id) = *registration {
             let Some(state) = self.live_state(id) else {
                 *registration = None;
-                return self.poll(
-                    registration,
-                    free_len,
-                    deadline,
-                    incoming_waker,
-                    actions,
-                );
+                return self.poll(registration, free_len, deadline, incoming_waker, actions);
             };
             match state {
                 CapacityState::Queued { waker: stored, .. } => {
@@ -1112,9 +1106,7 @@ impl Handle {
 
     /// Access the shared op state if called on the runtime thread.
     fn try_with<R>(&self, f: impl FnOnce(&mut Ops) -> R) -> Option<R> {
-        self.inner
-            .ops
-            .try_with(|cell| f(&mut cell.borrow_mut()))
+        self.inner.ops.try_with(|cell| f(&mut cell.borrow_mut()))
     }
 
     /// Queue one foreign-thread drop for the owning event loop.
@@ -1410,8 +1402,7 @@ fn poll_op_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Po
     }
 
     let mut incoming = Some(cx.waker().clone());
-    let (output, detached) =
-        handle.with(|ops| ops.waiters.poll_take_deferred(id, &mut incoming));
+    let (output, detached) = handle.with(|ops| ops.waiters.poll_take_deferred(id, &mut incoming));
     let mut actions = CapacityActions::new();
     actions.reserve(2);
     for waker in detached.into_iter().chain(incoming) {
@@ -2019,22 +2010,14 @@ mod tests {
             CapacityAdmissionKind::Queued
         );
         assert_eq!(
-            poll_capacity(
-                &mut capacity,
-                &mut registrations[2],
-                0,
-                &wakers[2],
-            ),
+            poll_capacity(&mut capacity, &mut registrations[2], 0, &wakers[2],),
             CapacityAdmissionKind::Queued
         );
 
         reconcile_capacity(&mut capacity, 1);
         assert_eq!(*log.lock(), vec![0]);
         assert_eq!(capacity.reserved(), 1);
-        assert_eq!(
-            capacity.next_deadline(now),
-            Some(Duration::from_millis(10))
-        );
+        assert_eq!(capacity.next_deadline(now), Some(Duration::from_millis(10)));
 
         let mut actions = Vec::new();
         capacity.expire(now + Duration::from_millis(15), 1, &mut actions);
@@ -2941,5 +2924,4 @@ mod tests {
         std::mem::forget(payload);
         assert!(flag.0.load(Ordering::Acquire));
     }
-
 }

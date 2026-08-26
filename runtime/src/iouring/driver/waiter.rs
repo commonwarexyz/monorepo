@@ -22,10 +22,11 @@ use tracing::warn;
 /// only moves wakers, so RawWaker clone and drop callbacks remain outside the
 /// waiter and completion arenas.
 fn replace_waker(stored: &mut Option<Waker>, incoming: &mut Option<Waker>) -> Option<Waker> {
-    let next = incoming
+    let next = incoming.as_ref().expect("poll missing incoming waker");
+    if stored
         .as_ref()
-        .expect("poll missing incoming waker");
-    if stored.as_ref().is_some_and(|current| current.will_wake(next)) {
+        .is_some_and(|current| current.will_wake(next))
+    {
         return incoming.take();
     }
     stored.replace(incoming.take().expect("poll waker consumed twice"))
@@ -436,7 +437,11 @@ impl TicketCompletions {
         if index == self.entries.len() {
             self.entries.reserve(1);
         } else {
-            assert_eq!(self.free.last(), Some(&id), "completion free list order changed");
+            assert_eq!(
+                self.free.last(),
+                Some(&id),
+                "completion free list order changed"
+            );
             assert!(
                 self.entries[index].is_none(),
                 "free completion slot still occupied"
@@ -520,7 +525,10 @@ impl TicketCompletions {
         let entry = self.entry_mut(completion_id, "poll_state");
         match &entry.completion {
             Completion::Pending { waker: stored, .. } => {
-                if stored.as_ref().is_some_and(|stored| stored.will_wake(waker)) {
+                if stored
+                    .as_ref()
+                    .is_some_and(|stored| stored.will_wake(waker))
+                {
                     PollState::PendingCurrent
                 } else {
                     PollState::PendingNeedsWaker
@@ -759,9 +767,7 @@ impl Waiters {
     ) -> WaiterId {
         let id = self.prepare_insert();
         let observer = Observer::Op(Some(
-            incoming_waker
-                .take()
-                .expect("waiter waker consumed twice"),
+            incoming_waker.take().expect("waiter waker consumed twice"),
         ));
         self.insert_prepared(id, request, observer)
     }
@@ -801,10 +807,7 @@ impl Waiters {
 
     /// Commit a waiter after [Self::prepare_insert] validated its slot.
     fn insert_prepared(&mut self, id: WaiterId, request: Request, observer: Observer) -> WaiterId {
-        let popped = self
-            .free
-            .pop()
-            .expect("prepared waiter slot disappeared");
+        let popped = self.free.pop().expect("prepared waiter slot disappeared");
         debug_assert_eq!(popped, id);
         let index = id.index() as usize;
         self.entries[index] = Some(Waiter {
@@ -1217,7 +1220,10 @@ impl Waiters {
                 let Observer::Op(stored) = &slot.observer else {
                     unreachable!("observer verified op above");
                 };
-                if stored.as_ref().is_some_and(|stored| stored.will_wake(waker)) {
+                if stored
+                    .as_ref()
+                    .is_some_and(|stored| stored.will_wake(waker))
+                {
                     PollState::PendingCurrent
                 } else {
                     PollState::PendingNeedsWaker

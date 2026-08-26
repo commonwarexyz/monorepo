@@ -341,9 +341,7 @@ impl IoUringLoop {
     /// another thread).
     pub(crate) fn park(&mut self, ring: &mut IoUring, limit: Option<Duration>) {
         let now = Instant::now();
-        let capacity_deadline = self
-            .handle
-            .with(|ops| ops.capacity.next_deadline(now));
+        let capacity_deadline = self.handle.with(|ops| ops.capacity.next_deadline(now));
         let deadline = [self.timeout_wheel.next_deadline(), capacity_deadline, limit]
             .into_iter()
             .flatten()
@@ -440,9 +438,11 @@ impl IoUringLoop {
                 // When the first deadline arrives after an idle period, align
                 // wheel time once before converting deadlines to ticks.
                 if self.timeout_wheel.next_deadline().is_none() {
-                    assert!(!self
-                        .timeout_wheel
-                        .advance_into(Instant::now(), &mut self.expired_timeouts));
+                    assert!(
+                        !self
+                            .timeout_wheel
+                            .advance_into(Instant::now(), &mut self.expired_timeouts)
+                    );
                 }
                 match self.timeout_wheel.target_tick(deadline) {
                     Some(tick) => {
@@ -655,11 +655,8 @@ impl IoUringLoop {
         // Admission wait is part of the operation budget. Expire capacity
         // registrations before touching admitted requests so a saturated ring
         // cannot hide a network deadline from the event loop.
-        ops.capacity.expire(
-            now,
-            ops.waiters.free_len(),
-            &mut self.pending_waker_actions,
-        );
+        ops.capacity
+            .expire(now, ops.waiters.free_len(), &mut self.pending_waker_actions);
 
         // Release deadline accounting for ops whose tickets were dropped: the
         // wheel is loop-owned, so drop paths queue removals instead. Without
@@ -736,11 +733,7 @@ impl IoUringLoop {
     ///
     /// The injectable clock keeps the whole-loop grace boundary deterministic
     /// in tests. Request deadlines continue to use the runtime monotonic clock.
-    fn drain_with_shutdown_clock(
-        &mut self,
-        ring: &mut IoUring,
-        mut now: impl FnMut() -> Instant,
-    ) {
+    fn drain_with_shutdown_clock(&mut self, ring: &mut IoUring, mut now: impl FnMut() -> Instant) {
         let handle = self.handle.clone();
         let started_at = now();
         let grace = self.shutdown_timeout;
@@ -1160,7 +1153,10 @@ mod tests {
             unix::net::UnixStream,
         },
         pin::Pin,
-        sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         task::{Context, Poll},
         time::{Duration, Instant},
     };
@@ -1247,9 +1243,12 @@ mod tests {
         );
 
         let mut registry = Registry::default();
-        let (mut ring, _handle, ioloop) =
-            IoUringLoop::new(RingConfig::default(), Duration::from_secs(60), &mut registry)
-                .expect("io_uring creation should succeed");
+        let (mut ring, _handle, ioloop) = IoUringLoop::new(
+            RingConfig::default(),
+            Duration::from_secs(60),
+            &mut registry,
+        )
+        .expect("io_uring creation should succeed");
         let entry = io_uring::opcode::Nop::new().build();
         // SAFETY: the NOP references no external memory, and `entry` remains
         // alive until the submission queue has copied it.
@@ -1291,12 +1290,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         assert!(recv.as_mut().poll(&mut cx).is_pending());
         ioloop.turn(&mut ring);
-        handle::wake_batch(
-            handle
-                .close()
-                .into_iter()
-                .map(handle::WakerAction::Wake),
-        );
+        handle::wake_batch(handle.close().into_iter().map(handle::WakerAction::Wake));
 
         let started_at = Instant::now();
         let expired_at = started_at
@@ -1715,9 +1709,7 @@ mod tests {
         handle.with(|ops| assert_eq!(ops.capacity.queued(), 1));
 
         let parked_at = Instant::now();
-        harness
-            .driver()
-            .park(Some(Duration::from_millis(500)));
+        harness.driver().park(Some(Duration::from_millis(500)));
         assert!(
             parked_at.elapsed() < Duration::from_millis(250),
             "park ignored the queued connect deadline: {:?}",
@@ -3185,7 +3177,14 @@ mod tests {
             assert!(ops.backlog.is_empty());
             assert_eq!(ops.waiters.pending(), 1);
         });
-        assert!(harness.driver().inner.timeout_wheel.next_deadline().is_some());
+        assert!(
+            harness
+                .driver()
+                .inner
+                .timeout_wheel
+                .next_deadline()
+                .is_some()
+        );
 
         drop(ticket);
         drop(admission_waker);

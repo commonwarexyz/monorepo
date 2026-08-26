@@ -159,7 +159,9 @@ impl TaskPanic {
 
     /// Recover the stamped payload from a delivered notification.
     const fn take_stamped(&mut self) -> StampedPanic {
-        self.stamped.take().expect("task panic payload already taken")
+        self.stamped
+            .take()
+            .expect("task panic payload already taken")
     }
 
     /// Downcast a type-erased panic notification.
@@ -648,10 +650,8 @@ fn route_task_panic(shared: &Arc<Shared>, panicker: &Panicker, payload: PanicPay
     }
 
     let sequence = shared.observe_panic();
-    let notification: PanicPayload = Box::new(TaskPanic::new(
-        shared,
-        StampedPanic { sequence, payload },
-    ));
+    let notification: PanicPayload =
+        Box::new(TaskPanic::new(shared, StampedPanic { sequence, payload }));
     let Some(notification) = panicker.notify(notification) else {
         return;
     };
@@ -679,11 +679,7 @@ struct WorkerCleanup<'a> {
 
 impl<'a> WorkerCleanup<'a> {
     /// Start teardown with an optional panic caught from the worker loop.
-    fn new(
-        shared: &'a Shared,
-        stamp: &'a AtomicU64,
-        first_panic: Option<PanicPayload>,
-    ) -> Self {
+    fn new(shared: &'a Shared, stamp: &'a AtomicU64, first_panic: Option<PanicPayload>) -> Self {
         let first_panic = first_panic.map(|payload| match TaskPanic::downcast(payload) {
             Ok(panic) => {
                 shared.adopt_panic_sequence(stamp, panic.sequence);
@@ -1358,10 +1354,7 @@ impl crate::Runner for Runner {
                 } = worker;
                 if let Err(payload) = join.join() {
                     let sequence = shared.stamp_panic(&panic_sequence);
-                    retain_earliest_panic(
-                        &mut worker_panic,
-                        StampedPanic { sequence, payload },
-                    );
+                    retain_earliest_panic(&mut worker_panic, StampedPanic { sequence, payload });
                 }
             }
         }
@@ -1376,10 +1369,7 @@ impl crate::Runner for Runner {
             Ok(output) => Some(output),
             Err(payload) => {
                 let sequence = shared.stamp_panic(&root_panic_sequence);
-                retain_earliest_panic(
-                    &mut first_panic,
-                    StampedPanic { sequence, payload },
-                );
+                retain_earliest_panic(&mut first_panic, StampedPanic { sequence, payload });
                 None
             }
         };
@@ -1493,11 +1483,13 @@ impl Context {
                 let panic_shared = Arc::clone(&thread_shared);
                 let wrapped = async move {
                     let result = match catch_unwind(AssertUnwindSafe(|| f(context))) {
-                        Ok(future) => Abortable::new(
-                            AssertUnwindSafe(future).catch_unwind(),
-                            abort_registration,
-                        )
-                        .await,
+                        Ok(future) => {
+                            Abortable::new(
+                                AssertUnwindSafe(future).catch_unwind(),
+                                abort_registration,
+                            )
+                            .await
+                        }
                         Err(panic) => Ok(Err(panic)),
                     };
                     match result {
@@ -3943,46 +3935,42 @@ mod tests {
         let result = catch_unwind(AssertUnwindSafe(|| {
             Runner::default().start(move |context| async move {
                 let shared = Arc::clone(&context.executor().shared);
-                let (first_started_send, first_started_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let (first_release_send, first_release_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let (first_dropping_send, first_dropping_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let _first = context.child("first").dedicated().spawn(move |_| {
-                    WorkerPanic {
+                let (first_started_send, first_started_recv) = std::sync::mpsc::sync_channel(0);
+                let (first_release_send, first_release_recv) = std::sync::mpsc::sync_channel(0);
+                let (first_dropping_send, first_dropping_recv) = std::sync::mpsc::sync_channel(0);
+                let _first = context
+                    .child("first")
+                    .dedicated()
+                    .spawn(move |_| WorkerPanic {
                         started: Some(first_started_send),
                         release: first_release_recv,
                         dropping: Some(first_dropping_send),
                         failure: Some(Failure::First),
-                    }
-                });
+                    });
                 first_started_recv.recv().unwrap();
 
-                let (later_started_send, later_started_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let (later_release_send, later_release_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let (later_dropping_send, later_dropping_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let _later = context.child("later").dedicated().spawn(move |_| {
-                    WorkerPanic {
+                let (later_started_send, later_started_recv) = std::sync::mpsc::sync_channel(0);
+                let (later_release_send, later_release_recv) = std::sync::mpsc::sync_channel(0);
+                let (later_dropping_send, later_dropping_recv) = std::sync::mpsc::sync_channel(0);
+                let _later = context
+                    .child("later")
+                    .dedicated()
+                    .spawn(move |_| WorkerPanic {
                         started: Some(later_started_send),
                         release: later_release_recv,
                         dropping: Some(later_dropping_send),
                         failure: Some(Failure::Adversarial(observed_later_payload_drops)),
-                    }
-                });
+                    });
                 later_started_recv.recv().unwrap();
 
-                let (slow_started_send, slow_started_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let _slow = context.child("slow").dedicated().spawn(move |_| {
-                    SlowWorker {
+                let (slow_started_send, slow_started_recv) = std::sync::mpsc::sync_channel(0);
+                let _slow = context
+                    .child("slow")
+                    .dedicated()
+                    .spawn(move |_| SlowWorker {
                         started: Some(slow_started_send),
                         dropped: observed_slow_worker_drop,
-                    }
-                });
+                    });
                 slow_started_recv.recv().unwrap();
 
                 first_release_send.send(()).unwrap();
@@ -4054,27 +4042,27 @@ mod tests {
             Runner::default().start(|context| async move {
                 let shared = Arc::clone(&context.executor().shared);
 
-                let (task_started_send, task_started_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let (task_release_send, task_release_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let _task = context.child("task").dedicated().spawn(move |_| async move {
-                    task_started_send.send(()).unwrap();
-                    task_release_recv.recv().unwrap();
-                    panic!("first task panic");
-                });
+                let (task_started_send, task_started_recv) = std::sync::mpsc::sync_channel(0);
+                let (task_release_send, task_release_recv) = std::sync::mpsc::sync_channel(0);
+                let _task = context
+                    .child("task")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        task_started_send.send(()).unwrap();
+                        task_release_recv.recv().unwrap();
+                        panic!("first task panic");
+                    });
                 task_started_recv.recv().unwrap();
 
-                let (worker_started_send, worker_started_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let (worker_release_send, worker_release_recv) =
-                    std::sync::mpsc::sync_channel(0);
-                let _worker = context.child("worker").dedicated().spawn(move |_| {
-                    WorkerFailure {
+                let (worker_started_send, worker_started_recv) = std::sync::mpsc::sync_channel(0);
+                let (worker_release_send, worker_release_recv) = std::sync::mpsc::sync_channel(0);
+                let _worker = context
+                    .child("worker")
+                    .dedicated()
+                    .spawn(move |_| WorkerFailure {
                         started: Some(worker_started_send),
                         release: worker_release_recv,
-                    }
-                });
+                    });
                 worker_started_recv.recv().unwrap();
 
                 // Keep the root inside this poll while the first task catches
@@ -4298,8 +4286,7 @@ mod tests {
             *old_state.alarm.lock() = Some(Arc::downgrade(&alarm));
             executor.register_alarm(Arc::clone(&alarm));
 
-            let (replacement, replacement_state, replacement_counts) =
-                reentrant_waker(&executor);
+            let (replacement, replacement_state, replacement_counts) = reentrant_waker(&executor);
             *replacement_state.alarm.lock() = Some(Arc::downgrade(&alarm));
 
             assert!(!executor.refresh_alarm(&alarm, &replacement));

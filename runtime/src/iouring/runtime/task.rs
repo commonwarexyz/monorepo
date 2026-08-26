@@ -26,6 +26,10 @@ use crate::iouring::driver::{Affine, current_thread_id, waker::Waker as RingWake
 use crate::{Error, Handle};
 use commonware_utils::sync::Mutex;
 use futures::task::{ArcWake, waker, waker_ref};
+#[cfg(feature = "loom")]
+use loom::sync::atomic::AtomicU8;
+#[cfg(not(feature = "loom"))]
+use std::sync::atomic::AtomicU8;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -40,11 +44,6 @@ use std::{
     task::{self, Poll},
     thread::ThreadId,
 };
-
-#[cfg(feature = "loom")]
-use loom::sync::atomic::AtomicU8;
-#[cfg(not(feature = "loom"))]
-use std::sync::atomic::AtomicU8;
 
 /// Type-erased boundary for a task in the arena.
 ///
@@ -63,7 +62,6 @@ pub(super) trait Erased: Send + Sync {
     /// Resolve the task without polling: drop the future in place (which
     /// resolves any join handle with [Error::Closed]).
     fn clear(&self);
-
 }
 
 /// A spawned task: one allocation holding the concrete future and the
@@ -282,9 +280,7 @@ where
             let mut cx = task::Context::from_waker(&waker);
             self.future.with(|cell| {
                 let mut slot = cell.borrow_mut();
-                let future = slot
-                    .as_mut()
-                    .expect("queued task must retain its future");
+                let future = slot.as_mut().expect("queued task must retain its future");
                 // SAFETY: the future lives inside this task's Arc allocation
                 // and is never moved out of it: completion (below) and
                 // teardown ([Erased::clear]) both drop it in place by
@@ -1253,7 +1249,10 @@ mod tests {
         let task = scratch.pop().unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.poll()));
         let payload = result.expect_err("ready future drop must panic");
-        assert_eq!(payload.downcast_ref::<&str>(), Some(&"ready future drop panic"));
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"ready future drop panic")
+        );
         assert_eq!(drops.load(Ordering::Acquire), 1);
         {
             let ready = tasks.ready.lock();
