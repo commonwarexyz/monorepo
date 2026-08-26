@@ -1342,6 +1342,7 @@ impl crate::Runner for Runner {
         let label = Label::root();
         shared.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = shared.metrics.tasks_running.get_or_create(&label).clone();
+        gauge.inc();
 
         // Build the root context and drive the root task on this worker. A
         // panic (from the root task with `catch_panics` disabled, or from
@@ -4848,6 +4849,34 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn test_root_task_metric_balanced() {
+        const RUNNING_ROOT: &str =
+            "runtime_tasks_running{name=\"\",kind=\"Root\",execution=\"Shared\"}";
+
+        let retained = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&retained);
+        Runner::default().start(move |context| async move {
+            let shared = Arc::clone(&context.executor().shared);
+            let metrics = shared.registry.encode();
+            assert!(
+                metrics.contains(&format!("{RUNNING_ROOT} 1")),
+                "root task was not counted while running: {metrics}"
+            );
+            *capture.lock() = Some(shared);
+        });
+
+        let shared = retained
+            .lock()
+            .take()
+            .expect("root did not retain shared runtime state");
+        let metrics = shared.registry.encode();
+        assert!(
+            metrics.contains(&format!("{RUNNING_ROOT} 0")),
+            "root task metric was not balanced after shutdown: {metrics}"
+        );
     }
 
     #[test]
