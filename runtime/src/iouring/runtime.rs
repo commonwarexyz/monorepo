@@ -3437,8 +3437,7 @@ mod tests {
             *old_state.alarm.lock() = Some(Arc::downgrade(&alarm));
             executor.register_alarm(Arc::clone(&alarm));
 
-            let (replacement, replacement_state, replacement_counts) =
-                reentrant_waker(&executor);
+            let (replacement, replacement_state, replacement_counts) = reentrant_waker(&executor);
             *replacement_state.alarm.lock() = Some(Arc::downgrade(&alarm));
 
             assert!(!executor.refresh_alarm(&alarm, &replacement));
