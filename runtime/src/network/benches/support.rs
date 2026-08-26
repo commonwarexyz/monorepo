@@ -43,11 +43,23 @@ pub type Connection<N> = (SinkOf<N>, StreamOf<N>, SinkOf<N>, StreamOf<N>);
 
 /// Construct the io_uring runner used by every io_uring row.
 pub fn iouring_runner() -> IoUringRunner {
-    IoUringRunner::new(
-        iouring::Config::default()
-            .with_connect_timeout(NETWORK_TIMEOUT)
-            .with_read_write_timeout(NETWORK_TIMEOUT),
-    )
+    IoUringRunner::new(iouring_config())
+}
+
+/// Construct an io_uring runner with an explicit ring size.
+pub fn iouring_runner_with_ring(ring_size: u32) -> IoUringRunner {
+    let ring = iouring::RingConfig {
+        size: ring_size,
+        ..Default::default()
+    };
+    IoUringRunner::new(iouring_config().with_ring(ring))
+}
+
+/// Construct the io_uring configuration shared by network benchmarks.
+fn iouring_config() -> iouring::Config {
+    iouring::Config::default()
+        .with_connect_timeout(NETWORK_TIMEOUT)
+        .with_read_write_timeout(NETWORK_TIMEOUT)
 }
 
 /// Construct the one-worker Tokio baseline used by every Tokio row.
