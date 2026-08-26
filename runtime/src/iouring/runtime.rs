@@ -3616,7 +3616,13 @@ mod tests {
                 .unwrap();
 
             let executor = context.executor.clone();
-            let mut sleeper = Box::pin(context.sleep(Duration::from_secs(3600)));
+            // Keep the concrete sleeper alive past executor teardown to
+            // exercise its weak-owner cancellation path.
+            let mut sleeper = Box::pin(Sleeper {
+                executor: executor.clone(),
+                time: Instant::now() + Duration::from_secs(3600),
+                alarm: None,
+            });
             assert!(futures::poll!(sleeper.as_mut()).is_pending());
             (sleeper, executor)
         });
