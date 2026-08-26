@@ -6,7 +6,7 @@
 //! enters the kernel.
 
 use super::support::{Backend, tokio_runner};
-use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, iouring};
+use commonware_runtime::{Runner, Spawner, Supervisor as _, iouring};
 use criterion::{Criterion, Throughput};
 use futures::future::join_all;
 use std::{
@@ -68,10 +68,12 @@ pub fn bench(c: &mut Criterion) {
             );
             match backend {
                 Backend::IoUring => group.bench_function(&name, |b| {
-                    b.iter_custom(|iters| measure_iouring(iters, width, handoffs_per_task));
+                    b.iter_custom(|iters| {
+                        measure(iters, width, handoffs_per_task, iouring::Runner::default)
+                    });
                 }),
                 Backend::Tokio => group.bench_function(&name, |b| {
-                    b.iter_custom(|iters| measure_tokio(iters, width, handoffs_per_task));
+                    b.iter_custom(|iters| measure(iters, width, handoffs_per_task, tokio_runner));
                 }),
             };
         }
@@ -107,10 +109,15 @@ fn finish_helper(helper: JoinHandle<u64>, iters: u64) {
     assert_eq!(handoffs, iters * TOTAL_HANDOFFS as u64);
 }
 
-/// Measure io_uring foreign wake handoffs inside one runtime root.
-fn measure_iouring(iters: u64, width: usize, handoffs_per_task: usize) -> Duration {
+/// Measure foreign wake handoffs inside one runtime root.
+fn measure<R, F>(iters: u64, width: usize, handoffs_per_task: usize, runner: F) -> Duration
+where
+    R: Runner,
+    R::Context: Spawner,
+    F: FnOnce() -> R,
+{
     let (sender, helper) = start_helper(width);
-    let elapsed = iouring::Runner::default().start(move |context| async move {
+    let elapsed = runner().start(move |context| async move {
         let start = Instant::now();
         for _ in 0..iters {
             let mut handles = Vec::with_capacity(width);
@@ -121,30 +128,7 @@ fn measure_iouring(iters: u64, width: usize, handoffs_per_task: usize) -> Durati
                 }));
             }
             for result in join_all(handles).await {
-                result.expect("io_uring foreign wake task failed");
-            }
-        }
-        start.elapsed()
-    });
-    finish_helper(helper, iters);
-    elapsed
-}
-
-/// Measure Commonware Tokio foreign wake handoffs inside one runtime root.
-fn measure_tokio(iters: u64, width: usize, handoffs_per_task: usize) -> Duration {
-    let (sender, helper) = start_helper(width);
-    let elapsed = tokio_runner().start(move |context| async move {
-        let start = Instant::now();
-        for _ in 0..iters {
-            let mut handles = Vec::with_capacity(width);
-            for _ in 0..width {
-                handles.push(context.child("foreign_wake").spawn({
-                    let sender = sender.clone();
-                    move |_| ForeignWake::new(handoffs_per_task, sender)
-                }));
-            }
-            for result in join_all(handles).await {
-                result.expect("Commonware Tokio foreign wake task failed");
+                result.expect("foreign wake task failed");
             }
         }
         start.elapsed()

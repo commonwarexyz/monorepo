@@ -1,7 +1,7 @@
 //! Spawned timer consumer latency under a persistent self-waking task load.
 
 use super::support::{Backend, ReadyLoad, tokio_runner};
-use commonware_runtime::{Clock as _, Runner as _, Spawner as _, Supervisor as _, iouring};
+use commonware_runtime::{Clock, Runner, Spawner, Supervisor as _, iouring};
 use criterion::Criterion;
 use futures::future::join_all;
 use std::{
@@ -26,18 +26,23 @@ pub fn bench(c: &mut Criterion) {
         );
         match backend {
             Backend::IoUring => c.bench_function(&name, |b| {
-                b.iter_custom(measure_iouring);
+                b.iter_custom(|iters| measure(iters, iouring::Runner::default));
             }),
             Backend::Tokio => c.bench_function(&name, |b| {
-                b.iter_custom(measure_tokio);
+                b.iter_custom(|iters| measure(iters, tokio_runner));
             }),
         };
     }
 }
 
-/// Sum io_uring timer-consumer latencies under persistent ready load.
-fn measure_iouring(iters: u64) -> Duration {
-    iouring::Runner::default().start(move |context| async move {
+/// Sum timer-consumer latencies under persistent ready load.
+fn measure<R, F>(iters: u64, runner: F) -> Duration
+where
+    R: Runner,
+    R::Context: Clock + Spawner,
+    F: FnOnce() -> R,
+{
+    runner().start(move |context| async move {
         let stop = Arc::new(AtomicBool::new(false));
         let mut load = Vec::with_capacity(LOAD_WIDTH);
         for _ in 0..LOAD_WIDTH {
@@ -55,43 +60,12 @@ fn measure_iouring(iters: u64) -> Duration {
                 context.sleep(DELAY).await;
                 start.elapsed()
             });
-            elapsed += timer.await.expect("io_uring timer task failed");
+            elapsed += timer.await.expect("timer task failed");
         }
 
         stop.store(true, Ordering::Relaxed);
         for result in join_all(load).await {
-            result.expect("io_uring load task failed");
-        }
-        elapsed
-    })
-}
-
-/// Sum Commonware Tokio timer-consumer latencies under persistent ready load.
-fn measure_tokio(iters: u64) -> Duration {
-    tokio_runner().start(move |context| async move {
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut load = Vec::with_capacity(LOAD_WIDTH);
-        for _ in 0..LOAD_WIDTH {
-            load.push(context.child("load").spawn({
-                let stop = Arc::clone(&stop);
-                move |_| ReadyLoad::new(stop)
-            }));
-        }
-
-        let mut elapsed = Duration::ZERO;
-        for _ in 0..iters {
-            let timer = context.child("timer").spawn(|context| async move {
-                // Start inside the consumer so queueing before its first poll is setup.
-                let start = Instant::now();
-                context.sleep(DELAY).await;
-                start.elapsed()
-            });
-            elapsed += timer.await.expect("Commonware Tokio timer task failed");
-        }
-
-        stop.store(true, Ordering::Relaxed);
-        for result in join_all(load).await {
-            result.expect("Commonware Tokio load task failed");
+            result.expect("load task failed");
         }
         elapsed
     })
