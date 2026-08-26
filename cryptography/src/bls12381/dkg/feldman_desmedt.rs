@@ -114,8 +114,10 @@
 //! ## Errors and Failures
 //!
 //! [`enum@Error`] reports invalid caller input or incomplete local state. [`Fault`]
-//! identifies a participant and a specific [`FaultReason`]. [`Failure`] reports
-//! that the protocol round did not produce the requested result.
+//! identifies a participant and an operation-specific reason. [`FaultReason`]
+//! covers dealer messages and logs, while [`PlayerAckFaultReason`] covers player
+//! acknowledgements. [`Failure`] reports that the protocol round did not produce
+//! the requested result.
 //!
 //! Participant attribution is only sound when the caller authenticated the
 //! identity supplied to [`Player::dealer_message`] or [`Dealer::receive_player_ack`],
@@ -191,8 +193,8 @@
 //! In practice:
 //! - [`Player::dealer_message`] returns [`Fault`] for a provably invalid
 //!   message (an implicit complaint) and `Ok(None)` for a benign duplicate
-//! - [`Dealer::receive_player_ack`] validates acknowledgements and also returns
-//!   [`Fault`] for an invalid acknowledgement
+//! - [`Dealer::receive_player_ack`] validates acknowledgements and returns
+//!   [`PlayerAckFault`] when one is invalid
 //! - Other custom mechanisms can exclude dealers before calling [`observe`] or [`Player::finalize`],
 //!   to enforce other rules for "misbehavior" beyond what the DKG does already.
 //!
@@ -424,18 +426,30 @@ pub enum FaultReason {
     ExcessiveReveals,
 }
 
+/// The reason a player acknowledgement was rejected.
+#[derive(Clone, Debug, Error)]
+pub enum PlayerAckFaultReason {
+    #[error("participant is not a player in this round")]
+    UnexpectedPlayer,
+    #[error("player acknowledgement signature did not verify")]
+    InvalidAck,
+}
+
 /// A provable protocol fault attributed to a participant.
 ///
 /// The caller must authenticate the participant identity supplied to the method
 /// returning this fault before using it for attribution.
 #[derive(Clone, Debug, Error)]
 #[error("participant {participant} committed a protocol fault: {reason}")]
-pub struct Fault<P> {
+pub struct Fault<P, R = FaultReason> {
     /// The participant that committed the fault.
     pub participant: P,
     /// The reason for the fault.
-    pub reason: FaultReason,
+    pub reason: R,
 }
+
+/// A provable fault returned while processing a player acknowledgement.
+pub type PlayerAckFault<P> = Fault<P, PlayerAckFaultReason>;
 
 /// A protocol round failure.
 #[derive(Debug, Error)]
@@ -611,7 +625,7 @@ where
 #[repr(u8)]
 pub enum Reveal {
     /// Original calculation based on the number of players in the new sharing.
-    #[deprecated(note = "use V1 for new ceremonies; retain V0 only for compatibility")]
+    #[deprecated(note = "uses the new player set instead of the contributor set")]
     V0 = 0,
     /// Contributor-aware calculation based on the dealers or previous players.
     V1 = 1,
@@ -874,8 +888,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                 .commit(dealers.encode())
                 .commit(players.encode());
 
-            // The all-zero default adds no transcript data, and V0 omits its trailing reveal tag.
-            // Continuation framing keeps a V1 tag distinct from the polynomial mode.
+            // Record the selected polynomial evaluation and revealed-share calculations.
             if let Some(modes) = modes![mode, reveal] {
                 transcript.commit(modes.encode());
             }
@@ -1737,23 +1750,23 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// but this method is idempotent nonetheless.
     ///
     /// The caller must authenticate `player` before treating a returned
-    /// [`Fault`] as attributable to that participant. A failed
+    /// [`PlayerAckFault`] as attributable to that participant. A failed
     /// acknowledgement signature does not authenticate its purported signer.
     pub fn receive_player_ack(
         &mut self,
         player: S::PublicKey,
         ack: PlayerAck<S::PublicKey>,
-    ) -> Result<(), Fault<S::PublicKey>> {
+    ) -> Result<(), PlayerAckFault<S::PublicKey>> {
         let Some(res_mut) = self.results.get_value_mut(&player) else {
             return Err(Fault {
                 participant: player,
-                reason: FaultReason::UnexpectedPlayer,
+                reason: PlayerAckFaultReason::UnexpectedPlayer,
             });
         };
         if !self.transcript.verify(&player, &ack.sig) {
             return Err(Fault {
                 participant: player,
-                reason: FaultReason::InvalidAck,
+                reason: PlayerAckFaultReason::InvalidAck,
             });
         }
         *res_mut = AckOrReveal::Ack(ack);
@@ -4714,7 +4727,7 @@ mod test {
             dealer.receive_player_ack(a_pk.clone(), forged),
             Err(Fault {
                 participant,
-                reason: FaultReason::InvalidAck,
+                reason: PlayerAckFaultReason::InvalidAck,
             }) if participant == a_pk
         ));
 
@@ -4723,7 +4736,7 @@ mod test {
             dealer.receive_player_ack(stranger_pk.clone(), ack.clone()),
             Err(Fault {
                 participant,
-                reason: FaultReason::UnexpectedPlayer,
+                reason: PlayerAckFaultReason::UnexpectedPlayer,
             }) if participant == stranger_pk
         ));
 

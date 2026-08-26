@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::{Digest, certificate::Verification};
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::ordered::Set;
+use commonware_utils::{non_empty, ordered::Set};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{future::Future, mem, sync::Arc};
@@ -321,8 +321,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             );
             let scheme = Arc::clone(&self.scheme);
             let notarization = offload(span, strategy, move |strategy| {
-                Notarization::from_owned_notarizes(scheme.as_ref(), notarizes, &strategy)
-                    .expect("verified notarize quorum must assemble")
+                Notarization::from_owned_notarizes(
+                    scheme.as_ref(),
+                    non_empty![@notarizes],
+                    &strategy,
+                )
+                .expect("verified notarize quorum must assemble")
             })
             .await;
             return Some(Certificate::Notarization(notarization));
@@ -336,8 +340,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             );
             let scheme = Arc::clone(&self.scheme);
             let nullification = offload(span, strategy, move |strategy| {
-                Nullification::from_owned_nullifies(scheme.as_ref(), nullifies, &strategy)
-                    .expect("verified nullify quorum must assemble")
+                Nullification::from_owned_nullifies(
+                    scheme.as_ref(),
+                    non_empty![@nullifies],
+                    &strategy,
+                )
+                .expect("verified nullify quorum must assemble")
             })
             .await;
             return Some(Certificate::Nullification(nullification));
@@ -351,8 +359,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             );
             let scheme = Arc::clone(&self.scheme);
             let finalization = offload(span, strategy, move |strategy| {
-                Finalization::from_owned_finalizes(scheme.as_ref(), finalizes, &strategy)
-                    .expect("verified finalize quorum must assemble")
+                Finalization::from_owned_finalizes(
+                    scheme.as_ref(),
+                    non_empty![@finalizes],
+                    &strategy,
+                )
+                .expect("verified finalize quorum must assemble")
             })
             .await;
             return Some(Certificate::Finalization(finalization));

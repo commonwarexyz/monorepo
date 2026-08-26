@@ -12,9 +12,9 @@
 //!
 //! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply the same criteria.
 //! A non-empty batch of at most `u32::MAX` signatures is always accepted when every signature
-//! verifies individually.
-//! Because batch verification checks a randomized linear combination, an invalid batch may be
-//! accepted with probability about `2^-128`. See [this post] for why these criteria matter.
+//! verifies individually. Because batch verification checks a randomized linear combination, an
+//! invalid batch may be accepted with probability about `2^-128`. See [this post] for why these
+//! criteria matter.
 //!
 //! [this post]: https://hdevalence.ca/blog/2020-10-04-its-25519am
 //! [ZIP215]: https://zips.z.cash/zip-0215

@@ -297,11 +297,11 @@ where
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Assembles attestations into a mock certificate.
-    pub fn assemble<S, I>(&self, attestations: I) -> Result<U64, AssemblyError>
+    /// Assembles a non-empty stream of attestations into a mock certificate.
+    pub fn assemble<S, I>(&self, attestations: NonEmpty<I>) -> Result<U64, AssemblyError>
     where
         S: Scheme<Signature = U64>,
-        I: IntoIterator<Item = Attestation<S>>,
+        I: Iterator<Item = Attestation<S>>,
     {
         let mut signers = Vec::new();
         let mut signed_subject = None;
@@ -352,8 +352,7 @@ where
             return Err(AssemblyError::InsufficientAttestations(expected, found));
         }
 
-        let subject =
-            signed_subject.ok_or_else(|| Self::assembly_error(AssemblyError::RecoveryFailed))?;
+        let subject = signed_subject.expect("non-empty attestations establish a signed subject");
         let stored_subject = subject.clone();
         let artifact = (subject, signers);
         let certificate = inner
@@ -702,11 +701,11 @@ macro_rules! impl_certificate_mock {
 
             fn assemble<I>(
                 &self,
-                attestations: I,
+                attestations: commonware_utils::iter::NonEmpty<I>,
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> Result<Self::Certificate, $crate::certificate::AssemblyError>
             where
-                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                I: Iterator<Item = $crate::certificate::Attestation<Self>> + Send,
             {
                 self.generic.assemble::<Self, _>(attestations)
             }
@@ -1005,7 +1004,7 @@ mod tests {
             .collect();
         let certificate = fixture
             .verifier
-            .assemble(attestations, &Sequential)
+            .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
         let decoded =
@@ -1041,12 +1040,12 @@ mod tests {
 
         let first = fixture
             .verifier
-            .assemble(attestations.clone(), &Sequential)
+            .assemble(non_empty![@attestations.clone()], &Sequential)
             .unwrap();
         let second = fixture
             .verifier
             .assemble(
-                attestations.iter().cloned().rev().collect::<Vec<_>>(),
+                non_empty![@attestations.iter().cloned().rev().collect::<Vec<_>>()],
                 &Sequential,
             )
             .unwrap();
@@ -1065,7 +1064,7 @@ mod tests {
             .collect();
         let certificate = fixture
             .verifier
-            .assemble(attestations, &Sequential)
+            .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
 
@@ -1083,7 +1082,7 @@ mod tests {
 
         assert_eq!(
             fixture.verifier.assemble(
-                [
+                non_empty![
                     fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
                     fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
                 ],
@@ -1094,7 +1093,7 @@ mod tests {
 
         assert_eq!(
             fixture.verifier.assemble(
-                [
+                non_empty![
                     fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
                     fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
                     fixture.schemes[2]
@@ -1115,7 +1114,7 @@ mod tests {
 
         assert_eq!(
             fixture.verifier.assemble(
-                [
+                non_empty![
                     fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
                     fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
                 ],
@@ -1137,7 +1136,7 @@ mod tests {
             .expect("signer must produce an attestation");
 
         let certificate = fixture.verifier.assemble(
-            [
+            non_empty![
                 attestation.clone(),
                 attestation,
                 fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
@@ -1168,11 +1167,11 @@ mod tests {
             .collect();
         let certificate_a = fixture
             .verifier
-            .assemble(attestations_a, &Sequential)
+            .assemble(non_empty![@attestations_a], &Sequential)
             .unwrap();
         let certificate_b = fixture
             .verifier
-            .assemble(attestations_b, &Sequential)
+            .assemble(non_empty![@attestations_b], &Sequential)
             .unwrap();
         let missing = U64::new(u64::MAX);
         assert!(!fixture.verifier.verify_certificate::<_, Sha256Digest>(
@@ -1225,7 +1224,7 @@ mod tests {
         let subject = TestSubject { message: b"vote-1" };
 
         let _ = fixture.verifier.assemble(
-            [
+            non_empty![
                 fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
                 fixture.schemes[1]
                     .sign::<Sha256Digest>(TestSubject { message: b"vote-2" })

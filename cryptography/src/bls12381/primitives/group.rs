@@ -5,10 +5,13 @@
 //!
 //! # Warning
 //!
-//! [`G1`] and [`G2`] include the identity because group operations require it. Their [`Read`]
-//! implementations reject the identity and points outside the correct subgroup. Values produced by
-//! group operations can still be the identity, so an API that treats it as invalid must reject it at
-//! its own boundary.
+//! Points received from untrusted sources must be checked for membership in the correct subgroup
+//! to prevent small-subgroup attacks. The [`Read`] implementations for [`G1`] and [`G2`] perform
+//! this check and also reject the identity.
+//!
+//! [`G1`] and [`G2`] include the identity because group operations require it. Values produced by
+//! group operations can still be the identity, so an API that treats it as invalid must reject it
+//! at its own boundary.
 
 use super::variant::Variant;
 use crate::Secret;

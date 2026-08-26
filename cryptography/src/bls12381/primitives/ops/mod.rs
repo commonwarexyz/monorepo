@@ -367,7 +367,7 @@ mod tests {
         );
     }
 
-    fn batch_verify_detects_zero_signature<V: Variant>() {
+    fn batch_verify_rejects_identity_signature<V: Variant>() {
         let mut rng = test_rng();
         let (_, public) = keypair::<_, V>(&mut rng);
         let namespace = b"test";
@@ -387,9 +387,9 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_detects_zero_signature() {
-        batch_verify_detects_zero_signature::<MinPk>();
-        batch_verify_detects_zero_signature::<MinSig>();
+    fn test_batch_verify_rejects_identity_signature() {
+        batch_verify_rejects_identity_signature::<MinPk>();
+        batch_verify_rejects_identity_signature::<MinSig>();
     }
 
     fn parse_sign_vector(

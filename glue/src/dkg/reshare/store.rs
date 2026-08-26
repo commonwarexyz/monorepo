@@ -27,8 +27,9 @@ use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Error as DkgError,
-            Fault as DkgFault, FaultReason as DkgFaultReason, FinalizeError as DkgFinalizeError,
-            Info, Logs, Output, Player as CryptoPlayer, PlayerAck, SignedDealerLog, Verdict,
+            Fault as DkgFault, FinalizeError as DkgFinalizeError, Info, Logs, Output,
+            Player as CryptoPlayer, PlayerAck, PlayerAckFaultReason as DkgAckFaultReason,
+            SignedDealerLog, Verdict,
         },
         primitives::{group, variant::Variant},
     },
@@ -354,6 +355,7 @@ where
             .unwrap_or_default()
     }
 
+    /// Persists a public/private dealing already accepted by the cryptographic player.
     async fn append_dealing(
         &mut self,
         epoch: Epoch,
@@ -589,10 +591,13 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         match dealer.receive_player_ack(player.clone(), ack.clone()) {
             Ok(()) => {}
             Err(DkgFault {
-                reason: DkgFaultReason::InvalidAck,
+                reason: DkgAckFaultReason::InvalidAck,
                 ..
             }) => return Verdict::Fault,
-            Err(_) => return Verdict::Skip,
+            Err(DkgFault {
+                reason: DkgAckFaultReason::UnexpectedPlayer,
+                ..
+            }) => return Verdict::Skip,
         }
         self.unsent.remove(&player);
         if store.append_ack(epoch, player, ack).await {
@@ -849,9 +854,11 @@ mod tests {
             drop(store);
 
             let mut store = init_store(context.child("restart"), "replay", secret_store).await;
+
             // The current epoch is not persisted; the setup state re-derives it from
             // finalized blocks, so a restarted store has no current epoch on its own.
             assert!(store.current().is_none());
+
             // The public recovery journal is replayed.
             assert_eq!(store.dealings(Epoch::zero()).len(), 1);
             assert_eq!(store.acks(Epoch::zero()).len(), 1);

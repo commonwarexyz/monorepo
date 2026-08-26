@@ -12,7 +12,7 @@ use crate::{
 };
 use commonware_cryptography::{
     Digest,
-    certificate::{AssemblyError, Provider, Scheme, Verifier},
+    certificate::{Provider, Scheme, Verifier},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -30,6 +30,7 @@ use commonware_storage::journal::segmented::variable::{Config as JConfig, Journa
 use commonware_utils::{
     N3f1, PrioritySet,
     futures::{Pool as FuturesPool, rebind},
+    non_empty,
     ordered::Quorum,
 };
 use futures::future::{self, Either};
@@ -534,19 +535,13 @@ impl<
             .filter(|a| a.item.digest == ack.item.digest)
             .collect::<Vec<_>>();
         if filtered.len() >= quorum {
-            match Certificate::from_acks(&*scheme, filtered, &self.strategy) {
-                Ok(certificate) => {
-                    self.metrics.certificates.inc();
-                    self = self.handle_certificate(certificate).await;
-                }
-                Err(
-                    AssemblyError::InsufficientAttestations(_, _)
-                    | AssemblyError::UnknownSigner(_)
-                    | AssemblyError::DuplicateSigner(_)
-                    | AssemblyError::MalformedSignature(_)
-                    | AssemblyError::RecoveryFailed,
-                ) => {}
-            }
+            // Every stored acknowledgement is verified and signer-unique, so a same-item quorum
+            // satisfies the certificate scheme's assembly contract.
+            let certificate =
+                Certificate::from_acks(&*scheme, non_empty![@filtered], &self.strategy)
+                    .expect("verified acknowledgement quorum must assemble");
+            self.metrics.certificates.inc();
+            self = self.handle_certificate(certificate).await;
         }
 
         (self, true)
@@ -1010,7 +1005,8 @@ mod tests {
     }
 
     #[test]
-    fn assembly_failure_does_not_reject_retained_ack() {
+    #[should_panic(expected = "verified acknowledgement quorum must assemble")]
+    fn assembly_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
@@ -1059,16 +1055,8 @@ mod tests {
             for scheme in schemes.iter().take(3) {
                 let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
                 let ack = Ack::sign(&scheme, epoch, Item { height, digest }).unwrap();
-                let accepted;
-                (engine, accepted) = engine.handle_ack(&ack).await;
-                assert!(accepted, "a retained valid ack must be accepted");
+                (engine, _) = engine.handle_ack(&ack).await;
             }
-
-            let Some(Pending::Verified(_, epochs)) = engine.pending.get(&height) else {
-                panic!("height must remain pending after recovery failure");
-            };
-            assert_eq!(epochs.get(&epoch).unwrap().len(), 3);
-            assert!(engine.confirmed.is_empty());
         });
     }
 }

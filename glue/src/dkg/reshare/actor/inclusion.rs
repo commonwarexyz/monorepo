@@ -2680,7 +2680,7 @@ mod tests {
         ));
     }
 
-    struct TaxonomyFixture {
+    struct FinalizationFixture {
         info: Info<TestBlsVariant, PublicKey>,
         current: EpochInfo<TestBlsVariant, PublicKey>,
         share: Share,
@@ -2688,7 +2688,8 @@ mod tests {
         dealings: BTreeMap<PublicKey, (DealerPubMsg<TestBlsVariant>, DealerPrivMsg)>,
     }
 
-    fn taxonomy_fixture(seed: u64) -> TaxonomyFixture {
+    fn finalization_fixture(seed: u64) -> FinalizationFixture {
+        // Build a prior sharing and a reshare round with the same dealer and player set.
         let signers = signers();
         let participants = players();
         let (previous, shares) = deal::<TestBlsVariant, _, N3f1>(
@@ -2707,6 +2708,8 @@ mod tests {
             participants.clone(),
         )
         .expect("valid reshare info");
+
+        // Finalize an N3f1 quorum of dealer logs and retain each private dealing for the target.
         let mut logs = BTreeMap::new();
         let mut dealings = BTreeMap::new();
 
@@ -2755,11 +2758,12 @@ mod tests {
             logs.insert(checked_dealer, log);
         }
 
+        // Preserve the prior successful output and target share for artifact recovery tests.
         let share = shares
             .get_value(&signers[0].public_key())
             .cloned()
             .expect("target has previous share");
-        TaxonomyFixture {
+        FinalizationFixture {
             info,
             current: EpochInfo {
                 outcome: EpochOutcome::Success,
@@ -2775,7 +2779,7 @@ mod tests {
         }
     }
 
-    async fn taxonomy_actor(
+    async fn setup_finalization_actor(
         context: deterministic::Context,
         signer: PrivateKey,
         participants: Set<PublicKey>,
@@ -2810,7 +2814,8 @@ mod tests {
     fn missing_dealing_recovery_produces_shareless_success_artifact() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let fixture = taxonomy_fixture(10);
+            // Persist a verified quorum of public logs and the target's matching private dealings.
+            let fixture = finalization_fixture(10);
             let target = signers()[0].clone();
             let mut store = TestInclusionStore::init(
                 context.child("store"),
@@ -2845,6 +2850,7 @@ mod tests {
             }
             drop(store);
 
+            // Replay the public journal against an empty secret store, omitting private dealings.
             let mut store = TestInclusionStore::init(
                 context.child("restart"),
                 "missing-dealing-artifact",
@@ -2852,6 +2858,8 @@ mod tests {
                 MemorySecretStore::default(),
             )
             .await;
+
+            // Reconstruct the ceremony as an observer with the prior successful epoch available.
             store
                 .commit_epoch(
                     fixture.current,
@@ -2859,7 +2867,7 @@ mod tests {
                     Some(fixture.share),
                 )
                 .await;
-            let mut actor = taxonomy_actor(
+            let mut actor = setup_finalization_actor(
                 context.child("artifact_actor"),
                 target,
                 players(),
@@ -2878,6 +2886,7 @@ mod tests {
             let expected = ceremony.output.clone();
             let mut artifacts = ArtifactCache::default();
 
+            // Preserve the verified output while leaving the unavailable local share absent.
             let artifact = actor
                 .artifact(
                     Epoch::zero(),
@@ -2900,7 +2909,8 @@ mod tests {
     fn finalization_failure_produces_failure_artifact() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let fixture = taxonomy_fixture(20);
+            // Commit the last successful output and share without logs for the next ceremony.
+            let fixture = finalization_fixture(20);
             let expected_output = fixture.current.output.clone();
             let expected_share = fixture.share.clone();
             let mut store = TestInclusionStore::init(
@@ -2917,7 +2927,9 @@ mod tests {
                     Some(fixture.share),
                 )
                 .await;
-            let mut actor = taxonomy_actor(
+
+            // An empty dealer-log view cannot produce a ceremony result.
+            let mut actor = setup_finalization_actor(
                 context.child("artifact_actor"),
                 signers()[0].clone(),
                 players(),
@@ -2934,6 +2946,7 @@ mod tests {
             assert!(ceremony.is_none());
             let mut artifacts = ArtifactCache::default();
 
+            // Continuous resharing carries the prior successful state into a failure artifact.
             let artifact = actor
                 .artifact(
                     Epoch::zero(),
@@ -2959,8 +2972,9 @@ mod tests {
     fn finalization_error_panics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let persisted = taxonomy_fixture(30);
-            let finalized = taxonomy_fixture(40);
+            // Two valid ceremonies for the same round provide conflicting messages from one dealer.
+            let persisted = finalization_fixture(30);
+            let finalized = finalization_fixture(40);
             let target = signers()[0].clone();
             let mismatched_dealer = signers()[0].public_key();
             let mut store = TestInclusionStore::init(
@@ -2985,6 +2999,8 @@ mod tests {
                 )
                 .expect("target is a player");
 
+            // Persist one private dealing from the alternate ceremony and the remaining finalized
+            // dealings.
             for (dealer, (public, private)) in &finalized.dealings {
                 let (public, private) = if dealer == &mismatched_dealer {
                     persisted
@@ -3000,12 +3016,14 @@ mod tests {
                     .await
                     .expect("persisted dealing is valid for the round");
             }
+
+            // The finalized public logs bind the resumed player to the conflicting dealer message.
             for (dealer, log) in &finalized.logs {
                 store
                     .append_log(Epoch::zero(), dealer.clone(), log.clone())
                     .await;
             }
-            let mut actor = taxonomy_actor(
+            let mut actor = setup_finalization_actor(
                 context.child("artifact_actor"),
                 target,
                 players(),

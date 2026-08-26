@@ -37,7 +37,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                                 ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut verify_rng,
                                     &public,
-                                    non_empty![@entries.iter().copied()],
+                                    non_empty![@entries],
                                     &strategy,
                                 )
                                 .unwrap();
@@ -45,7 +45,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                                 ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut verify_rng,
                                     &public,
-                                    non_empty![@entries.iter().copied()],
+                                    non_empty![@entries],
                                     &Sequential,
                                 )
                                 .unwrap();

@@ -108,7 +108,7 @@ mod tests {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        ordered::Set, probability, sequence::Unit,
+        non_empty, ordered::Set, probability, sequence::Unit,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -587,7 +587,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect::<Vec<_>>();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+        Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
             .expect("finalization quorum")
     }
 

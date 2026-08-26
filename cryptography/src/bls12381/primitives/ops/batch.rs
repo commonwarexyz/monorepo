@@ -336,7 +336,7 @@ mod tests {
         verify_same_signer_correct::<MinSig>();
     }
 
-    fn verify_same_signer_detects_zero_signature<V: Variant>() {
+    fn verify_same_signer_rejects_identity_signature<V: Variant>() {
         let mut rng = test_rng();
         let (_, public) = keypair::<_, V>(&mut rng);
         let namespace: &[u8] = b"test";
@@ -355,12 +355,12 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_same_signer_detects_zero_signature() {
-        verify_same_signer_detects_zero_signature::<MinPk>();
-        verify_same_signer_detects_zero_signature::<MinSig>();
+    fn test_verify_same_signer_rejects_identity_signature() {
+        verify_same_signer_rejects_identity_signature::<MinPk>();
+        verify_same_signer_rejects_identity_signature::<MinSig>();
     }
 
-    fn verify_same_message_detects_zero_signature<V: Variant>() {
+    fn verify_same_message_detects_identity_signature<V: Variant>() {
         let mut rng = test_rng();
         let (_, public) = keypair::<_, V>(&mut rng);
         let namespace = b"test";
@@ -380,9 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_same_message_detects_zero_signature() {
-        verify_same_message_detects_zero_signature::<MinPk>();
-        verify_same_message_detects_zero_signature::<MinSig>();
+    fn test_verify_same_message_detects_identity_signature() {
+        verify_same_message_detects_identity_signature::<MinPk>();
+        verify_same_message_detects_identity_signature::<MinSig>();
     }
 
     fn verify_same_signer_wrong_signature<V: Variant>() {

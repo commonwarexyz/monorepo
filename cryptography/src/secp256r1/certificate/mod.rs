@@ -17,6 +17,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_utils::{
     Participant,
+    iter::NonEmpty,
     ordered::{BiMap, Quorum, Set},
 };
 use rand_core::{CryptoRng, Rng};
@@ -171,11 +172,11 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Assembles a certificate from a collection of attestations.
-    pub fn assemble<S, I>(&self, attestations: I) -> Result<Certificate, AssemblyError>
+    /// Assembles a certificate from a non-empty collection of attestations.
+    pub fn assemble<S, I>(&self, attestations: NonEmpty<I>) -> Result<Certificate, AssemblyError>
     where
         S: Scheme<Signature = Secp256r1Signature>,
-        I: IntoIterator<Item = Attestation<S>>,
+        I: Iterator<Item = Attestation<S>>,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
@@ -540,11 +541,11 @@ macro_rules! impl_certificate_secp256r1 {
 
             fn assemble<I>(
                 &self,
-                attestations: I,
+                attestations: commonware_utils::iter::NonEmpty<I>,
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> Result<Self::Certificate, $crate::certificate::AssemblyError>
             where
-                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                I: Iterator<Item = $crate::certificate::Attestation<Self>> + Send,
             {
                 self.generic.assemble::<Self, _>(attestations)
             }
@@ -742,7 +743,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Verify certificate has correct number of signers
         assert_eq!(certificate.signers.count(), quorum);
@@ -777,7 +780,9 @@ mod tests {
                 .unwrap(),
         ];
 
-        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Verify signers are sorted by signer index
         let expected: Vec<_> = indexed.iter().map(|(idx, _)| *idx).collect();
@@ -801,7 +806,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
@@ -830,7 +837,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -872,7 +881,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
         let encoded = certificate.encode();
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
@@ -898,7 +909,7 @@ mod tests {
             .collect();
 
         assert_eq!(
-            schemes[0].assemble(attestations, &Sequential),
+            schemes[0].assemble(non_empty![@attestations], &Sequential),
             Err(AssemblyError::InsufficientAttestations(expected, found))
         );
     }
@@ -926,7 +937,7 @@ mod tests {
         attestations[0].signer = unknown;
 
         assert_eq!(
-            schemes[0].assemble(attestations, &Sequential),
+            schemes[0].assemble(non_empty![@attestations], &Sequential),
             Err(AssemblyError::UnknownSigner(unknown))
         );
     }
@@ -954,7 +965,7 @@ mod tests {
         attestations[0].signature = Lazy::deferred(&mut truncated, ());
 
         assert_eq!(
-            schemes[0].assemble(attestations, &Sequential),
+            schemes[0].assemble(non_empty![@attestations], &Sequential),
             Err(AssemblyError::MalformedSignature(malformed_signer))
         );
     }
@@ -976,7 +987,9 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let mut certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Artificially truncate to below quorum
         let mut signers: Vec<Participant> = certificate.signers.iter().collect();
@@ -1010,7 +1023,9 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let mut certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Remove one signature but keep signers bitmap unchanged
         certificate.signatures.pop();
@@ -1048,7 +1063,11 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble(attestations, &Sequential).unwrap());
+            certificates.push(
+                schemes[0]
+                    .assemble(non_empty![@attestations], &Sequential)
+                    .unwrap(),
+            );
         }
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
@@ -1090,7 +1109,11 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(schemes[0].assemble(attestations, &Sequential).unwrap());
+            certificates.push(
+                schemes[0]
+                    .assemble(non_empty![@attestations], &Sequential)
+                    .unwrap(),
+            );
         }
 
         // Corrupt second certificate
@@ -1134,7 +1157,7 @@ mod tests {
         attestations.push(duplicate);
 
         assert_eq!(
-            schemes[0].assemble(attestations, &Sequential),
+            schemes[0].assemble(non_empty![@attestations], &Sequential),
             Err(AssemblyError::DuplicateSigner(duplicate_signer))
         );
     }
@@ -1187,7 +1210,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Well-formed certificate decodes successfully
         let encoded = certificate.encode();
@@ -1242,7 +1267,9 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let mut certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Add an unknown signer (out of range)
         let mut signers: Vec<Participant> = certificate.signers.iter().collect();
@@ -1280,7 +1307,9 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let mut certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Valid certificate passes
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -1325,7 +1354,9 @@ mod tests {
             })
             .collect();
 
-        let mut certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
+        let mut certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
         // Make the signers bitmap size larger than participants
         let signers: Vec<Participant> = certificate.signers.iter().collect();

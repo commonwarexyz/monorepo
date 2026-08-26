@@ -403,18 +403,17 @@ pub trait Scheme: Verifier {
         Verification::new(verified.collect(), invalid.into_iter().collect())
     }
 
-    /// Assembles attestations into a certificate.
+    /// Assembles a non-empty stream of attestations into a certificate.
     ///
-    /// A successful certificate must be backed by at least one attestation. Empty or insufficient
-    /// input returns [`AssemblyError::InsufficientAttestations`].
+    /// Insufficient input returns [`AssemblyError::InsufficientAttestations`].
+    /// A signer-unique quorum already verified for one subject must assemble successfully.
     fn assemble<I>(
         &self,
-        attestations: I,
+        attestations: NonEmpty<I>,
         strategy: &impl Strategy,
     ) -> Result<Self::Certificate, AssemblyError>
     where
-        I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send;
+        I: Iterator<Item = Attestation<Self>> + Send;
 
     /// Returns whether per-participant fault evidence can be safely exposed.
     ///
@@ -759,7 +758,7 @@ mod tests {
             .filter_map(|s| s.sign::<Sha256Digest>(TestSubject { message }))
             .collect();
         schemes[0]
-            .assemble(attestations, &Sequential)
+            .assemble(non_empty![@attestations], &Sequential)
             .expect("assembly failed")
     }
 

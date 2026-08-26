@@ -623,6 +623,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::non_empty;
     use std::time::Duration;
 
     const THRESHOLD_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_PROBE_DISCOVERY_TEST";
@@ -650,7 +651,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect::<Vec<_>>();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+        Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
             .expect("finalization quorum")
     }
 
