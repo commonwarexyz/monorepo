@@ -54,6 +54,42 @@ use commonware_cryptography::Crc32;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
 
+#[cfg(not(test))]
+const RECOVERABLE_PREFIX_SCAN_PAGES: u64 = 256;
+#[cfg(test)]
+const RECOVERABLE_PREFIX_SCAN_PAGES: u64 = 3;
+
+fn capture_logical_page(
+    capture: &mut Option<(u64, &mut [u8])>,
+    page_offset: u64,
+    logical: &[u8],
+) -> Result<(), Error> {
+    let Some((capture_offset, capture_buf)) = capture.as_mut() else {
+        return Ok(());
+    };
+    let capture_offset = *capture_offset;
+    let capture_len = u64::try_from(capture_buf.len()).map_err(|_| Error::OffsetOverflow)?;
+    let capture_end = capture_offset
+        .checked_add(capture_len)
+        .ok_or(Error::OffsetOverflow)?;
+    let logical_len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
+    let page_end = page_offset
+        .checked_add(logical_len)
+        .ok_or(Error::OffsetOverflow)?;
+    let overlap_start = capture_offset.max(page_offset);
+    let overlap_end = capture_end.min(page_end);
+    if overlap_start >= overlap_end {
+        return Ok(());
+    }
+
+    let source_start = (overlap_start - page_offset) as usize;
+    let target_start = (overlap_start - capture_offset) as usize;
+    let len = (overlap_end - overlap_start) as usize;
+    capture_buf[target_start..target_start + len]
+        .copy_from_slice(&logical[source_start..source_start + len]);
+    Ok(())
+}
+
 /// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
 /// applying two upward adjustments:
 ///
@@ -894,81 +930,180 @@ impl<B: Blob> Writer<B> {
     ) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size();
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
-        Self::recoverable_prefix_len_from_pages(
+        let (recoverable, _) = Self::recoverable_prefix_len_from_pages(
             &self.blob,
             logical_page_size,
             total_pages,
             None,
             read_options,
         )
-        .await
+        .await?;
+        Ok(recoverable)
     }
 
-    /// Return whether a raw paged blob has a well-formed logical prefix of `minimum_len` bytes.
+    /// Physical bytes occupied by the pages covering `logical_len` logical prefix bytes.
     ///
-    /// Use this before constructing a writer when recovery must prove a committed floor without
-    /// allowing [`Self::new`] to resize the blob. `physical_size` is the size reported when `blob`
-    /// was opened, and `logical_page_size` is the page size used to write it. Validation stops once
-    /// the requested prefix is covered or the first short or invalid page is reached.
-    pub async fn has_recoverable_prefix(
+    /// Returns [Error::OffsetOverflow] when the page count or physical length overflows.
+    pub fn physical_len_for_logical_prefix(
+        logical_len: u64,
+        logical_page_size: NonZeroU16,
+    ) -> Result<u64, Error> {
+        if logical_len == 0 {
+            return Ok(0);
+        }
+        let logical_page_size = u64::from(logical_page_size.get());
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        logical_len
+            .div_ceil(logical_page_size)
+            .checked_mul(physical_page_size)
+            .ok_or(Error::OffsetOverflow)
+    }
+
+    /// Read a logical range directly from a raw paged blob, validating every page it spans.
+    ///
+    /// Returns [Error::BlobInsufficientLength] when valid page contents do not cover the whole
+    /// range, and [Error::OffsetOverflow] when its end or page offsets overflow.
+    pub async fn read_validated_from_blob(
+        blob: &B,
+        logical_page_size: NonZeroU16,
+        offset: u64,
+        len: usize,
+        read_options: ReadOptions,
+    ) -> Result<IoBufs, Error> {
+        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let end = offset.checked_add(len_u64).ok_or(Error::OffsetOverflow)?;
+        if len == 0 {
+            return Ok(IoBufs::default());
+        }
+
+        let logical_page_size = u64::from(logical_page_size.get());
+        let first_page = offset / logical_page_size;
+        let last_page = (end - 1) / logical_page_size;
+        let mut out = IoBufs::default();
+        for page in first_page..=last_page {
+            let (logical, _) = super::get_page_with_checksum_from_blob(
+                blob,
+                page,
+                logical_page_size,
+                read_options,
+            )
+            .await?;
+            let page_start = page
+                .checked_mul(logical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            let logical_len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
+            let page_end = page_start
+                .checked_add(logical_len)
+                .ok_or(Error::OffsetOverflow)?;
+            let overlap_start = offset.max(page_start);
+            let overlap_end = end.min(page_end);
+            if overlap_start >= overlap_end {
+                return Err(Error::BlobInsufficientLength);
+            }
+            let start = (overlap_start - page_start) as usize;
+            let end = (overlap_end - page_start) as usize;
+            out.append(logical.slice(start..end));
+        }
+        if out.len() != len {
+            return Err(Error::BlobInsufficientLength);
+        }
+        Ok(out)
+    }
+
+    /// Return the contiguous recoverable prefix of a raw paged blob without mutating it.
+    ///
+    /// `physical_size` must be the blob's current size, and the blob must remain unchanged while
+    /// the scan runs.
+    ///
+    /// The boolean is true only when every physical byte belongs to a valid page in that prefix.
+    /// It is false when the scan stops at a short or invalid page, at a partial physical page, or
+    /// before a later physical page. When `capture` is set, bytes from its logical range are copied
+    /// as valid pages are scanned; callers must check that the returned prefix covers the range
+    /// before using them.
+    pub async fn recoverable_prefix_len_from_blob(
         blob: &B,
         physical_size: u64,
-        logical_page_size: u64,
-        minimum_len: u64,
+        logical_page_size: NonZeroU16,
+        capture: Option<(u64, &mut [u8])>,
         read_options: ReadOptions,
-    ) -> Result<bool, Error> {
-        if minimum_len == 0 {
-            return Ok(true);
-        }
+    ) -> Result<(u64, bool), Error> {
+        let logical_page_size = u64::from(logical_page_size.get());
         let physical_page_size = logical_page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
         let total_pages = physical_size / physical_page_size;
-        let recoverable = Self::recoverable_prefix_len_from_pages(
+        let (recoverable, complete) = Self::recoverable_prefix_len_from_pages(
             blob,
             logical_page_size,
             total_pages,
-            Some(minimum_len),
+            capture,
             read_options,
         )
         .await?;
-        Ok(recoverable >= minimum_len)
+        Ok((
+            recoverable,
+            complete && physical_size.is_multiple_of(physical_page_size),
+        ))
     }
 
     async fn recoverable_prefix_len_from_pages(
         blob: &B,
         logical_page_size: u64,
         total_pages: u64,
-        stop_at: Option<u64>,
+        mut capture: Option<(u64, &mut [u8])>,
         read_options: ReadOptions,
-    ) -> Result<u64, Error> {
+    ) -> Result<(u64, bool), Error> {
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
         let mut valid_len = 0u64;
-        for page in 0..total_pages {
-            match super::get_page_with_checksum_from_blob(
-                blob,
-                page,
-                logical_page_size,
-                read_options,
-            )
-            .await
+        let mut page = 0u64;
+        while page < total_pages {
+            let batch_pages = RECOVERABLE_PREFIX_SCAN_PAGES.min(total_pages - page);
+            let batch_end = page.checked_add(batch_pages).ok_or(Error::OffsetOverflow)?;
+            let physical_offset = page
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            let physical_len = batch_pages
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            let physical_len = usize::try_from(physical_len).map_err(|_| Error::OffsetOverflow)?;
+
+            let physical = blob
+                .read_at(physical_offset, physical_len, read_options)
+                .await?
+                .coalesce();
+
+            for (batch_page, physical_page) in physical
+                .as_ref()
+                .chunks_exact(physical_page_size as usize)
+                .enumerate()
             {
-                Ok((logical, _)) => {
-                    let len = logical.len() as u64;
-                    valid_len += len;
-                    // A partial page can only legitimately be the last one. A bounded caller also
-                    // needs no information after the page covering its requested prefix.
-                    if len < logical_page_size
-                        || stop_at.is_some_and(|minimum| valid_len >= minimum)
-                    {
-                        break;
-                    }
+                let Some(checksum) = Checksum::validate_page(physical_page) else {
+                    return Ok((valid_len, false));
+                };
+                let len = u64::from(checksum.len);
+                let page_number = page
+                    .checked_add(batch_page as u64)
+                    .ok_or(Error::OffsetOverflow)?;
+                let page_offset = page_number
+                    .checked_mul(logical_page_size)
+                    .ok_or(Error::OffsetOverflow)?;
+                capture_logical_page(&mut capture, page_offset, &physical_page[..len as usize])?;
+                valid_len = valid_len.checked_add(len).ok_or(Error::OffsetOverflow)?;
+                if len < logical_page_size {
+                    let scanned_pages = page
+                        .checked_add(batch_page as u64)
+                        .and_then(|page| page.checked_add(1))
+                        .ok_or(Error::OffsetOverflow)?;
+                    return Ok((valid_len, scanned_pages == total_pages));
                 }
-                // First torn/invalid page: the contiguous valid prefix ends here.
-                Err(Error::InvalidChecksum | Error::BlobInsufficientLength) => break,
-                Err(err) => return Err(err),
             }
+            page = batch_end;
         }
-        Ok(valid_len)
+        Ok((valid_len, true))
     }
 
     /// Wait for any started sync to complete without starting a new sync.
@@ -1342,6 +1477,51 @@ mod tests {
             blob.sync().await.unwrap();
 
             assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 20);
+        });
+    }
+
+    /// A clean scan advances in multi-page reads instead of serializing one storage operation per
+    /// page.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_batches_reads() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_batches")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Eight full pages plus a partial tail span three three-page test batches.
+            let total = PAGE_SIZE.get() as usize * 8 + 10;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            recordings.clear();
+            let capture_offset = PAGE_SIZE.get() as u64 * 3 - 5;
+            let mut captured = [0u8; 10];
+            let physical_size = (PAGE_SIZE.get() as u64 + CHECKSUM_SIZE) * 9;
+            let (recoverable, complete) = Writer::<_>::recoverable_prefix_len_from_blob(
+                &blob,
+                physical_size,
+                PAGE_SIZE,
+                Some((capture_offset, &mut captured)),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(recoverable, total as u64);
+            assert!(complete);
+            assert_eq!(
+                captured,
+                data[capture_offset as usize..capture_offset as usize + 10]
+            );
+            assert_eq!(recordings.snapshot().reads.len(), 3);
         });
     }
 
@@ -3327,18 +3507,17 @@ mod tests {
 
             // The protected slot proves exactly the previously committed boundary: the torn
             // extension cannot make any later byte part of the recoverable prefix.
-            for (minimum_len, expected) in [(3, true), (4, false)] {
-                let recoverable = Writer::<_>::has_recoverable_prefix(
-                    &blob,
-                    physical_page_size as u64,
-                    u64::from(PAGE_SIZE.get()),
-                    minimum_len,
-                    ReadOptions::default(),
-                )
-                .await
-                .unwrap();
-                assert_eq!(recoverable, expected);
-            }
+            let (recoverable, complete) = Writer::<_>::recoverable_prefix_len_from_blob(
+                &blob,
+                physical_page_size as u64,
+                PAGE_SIZE,
+                None,
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(recoverable, 3);
+            assert!(complete);
 
             let (blob, blob_size) = context
                 .open("test_partition", b"torn_extension_footer")

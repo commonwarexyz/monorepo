@@ -23,15 +23,16 @@
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_formatting::hex;
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use commonware_utils::NZUsize;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     marker::PhantomData,
-    num::NonZeroUsize,
+    num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
 
@@ -61,51 +62,261 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
+enum PreflightMode<B> {
+    Floors,
+    Restore {
+        current: Option<(B, u64, u64)>,
+        discard: Vec<Vec<u8>>,
+    },
+}
+
+struct Validated<A, B> {
+    recoverable: BTreeMap<u64, u64>,
+    boundaries: BTreeMap<u64, (u64, Option<A>)>,
+    mode: PreflightMode<B>,
+}
+
+/// Non-mutating recovery evidence bound to the context and configuration that produced it.
+pub(crate) struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
+    context: E,
+    cfg: Config,
+    validated: Validated<A, E::Blob>,
+}
+
+impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
+    pub(crate) const fn boundaries(&self) -> &BTreeMap<u64, (u64, Option<A>)> {
+        &self.validated.boundaries
+    }
+
+    pub(crate) async fn finish(self) -> Result<Journal<E, A>, Error> {
+        Ok(Journal(Box::new(
+            Inner::init(self.context, self.cfg, Some(self.validated)).await?,
+        )))
+    }
+}
+
 impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     /// Size of each entry.
     const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
+    fn page_size(cfg: &Config) -> NonZeroU16 {
+        NonZeroU16::new(
+            cfg.page_cache
+                .page_size()
+                .try_into()
+                .expect("page cache size must fit in u16"),
+        )
+        .expect("page cache size must be non-zero")
+    }
+
+    async fn stored(context: &E, cfg: &Config) -> Result<BTreeMap<u64, Vec<u8>>, Error> {
+        let names = match context.scan(&cfg.partition).await {
+            Ok(names) => names,
+            Err(RError::PartitionMissing(_)) => Vec::new(),
+            Err(err) => return Err(Error::Runtime(err)),
+        };
+        let mut stored = BTreeMap::new();
+        for name in names {
+            let hex_name = hex(&name);
+            let section = match name.as_slice().try_into() {
+                Ok(section) => u64::from_be_bytes(section),
+                Err(_) => return Err(Error::InvalidBlobName(hex_name)),
+            };
+            stored.insert(section, name);
+        }
+        Ok(stored)
+    }
+
+    async fn preflight_floors(
+        context: &E,
+        cfg: &Config,
+        minimum_items: &BTreeMap<u64, u64>,
+    ) -> Result<Validated<A, E::Blob>, Error> {
+        let stored = Self::stored(context, cfg).await?;
+        let page_size = Self::page_size(cfg);
+        let mut recoverable_lengths = BTreeMap::new();
+        let mut boundaries = BTreeMap::new();
+
+        for (&section, &items) in minimum_items {
+            let Some(name) = stored.get(&section) else {
+                return Err(Error::Corruption(format!(
+                    "section {section} has a validation floor but no blob"
+                )));
+            };
+            let required = items.checked_mul(Self::CHUNK_SIZE_U64).ok_or_else(|| {
+                Error::Corruption(format!(
+                    "section {section} validation floor {items} overflows its byte size"
+                ))
+            })?;
+            if required == 0 {
+                boundaries.insert(section, (0, None));
+                continue;
+            }
+
+            let entry_offset = required - Self::CHUNK_SIZE_U64;
+            let mut entry = vec![0u8; Self::CHUNK_SIZE];
+            let (blob, physical_size) = context.open(&cfg.partition, name).await?;
+            let (recoverable, _) = Writer::<E::Blob>::recoverable_prefix_len_from_blob(
+                &blob,
+                physical_size,
+                page_size,
+                Some((entry_offset, &mut entry)),
+                ReadOptions::default(),
+            )
+            .await?;
+            if recoverable < required {
+                return Err(Error::Corruption(format!(
+                    "section {section} does not retain its {required}-byte validation floor"
+                )));
+            }
+            let entry = A::decode(entry.as_slice()).map_err(Error::Codec)?;
+            recoverable_lengths.insert(section, recoverable);
+            boundaries.insert(section, (required, Some(entry)));
+        }
+
+        Ok(Validated {
+            recoverable: recoverable_lengths,
+            boundaries,
+            mode: PreflightMode::Floors,
+        })
+    }
+
+    async fn preflight_restore(
+        context: &E,
+        cfg: &Config,
+        section: u64,
+        size: u64,
+    ) -> Result<Validated<A, E::Blob>, Error> {
+        if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
+            return Err(Error::Corruption(format!(
+                "section {section} checkpoint size {size} is not item-aligned"
+            )));
+        }
+
+        let stored = Self::stored(context, cfg).await?;
+        if size > 0 && !stored.contains_key(&section) {
+            return Err(Error::Corruption(format!(
+                "section {section} has a checkpoint but no blob"
+            )));
+        }
+
+        let page_size = Self::page_size(cfg);
+        let current_physical = Writer::<E::Blob>::physical_len_for_logical_prefix(size, page_size)?;
+        let mut boundaries = BTreeMap::new();
+        let mut current = None;
+
+        for (&candidate, name) in stored.range(..=section) {
+            let (blob, physical_size) = context.open(&cfg.partition, name).await?;
+            let is_current = candidate == section;
+            if is_current && physical_size < current_physical {
+                return Err(Error::Corruption(format!(
+                    "section {section} does not retain the physical pages covering its {size} committed index bytes"
+                )));
+            }
+            let scan_physical = if is_current {
+                current_physical
+            } else {
+                physical_size
+            };
+            let mut captured = if is_current && size > 0 {
+                vec![0u8; Self::CHUNK_SIZE]
+            } else {
+                Vec::new()
+            };
+            let capture = if captured.is_empty() {
+                None
+            } else {
+                Some((size - Self::CHUNK_SIZE_U64, captured.as_mut_slice()))
+            };
+            let (recoverable, complete) = Writer::<E::Blob>::recoverable_prefix_len_from_blob(
+                &blob,
+                scan_physical,
+                page_size,
+                capture,
+                ReadOptions::default(),
+            )
+            .await?;
+            if candidate < section {
+                if !complete || !recoverable.is_multiple_of(Self::CHUNK_SIZE_U64) {
+                    return Err(Error::Corruption(format!(
+                        "section {candidate} is not a complete checkpoint-covered index"
+                    )));
+                }
+            } else if recoverable < size {
+                return Err(Error::Corruption(format!(
+                    "section {section} retains {recoverable} of committed {size} index bytes"
+                )));
+            }
+
+            let boundary_size = if is_current { size } else { recoverable };
+            let entry = if boundary_size == 0 {
+                None
+            } else {
+                if captured.is_empty() {
+                    captured = Writer::<E::Blob>::read_validated_from_blob(
+                        &blob,
+                        page_size,
+                        boundary_size - Self::CHUNK_SIZE_U64,
+                        Self::CHUNK_SIZE,
+                        ReadOptions::default(),
+                    )
+                    .await?
+                    .coalesce()
+                    .as_ref()
+                    .to_vec();
+                }
+                Some(A::decode(captured.as_slice()).map_err(Error::Codec)?)
+            };
+            boundaries.insert(candidate, (boundary_size, entry));
+            if candidate == section {
+                current = Some((blob, physical_size, current_physical));
+            }
+        }
+        boundaries.entry(section).or_insert((size, None));
+
+        let discard = stored
+            .iter()
+            .rev()
+            .filter(|(candidate, _)| **candidate > section)
+            .map(|(_, name)| name.clone())
+            .collect();
+        Ok(Validated {
+            recoverable: BTreeMap::new(),
+            boundaries,
+            mode: PreflightMode::Restore { current, discard },
+        })
+    }
+
     /// See [Journal::init].
     async fn init(
         context: E,
         cfg: Config,
-        minimum_items: Option<&BTreeMap<u64, u64>>,
+        validated: Option<Validated<A, E::Blob>>,
     ) -> Result<Self, Error> {
-        if let Some(minimum_items) = minimum_items {
-            let stored = match context.scan(&cfg.partition).await {
-                Ok(names) => names.into_iter().collect::<BTreeSet<_>>(),
-                Err(RError::PartitionMissing(_)) => BTreeSet::new(),
-                Err(err) => return Err(Error::Runtime(err)),
-            };
-            for (&section, &items) in minimum_items {
-                let name = section.to_be_bytes();
-                if !stored.contains(name.as_slice()) {
-                    return Err(Error::Corruption(format!(
-                        "section {section} has a validation floor but no blob"
-                    )));
+        let (prevalidated, restore) = match validated {
+            None => (BTreeMap::new(), false),
+            Some(Validated {
+                recoverable,
+                boundaries: _,
+                mode: PreflightMode::Floors,
+            }) => (recoverable, false),
+            Some(Validated {
+                recoverable,
+                boundaries: _,
+                mode: PreflightMode::Restore { current, discard },
+            }) => {
+                for name in discard {
+                    context.remove(&cfg.partition, Some(&name)).await?;
                 }
-                let required = items.checked_mul(Self::CHUNK_SIZE_U64).ok_or_else(|| {
-                    Error::Corruption(format!(
-                        "section {section} validation floor {items} overflows its byte size"
-                    ))
-                })?;
-                let (blob, physical_size) = context.open(&cfg.partition, &name).await?;
-                let recoverable = Writer::<E::Blob>::has_recoverable_prefix(
-                    &blob,
-                    physical_size,
-                    cfg.page_cache.page_size(),
-                    required,
-                    ReadOptions::default(),
-                )
-                .await?;
-                if !recoverable {
-                    return Err(Error::Corruption(format!(
-                        "section {section} does not retain its {required}-byte validation floor"
-                    )));
+                if let Some((blob, physical_size, target)) = current
+                    && physical_size > target
+                {
+                    blob.resize(target).await?;
                 }
+                (recoverable, true)
             }
-        }
+        };
 
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
@@ -116,6 +327,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
 
+        if restore {
+            return Ok(Self {
+                manager,
+                _array: PhantomData,
+            });
+        }
+
         // `Writer::new` finds a blob's size by scanning backward from its last valid page, so a
         // later valid page can hide an earlier torn one. Item alignment does not prove that every
         // preceding page survived. Find the contiguous valid prefix first, then round it down to
@@ -123,11 +341,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let sections: Vec<_> = manager.sections().collect();
         for section in sections {
             let size = manager.size(section)?;
-            let recoverable = manager
-                .get(section)?
-                .expect("listed section is present")
-                .recoverable_prefix_len()
-                .await?;
+            let recoverable = match prevalidated.get(&section) {
+                Some(&recoverable) => recoverable,
+                None => {
+                    manager
+                        .get(section)?
+                        .expect("listed section is present")
+                        .recoverable_prefix_len()
+                        .await?
+                }
+            };
             let valid_size = recoverable - (recoverable % Self::CHUNK_SIZE_U64);
             if valid_size == size {
                 continue;
@@ -381,15 +604,33 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(Self(Box::new(Inner::init(context, cfg, None).await?)))
     }
 
-    /// Initialize while preserving at least the given item count in each section.
-    pub(crate) async fn init_with_floors(
+    /// Prove validation floors without opening a writer or mutating their blobs.
+    pub(crate) async fn preflight_floors(
         context: E,
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
-    ) -> Result<Self, Error> {
-        Ok(Self(Box::new(
-            Inner::init(context, cfg, Some(minimum_items)).await?,
-        )))
+    ) -> Result<RecoveryPreflight<E, A>, Error> {
+        let validated = Inner::preflight_floors(&context, &cfg, minimum_items).await?;
+        Ok(RecoveryPreflight {
+            context,
+            cfg,
+            validated,
+        })
+    }
+
+    /// Prove every checkpoint-covered index byte without mutating damage.
+    pub(crate) async fn preflight_restore(
+        context: E,
+        cfg: Config,
+        section: u64,
+        size: u64,
+    ) -> Result<RecoveryPreflight<E, A>, Error> {
+        let validated = Inner::preflight_restore(&context, &cfg, section, size).await?;
+        Ok(RecoveryPreflight {
+            context,
+            cfg,
+            validated,
+        })
     }
 
     /// Append a new item to the journal in the given section.
@@ -823,6 +1064,41 @@ mod tests {
             assert!(replay.next().await.is_none());
 
             let journal = replay.finish().expect("failed to finish replay");
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_floor_scan_is_reused_for_repair() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = aligned_subset_cfg(&context);
+            let mut journal = Journal::init(context.child("seed"), cfg.clone())
+                .await
+                .expect("failed to init");
+            for value in 0..2 {
+                (journal, _) = journal
+                    .append(1, &test_digest(value))
+                    .await
+                    .expect("failed to append");
+            }
+            journal = journal.sync(1).await.expect("failed to sync");
+            drop(journal);
+
+            recordings.clear();
+            let floors = BTreeMap::from([(1, 2)]);
+            let journal =
+                Journal::<_, Digest>::preflight_floors(context.child("reopen"), cfg, &floors)
+                    .await
+                    .expect("failed to preflight")
+                    .finish()
+                    .await
+                    .expect("failed to reopen");
+
+            // Two 32-byte items occupy four 16-byte pages. Startup proves them in one batched
+            // read, then reads only the tail page while constructing Writer.
+            assert_eq!(recordings.snapshot().reads.len(), 2);
             journal.destroy().await.expect("failed to destroy");
         });
     }

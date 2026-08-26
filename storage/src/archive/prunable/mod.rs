@@ -1290,7 +1290,71 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_startup_syncs_validated_data_before_marker() {
+    fn test_validation_floor_rejection_precedes_index_suffix_repair() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(4));
+            cfg.key_partition = "floor-order-index".into();
+            cfg.metadata_partition = "floor-order-metadata".into();
+            cfg.value_partition = "floor-order-values".into();
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+            let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.sync().await.unwrap();
+            drop(archive);
+
+            let (index, index_size) = context
+                .open(&cfg.key_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            index
+                .write_at(index_size, vec![0xA5; 7], WriteOptions::SYNC)
+                .await
+                .unwrap();
+            let expected_size = index_size + 7;
+            let expected = index
+                .read_at(0, expected_size as usize, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            drop(index);
+
+            let (values, _) = context
+                .open(&cfg.value_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            values.resize(0).await.unwrap();
+            values.sync().await.unwrap();
+            drop(values);
+
+            for child in ["first", "second"] {
+                let result =
+                    Archive::<_, _, FixedBytes<64>, i32>::init(context.child(child), cfg.clone())
+                        .await;
+                assert!(matches!(
+                    result,
+                    Err(Error::Journal(JournalError::Corruption(_)))
+                ));
+
+                let (index, actual_size) = context
+                    .open(&cfg.key_partition, &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                assert_eq!(actual_size, expected_size);
+                let actual = index
+                    .read_at(0, actual_size as usize, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                assert_eq!(actual.as_ref(), expected.as_ref());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_startup_publishes_validated_marker_without_data_resync() {
         deterministic::Runner::default().start(|context| async move {
             let mut cfg = test_config(&context, NZU64!(4));
             cfg.key_partition = "startup-order-index".into();
@@ -1312,9 +1376,11 @@ mod tests {
             pending.arm();
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
+            let reopen_cfg = cfg.clone();
             let task = context.child("startup").spawn(|_| async move {
                 let result =
-                    Archive::<_, _, FixedBytes<64>, i32>::init(delayed.child("reopen"), cfg).await;
+                    Archive::<_, _, FixedBytes<64>, i32>::init(delayed.child("reopen"), reopen_cfg)
+                        .await;
                 completed_clone.store(1, Ordering::Relaxed);
                 result
             });
@@ -1324,22 +1390,61 @@ mod tests {
             }
             commonware_runtime::reschedule().await;
 
-            // Reopened writers conservatively treat the existing index and value bytes as dirty.
-            // Startup must sync both before it can publish the marker derived by validating them:
-            //
-            // data:   [index] [values] -- durable first
-            // marker: [validated count] -- durable second
+            // Startup-readable bytes are already durable. A clean reopen should start only the
+            // derived marker and return while that metadata sync drives itself in the background.
             let calls = pending.calls();
-            if calls != 2 {
+            let finished = completed.load(Ordering::Relaxed);
+            if calls != 1 || finished != 1 {
                 pending.unblock();
                 let _ = task.await;
-                panic!("startup must sync both data journals before its marker, started {calls}");
+                panic!(
+                    "clean startup must return after starting one marker sync, calls={calls}, \
+                     finished={finished}"
+                );
             }
 
             pending.unblock();
-            let archive = task.await.unwrap().unwrap();
+            let archive = task.await.unwrap().unwrap().sync().await.unwrap();
             assert_eq!(archive.values_validated_on_init(), 1);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("marker_reopen"), cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(archive.values_validated_on_init(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_startup_marker_failure_fails_next_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut cfg = test_config(&context, NZU64!(4));
+            cfg.key_partition = "startup-marker-failure-index".into();
+            cfg.metadata_partition = "startup-marker-failure-metadata".into();
+            cfg.value_partition = "startup-marker-failure-values".into();
+
+            let archive = Archive::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            let archive = archive.put(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.sync().await.unwrap();
+            drop(archive);
+
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            pending.arm();
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(delayed.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(pending.lock().len(), 1);
+
+            fail_pending_syncs(&pending);
+            assert!(matches!(archive.sync().await, Err(Error::Metadata(_))));
         });
     }
 

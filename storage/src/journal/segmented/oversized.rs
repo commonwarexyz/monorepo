@@ -53,7 +53,9 @@
 //! still verified lazily at read.
 
 use super::{
-    fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
+    fixed::{
+        Config as FixedConfig, Journal as FixedJournal, RecoveryPreflight, Replay as FixedReplay,
+    },
     glob::{Config as GlobConfig, Glob},
 };
 use crate::{Context, journal::Error};
@@ -188,46 +190,47 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         cfg: Config<V::Cfg>,
         recovery: Recovery<'_>,
     ) -> Result<Self, Error> {
-        // Initialize both journals
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
             page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
         };
-        let index = match &recovery {
-            Recovery::Floors(minimum_items) => {
-                FixedJournal::init_with_floors(context.child("index"), index_cfg, minimum_items)
-                    .await?
-            }
-            Recovery::Restore { .. } | Recovery::Infer => {
-                FixedJournal::init(context.child("index"), index_cfg).await?
-            }
-        };
-
         let value_cfg = GlobConfig {
             partition: cfg.value_partition,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             write_buffer: cfg.value_write_buffer,
         };
-        let values = Glob::init(context.child("values"), value_cfg).await?;
+        let index_context = context.child("index");
+        let value_context = context.child("values");
 
-        let oversized = Self { index, values };
-        if let Recovery::Floors(minimum_items) = &recovery {
-            oversized.validate_value_floors(minimum_items).await?;
-        }
-
-        // Perform crash recovery
-        let oversized = match recovery {
+        match recovery {
+            Recovery::Infer => {
+                let index = FixedJournal::init(index_context, index_cfg).await?;
+                let values = Glob::init(value_context, value_cfg).await?;
+                Self { index, values }.repair(None).await
+            }
+            Recovery::Floors(minimum_items) => {
+                let preflight =
+                    FixedJournal::preflight_floors(index_context, index_cfg, minimum_items).await?;
+                let values = Glob::init(value_context, value_cfg).await?;
+                Self::validate_value_floors(&values, minimum_items, &preflight)?;
+                let index = preflight.finish().await?;
+                Self { index, values }.repair(Some(minimum_items)).await
+            }
             Recovery::Restore {
                 section,
                 index_size,
-            } => oversized.restore(section, index_size).await?,
-            Recovery::Floors(minimum_items) => oversized.repair(Some(minimum_items)).await?,
-            Recovery::Infer => oversized.repair(None).await?,
-        };
-
-        Ok(oversized)
+            } => {
+                let preflight =
+                    FixedJournal::preflight_restore(index_context, index_cfg, section, index_size)
+                        .await?;
+                let values = Glob::init(value_context, value_cfg).await?;
+                Self::validate_restore_values(&values, &preflight, section, index_size)?;
+                let index = preflight.finish().await?;
+                Self { index, values }.restore(section, index_size).await
+            }
+        }
     }
 
     /// Perform crash recovery by validating index entries against glob contents.
@@ -339,20 +342,20 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Verify that every floor's final index entry is backed by retained value bytes before repair
     /// can rewind either journal. Value checksums within the floor were verified before publication
     /// and are not read again here.
-    async fn validate_value_floors(&self, minimum_items: &BTreeMap<u64, u64>) -> Result<(), Error> {
+    fn validate_value_floors(
+        values: &Glob<E, V>,
+        minimum_items: &BTreeMap<u64, u64>,
+        preflight: &RecoveryPreflight<E, I>,
+    ) -> Result<(), Error> {
         for (&section, &minimum) in minimum_items {
             if minimum == 0 {
                 continue;
             }
 
-            let entry = match self.index.get(section, minimum - 1).await {
-                Ok(entry) => entry,
-                Err(Error::ItemOutOfRange(_) | Error::Runtime(RError::InvalidChecksum)) => {
-                    return Err(Error::Corruption(format!(
-                        "section {section} validation floor ends at an unreadable index entry"
-                    )));
-                }
-                Err(err) => return Err(err),
+            let Some((_, Some(entry))) = preflight.boundaries().get(&section) else {
+                return Err(Error::Corruption(format!(
+                    "section {section} validation floor ends at an unreadable index entry"
+                )));
             };
             let (offset, size) = entry.value_location();
             let required = offset.checked_add(u64::from(size)).ok_or_else(|| {
@@ -360,7 +363,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                     "section {section} validation floor has an overflowing value range"
                 ))
             })?;
-            let retained = self.values.size(section)?;
+            let retained = values.size(section)?;
             if retained < required {
                 return Err(Error::Corruption(format!(
                     "section {section} retains {retained} value bytes, below the validation \
@@ -371,92 +374,80 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Ok(())
     }
 
-    /// Restore the journals to exactly the durable state `(section, index_size)`
-    /// describes (see [Self::init]).
-    async fn restore(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
-        // Sections below the checkpoint were durable when it was published and never
-        // appended to again, so anything but a fully consistent section is
-        // unrecoverable loss, never crash debris. Adopt them unchanged.
-        let below: Vec<u64> = self
-            .index
-            .sections()
-            .take_while(|candidate| *candidate < section)
-            .collect();
-        for candidate in below {
-            let index_size = self.index.size(candidate)?;
-            let glob_size = self.values.size(candidate)?;
-            self.verify_complete(candidate, index_size, glob_size)
-                .await?;
+    fn validate_restore_values(
+        values: &Glob<E, V>,
+        preflight: &RecoveryPreflight<E, I>,
+        section: u64,
+        index_size: u64,
+    ) -> Result<(), Error> {
+        for (&candidate, (size, entry)) in preflight.boundaries().range(..section) {
+            let required = match (size, entry) {
+                (0, None) => 0,
+                (_, Some(entry)) => {
+                    let (offset, size) = entry.value_location();
+                    offset.checked_add(u64::from(size)).ok_or_else(|| {
+                        Error::Corruption(format!(
+                            "section {candidate} has an overflowing committed value range"
+                        ))
+                    })?
+                }
+                _ => {
+                    return Err(Error::Corruption(format!(
+                        "section {candidate} has committed index bytes but no terminal entry"
+                    )));
+                }
+            };
+            let retained = values.size(candidate)?;
+            if retained != required {
+                return Err(Error::Corruption(format!(
+                    "section {candidate} index ends at value byte {required}, but its glob size is {retained}"
+                )));
+            }
         }
 
-        // A value section below the checkpoint without an index counterpart lost its
-        // index, and the checkpointed section must retain at least the committed size.
-        let index_sections: HashSet<u64> = self.index.sections().collect();
-        if let Some(orphan) = self
-            .values
-            .sections()
-            .find(|candidate| *candidate < section && !index_sections.contains(candidate))
-        {
+        if let Some(orphan) = values.sections().find(|candidate| {
+            *candidate < section && !preflight.boundaries().contains_key(candidate)
+        }) {
             return Err(Error::Corruption(format!(
                 "section {orphan} has values but no index"
             )));
         }
-        let retained = self.index.size(section)?;
-        if retained < index_size {
-            return Err(Error::Corruption(format!(
-                "section {section} retains {retained} of committed {index_size}"
-            )));
-        }
 
-        // Truncate to the checkpoint and remove everything after it, durably (see
-        // Self::rewind). Later appends can only reuse the freed offsets once the
-        // truncations are durable.
-        self = self.rewind(section, index_size).await?;
-
-        // The retained glob must cover exactly the committed values.
-        let glob_size = self.values.size(section)?;
-        self.verify_complete(section, index_size, glob_size).await?;
-
-        Ok(self)
-    }
-
-    /// Verify a section's journals agree: the last entry's value range must end exactly
-    /// at the glob's size.
-    async fn verify_complete(
-        &self,
-        section: u64,
-        index_size: u64,
-        glob_size: u64,
-    ) -> Result<(), Error> {
-        if index_size == 0 {
-            if glob_size != 0 {
+        if index_size > 0 {
+            let Some((boundary, Some(entry))) = preflight.boundaries().get(&section) else {
                 return Err(Error::Corruption(format!(
-                    "section {section} has values but no entries: glob size {glob_size}"
+                    "section {section} checkpoint ends at an unreadable index entry"
+                )));
+            };
+            if *boundary != index_size {
+                return Err(Error::Corruption(format!(
+                    "section {section} checkpoint boundary changed during preflight"
                 )));
             }
-            return Ok(());
-        }
-
-        let entry_count = index_size / FixedJournal::<E, I>::CHUNK_SIZE as u64;
-        let entry_end = match self.index.get(section, entry_count - 1).await {
-            Ok(entry) => {
-                let (offset, size) = entry.value_location();
-                offset.saturating_add(u64::from(size))
-            }
-            Err(Error::ItemOutOfRange(_) | Error::Runtime(RError::InvalidChecksum)) => {
+            let (offset, size) = entry.value_location();
+            let required = offset.checked_add(u64::from(size)).ok_or_else(|| {
+                Error::Corruption(format!(
+                    "section {section} checkpoint has an overflowing value range"
+                ))
+            })?;
+            let retained = values.size(section)?;
+            if retained < required {
                 return Err(Error::Corruption(format!(
-                    "section {section} last entry is unreadable"
+                    "section {section} retains {retained} of {required} committed value bytes"
                 )));
             }
-            Err(err) => return Err(err),
-        };
-        if entry_end != glob_size {
-            return Err(Error::Corruption(format!(
-                "section {section} last entry ends at {entry_end}, glob size is {glob_size}"
-            )));
         }
 
         Ok(())
+    }
+
+    /// Restore the journals to exactly the durable state `(section, index_size)`
+    /// describes (see [Self::init]).
+    async fn restore(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
+        // The non-mutating preflight proved every covered cross-journal boundary. Truncate to the
+        // checkpoint durably before later appends can reuse any discarded range.
+        self = self.rewind(section, index_size).await?;
+        Ok(self)
     }
 
     /// Remove any value sections that don't have corresponding index sections.
@@ -828,12 +819,15 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::utils::corrupt_page;
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Blob as _, Buf, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
-        buffer::paged::CacheRef, deterministic, mocks::SyncFaultContext,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
     };
     use commonware_utils::{NZU16, NZUsize};
 
@@ -1702,6 +1696,55 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_oversized_restore_does_not_repair_discarded_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context);
+            cfg.index_page_cache =
+                CacheRef::from_pooler(&context, NZU16!(TestEntry::SIZE as u16), NZUsize!(8));
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("seed"), cfg.clone(), None)
+                    .await
+                    .expect("failed to init");
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(0, 0, 0), &[0; 16])
+                .await
+                .expect("failed to append checkpoint entry");
+            for id in 1..=3 {
+                (oversized, _, _, _) = oversized
+                    .append(2, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .expect("failed to append discardable entry");
+            }
+            oversized = oversized.sync_all().await.expect("failed to sync");
+            drop(oversized);
+
+            // The valid final page hides this interior hole from Writer::new. Restore owns no
+            // bytes in section 2 and must remove it without first repairing and syncing it.
+            corrupt_page(&context, &cfg.index_partition, 2, 1, TestEntry::SIZE as u64).await;
+
+            let pending = PendingSyncs::default();
+            pending.arm();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let chunk = TestEntry::SIZE as u64;
+            let oversized: Oversized<_, TestEntry, TestValue> = drive_pending_syncs(
+                &pending,
+                Oversized::init(delayed.child("restore"), cfg, Some((1, chunk))),
+            )
+            .await
+            .expect("checkpoint restore failed");
+
+            // Restoring an already exact checkpoint syncs its index and values once each. Any
+            // additional durability work came from repairing data that restore discards.
+            assert_eq!(pending.calls(), 2);
+            oversized.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_oversized_restore_incomplete_section_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1742,6 +1785,65 @@ mod tests {
                 )
                 .await;
                 assert!(matches!(result, Err(Error::Corruption(_))));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_restore_preserves_interior_index_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context);
+            cfg.index_page_cache =
+                CacheRef::from_pooler(&context, NZU16!(TestEntry::SIZE as u16), NZUsize!(8));
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("seed"), cfg.clone(), None)
+                    .await
+                    .expect("failed to init");
+            for id in 0..3 {
+                (oversized, _, _, _) = oversized
+                    .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .expect("failed to append");
+            }
+            (oversized, _, _, _) = oversized
+                .append(2, TestEntry::new(3, 0, 0), &[3; 16])
+                .await
+                .expect("failed to append later section");
+            oversized = oversized.sync_all().await.expect("failed to sync");
+            drop(oversized);
+
+            corrupt_page(&context, &cfg.index_partition, 1, 1, TestEntry::SIZE as u64).await;
+            let (blob, expected_size) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open index");
+            let expected = blob
+                .read_at(0, expected_size as usize, ReadOptions::default())
+                .await
+                .expect("failed to snapshot damaged index")
+                .coalesce();
+            drop(blob);
+
+            for (child, checkpoint) in [
+                ("checkpoint_section", (1, 3 * TestEntry::SIZE as u64)),
+                ("earlier_section", (2, TestEntry::SIZE as u64)),
+            ] {
+                let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
+                    Oversized::init(context.child(child), cfg.clone(), Some(checkpoint)).await;
+                assert!(matches!(result, Err(Error::Corruption(_))));
+
+                let (blob, actual_size) = context
+                    .open(&cfg.index_partition, &1u64.to_be_bytes())
+                    .await
+                    .expect("failed to reopen index");
+                assert_eq!(actual_size, expected_size);
+                let actual = blob
+                    .read_at(0, actual_size as usize, ReadOptions::default())
+                    .await
+                    .expect("failed to read damaged index")
+                    .coalesce();
+                assert_eq!(actual.as_ref(), expected.as_ref());
             }
         });
     }

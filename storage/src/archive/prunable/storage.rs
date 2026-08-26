@@ -338,7 +338,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
 
         let mut metadata_dirty = false;
-        let mut validated_sections = Vec::new();
         for (&section, &items) in &section_lengths {
             let key = SectionKey::new(section);
             if items == 0 && metadata.get(&key).is_none() {
@@ -347,18 +346,16 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             if metadata.get(&key) != Some(&items) {
                 metadata.put(key, items);
                 metadata_dirty = true;
-                validated_sections.push(section);
             }
         }
-        if !validated_sections.is_empty() {
-            // A reopened writer treats existing bytes as potentially unsynchronized. Make the
-            // validated sections durable before publishing metadata that allows later startups to
-            // skip their value checks.
-            oversized = oversized.sync(&validated_sections).await?;
-        }
-        if metadata_dirty {
-            metadata = metadata.sync().await?;
-        }
+        let marker_sync_pending = if metadata_dirty {
+            let marker;
+            (metadata, marker) = metadata.start_sync().await?;
+            drop(marker);
+            true
+        } else {
+            false
+        };
         let barriers = section_lengths
             .into_iter()
             .map(|(section, length)| (section, Barrier::new(length)))
@@ -381,7 +378,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             items_per_section,
             oversized,
             metadata,
-            marker_sync_pending: false,
+            marker_sync_pending,
             barriers,
             unpublished: BTreeSet::new(),
             pending: BTreeSet::new(),
@@ -810,6 +807,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     ///
     /// The in-memory index is populated by replaying the index journal. Value frames not covered by
     /// a durable validation marker are CRC-validated before this returns.
+    ///
+    /// Recovery relies on the runtime's startup durability guarantee. Before reopening the same
+    /// storage within a running process, synchronize the previous owner before dropping it.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }

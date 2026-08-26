@@ -119,7 +119,6 @@ pub struct Config<C> {
 struct SectionReplay<B: Blob> {
     section: u64,
     reader: BlobReplay<B>,
-    validated: bool,
     skip_bytes: u64,
     offset: u64,
     valid_offset: u64,
@@ -399,7 +398,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// with the item at the given `start_section` and `start_offset` into that section.
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
-    /// validates replay setup but does not allocate `buffer` bytes per blob. Page buffers
+    /// validates the requested start bound but does not allocate `buffer` bytes per blob. Page buffers
     /// are allocated lazily as the reader advances. Every backing blob read performed by
     /// the returned replay uses `read_options`, including reads after advancing to
     /// another section.
@@ -421,7 +420,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             sections.push_back(SectionReplay {
                 section,
                 reader,
-                validated: false,
                 skip_bytes,
                 offset: 0,
                 valid_offset: skip_bytes,
@@ -429,7 +427,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             });
         }
         let finished = sections.is_empty();
-        let mut replay = Replay {
+        let replay = Replay {
             journal: self,
             sections,
             buffer,
@@ -439,9 +437,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             repairing: false,
         };
 
-        // Validate the first section before returning so an invalid start offset remains a setup
-        // error. Later sections are validated only when ordered replay reaches them.
-        replay.validate_front().await?;
         if let Some(current) = replay.sections.front()
             && current.section == start_section
             && start_offset > current.reader.blob_size()
@@ -610,17 +605,18 @@ pub struct Replay<E: Storage + Metrics, V: Codec> {
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
-    /// Validate the front section before frame replay can accept any of its bytes.
-    async fn validate_front(&mut self) -> Result<(), Error> {
-        let Some(current) = self.sections.front() else {
-            return Ok(());
-        };
-        if current.validated {
-            return Ok(());
+    /// Repair a torn page discovered by the ordered replay pass, then resume at the last complete
+    /// frame boundary. Clean sections never enter this path or pay for a separate prefix scan.
+    async fn repair_torn_front(&mut self, source: commonware_runtime::Error) -> Result<(), Error> {
+        if !matches!(source, commonware_runtime::Error::InvalidChecksum) {
+            self.sections.pop_front();
+            return Err(source.into());
         }
 
+        let current = self.sections.front().expect("replayed section is present");
         let section = current.section;
         let size = current.reader.blob_size();
+        let valid_offset = current.valid_offset;
         let recoverable = match self
             .journal
             .0
@@ -637,11 +633,12 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             }
         };
         if recoverable >= size {
-            self.sections
-                .front_mut()
-                .expect("validated section is present")
-                .validated = true;
-            return Ok(());
+            self.sections.pop_front();
+            return Err(source.into());
+        }
+        if recoverable < valid_offset {
+            self.sections.pop_front();
+            return Err(Error::ItemOutOfRange(valid_offset));
         }
 
         warn!(
@@ -660,7 +657,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             .expect("repaired section is present");
         drop(current.reader);
         repair_blob(&mut self.journal, section, recoverable).await?;
-        let reader = match self
+        let mut reader = match self
             .journal
             .0
             .manager
@@ -670,19 +667,16 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             .await
         {
             Ok(reader) => reader,
-            Err(err) => {
-                self.repairing = false;
-                return Err(err.into());
-            }
+            Err(err) => return Err(err.into()),
         };
+        reader.seek_to(valid_offset)?;
         self.sections.push_front(SectionReplay {
             section,
             reader,
-            validated: true,
-            skip_bytes: current.skip_bytes,
-            offset: current.offset,
-            valid_offset: current.valid_offset,
-            pending: current.pending,
+            skip_bytes: 0,
+            offset: valid_offset,
+            valid_offset,
+            pending: None,
         });
         self.repairing = false;
         Ok(())
@@ -703,13 +697,10 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             return self.fail(Error::ReplayInterrupted);
         }
         while !self.sections.is_empty() {
-            if let Err(err) = self.validate_front().await {
-                return self.fail(err);
-            }
             let current = self
                 .sections
                 .front_mut()
-                .expect("validated section is present");
+                .expect("replayed section is present");
             let blob_size = current.reader.blob_size();
 
             // Resume a recorded frame header or decode the next one
@@ -730,8 +721,10 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                             // Buffer still has data - continue to try decoding
                         }
                         Err(err) => {
-                            self.sections.pop_front();
-                            return self.fail(err.into());
+                            if let Err(err) = self.repair_torn_front(err).await {
+                                return self.fail(err);
+                            }
+                            continue;
                         }
                     }
 
@@ -814,8 +807,10 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                     continue;
                 }
                 Err(err) => {
-                    self.sections.pop_front();
-                    return self.fail(err.into());
+                    if let Err(err) = self.repair_torn_front(err).await {
+                        return self.fail(err);
+                    }
+                    continue;
                 }
             }
 
@@ -2018,6 +2013,47 @@ mod tests {
             let journal = replay.finish().unwrap();
             assert_eq!(journal.size(TORN_SECTION).unwrap(), 63);
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_variable_replay_rejects_start_beyond_torn_prefix_without_repair() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PARTITION: &str = "segmented-variable-torn-start";
+            const SECTION: u64 = 1;
+            const START_OFFSET: u64 = 72;
+
+            let (journal, _) = journal_with_torn_interior_page(&context, PARTITION, false).await;
+            let original_size = context
+                .open(PARTITION, &SECTION.to_be_bytes())
+                .await
+                .unwrap()
+                .1;
+            let mut replay = journal
+                .replay(
+                    SECTION,
+                    START_OFFSET,
+                    NZUsize!(1024),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("apparent tail still covers the requested start");
+
+            assert!(matches!(
+                replay.next().await,
+                Some(Err(Error::ItemOutOfRange(START_OFFSET)))
+            ));
+            assert_eq!(
+                context
+                    .open(PARTITION, &SECTION.to_be_bytes())
+                    .await
+                    .unwrap()
+                    .1,
+                original_size,
+                "an unvalidated start offset must not become a repair boundary"
+            );
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
         });
     }
 
