@@ -367,8 +367,6 @@ enum ReadyLane {
 /// normal service based on one consistent snapshot while preserving FIFO
 /// order within each lane.
 struct Ready {
-    /// Whether teardown has permanently closed ready-token admission.
-    closed: bool,
     /// Ordinary readiness in arrival order.
     normal: VecDeque<Arc<dyn Erased>>,
     /// Event-delivered readiness in arrival order.
@@ -438,7 +436,6 @@ impl Tasks {
     pub(super) fn new(unpark: RingWaker) -> Self {
         Self {
             ready: Mutex::new(Ready {
-                closed: false,
                 normal: VecDeque::new(),
                 event: VecDeque::new(),
             }),
@@ -518,12 +515,9 @@ impl Tasks {
     }
 
     /// Enqueue an initial poll or deferred running notification at the back
-    /// of the normal lane, unless teardown has closed ready admission.
+    /// of the normal lane.
     fn queue_normal(&self, task: Arc<dyn Erased>) {
         let mut ready = self.ready.lock();
-        if ready.closed {
-            return;
-        }
         ready.normal.push_back(task);
         drop(ready);
         self.unpark_foreign();
@@ -544,9 +538,6 @@ impl Tasks {
             ReadyLane::Normal
         };
         let mut ready = self.ready.lock();
-        if ready.closed {
-            return;
-        }
         match lane {
             ReadyLane::Normal => ready.normal.push_back(task),
             ReadyLane::Event => ready.event.push_back(task),
@@ -640,9 +631,9 @@ impl Tasks {
 
     /// Clear all tasks and reject future registrations.
     pub(super) fn clear(&self) {
-        // Close and detach the arena before closing ready admission. A
-        // registration that already owns a slot may reach queue_normal after
-        // this point, where the ready lock rejects its publication.
+        // Close and detach the arena before dropping futures. A registration
+        // that already owns a slot may still publish a harmless ready token,
+        // but the cleared task cannot be polled again.
         let slots = self
             .running
             .lock()
@@ -650,11 +641,10 @@ impl Tasks {
             .map(|running| running.slots)
             .unwrap_or_default();
 
-        // Close ready admission and detach both lanes atomically with respect
-        // to every publisher. Arc destruction runs after releasing the lock.
+        // Detach both lanes atomically with respect to every publisher. Arc
+        // destruction runs after releasing the lock.
         let (normal, event) = {
             let mut ready = self.ready.lock();
-            ready.closed = true;
             (
                 std::mem::take(&mut ready.normal),
                 std::mem::take(&mut ready.event),
@@ -1181,27 +1171,6 @@ mod tests {
 
         tasks.clear();
         let ready = tasks.ready.lock();
-        assert!(ready.normal.is_empty());
-        assert!(ready.event.is_empty());
-        assert!(ready.closed);
-        drop(ready);
-        assert!(!tasks.has_ready());
-    }
-
-    /// A wake that claims an idle task before teardown but delays publication
-    /// until afterward must not reinsert a token into the closed ready queue.
-    #[test]
-    fn test_clear_rejects_claimed_but_unpublished_wake() {
-        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
-        assert!(tasks.take_root_ready());
-        let cell = pending_cell(&tasks, 14, false);
-
-        assert!(cell.state.notify(), "idle wake must claim publication");
-        tasks.clear();
-        tasks.queue_normal(cell as Arc<dyn Erased>);
-
-        let ready = tasks.ready.lock();
-        assert!(ready.closed);
         assert!(ready.normal.is_empty());
         assert!(ready.event.is_empty());
         drop(ready);

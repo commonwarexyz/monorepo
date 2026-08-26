@@ -52,10 +52,9 @@
 //!
 //! Every state transition completes while [Ops] is borrowed. Stored waker
 //! drops and callbacks are detached into [WakerAction] values, then processed
-//! after releasing that borrow. This lets callback panics propagate without
-//! exposing partially published capacity or completion state. During an
-//! existing unwind, callback panic payloads are forgotten after all actions
-//! run so an owner destructor cannot abort the process with a second panic.
+//! after releasing that borrow. This permits callback reentrancy without a
+//! nested [RefCell] borrow and lets callback panics propagate only after the
+//! state they observe has been committed.
 
 use super::{
     Tick,
@@ -79,6 +78,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     os::fd::OwnedFd,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     sync::{
         Arc,
@@ -271,50 +271,33 @@ impl IntoIterator for CapacityActions {
     }
 }
 
-/// Run every detached waker action, then resume the earliest callback panic.
+/// Run every detached waker action, then propagate the first callback panic.
 ///
-/// Capacity state changes are committed before their wakers leave [Ops]. A
-/// panic from an earlier callback must therefore not strand later callbacks
-/// whose queued or granted state already changed. Stored wakers can also run
-/// user RawWaker code on drop, so their destruction follows the same ordering
-/// and unwind isolation. If a batch begins during an existing unwind, its
-/// callback panic is forgotten instead of causing a double-panic abort.
+/// Owner state is committed before this function runs. Continuing the batch
+/// ensures a panicking callback cannot strand later waiters whose state has
+/// already advanced. Secondary payloads are leaked because their destructors
+/// may panic while the first payload is retained.
 pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
     let already_panicking = std::thread::panicking();
-    let mut first_callback_panic = None;
+    let mut first_panic = None;
     for action in actions {
-        match action {
-            WakerAction::Drop(waker) => {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                    drop(waker);
-                }));
-                if let Err(payload) = result {
-                    if first_callback_panic.is_none() {
-                        first_callback_panic = Some(payload);
-                    } else {
-                        std::mem::forget(payload);
-                    }
-                }
-            }
-            WakerAction::Wake(waker) => {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                    waker.wake();
-                }));
-                if let Err(payload) = result {
-                    if first_callback_panic.is_none() {
-                        first_callback_panic = Some(payload);
-                    } else {
-                        std::mem::forget(payload);
-                    }
-                }
+        let result = catch_unwind(AssertUnwindSafe(|| match action {
+            WakerAction::Drop(waker) => drop(waker),
+            WakerAction::Wake(waker) => waker.wake(),
+        }));
+        if let Err(payload) = result {
+            if first_panic.is_none() {
+                first_panic = Some(payload);
+            } else {
+                std::mem::forget(payload);
             }
         }
     }
-    if let Some(payload) = first_callback_panic {
+    if let Some(payload) = first_panic {
         if already_panicking {
             std::mem::forget(payload);
         } else {
-            std::panic::resume_unwind(payload);
+            resume_unwind(payload);
         }
     }
 }
@@ -1825,7 +1808,7 @@ mod tests {
         os::unix::net::UnixStream,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
         task::{RawWaker, RawWakerVTable},
     };
@@ -1849,12 +1832,25 @@ mod tests {
         }
     }
 
-    struct FlagWaker(AtomicBool);
+    struct PanicWaker;
 
-    impl ArcWake for FlagWaker {
-        fn wake_by_ref(arc_self: &Arc<Self>) {
-            arc_self.0.store(true, Ordering::Release);
+    impl ArcWake for PanicWaker {
+        fn wake_by_ref(_: &Arc<Self>) {
+            panic!("waker panic");
         }
+    }
+
+    #[test]
+    fn test_wake_batch_finishes_committed_actions_before_panicking() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            wake_batch([
+                WakerAction::Wake(arc_waker(Arc::new(PanicWaker))),
+                WakerAction::Wake(log_waker(1, &log)),
+            ]);
+        }));
+        assert!(result.is_err());
+        assert_eq!(*log.lock(), [1]);
     }
 
     fn log_waker(id: usize, log: &Arc<Mutex<Vec<usize>>>) -> Waker {
@@ -2781,191 +2777,5 @@ mod tests {
             assert_eq!(ops.capacity.registered(), 0);
             assert_eq!(ops.capacity.reserved(), 0);
         });
-    }
-
-    unsafe fn clone_panicking_drop(_: *const ()) -> RawWaker {
-        RawWaker::new(std::ptr::null(), &PANICKING_DROP_VTABLE)
-    }
-
-    unsafe fn panic_on_drop(_: *const ()) {
-        panic!("waker drop panic");
-    }
-
-    static PANICKING_DROP_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        clone_panicking_drop,
-        noop_wake,
-        noop_wake_by_ref,
-        panic_on_drop,
-    );
-
-    fn panicking_drop_waker() -> Waker {
-        // SAFETY: the vtable never dereferences the null data pointer. Drop
-        // panics deliberately, while clone and wake preserve RawWaker rules.
-        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &PANICKING_DROP_VTABLE)) }
-    }
-
-    #[test]
-    fn test_queued_drop_panic_does_not_block_next_fifo_wake() {
-        let mut capacity = CapacityWaiters::new();
-        let first_waker = panicking_drop_waker();
-        let second = Arc::new(FlagWaker(AtomicBool::new(false)));
-        let second_waker = arc_waker(Arc::clone(&second));
-        let mut first_registration = None;
-        let mut second_registration = None;
-        let mut actions = Vec::new();
-        let mut first_incoming = Some(first_waker.clone());
-        assert_eq!(
-            capacity
-                .poll(
-                    &mut first_registration,
-                    0,
-                    None,
-                    &mut first_incoming,
-                    &mut actions,
-                )
-                .kind(),
-            CapacityAdmissionKind::Queued
-        );
-        let mut second_incoming = Some(second_waker.clone());
-        assert_eq!(
-            capacity
-                .poll(
-                    &mut second_registration,
-                    0,
-                    None,
-                    &mut second_incoming,
-                    &mut actions,
-                )
-                .kind(),
-            CapacityAdmissionKind::Queued
-        );
-        std::mem::forget(first_waker);
-        capacity.cancel(first_registration.unwrap(), 1, &mut actions);
-        capacity.reconcile(1, &mut actions);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wake_batch(actions);
-        }));
-        assert!(result.is_err());
-        assert!(second.0.load(Ordering::Acquire));
-        assert_eq!(capacity.registered(), 1);
-        assert_eq!(capacity.queued(), 0);
-        assert_eq!(capacity.reserved(), 1);
-        assert_eq!(
-            poll_capacity(&mut capacity, &mut second_registration, 1, &second_waker),
-            CapacityAdmissionKind::Granted
-        );
-    }
-
-    struct PanicPayload;
-
-    impl Drop for PanicPayload {
-        fn drop(&mut self) {
-            panic!("panic payload dropped");
-        }
-    }
-
-    unsafe fn clone_payload_panicking_drop(_: *const ()) -> RawWaker {
-        RawWaker::new(std::ptr::null(), &PAYLOAD_PANICKING_DROP_VTABLE)
-    }
-
-    unsafe fn panic_payload_on_drop(_: *const ()) {
-        std::panic::panic_any(PanicPayload);
-    }
-
-    static PAYLOAD_PANICKING_DROP_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        clone_payload_panicking_drop,
-        noop_wake,
-        noop_wake_by_ref,
-        panic_payload_on_drop,
-    );
-
-    fn payload_panicking_drop_waker() -> Waker {
-        // SAFETY: the vtable never dereferences the null data pointer. Drop
-        // panics deliberately, while clone and wake preserve RawWaker rules.
-        unsafe {
-            Waker::from_raw(RawWaker::new(
-                std::ptr::null(),
-                &PAYLOAD_PANICKING_DROP_VTABLE,
-            ))
-        }
-    }
-
-    struct PayloadPanicWaker;
-
-    impl ArcWake for PayloadPanicWaker {
-        fn wake_by_ref(_: &Arc<Self>) {
-            std::panic::panic_any(PanicPayload);
-        }
-    }
-
-    #[test]
-    fn test_wake_batch_forgets_secondary_panics_and_runs_remaining_actions() {
-        let flag = Arc::new(FlagWaker(AtomicBool::new(false)));
-        let actions = [
-            WakerAction::Wake(arc_waker(Arc::new(PayloadPanicWaker))),
-            WakerAction::Wake(arc_waker(Arc::new(PayloadPanicWaker))),
-            WakerAction::Wake(arc_waker(Arc::clone(&flag))),
-        ];
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wake_batch(actions);
-        }));
-        let payload = result.expect_err("wake batch should resume first panic");
-        std::mem::forget(payload);
-        assert!(flag.0.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn test_wake_batch_forgets_secondary_drop_panic_and_runs_remaining_actions() {
-        let flag = Arc::new(FlagWaker(AtomicBool::new(false)));
-        let actions = [
-            WakerAction::Drop(payload_panicking_drop_waker()),
-            WakerAction::Drop(payload_panicking_drop_waker()),
-            WakerAction::Wake(arc_waker(Arc::clone(&flag))),
-        ];
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wake_batch(actions);
-        }));
-        let payload = result.expect_err("wake batch should resume first panic");
-        std::mem::forget(payload);
-        assert!(flag.0.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn test_wake_batch_preserves_active_unwind() {
-        const CASE: &str = "_COMMONWARE_RUNTIME_IOURING_WAKE_BATCH_UNWIND_CASE";
-        const TEST: &str =
-            "iouring::driver::handle::tests::test_wake_batch_preserves_active_unwind";
-
-        if std::env::var_os(CASE).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST, "--nocapture"])
-                .env(CASE, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "wake batch unwind case aborted\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-            return;
-        }
-
-        struct DropWakerOnUnwind(Option<Waker>);
-
-        impl Drop for DropWakerOnUnwind {
-            fn drop(&mut self) {
-                wake_batch([WakerAction::Drop(
-                    self.0.take().expect("waker dropped twice"),
-                )]);
-            }
-        }
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _drop = DropWakerOnUnwind(Some(payload_panicking_drop_waker()));
-            panic!("outer panic");
-        }));
-        let payload = result.expect_err("outer panic should propagate");
-        assert_eq!(payload.downcast_ref::<&str>(), Some(&"outer panic"));
     }
 }

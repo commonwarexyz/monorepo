@@ -32,33 +32,32 @@
 //! Task wrappers catch panics raised while polling. Dedicated worker wrappers
 //! also catch the spawn closure. With [`Config::with_catch_panics`] enabled,
 //! `Panicker` absorbs a panic that reaches either wrapper and the task handle
-//! reports [`Error::Exited`]. Otherwise the catch boundary stamps the payload
-//! before `Panicker` delivers it to the root interrupt or the shared fallback
-//! retains it when delivery is no longer possible.
+//! reports [`Error::Exited`]. Otherwise `Panicker` delivers the payload to the
+//! root interrupt. When root completion wins the same poll, the interrupt
+//! receiver closes before its final check so a concurrent sender either
+//! becomes visible there or receives its payload back for the shared fallback.
 //!
 //! ```text
-//! task catch -- catch_panics=true ----------------------> Error::Exited
+//! task catch -- catch_panics=true --------------------> Error::Exited
 //!      |
-//!      +-- false --> source stamp --> Panicker --> root interrupt
-//!                                      `---------> retained fallback
+//!      +-- false --> Panicker --> root interrupt
+//!                            `--> retained fallback
 //!
-//! worker-loop catch ------> source stamp --\
-//! cleanup panic isolation -> source stamp ---+-> close -> ring drain -> unwind
-//!                                             |
-//! worker unwind -> opportunistic reap --------+
-//!                `-> final joins -------------+-> earliest source sequence
-//! root unwind --------------------------------/              |
-//!                                                   isolated output drop
-//!                                                            |
-//!                                                       final resume
+//! worker-loop catch ------\
+//! cleanup panic isolation -+-> close -> ring drain -> resume
+//!                           |
+//! worker fallback ----------+-> opportunistic reap or final join
+//!                           |
+//! root unwind --------------+-> isolated output drop -> final resume
 //! ```
 //!
 //! Worker teardown isolates cleanup callbacks, closes and drains the ring, and
 //! resumes only after quiescence. A panic inside [`Driver::drain`] aborts
 //! instead of unwinding ring state. [`crate::Runner::start`] joins every worker
-//! before selecting the earliest source sequence and resuming its payload.
-//! Losing payloads and panic-capable output drops are isolated, and later
-//! adversarial payloads are forgotten without running their destructors.
+//! before resuming a retained payload. Exact ordering between concurrently
+//! observed failures is not guaranteed. Panic-capable output drops are
+//! isolated, and secondary payloads are forgotten when dropping them could
+//! interrupt the mandatory ring drain.
 //!
 //! Ordinary tasks run inline on the executor thread. Tasks spawned with
 //! [crate::Spawner::dedicated] or [crate::Spawner::shared] with
@@ -118,10 +117,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     pin::Pin,
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::{Arc, Weak},
     task::{self as std_task, Poll, Waker},
     time::{Duration, Instant, SystemTime},
 };
@@ -161,118 +157,22 @@ const EVENT_READY_TASKS_PER_TURN: usize = READY_TASKS_PER_TURN / 2;
 /// Type-erased payload retained while teardown completes.
 type PanicPayload = Box<dyn std::any::Any + Send>;
 
-/// Panic payload paired with its runtime-wide observation order.
-struct StampedPanic {
-    /// Runtime-wide order assigned at the panic's first catch boundary.
-    sequence: u64,
-    /// Type-erased user or runtime panic payload.
-    payload: PanicPayload,
-}
-
-/// Task panic transported through the root interrupt with its source order.
-///
-/// A notification can lose its race with an earlier panic or outlive the
-/// interrupt receiver. In either case dropping an adversarial payload must
-/// not raise a second panic outside the runtime's teardown isolation.
-struct TaskPanic {
-    /// Runtime that retains the payload if interrupt delivery loses a race.
-    shared: Weak<Shared>,
-    /// Stamped payload, taken only when the root or fallback path receives it.
-    stamped: Option<StampedPanic>,
-}
-
-impl TaskPanic {
-    /// Wrap a task panic for transport through [Panicker].
-    fn new(shared: &Arc<Shared>, stamped: StampedPanic) -> Self {
-        Self {
-            shared: Arc::downgrade(shared),
-            stamped: Some(stamped),
-        }
-    }
-
-    /// Recover the stamped payload from a delivered notification.
-    const fn take_stamped(&mut self) -> StampedPanic {
-        self.stamped
-            .take()
-            .expect("task panic payload already taken")
-    }
-
-    /// Downcast a type-erased panic notification.
-    fn downcast(payload: PanicPayload) -> Result<StampedPanic, PanicPayload> {
-        match payload.downcast::<Self>() {
-            Ok(mut payload) => Ok(payload.take_stamped()),
-            Err(payload) => Err(payload),
-        }
-    }
-}
-
-impl Drop for TaskPanic {
-    fn drop(&mut self) {
-        if let Some(stamped) = self.stamped.take() {
-            if let Some(shared) = self.shared.upgrade() {
-                // The root can complete in the same poll during which this
-                // notification arrived. Retain the source-stamped payload so
-                // dropping the filled receiver cannot lose it.
-                shared.retain_worker_panic(stamped.sequence, stamped.payload);
-            } else {
-                // The runtime already disappeared. Forget arbitrary user drop
-                // glue instead of raising a panic from channel destruction.
-                std::mem::forget(stamped.payload);
-            }
-        }
-    }
-}
-
-/// Retain the earliest stamped panic without running later payload drop glue.
-fn retain_earliest_panic(first: &mut Option<StampedPanic>, panic: StampedPanic) {
-    match first {
-        None => *first = Some(panic),
-        Some(current) if panic.sequence < current.sequence => {
-            let later = std::mem::replace(current, panic);
-            std::mem::forget(later.payload);
-        }
-        Some(_) => std::mem::forget(panic.payload),
-    }
-}
-
-/// Retain the earliest panic without running adversarial drop glue from a
-/// later payload while teardown is still in progress.
+/// Retain the earliest panic while teardown is still in progress.
 fn retain_first_panic(first_panic: &mut Option<PanicPayload>, payload: PanicPayload) {
     if first_panic.is_none() {
         *first_panic = Some(payload);
     } else {
+        // A secondary panic payload may itself panic when dropped. Leaking it
+        // is preferable to unwinding past the mandatory ring drain.
         std::mem::forget(payload);
     }
 }
 
-/// Run one cleanup step, retaining the earliest panic without dropping any
-/// later adversarial payloads.
+/// Run one cleanup step and retain its panic unless an earlier step failed.
 fn capture_cleanup_panic(first_panic: &mut Option<PanicPayload>, cleanup: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(cleanup)) {
         retain_first_panic(first_panic, payload);
     }
-}
-
-/// Raise a closed-alarm failure after isolating every detached waker drop.
-///
-/// The closed-queue panic is captured first so unwinding never begins while
-/// an arbitrary RawWaker destructor remains armed in a local value. Later
-/// destructor panics are retained only if the primary diagnostic somehow
-/// fails to materialize.
-fn fail_closed_alarm(
-    message: &'static str,
-    first_waker: Option<Waker>,
-    second_waker: Option<Waker>,
-) -> ! {
-    let mut first_panic = None;
-    capture_cleanup_panic(&mut first_panic, || panic!("{message}"));
-    if let Some(waker) = first_waker {
-        capture_cleanup_panic(&mut first_panic, move || drop(waker));
-    }
-    if let Some(waker) = second_waker {
-        capture_cleanup_panic(&mut first_panic, move || drop(waker));
-    }
-    resume_unwind(first_panic.expect("closed alarm failure did not panic"));
 }
 
 #[derive(Debug)]
@@ -561,22 +461,6 @@ impl Default for Config {
     }
 }
 
-/// Dedicated worker thread and the first panic sequence stamped by that
-/// worker before it begins unwinding.
-struct WorkerThread {
-    /// Handle joined by opportunistic reaping or final runtime teardown.
-    join: std::thread::JoinHandle<()>,
-    /// First panic sequence stamped by this worker.
-    panic_sequence: Arc<AtomicU64>,
-}
-
-impl WorkerThread {
-    /// Whether the underlying thread has finished.
-    fn is_finished(&self) -> bool {
-        self.join.is_finished()
-    }
-}
-
 /// State shared by every worker thread of one runtime instance.
 struct Shared {
     /// Configuration template used to construct workers.
@@ -595,50 +479,16 @@ struct Shared {
     /// `None` once the root has joined every worker: a dedicated spawn racing
     /// final teardown from a non-worker thread must not create a thread
     /// nobody joins.
-    workers: Mutex<Option<Vec<WorkerThread>>>,
-    /// Whether this runtime ever spawned a worker thread. Monotone: set (for
-    /// an accepted spawn) before the worker thread is launched, never
-    /// cleared, so any worker observing its own teardown sees it set.
-    spawned_workers: AtomicBool,
-    /// Next runtime-wide panic sequence. Zero is reserved for an unstamped
-    /// worker, so real observations start at one.
-    next_panic_sequence: AtomicU64,
-    /// Earliest payload from a worker joined by an opportunistic reap.
-    worker_panic: Mutex<Option<StampedPanic>>,
+    workers: Mutex<Option<Vec<std::thread::JoinHandle<()>>>>,
+    /// Panic payload from a worker joined by an opportunistic reap, resumed
+    /// when the runtime shuts down (reaps must not swallow worker panics).
+    worker_panic: Mutex<Option<Box<dyn std::any::Any + Send>>>,
 }
 
 impl Shared {
-    /// Allocate the next runtime-wide panic observation sequence.
-    fn observe_panic(&self) -> u64 {
-        self.next_panic_sequence.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Stamp the first panic observed by one worker.
-    fn stamp_panic(&self, stamp: &AtomicU64) -> u64 {
-        let existing = stamp.load(Ordering::Acquire);
-        if existing != 0 {
-            return existing;
-        }
-        let sequence = self.observe_panic();
-        match stamp.compare_exchange(0, sequence, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => sequence,
-            Err(existing) => existing,
-        }
-    }
-
-    /// Adopt a sequence assigned before this worker observed a task panic.
-    fn adopt_panic_sequence(&self, stamp: &AtomicU64, sequence: u64) {
-        // Only the owning worker writes its stamp. A failed exchange means an
-        // earlier catch boundary already assigned that worker's precedence.
-        let _ = stamp.compare_exchange(0, sequence, Ordering::AcqRel, Ordering::Acquire);
-    }
-
-    /// Retain an opportunistically reaped worker panic by source order.
-    fn retain_worker_panic(&self, sequence: u64, payload: PanicPayload) {
-        retain_earliest_panic(
-            &mut self.worker_panic.lock(),
-            StampedPanic { sequence, payload },
-        );
+    /// Retain the first worker panic observed by a shared shutdown path.
+    fn retain_worker_panic(&self, payload: PanicPayload) {
+        retain_first_panic(&mut self.worker_panic.lock(), payload);
     }
 
     /// Join any finished worker threads, retaining live ones.
@@ -656,97 +506,14 @@ impl Shared {
         let mut index = 0;
         while index < list.len() {
             if list[index].is_finished() {
-                let WorkerThread {
-                    join,
-                    panic_sequence,
-                } = list.swap_remove(index);
-                if let Err(payload) = join.join() {
-                    let sequence = self.stamp_panic(&panic_sequence);
-                    self.retain_worker_panic(sequence, payload);
+                let worker = list.swap_remove(index);
+                if let Err(payload) = worker.join() {
+                    self.retain_worker_panic(payload);
                 }
             } else {
                 index += 1;
             }
         }
-    }
-}
-
-/// Stamp and route a task panic at its catch boundary.
-///
-/// Successful delivery carries the sequence through the root interrupt. If
-/// the receiver is already closed, retain the same stamped payload for final
-/// join synthesis instead.
-fn route_task_panic(shared: &Arc<Shared>, panicker: &Panicker, payload: PanicPayload) {
-    if panicker.catch() {
-        let _ = panicker.notify(payload);
-        return;
-    }
-
-    let sequence = shared.observe_panic();
-    let notification: PanicPayload =
-        Box::new(TaskPanic::new(shared, StampedPanic { sequence, payload }));
-    let Some(notification) = panicker.notify(notification) else {
-        return;
-    };
-    match TaskPanic::downcast(notification) {
-        Ok(panic) => shared.retain_worker_panic(panic.sequence, panic.payload),
-        // Panicker returns the same allocation it was given. Preserve
-        // teardown progress even if that invariant is violated.
-        Err(payload) => shared.retain_worker_panic(sequence, payload),
-    }
-}
-
-/// Panic accumulator for one worker's teardown.
-///
-/// Each cleanup callback runs in isolation. The first callback panic is
-/// retained and stamped at its catch boundary, while later payloads are
-/// forgotten without running adversarial drop glue.
-struct WorkerCleanup<'a> {
-    /// Runtime-wide sequencing and worker-panic retention state.
-    shared: &'a Shared,
-    /// First panic sequence for the worker being torn down.
-    stamp: &'a AtomicU64,
-    /// Earliest payload caught from the worker loop or a cleanup callback.
-    first_panic: Option<PanicPayload>,
-}
-
-impl<'a> WorkerCleanup<'a> {
-    /// Start teardown with an optional panic caught from the worker loop.
-    fn new(shared: &'a Shared, stamp: &'a AtomicU64, first_panic: Option<PanicPayload>) -> Self {
-        let first_panic = first_panic.map(|payload| match TaskPanic::downcast(payload) {
-            Ok(panic) => {
-                shared.adopt_panic_sequence(stamp, panic.sequence);
-                panic.payload
-            }
-            Err(payload) => {
-                shared.stamp_panic(stamp);
-                payload
-            }
-        });
-        Self {
-            shared,
-            stamp,
-            first_panic,
-        }
-    }
-
-    /// Run one cleanup callback and retain its panic if none was seen earlier.
-    fn capture(&mut self, cleanup: impl FnOnce()) {
-        let had_panic = self.first_panic.is_some();
-        capture_cleanup_panic(&mut self.first_panic, cleanup);
-        if !had_panic && self.first_panic.is_some() {
-            self.shared.stamp_panic(self.stamp);
-        }
-    }
-
-    /// Whether the worker has retained a panic.
-    fn has_panic(&self) -> bool {
-        self.first_panic.is_some()
-    }
-
-    /// Return the retained panic, if any.
-    fn into_panic(self) -> Option<PanicPayload> {
-        self.first_panic
     }
 }
 
@@ -804,15 +571,9 @@ impl Executor {
     fn register_alarm(&self, alarm: Arc<Alarm>) {
         let earliest = {
             let mut sleeping = self.sleeping.lock();
-            let Some(sleeping) = sleeping.as_mut() else {
-                drop(sleeping);
-                let detached = alarm.waker.lock().take();
-                fail_closed_alarm(
-                    "sleep registered on a torn-down io_uring worker",
-                    detached,
-                    None,
-                );
-            };
+            let sleeping = sleeping
+                .as_mut()
+                .expect("sleep registered on a torn-down io_uring worker");
             let earliest = sleeping
                 .alarms
                 .peek()
@@ -843,15 +604,7 @@ impl Executor {
         let replacement = waker.clone();
         let (fired, detached) = {
             let sleeping = self.sleeping.lock();
-            if sleeping.is_none() {
-                drop(sleeping);
-                let detached = alarm.waker.lock().take();
-                fail_closed_alarm(
-                    "sleep outlived its io_uring worker",
-                    detached,
-                    Some(replacement),
-                );
-            }
+            assert!(sleeping.is_some(), "sleep outlived its io_uring worker");
             let mut slot = alarm.waker.lock();
             if slot.is_some() {
                 (false, slot.replace(replacement))
@@ -952,8 +705,6 @@ struct Worker {
     driver: Driver,
     storage: Storage,
     network: Network,
-    /// First panic observed by this worker, shared with its join record.
-    panic_sequence: Arc<AtomicU64>,
 }
 
 impl Worker {
@@ -964,7 +715,7 @@ impl Worker {
     /// worker metrics aggregate into the runtime-wide families.
     ///
     /// Panics if the ring cannot be created.
-    fn new(shared: Arc<Shared>, panic_sequence: Arc<AtomicU64>) -> Self {
+    fn new(shared: Arc<Shared>) -> Self {
         let mut registry = shared.registry.clone();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
@@ -1017,7 +768,6 @@ impl Worker {
             driver,
             storage,
             network,
-            panic_sequence,
         }
     }
 
@@ -1051,9 +801,7 @@ impl Worker {
             mut driver,
             storage,
             network,
-            panic_sequence,
         } = self;
-        let shared = Arc::clone(&executor.shared);
         let mut root = Box::pin(root);
 
         // Build the root task's waker (the root starts ready).
@@ -1142,11 +890,10 @@ impl Worker {
             }
         }));
 
-        let (output, first_panic) = match result {
+        let (output, mut first_panic) = match result {
             Ok(output) => (Some(output), None),
             Err(payload) => (None, Some(payload)),
         };
-        let mut cleanup = WorkerCleanup::new(&shared, &panic_sequence, first_panic);
 
         // Close the alarm queue and detach every waker before invoking any
         // teardown callback. Registrations racing teardown now fail loudly
@@ -1161,7 +908,7 @@ impl Worker {
                     }
                 }
             }
-            None => cleanup.capture(|| {
+            None => capture_cleanup_panic(&mut first_panic, || {
                 panic!("alarm queue closed twice");
             }),
         }
@@ -1169,32 +916,27 @@ impl Worker {
         // Abort every task spawned under this worker's root so registrations
         // racing teardown observe the abort. Each callback and resource drop
         // is isolated so later cleanup still runs.
-        cleanup.capture(|| tree.abort());
+        capture_cleanup_panic(&mut first_panic, || tree.abort());
         for waker in alarm_wakers {
-            cleanup.capture(|| waker.wake_by_ref());
-            cleanup.capture(move || drop(waker));
+            capture_cleanup_panic(&mut first_panic, || waker.wake_by_ref());
+            capture_cleanup_panic(&mut first_panic, move || drop(waker));
         }
 
         // Task futures run arbitrary user drop code. Clearing all of them is
         // what orphans their driver observers before the ring drain.
-        cleanup.capture(|| executor.tasks.clear());
+        capture_cleanup_panic(&mut first_panic, || executor.tasks.clear());
 
         // Drop the root and every worker-owned handle before the executor.
         // Task and root destructors may still upgrade their executor weak
         // references during their isolated cleanup callbacks.
-        cleanup.capture(move || drop(root));
-        cleanup.capture(move || drop(storage));
-        cleanup.capture(move || drop(network));
-        cleanup.capture(move || drop(scratch));
-        cleanup.capture(move || drop(root_waker));
-        cleanup.capture(move || drop(tree));
+        capture_cleanup_panic(&mut first_panic, move || drop(root));
+        capture_cleanup_panic(&mut first_panic, move || drop(storage));
+        capture_cleanup_panic(&mut first_panic, move || drop(network));
+        capture_cleanup_panic(&mut first_panic, move || drop(scratch));
+        capture_cleanup_panic(&mut first_panic, move || drop(root_waker));
+        capture_cleanup_panic(&mut first_panic, move || drop(tree));
 
-        // Record the escaped-context diagnostic before releasing the last
-        // executor strong reference. It is reported only when no earlier
-        // worker or cleanup panic exists.
-        let escaped_executor = !executor.shared.spawned_workers.load(Ordering::Relaxed)
-            && Arc::weak_count(&executor) != 0;
-        cleanup.capture(move || drop(executor));
+        capture_cleanup_panic(&mut first_panic, move || drop(executor));
 
         // Close the driver so late admissions fail with their kind-specific
         // error, then drain in-flight ring work so kernel-owned buffers and
@@ -1208,30 +950,15 @@ impl Worker {
         // drain, so it is retained and resumed only after the ring is
         // quiesced. A panic inside the drain itself aborts the process
         // before unwinding can free ring state (see [Driver::drain]).
-        cleanup.capture(|| driver.close());
+        capture_cleanup_panic(&mut first_panic, || driver.close());
         driver.drain();
 
-        // Assert no context escaped the runtime. The check is meaningful only
-        // for runtimes that never spawned another worker: once one exists,
-        // the count legitimately races (another worker's tasks may hold this
-        // worker's contexts or sleep futures and drop them only when their
-        // own teardown observes the abort cascade, possibly after the join
-        // loop has already drained the registry), so a monotone flag gates
-        // the check rather than any point-in-time registry state. It runs
-        // only when no caught payload is pending: an escape observed then is
-        // usually a consequence of the pending panic (the root died before
-        // releasing or joining whatever holds the reference), and this
-        // diagnostic must not replace the payload that explains it.
-        if !cleanup.has_panic() && escaped_executor {
-            cleanup.capture(|| panic!("executor still has weak references"));
-        }
-
-        if cleanup.has_panic() {
+        if first_panic.is_some() {
             // A completed root may return a value with adversarial drop glue.
             // Dispose of it before resuming the retained payload so a second
             // panic cannot abort the process during unwind.
-            cleanup.capture(move || drop(output));
-            resume_unwind(cleanup.into_panic().expect("cleanup panic disappeared"));
+            capture_cleanup_panic(&mut first_panic, move || drop(output));
+            resume_unwind(first_panic.expect("cleanup panic disappeared"));
         }
         output.expect("root output missing without a panic")
     }
@@ -1310,12 +1037,9 @@ impl crate::Runner for Runner {
             storage_buffer_pool,
             storage_lock: Arc::new(Mutex::new(())),
             workers: Mutex::new(Some(Vec::new())),
-            spawned_workers: AtomicBool::new(false),
-            next_panic_sequence: AtomicU64::new(1),
             worker_panic: Mutex::new(None),
         });
-        let root_panic_sequence = Arc::new(AtomicU64::new(0));
-        let worker = Worker::new(Arc::clone(&shared), Arc::clone(&root_panic_sequence));
+        let worker = Worker::new(Arc::clone(&shared));
 
         // Collect process metrics.
         //
@@ -1359,9 +1083,16 @@ impl crate::Runner for Runner {
             worker.run(root, Arc::clone(&root_tree))
         }));
 
-        // Take any opportunistically reaped panic before joining. Every
-        // payload is stamped at its worker source, so a later reap cannot
-        // change causal precedence relative to the root.
+        // Snapshot reap-stashed panics before triggering any further
+        // teardown: a payload present at this point was captured while the
+        // root still ran, so it predates (and usually causes) any root
+        // panic. Taking it after the joins below would let a worker panicked
+        // BY that cascade (and reaped by a racing foreign-thread spawn)
+        // outrank the root panic it resulted from. A cascade panic from
+        // `run`'s own internal abort can still slip in through the same
+        // foreign-reap race. Distinguishing it would require stamping
+        // stashes with a teardown epoch, which the diagnostic payoff does
+        // not justify.
         let stashed = shared.worker_panic.lock().take();
 
         // Join dedicated worker threads: the tree abort cascaded to their
@@ -1382,42 +1113,38 @@ impl crate::Runner for Runner {
                 take(list)
             };
             for worker in batch {
-                let WorkerThread {
-                    join,
-                    panic_sequence,
-                } = worker;
-                if let Err(payload) = join.join() {
-                    let sequence = shared.stamp_panic(&panic_sequence);
-                    retain_earliest_panic(&mut worker_panic, StampedPanic { sequence, payload });
+                if let Err(payload) = worker.join() {
+                    retain_first_panic(&mut worker_panic, payload);
                 }
             }
         }
 
-        // Panic precedence follows source order, independent of whether a
-        // worker was opportunistically reaped or collected by the final join.
+        // Panic precedence: earliest cause first. A worker panic stashed
+        // while the root still ran predates the root's own panic (and is
+        // usually its cause: a dead worker fails the tasks that depended on
+        // it), so it wins. The root panic beats join-loop and teardown-era
+        // payloads, which are its downstream cascade.
         let mut first_panic = None;
-        if let Some(panic) = stashed {
-            retain_earliest_panic(&mut first_panic, panic);
+        if let Some(payload) = stashed {
+            retain_first_panic(&mut first_panic, payload);
         }
         let output = match output {
             Ok(output) => Some(output),
             Err(payload) => {
-                let sequence = shared.stamp_panic(&root_panic_sequence);
-                retain_earliest_panic(&mut first_panic, StampedPanic { sequence, payload });
+                retain_first_panic(&mut first_panic, payload);
                 None
             }
         };
-        if let Some(panic) = shared.worker_panic.lock().take() {
-            retain_earliest_panic(&mut first_panic, panic);
+        if let Some(payload) = shared.worker_panic.lock().take() {
+            retain_first_panic(&mut first_panic, payload);
         }
-        if let Some(panic) = worker_panic {
-            retain_earliest_panic(&mut first_panic, panic);
+        if let Some(payload) = worker_panic {
+            retain_first_panic(&mut first_panic, payload);
         }
         gauge.dec();
-        if let Some(first_panic) = first_panic {
-            let mut payload = Some(first_panic.payload);
-            capture_cleanup_panic(&mut payload, move || drop(output));
-            resume_unwind(payload.expect("runner panic disappeared"));
+        if first_panic.is_some() {
+            capture_cleanup_panic(&mut first_panic, move || drop(output));
+            resume_unwind(first_panic.expect("runner panic disappeared"));
         }
 
         output.expect("root output missing without a panic")
@@ -1498,56 +1225,46 @@ impl Context {
 
         // Run the worker until the task completes or teardown aborts it.
         let thread_shared = Arc::clone(&shared);
-        let worker_panic_sequence = Arc::new(AtomicU64::new(0));
-        let thread_panic_sequence = Arc::clone(&worker_panic_sequence);
         let body = move || {
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                let worker = Worker::new(
-                    Arc::clone(&thread_shared),
-                    Arc::clone(&thread_panic_sequence),
-                );
-                let context = worker.context(name, attributes, Arc::clone(&tree));
+            let worker = Worker::new(Arc::clone(&thread_shared));
+            let context = worker.context(name, attributes, Arc::clone(&tree));
 
-                // Wrap the future with panic catching, abort support, and
-                // cleanup, mirroring the wrapper [Handle::init] builds for
-                // executor tasks. `f` itself runs inside the catch: a panic in
-                // the closure is task failure (as on the inline path, where `f`
-                // runs in the caller's task), not worker failure.
-                let panicker = thread_shared.panicker.clone();
-                let panic_shared = Arc::clone(&thread_shared);
-                let wrapped = async move {
-                    let result = match catch_unwind(AssertUnwindSafe(|| f(context))) {
-                        Ok(future) => {
-                            Abortable::new(
-                                AssertUnwindSafe(future).catch_unwind(),
-                                abort_registration,
-                            )
+            // Wrap the future with panic catching, abort support, and
+            // cleanup, mirroring the wrapper [Handle::init] builds for
+            // executor tasks. `f` itself runs inside the catch: a panic in
+            // the closure is task failure (as on the inline path, where `f`
+            // runs in the caller's task), not worker failure.
+            let panicker = thread_shared.panicker.clone();
+            let panic_shared = Arc::clone(&thread_shared);
+            let wrapped = async move {
+                let result = match catch_unwind(AssertUnwindSafe(|| f(context))) {
+                    Ok(future) => {
+                        Abortable::new(AssertUnwindSafe(future).catch_unwind(), abort_registration)
                             .await
-                        }
-                        Err(panic) => Ok(Err(panic)),
-                    };
-                    match result {
-                        Ok(Ok(value)) => publisher.publish(Ok(value)),
-                        Ok(Err(panic)) => {
-                            // Stamp at this catch boundary before delivery.
-                            // If the root receiver is gone, the same helper
-                            // retains the payload for final join synthesis.
-                            route_task_panic(&panic_shared, &panicker, panic);
-                            publisher.publish(Err(Error::Exited));
-                        }
-                        // Dropping the publisher (at the end of this block)
-                        // aborts the node and resolves the handle with
-                        // [Error::Closed].
-                        Err(Aborted) => {}
                     }
-                    metric.finish();
+                    Err(panic) => Ok(Err(panic)),
                 };
-                worker.run(wrapped, tree);
-            }));
-            if let Err(payload) = result {
-                thread_shared.stamp_panic(&thread_panic_sequence);
-                resume_unwind(payload);
-            }
+                match result {
+                    Ok(Ok(value)) => publisher.publish(Ok(value)),
+                    Ok(Err(panic)) => {
+                        // Deliver to the root's interrupt. If the root
+                        // already finished (its receiver is gone), stash the
+                        // payload: a poll panic racing root completion must
+                        // still fail `start` through the join path's final
+                        // take, not vanish because this worker exits cleanly.
+                        if let Some(panic) = panicker.notify(panic) {
+                            panic_shared.retain_worker_panic(panic);
+                        }
+                        publisher.publish(Err(Error::Exited));
+                    }
+                    // Dropping the publisher (at the end of this block)
+                    // aborts the node and resolves the handle with
+                    // [Error::Closed].
+                    Err(Aborted) => {}
+                }
+                metric.finish();
+            };
+            worker.run(wrapped, tree);
         };
 
         // Reap finished workers so retention is bounded by spawn activity
@@ -1562,15 +1279,7 @@ impl Context {
         // with [Error::Closed].
         let mut workers = shared.workers.lock();
         if let Some(list) = workers.as_mut() {
-            // Mark the runtime multi-worker before the thread exists so the
-            // new worker (and any worker it makes reachable) can never reach
-            // its own teardown check ahead of the flag.
-            shared.spawned_workers.store(true, Ordering::Relaxed);
-            let join = utils::thread::spawn(shared.cfg.thread_stack_size, body);
-            list.push(WorkerThread {
-                join,
-                panic_sequence: worker_panic_sequence,
-            });
+            list.push(utils::thread::spawn(shared.cfg.thread_stack_size, body));
         }
         drop(workers);
 
@@ -1664,13 +1373,13 @@ impl crate::Spawner for Context {
         // Wrap the future with panic catching, abort support, and cleanup.
         let future = f(self);
         let panic_shared = Arc::clone(&executor.shared);
-        let panicker = executor.shared.panicker.clone();
-        let (task, handle) = Handle::init_with_panic_handler(
+        let (task, handle) = Handle::init_with_fallback(
             future,
             metric.clone(),
+            executor.shared.panicker.clone(),
             Arc::clone(&parent),
             move |panic| {
-                route_task_panic(&panic_shared, &panicker, panic);
+                panic_shared.retain_worker_panic(panic);
             },
         );
 
@@ -2036,30 +1745,30 @@ mod tests {
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
         sync::{
-            atomic::{AtomicBool, AtomicUsize},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc::{Receiver, SyncSender},
         },
         task::{RawWaker, RawWakerVTable},
     };
 
-    /// A panic payload whose destructor detects unsafe retention fallback.
-    struct AdversarialPayload {
-        drops: Arc<AtomicUsize>,
-    }
+    #[test]
+    fn test_secondary_panic_payload_cannot_interrupt_teardown() {
+        struct PanicOnDrop;
 
-    impl AdversarialPayload {
-        fn new(drops: &Arc<AtomicUsize>) -> Self {
-            Self {
-                drops: Arc::clone(drops),
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("secondary panic payload dropped");
             }
         }
-    }
 
-    impl Drop for AdversarialPayload {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::AcqRel);
-            panic!("adversarial panic payload dropped");
-        }
+        let mut first = Some(Box::new("first panic") as PanicPayload);
+        retain_first_panic(&mut first, Box::new(PanicOnDrop));
+        assert_eq!(
+            first
+                .as_ref()
+                .and_then(|payload| payload.downcast_ref::<&str>()),
+            Some(&"first panic")
+        );
     }
 
     #[derive(Default)]
@@ -2160,125 +1869,6 @@ mod tests {
             unsafe { Waker::from_raw(raw) }
         };
         (waker, state, counts)
-    }
-
-    /// Raw-waker state whose drop callback panics on every owned reference.
-    struct DropPanicWaker {
-        /// Number of consuming wake or drop callbacks invoked.
-        drops: Arc<AtomicUsize>,
-    }
-
-    /// Clone one strong reference held by a panicking-drop raw waker.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be one strong reference created from `Arc<DropPanicWaker>`.
-    unsafe fn clone_drop_panic_waker(data: *const ()) -> RawWaker {
-        // SAFETY: each raw waker stores an Arc strong reference to
-        // DropPanicWaker, and cloning creates one additional reference.
-        unsafe { Arc::increment_strong_count(data.cast::<DropPanicWaker>()) };
-        RawWaker::new(data, &DROP_PANIC_WAKER_VTABLE)
-    }
-
-    /// Consume one strong reference through the non-panicking wake callback.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be one strong reference created from `Arc<DropPanicWaker>`.
-    unsafe fn wake_drop_panic_waker(data: *const ()) {
-        // SAFETY: wake consumes the raw waker's one strong reference.
-        let state = unsafe { Arc::from_raw(data.cast::<DropPanicWaker>()) };
-        state.drops.fetch_add(1, Ordering::AcqRel);
-        drop(state);
-    }
-
-    /// Observe a borrowed wake without consuming the raw waker.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be a live strong reference created from
-    /// `Arc<DropPanicWaker>`.
-    unsafe fn wake_drop_panic_waker_by_ref(_: *const ()) {}
-
-    /// Consume one strong reference and panic from the raw-waker drop callback.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be one strong reference created from `Arc<DropPanicWaker>`.
-    unsafe fn drop_drop_panic_waker(data: *const ()) {
-        // SAFETY: drop consumes the raw waker's one strong reference.
-        let state = unsafe { Arc::from_raw(data.cast::<DropPanicWaker>()) };
-        state.drops.fetch_add(1, Ordering::AcqRel);
-        drop(state);
-        panic!("RawWaker drop panic");
-    }
-
-    /// Vtable for raw wakers whose owned drop callback panics.
-    static DROP_PANIC_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        clone_drop_panic_waker,
-        wake_drop_panic_waker,
-        wake_drop_panic_waker_by_ref,
-        drop_drop_panic_waker,
-    );
-
-    /// Build a waker whose every owned drop callback panics.
-    fn drop_panic_waker() -> (Waker, Arc<AtomicUsize>) {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let state = Arc::new(DropPanicWaker {
-            drops: Arc::clone(&drops),
-        });
-        let raw = RawWaker::new(Arc::into_raw(state).cast(), &DROP_PANIC_WAKER_VTABLE);
-        let waker = {
-            // SAFETY: raw owns one Arc strong reference and its vtable
-            // preserves that ownership contract across clone, wake, and drop.
-            unsafe { Waker::from_raw(raw) }
-        };
-        (waker, drops)
-    }
-
-    enum WakePanic {
-        Static(&'static str),
-        Adversarial(Arc<AtomicUsize>),
-    }
-
-    /// Waker state that can panic independently from wake and drop callbacks.
-    struct BatchWaker {
-        wakes: Arc<AtomicUsize>,
-        drops: Arc<AtomicUsize>,
-        wake_panic: Option<WakePanic>,
-        drop_panic: Option<Arc<AtomicUsize>>,
-    }
-
-    impl BatchWaker {
-        fn on_wake(&self) {
-            self.wakes.fetch_add(1, Ordering::AcqRel);
-            match &self.wake_panic {
-                Some(WakePanic::Static(message)) => panic!("{message}"),
-                Some(WakePanic::Adversarial(drops)) => {
-                    std::panic::panic_any(AdversarialPayload::new(drops));
-                }
-                None => {}
-            }
-        }
-    }
-
-    impl std::task::Wake for BatchWaker {
-        fn wake(self: Arc<Self>) {
-            self.on_wake();
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.on_wake();
-        }
-    }
-
-    impl Drop for BatchWaker {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::AcqRel);
-            if let Some(drops) = &self.drop_panic {
-                std::panic::panic_any(AdversarialPayload::new(drops));
-            }
-        }
     }
 
     /// Property: network timeouts at exactly the 30-year policy bound pass
@@ -3171,24 +2761,14 @@ mod tests {
     fn test_close_waker_panic_still_drains_ring() {
         struct PanicWake;
 
-        struct FlagWake(AtomicBool);
-
         impl std::task::Wake for PanicWake {
             fn wake(self: Arc<Self>) {
                 panic!("capacity wake panic");
             }
         }
 
-        impl std::task::Wake for FlagWake {
-            fn wake(self: Arc<Self>) {
-                self.0.store(true, Ordering::Release);
-            }
-        }
-
         let listener = Arc::new(Mutex::new(None));
         let escaped = Arc::clone(&listener);
-        let close_progress = Arc::new(FlagWake(AtomicBool::new(false)));
-        let observed_close_progress = Arc::clone(&close_progress);
         let (addr_send, addr_recv) = std::sync::mpsc::channel();
         let connector = std::thread::spawn(move || {
             let addr = addr_recv.recv().unwrap();
@@ -3214,22 +2794,7 @@ mod tests {
                 drop(accept);
                 *escaped.lock() = Some(first);
 
-                // Register the non-panicking waiter first. The arena's close
-                // traversal encounters the later panicking waiter before it,
-                // proving one callback panic cannot skip remaining wakes.
-                let mut blocked = context
-                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                    .await
-                    .unwrap();
-                let waker = Waker::from(Arc::clone(&observed_close_progress));
-                let mut cx = std_task::Context::from_waker(&waker);
-                let mut accept = Box::pin(blocked.accept());
-                assert!(accept.as_mut().poll(&mut cx).is_pending());
-                std::mem::forget(accept);
-                std::mem::forget(blocked);
-
-                // Park a later capacity admission whose wake panics. Both
-                // registrations must remain live until driver close.
+                // Park a capacity admission whose close wake panics.
                 let mut blocked = context
                     .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                     .await
@@ -3245,10 +2810,6 @@ mod tests {
             })
         }));
         assert!(result.is_err(), "capacity waker should panic");
-        assert!(
-            close_progress.0.load(Ordering::Acquire),
-            "capacity waker panic skipped a later close callback"
-        );
         let _connection = connector.join().unwrap();
 
         // The root returned before the first accept was submitted. Only the
@@ -3358,7 +2919,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .iter()
-                    .all(WorkerThread::is_finished);
+                    .all(std::thread::JoinHandle::is_finished);
                 if all_finished {
                     break;
                 }
@@ -3381,52 +2942,6 @@ mod tests {
             );
             assert_eq!(reaper.await.unwrap(), 42);
         });
-    }
-
-    /// A pending root panic must propagate even when a context legitimately
-    /// escaped to a helper thread: the escaped-context diagnostic must not
-    /// replace the payload that explains why the cleanup never happened.
-    #[test]
-    fn test_root_panic_outranks_escape_diagnostic() {
-        let (send, recv) = std::sync::mpsc::channel();
-        let (release_send, release_recv) = std::sync::mpsc::channel::<()>();
-        let holder = std::thread::spawn(move || {
-            let context: Context = recv.recv().unwrap();
-            release_recv.recv().unwrap();
-            drop(context);
-        });
-
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::default().start(|context| async move {
-                send.send(context.child("escapee")).unwrap();
-                panic!("root cause");
-            })
-        }));
-        let payload = result.expect_err("root panic should propagate");
-        let message = payload.downcast_ref::<&str>().copied();
-        assert_eq!(message, Some("root cause"));
-
-        release_send.send(()).unwrap();
-        holder.join().unwrap();
-    }
-
-    #[test]
-    fn test_successful_root_rejects_escaped_context() {
-        let escaped = Arc::new(Mutex::new(None));
-        let capture = Arc::clone(&escaped);
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::default().start(move |context| async move {
-                *capture.lock() = Some(context.child("escapee"));
-            })
-        }));
-        drop(escaped.lock().take());
-
-        let payload = result.expect_err("escaped context should fail start");
-        let message = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-        assert_eq!(message, Some("executor still has weak references"));
     }
 
     #[test]
@@ -3711,10 +3226,11 @@ mod tests {
         assert_eq!(payload.downcast_ref::<u64>(), Some(&PAYLOAD));
     }
 
-    /// A worker that failed before a later root panic must retain precedence
-    /// even when its payload is collected only by the final join.
+    /// A worker panic already observed by an opportunistic reap happened
+    /// before a later root panic and must remain the payload propagated by
+    /// `start` (earliest cause wins over its cascade).
     #[test]
-    fn test_finished_worker_panic_precedes_root_panic_without_reap() {
+    fn test_reaped_worker_panic_precedes_root_panic() {
         struct PanicOnDrop;
 
         impl Future for PanicOnDrop {
@@ -3740,8 +3256,9 @@ mod tests {
                     .spawn(|_| PanicOnDrop);
                 assert!(matches!(handle.await, Err(Error::Closed)));
 
-                // Wait until the worker has exited, but deliberately leave
-                // its JoinHandle in the registry until final teardown.
+                // Wait until the worker has exited, then exercise the
+                // opportunistic reaper so its payload is stashed before the
+                // root panics.
                 loop {
                     let finished = executor
                         .shared
@@ -3750,12 +3267,14 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .iter()
-                        .any(WorkerThread::is_finished);
+                        .any(std::thread::JoinHandle::is_finished);
                     if finished {
                         break;
                     }
                     context.sleep(Duration::from_millis(10)).await;
                 }
+                executor.shared.reap_workers();
+                assert!(executor.shared.worker_panic.lock().is_some());
 
                 panic!("root panic");
             })
@@ -3878,338 +3397,6 @@ mod tests {
         );
     }
 
-    /// Multiple worker failures must preserve the first payload, avoid later
-    /// payload destructors, join the complete worker batch, and isolate drop
-    /// glue on an already-produced root output before resuming the panic.
-    #[test]
-    fn test_worker_panic_batch_preserves_precedence_and_cleanup() {
-        enum Failure {
-            First,
-            Adversarial(Arc<AtomicUsize>),
-        }
-
-        struct WorkerPanic {
-            started: Option<SyncSender<()>>,
-            release: Receiver<()>,
-            dropping: Option<SyncSender<()>>,
-            failure: Option<Failure>,
-        }
-
-        impl Future for WorkerPanic {
-            type Output = ();
-
-            fn poll(mut self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
-                if let Some(started) = self.started.take() {
-                    started.send(()).unwrap();
-                }
-                self.release.recv().unwrap();
-                Poll::Ready(())
-            }
-        }
-
-        impl Drop for WorkerPanic {
-            fn drop(&mut self) {
-                if let Some(dropping) = self.dropping.take() {
-                    let _ = dropping.send(());
-                }
-                match self.failure.take().expect("worker failure missing") {
-                    Failure::First => panic!("first worker panic"),
-                    Failure::Adversarial(drops) => {
-                        std::panic::panic_any(AdversarialPayload::new(&drops));
-                    }
-                }
-            }
-        }
-
-        struct SlowWorker {
-            started: Option<SyncSender<()>>,
-            dropped: Arc<AtomicBool>,
-        }
-
-        impl Future for SlowWorker {
-            type Output = ();
-
-            fn poll(mut self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
-                if let Some(started) = self.started.take() {
-                    started.send(()).unwrap();
-                }
-                Poll::Pending
-            }
-        }
-
-        impl Drop for SlowWorker {
-            fn drop(&mut self) {
-                std::thread::sleep(Duration::from_millis(300));
-                self.dropped.store(true, Ordering::Release);
-            }
-        }
-
-        #[derive(Debug)]
-        struct RootOutput {
-            drops: Arc<AtomicUsize>,
-            payload_drops: Arc<AtomicUsize>,
-        }
-
-        impl Drop for RootOutput {
-            fn drop(&mut self) {
-                self.drops.fetch_add(1, Ordering::AcqRel);
-                std::panic::panic_any(AdversarialPayload::new(&self.payload_drops));
-            }
-        }
-
-        let later_payload_drops = Arc::new(AtomicUsize::new(0));
-        let slow_worker_dropped = Arc::new(AtomicBool::new(false));
-        let root_output_drops = Arc::new(AtomicUsize::new(0));
-        let root_payload_drops = Arc::new(AtomicUsize::new(0));
-
-        let observed_later_payload_drops = Arc::clone(&later_payload_drops);
-        let observed_slow_worker_drop = Arc::clone(&slow_worker_dropped);
-        let observed_root_output_drops = Arc::clone(&root_output_drops);
-        let observed_root_payload_drops = Arc::clone(&root_payload_drops);
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::default().start(move |context| async move {
-                let shared = Arc::clone(&context.executor().shared);
-                let (first_started_send, first_started_recv) = std::sync::mpsc::sync_channel(0);
-                let (first_release_send, first_release_recv) = std::sync::mpsc::sync_channel(0);
-                let (first_dropping_send, first_dropping_recv) = std::sync::mpsc::sync_channel(0);
-                let _first = context
-                    .child("first")
-                    .dedicated()
-                    .spawn(move |_| WorkerPanic {
-                        started: Some(first_started_send),
-                        release: first_release_recv,
-                        dropping: Some(first_dropping_send),
-                        failure: Some(Failure::First),
-                    });
-                first_started_recv.recv().unwrap();
-
-                let (later_started_send, later_started_recv) = std::sync::mpsc::sync_channel(0);
-                let (later_release_send, later_release_recv) = std::sync::mpsc::sync_channel(0);
-                let (later_dropping_send, later_dropping_recv) = std::sync::mpsc::sync_channel(0);
-                let _later = context
-                    .child("later")
-                    .dedicated()
-                    .spawn(move |_| WorkerPanic {
-                        started: Some(later_started_send),
-                        release: later_release_recv,
-                        dropping: Some(later_dropping_send),
-                        failure: Some(Failure::Adversarial(observed_later_payload_drops)),
-                    });
-                later_started_recv.recv().unwrap();
-
-                let (slow_started_send, slow_started_recv) = std::sync::mpsc::sync_channel(0);
-                let _slow = context
-                    .child("slow")
-                    .dedicated()
-                    .spawn(move |_| SlowWorker {
-                        started: Some(slow_started_send),
-                        dropped: observed_slow_worker_drop,
-                    });
-                slow_started_recv.recv().unwrap();
-
-                first_release_send.send(()).unwrap();
-                first_dropping_recv.recv().unwrap();
-                let wait_started = Instant::now();
-                while shared.next_panic_sequence.load(Ordering::Acquire) < 2 {
-                    assert!(wait_started.elapsed() < Duration::from_secs(5));
-                    std::thread::yield_now();
-                }
-
-                later_release_send.send(()).unwrap();
-                later_dropping_recv.recv().unwrap();
-
-                RootOutput {
-                    drops: observed_root_output_drops,
-                    payload_drops: observed_root_payload_drops,
-                }
-            })
-        }));
-
-        let payload = result.expect_err("worker panic should fail start");
-        let message = payload.downcast_ref::<&str>().copied();
-        if message != Some("first worker panic") {
-            // An adversarial payload panics when dropped. Forget it before
-            // reporting a precedence regression so this test fails normally
-            // instead of aborting during assertion unwinding.
-            std::mem::forget(payload);
-            panic!("unexpected worker panic payload");
-        }
-        drop(payload);
-        assert_eq!(later_payload_drops.load(Ordering::Acquire), 0);
-        assert!(slow_worker_dropped.load(Ordering::Acquire));
-        assert_eq!(root_output_drops.load(Ordering::Acquire), 1);
-        assert_eq!(root_payload_drops.load(Ordering::Acquire), 0);
-    }
-
-    /// A task panic must retain the sequence assigned at its own catch
-    /// boundary while it waits for the root interrupt to be polled.
-    #[test]
-    fn test_delivered_task_panic_precedes_later_worker_panic() {
-        /// Future whose destructor raises a worker-infrastructure panic after
-        /// its final poll returns.
-        struct WorkerFailure {
-            /// Signals when the worker is ready to be released.
-            started: Option<SyncSender<()>>,
-            /// Blocks the worker until the task panic has been delivered.
-            release: Receiver<()>,
-        }
-
-        impl Future for WorkerFailure {
-            type Output = ();
-
-            fn poll(mut self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
-                if let Some(started) = self.started.take() {
-                    started.send(()).unwrap();
-                }
-                self.release.recv().unwrap();
-                Poll::Ready(())
-            }
-        }
-
-        impl Drop for WorkerFailure {
-            fn drop(&mut self) {
-                panic!("later worker panic");
-            }
-        }
-
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::default().start(|context| async move {
-                let shared = Arc::clone(&context.executor().shared);
-
-                let (task_started_send, task_started_recv) = std::sync::mpsc::sync_channel(0);
-                let (task_release_send, task_release_recv) = std::sync::mpsc::sync_channel(0);
-                let _task = context
-                    .child("task")
-                    .dedicated()
-                    .spawn(move |_| async move {
-                        task_started_send.send(()).unwrap();
-                        task_release_recv.recv().unwrap();
-                        panic!("first task panic");
-                    });
-                task_started_recv.recv().unwrap();
-
-                let (worker_started_send, worker_started_recv) = std::sync::mpsc::sync_channel(0);
-                let (worker_release_send, worker_release_recv) = std::sync::mpsc::sync_channel(0);
-                let _worker = context
-                    .child("worker")
-                    .dedicated()
-                    .spawn(move |_| WorkerFailure {
-                        started: Some(worker_started_send),
-                        release: worker_release_recv,
-                    });
-                worker_started_recv.recv().unwrap();
-
-                // Keep the root inside this poll while the first task catches
-                // and delivers its panic to the interrupt channel.
-                task_release_send.send(()).unwrap();
-                let wait_started = Instant::now();
-                while shared.next_panic_sequence.load(Ordering::Acquire) < 2 {
-                    assert!(wait_started.elapsed() < Duration::from_secs(5));
-                    std::thread::yield_now();
-                }
-
-                // The later worker must stamp only after the task panic is
-                // already waiting for the still-blocked root interrupt.
-                worker_release_send.send(()).unwrap();
-                let wait_started = Instant::now();
-                while shared.next_panic_sequence.load(Ordering::Acquire) < 3 {
-                    assert!(wait_started.elapsed() < Duration::from_secs(5));
-                    std::thread::yield_now();
-                }
-            })
-        }));
-
-        let payload = result.expect_err("task panic should fail start");
-        assert_eq!(
-            payload.downcast_ref::<&str>().copied(),
-            Some("first task panic")
-        );
-    }
-
-    /// A dedicated task may hold another worker's context across that
-    /// worker's teardown: the escape check must tolerate the cross-worker
-    /// race instead of panicking.
-    #[test]
-    fn test_cross_worker_context_teardown() {
-        /// Holds a root-worker context and releases it only after a delay,
-        /// keeping the root executor's weak count non-zero while the root
-        /// worker tears down.
-        struct SlowRelease(Option<Context>);
-        impl Drop for SlowRelease {
-            fn drop(&mut self) {
-                std::thread::sleep(Duration::from_millis(200));
-                self.0.take();
-            }
-        }
-
-        Runner::default().start(|context| async move {
-            let held = SlowRelease(Some(context.child("held")));
-            let _dedicated =
-                context
-                    .child("dedicated")
-                    .dedicated()
-                    .spawn(move |context| async move {
-                        let _held = held;
-                        loop {
-                            context.sleep(Duration::from_secs(1)).await;
-                        }
-                    });
-            // Return while the dedicated task still holds a root context.
-            context.sleep(Duration::from_millis(20)).await;
-        });
-    }
-
-    /// A dedicated worker may reach its teardown check while the root is
-    /// already joining the worker batch (registry drained) and a sibling
-    /// worker still holds one of its contexts: the escape check must key on
-    /// whether this runtime ever spawned a worker, not on point-in-time
-    /// registry state.
-    #[test]
-    fn test_dedicated_teardown_during_join_with_held_context() {
-        /// Sleeps before releasing its contents, delaying a future's drop (and
-        /// so its worker's teardown) by a controlled margin.
-        struct SlowRelease(Option<Context>, Duration);
-        impl Drop for SlowRelease {
-            fn drop(&mut self) {
-                std::thread::sleep(self.1);
-                self.0.take();
-            }
-        }
-
-        Runner::default().start(|context| async move {
-            let (send, recv) = oneshot::channel();
-            let _origin = context
-                .child("origin")
-                .dedicated()
-                .spawn(move |context| async move {
-                    // Hand a context of this worker to the sibling, then delay
-                    // this worker's own teardown well past the root's
-                    // join-batch take via a slow-dropping guard.
-                    let _ = send.send(context.child("shared"));
-                    let _slow = SlowRelease(None, Duration::from_millis(300));
-                    loop {
-                        context.sleep(Duration::from_secs(1)).await;
-                    }
-                });
-            // The guard is a closure capture (not constructed in the async
-            // body) so its slow drop runs on the holder worker even when the
-            // abort cascade wins the race to the task's first poll.
-            let held = SlowRelease(Some(recv.await.unwrap()), Duration::from_millis(600));
-            let _holder = context
-                .child("holder")
-                .dedicated()
-                .spawn(move |context| async move {
-                    // Hold the origin worker's context past its teardown.
-                    let _held = held;
-                    loop {
-                        context.sleep(Duration::from_secs(1)).await;
-                    }
-                });
-            // Return immediately: both workers tear down through the abort
-            // cascade while the root drains and joins.
-        });
-    }
-
     /// A task awaiting a sleep created from another worker's context must
     /// fail loudly (not hang) when that worker tears down before the
     /// deadline: the teardown wake makes the sleeper re-poll and observe the
@@ -4236,76 +3423,6 @@ mod tests {
         });
     }
 
-    /// Closed registration and refresh must not begin unwinding until every
-    /// locally owned RawWaker with panicking drop glue has been isolated.
-    #[test]
-    fn test_closed_alarm_waker_drop_panics_are_isolated() {
-        const CASE: &str = "_COMMONWARE_RUNTIME_IOURING_CLOSED_ALARM_WAKER_CASE";
-        const TEST: &str =
-            "iouring::runtime::tests::test_closed_alarm_waker_drop_panics_are_isolated";
-
-        if std::env::var_os(CASE).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST, "--nocapture"])
-                .env(CASE, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "closed alarm case aborted\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-            return;
-        }
-
-        // First registration owns the only panicking waker reference after
-        // construction. The closed-queue diagnostic must survive its drop.
-        let registration = catch_unwind(AssertUnwindSafe(|| {
-            Runner::default().start(|context| async move {
-                let executor = context.executor.upgrade().unwrap();
-                let sleeping = executor.sleeping.lock().take().unwrap();
-                drop(sleeping);
-                let (waker, drops) = drop_panic_waker();
-                let alarm = Arc::new(Alarm {
-                    time: Instant::now() + Duration::from_secs(3600),
-                    waker: Mutex::new(Some(waker)),
-                });
-                let result = catch_unwind(AssertUnwindSafe(|| executor.register_alarm(alarm)));
-                assert!(result.is_err());
-                assert_eq!(drops.load(Ordering::Acquire), 1);
-            });
-        }));
-        assert!(registration.is_err());
-
-        // Refresh clones the caller's waker before it observes closure. Both
-        // that clone and the caller-owned reference panic independently.
-        let refresh = catch_unwind(AssertUnwindSafe(|| {
-            Runner::default().start(|context| async move {
-                let executor = context.executor.upgrade().unwrap();
-                let alarm = Arc::new(Alarm {
-                    time: Instant::now() + Duration::from_secs(3600),
-                    waker: Mutex::new(Some(Waker::noop().clone())),
-                });
-                executor.register_alarm(Arc::clone(&alarm));
-                let sleeping = executor.sleeping.lock().take().unwrap();
-                drop(sleeping);
-
-                let (replacement, drops) = drop_panic_waker();
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    executor.refresh_alarm(&alarm, &replacement)
-                }));
-                assert!(result.is_err());
-                assert_eq!(drops.load(Ordering::Acquire), 1);
-
-                let drop_result = catch_unwind(AssertUnwindSafe(|| drop(replacement)));
-                assert!(drop_result.is_err());
-                assert_eq!(drops.load(Ordering::Acquire), 2);
-            });
-        }));
-        assert!(refresh.is_err());
-    }
-
     /// Alarm refresh and cancellation must run RawWaker clone and drop
     /// callbacks only after releasing both sleeper locks.
     #[test]
@@ -4320,7 +3437,8 @@ mod tests {
             *old_state.alarm.lock() = Some(Arc::downgrade(&alarm));
             executor.register_alarm(Arc::clone(&alarm));
 
-            let (replacement, replacement_state, replacement_counts) = reentrant_waker(&executor);
+            let (replacement, replacement_state, replacement_counts) =
+                reentrant_waker(&executor);
             *replacement_state.alarm.lock() = Some(Arc::downgrade(&alarm));
 
             assert!(!executor.refresh_alarm(&alarm, &replacement));
@@ -4338,75 +3456,6 @@ mod tests {
             drop(replacement);
             assert_eq!(replacement_counts.drops.load(Ordering::Acquire), 2);
             assert_eq!(replacement_counts.callbacks.load(Ordering::Acquire), 3);
-        });
-    }
-
-    /// Every detached due waker receives both callback attempts even when
-    /// earlier wake and drop callbacks panic. The first panic wins and later
-    /// adversarial payloads remain undisposed.
-    #[test]
-    fn test_ready_sleepers_isolate_all_waker_panics() {
-        Runner::default().start(|context| async move {
-            let executor = context.executor.upgrade().unwrap();
-            let first_wakes = Arc::new(AtomicUsize::new(0));
-            let first_drops = Arc::new(AtomicUsize::new(0));
-            let first_drop_payload_drops = Arc::new(AtomicUsize::new(0));
-            let second_wakes = Arc::new(AtomicUsize::new(0));
-            let second_drops = Arc::new(AtomicUsize::new(0));
-            let second_wake_payload_drops = Arc::new(AtomicUsize::new(0));
-            let second_drop_payload_drops = Arc::new(AtomicUsize::new(0));
-            let final_wakes = Arc::new(AtomicUsize::new(0));
-            let final_drops = Arc::new(AtomicUsize::new(0));
-
-            let first = Waker::from(Arc::new(BatchWaker {
-                wakes: Arc::clone(&first_wakes),
-                drops: Arc::clone(&first_drops),
-                wake_panic: Some(WakePanic::Static("first wake panic")),
-                drop_panic: Some(Arc::clone(&first_drop_payload_drops)),
-            }));
-            let second = Waker::from(Arc::new(BatchWaker {
-                wakes: Arc::clone(&second_wakes),
-                drops: Arc::clone(&second_drops),
-                wake_panic: Some(WakePanic::Adversarial(Arc::clone(
-                    &second_wake_payload_drops,
-                ))),
-                drop_panic: Some(Arc::clone(&second_drop_payload_drops)),
-            }));
-            let final_waker = Waker::from(Arc::new(BatchWaker {
-                wakes: Arc::clone(&final_wakes),
-                drops: Arc::clone(&final_drops),
-                wake_panic: None,
-                drop_panic: None,
-            }));
-
-            let first_deadline = Instant::now() + Duration::from_secs(3600);
-            for (offset, waker) in [(0, first), (1, second), (2, final_waker)] {
-                executor.register_alarm(Arc::new(Alarm {
-                    time: first_deadline + Duration::from_nanos(offset),
-                    waker: Mutex::new(Some(waker)),
-                }));
-            }
-
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                executor.wake_ready_sleepers(first_deadline + Duration::from_nanos(3));
-            }));
-            let payload = result.expect_err("first wake should panic");
-            let message = payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-            assert_eq!(message, Some("first wake panic"));
-            drop(payload);
-
-            assert_eq!(first_wakes.load(Ordering::Acquire), 1);
-            assert_eq!(first_drops.load(Ordering::Acquire), 1);
-            assert_eq!(second_wakes.load(Ordering::Acquire), 1);
-            assert_eq!(second_drops.load(Ordering::Acquire), 1);
-            assert_eq!(final_wakes.load(Ordering::Acquire), 1);
-            assert_eq!(final_drops.load(Ordering::Acquire), 1);
-            assert_eq!(first_drop_payload_drops.load(Ordering::Acquire), 0);
-            assert_eq!(second_wake_payload_drops.load(Ordering::Acquire), 0);
-            assert_eq!(second_drop_payload_drops.load(Ordering::Acquire), 0);
         });
     }
 
@@ -4567,14 +3616,7 @@ mod tests {
                 .unwrap();
 
             let executor = context.executor.clone();
-
-            // Keep the concrete sleeper alive past executor teardown to
-            // exercise its weak-owner cancellation path.
-            let mut sleeper = Box::pin(Sleeper {
-                executor: executor.clone(),
-                time: Instant::now() + Duration::from_secs(3600),
-                alarm: None,
-            });
+            let mut sleeper = Box::pin(context.sleep(Duration::from_secs(3600)));
             assert!(futures::poll!(sleeper.as_mut()).is_pending());
             (sleeper, executor)
         });
@@ -4806,8 +3848,7 @@ mod tests {
             });
             assert_eq!(rx.await.unwrap(), 42);
 
-            // Join so the thread's context clone drops before teardown
-            // asserts that no context escaped the runtime.
+            // Join so the helper has finished before the runtime returns.
             thread.join().unwrap();
 
             // The wake must arrive promptly after the 50ms sleep, not at

@@ -67,19 +67,6 @@ where
     }
 }
 
-/// Aborts a task's consumed supervision subtree when terminal handling exits.
-///
-/// Panic routing runs before the explicit drop so the initiating failure is
-/// ordered ahead of cleanup failures. The drop guard still closes descendants
-/// if the runtime's panic handler itself unwinds.
-struct TreeAbortGuard(Arc<Tree>);
-
-impl Drop for TreeAbortGuard {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 /// Normalizes receiver-backed and future-backed completions behind one abortable future.
 enum Completion<T>
 where
@@ -121,23 +108,17 @@ where
     where
         F: Future<Output = T> + Send + 'static,
     {
-        Self::init_with_panic_handler(f, metric, tree, move |panic| {
-            let _ = panicker.notify(panic);
-        })
+        Self::init_with_fallback(f, metric, panicker, tree, drop)
     }
 
-    /// Initializes a task handle with runtime-specific panic routing.
-    ///
-    /// `on_panic` runs at the catch boundary, before the task aborts its
-    /// supervision subtree or publishes its terminal result. Runtimes can
-    /// attach source metadata or retain a panic that their root interrupt can
-    /// no longer receive.
+    /// Initializes a task handle with a fallback for an undeliverable panic.
     #[inline(always)]
-    pub(crate) fn init_with_panic_handler<F, C>(
+    pub(crate) fn init_with_fallback<F, C>(
         f: F,
         metric: MetricHandle,
+        panicker: Panicker,
         tree: Arc<Tree>,
-        on_panic: C,
+        fallback: C,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -158,23 +139,25 @@ where
             let result =
                 Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
 
-            let abort_tree = TreeAbortGuard(tree);
-            let result = match result {
-                Ok(Ok(result)) => Some(Ok(result)),
-                Ok(Err(panic)) => {
-                    on_panic(panic);
-                    Some(Err(Error::Exited))
-                }
-                Err(Aborted) => None,
-            };
+            // Mark the task as aborted and abort all descendants before
+            // publishing the result: a handle awaited on another worker can
+            // resume as soon as the send lands, and any spawn it then issues
+            // from a context derived from the consumed one must observe the
+            // closure.
+            tree.abort();
 
-            // Abort all descendants before publishing the result: a handle
-            // awaited on another worker can resume as soon as the send lands,
-            // and any spawn it then issues from a context derived from the
-            // consumed one must observe the closure.
-            drop(abort_tree);
-            if let Some(result) = result {
-                let _ = sender.send(result);
+            // Handle result
+            match result {
+                Ok(Ok(result)) => {
+                    let _ = sender.send(Ok(result));
+                }
+                Ok(Err(panic)) => {
+                    if let Some(panic) = panicker.notify(panic) {
+                        fallback(panic);
+                    }
+                    let _ = sender.send(Err(Error::Exited));
+                }
+                Err(Aborted) => {}
             }
 
             // Finish the metric.
@@ -447,19 +430,12 @@ impl Panicker {
         error!(?err, "task panicked");
 
         // If we are catching panics, the payload is absorbed by policy.
-        // Forget arbitrary drop glue so suppression cannot raise a new panic.
         if self.catch {
-            std::mem::forget(panic);
             return None;
         }
 
         // If we've already sent a panic, later ones rank below it.
-        let Some(sender) = self.sender.lock().take() else {
-            // An earlier payload already owns propagation. Forget later user
-            // drop glue instead of letting it replace that first failure.
-            std::mem::forget(panic);
-            return None;
-        };
+        let sender = self.sender.lock().take()?;
 
         // Send the panic. A dead receiver hands the payload back.
         sender.send(panic).err()
@@ -491,8 +467,14 @@ impl Panicked {
                 // and return the output
                 Err(_) => task.await,
             },
-            Either::Right((output, _)) => {
-                // Return the output
+            Either::Right((output, mut panicked)) => {
+                // Close before the final receive check. A concurrent sender
+                // either published before the close and is observed here, or
+                // receives its payload back for the runtime's fallback path.
+                panicked.close();
+                if let Ok(panic) = panicked.try_recv() {
+                    resume_unwind(panic);
+                }
                 output
             }
         }
@@ -523,21 +505,29 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::{Aborter, Handle, MetricHandle, Mutex, Panicker, Tree};
+    use super::{Handle, Panicker};
     use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
-    use futures::{
-        Future as _, future,
-        stream::{AbortHandle, Abortable},
-        task::{ArcWake, waker_ref},
-    };
+    use futures::future;
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
-        sync::Arc,
-        task::{Context, Poll},
+        task::Poll,
     };
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
+
+    #[test]
+    fn panic_sent_while_root_finishes_is_propagated() {
+        let (panicker, panicked) = Panicker::new(false);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            futures::executor::block_on(panicked.interrupt(std::future::poll_fn(move |_| {
+                assert!(panicker.notify(Box::new("racing panic")).is_none());
+                Poll::Ready(())
+            })))
+        }));
+        let payload = result.expect_err("racing panic should interrupt root completion");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"racing panic"));
+    }
 
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
         let label_fragment = format!("name=\"{label}\"");
@@ -549,112 +539,6 @@ mod tests {
                 None
             }
         })
-    }
-
-    /// Panic suppression must not run arbitrary payload drop glue.
-    #[test]
-    fn panicker_forgets_caught_payload() {
-        struct DropPanic;
-
-        impl Drop for DropPanic {
-            fn drop(&mut self) {
-                panic!("suppressed payload dropped");
-            }
-        }
-
-        let (panicker, _panicked) = Panicker::new(true);
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            assert!(panicker.notify(Box::new(DropPanic)).is_none());
-        }));
-        assert!(result.is_ok());
-    }
-
-    /// A lower-ranked panic must not run arbitrary payload drop glue.
-    #[test]
-    fn panicker_forgets_payload_after_interrupt_claimed() {
-        struct DropPanic;
-
-        impl Drop for DropPanic {
-            fn drop(&mut self) {
-                panic!("lower-ranked payload dropped");
-            }
-        }
-
-        let (panicker, _panicked) = Panicker::new(false);
-        assert!(panicker.notify(Box::new("first panic")).is_none());
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            assert!(panicker.notify(Box::new(DropPanic)).is_none());
-        }));
-        assert!(result.is_ok());
-    }
-
-    /// A task panic must be routed before aborting descendants so cleanup
-    /// panics cannot replace the initiating failure in runtime-wide ordering.
-    #[test]
-    fn panic_handler_runs_before_descendant_abort() {
-        struct Recorder(Arc<Mutex<Vec<&'static str>>>);
-
-        impl ArcWake for Recorder {
-            fn wake_by_ref(arc_self: &Arc<Self>) {
-                arc_self.0.lock().push("abort");
-            }
-        }
-
-        let order = Arc::new(Mutex::new(Vec::new()));
-        let tree = Tree::root();
-        let (child, aborted) = Tree::child(&tree);
-        assert!(!aborted, "child node unexpectedly aborted");
-
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        child.register(Aborter::new(
-            abort_handle,
-            MetricHandle::new(super::Gauge::default()),
-        ));
-
-        // Poll once so aborting the descendant synchronously invokes its
-        // registered waker and records the supervision ordering.
-        let recorder = Arc::new(Recorder(Arc::clone(&order)));
-        let waker = waker_ref(&recorder);
-        let mut context = Context::from_waker(&waker);
-        let mut descendant = Box::pin(Abortable::new(future::pending::<()>(), abort_registration));
-        assert_eq!(descendant.as_mut().poll(&mut context), Poll::Pending);
-
-        let panic_order = Arc::clone(&order);
-        let (task, _handle) = Handle::<()>::init_with_panic_handler(
-            async { panic!("task panic") },
-            MetricHandle::new(super::Gauge::default()),
-            tree,
-            move |_| panic_order.lock().push("panic"),
-        );
-        futures::executor::block_on(task);
-
-        assert_eq!(*order.lock(), ["panic", "abort"]);
-    }
-
-    /// Descendants must still be aborted if runtime panic routing unwinds.
-    #[test]
-    fn panicking_handler_still_aborts_descendants() {
-        let tree = Tree::root();
-        let (child, aborted) = Tree::child(&tree);
-        assert!(!aborted, "child node unexpectedly aborted");
-
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        child.register(Aborter::new(
-            abort_handle,
-            MetricHandle::new(super::Gauge::default()),
-        ));
-        let descendant = Abortable::new(future::pending::<()>(), abort_registration);
-
-        let (task, _handle) = Handle::<()>::init_with_panic_handler(
-            async { panic!("task panic") },
-            MetricHandle::new(super::Gauge::default()),
-            tree,
-            |_| panic!("panic handler failed"),
-        );
-        let result = catch_unwind(AssertUnwindSafe(|| futures::executor::block_on(task)));
-
-        assert!(result.is_err(), "panic handler unexpectedly returned");
-        assert!(descendant.is_aborted(), "descendant was not aborted");
     }
 
     #[test]
