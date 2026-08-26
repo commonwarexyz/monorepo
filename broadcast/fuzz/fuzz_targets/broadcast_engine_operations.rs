@@ -14,7 +14,7 @@ use commonware_cryptography::{
 use commonware_p2p::{Recipients, simulated::Network};
 use commonware_runtime::{Buf, BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
 use commonware_utils::{
-    NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, vec::Bounded,
+    NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, probability, vec::Bounded,
 };
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
@@ -163,7 +163,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let num_peers = u.int_in_range(1..=5)?;
         let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
-        let network_success_rate = Probability!(u.int_in_range(30..=100)?, 100);
+        let network_success_rate = probability!(u.int_in_range(30..=100)?, 100);
         let network_latency_ms = u.int_in_range(1..=100)?;
         let network_jitter_ms = u.int_in_range(0..=50)?;
         let cache_size = u.int_in_range(5..=10)?;

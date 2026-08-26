@@ -1,3 +1,11 @@
+["commonware_codec::mode::tests::conformance::CodecConformance<Modes<1>>"]
+n_cases = 65536
+hash = "39a93e796b1f7608760451ba8c4f9ced2a7d657ceeeab42eeacddef0d0fc9682"
+
+["commonware_codec::mode::tests::conformance::CodecConformance<Modes<2>>"]
+n_cases = 65536
+hash = "1f45aef3f064951930cb46ca33a3bbabb0bd6baf0e0645307a6692fba95a510a"
+
 ["commonware_codec::types::btree_map::tests::conformance::CodecConformance<BTreeMap<u32,u32>>"]
 n_cases = 65536
 hash = "058879e68cef3db01b165d2577e8b10688acf878cb2c8d76b11d6c31311c86fa"
