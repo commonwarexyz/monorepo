@@ -854,7 +854,7 @@ where
     let joined = joined?;
 
     // Routing stops on a closed worker channel so the join above can surface that worker's failure.
-    // Every clean join with cut-short routing therefore dropped routed operations; fail rather than
+    // Every clean join with cut-short routing therefore dropped routed operations. Fail rather than
     // install a snapshot missing them.
     if matches!(routing, RoutingOutcome::CutShort) {
         return Err(Error::DataCorrupted(
