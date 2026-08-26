@@ -54,19 +54,6 @@ pub enum SkipPolicy {
     },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::SkipBudget;
-    use std::num::NonZeroU64;
-
-    #[test]
-    fn skip_budget_resolves() {
-        assert_eq!(SkipBudget::default().resolve(4), 4);
-        assert_eq!(SkipBudget::Participants.resolve(7), 7);
-        assert_eq!(SkipBudget::Fixed(NonZeroU64::new(9).unwrap()).resolve(4), 9);
-    }
-}
-
 /// Controls whether and how the engine proactively forwards blocks when
 /// entering the next view.
 ///
@@ -326,5 +313,18 @@ impl<
         );
         self.floor
             .assert(self.epoch, rng, &self.scheme, &self.strategy);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SkipBudget;
+    use std::num::NonZeroU64;
+
+    #[test]
+    fn skip_budget_resolves() {
+        assert_eq!(SkipBudget::default().resolve(4), 4);
+        assert_eq!(SkipBudget::Participants.resolve(7), 7);
+        assert_eq!(SkipBudget::Fixed(NonZeroU64::new(9).unwrap()).resolve(4), 9);
     }
 }
