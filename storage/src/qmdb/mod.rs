@@ -677,11 +677,11 @@ where
 {
     let count = snapshot.partition_count();
 
-    // Split the concurrency between decode tasks and insert workers. With decode tasks this
-    // task only forwards batches and is mostly idle, so like the init overlap task it does
-    // not count against the concurrency; at a concurrency of two it decodes inline (chunked
-    // decode pays redundant reads a lone decoder cannot hide) and counts. Inserts cost more
-    // CPU than decoding, so an odd count gives the extra thread to the workers.
+    // Split the concurrency between decode tasks and insert workers. With decode tasks this task
+    // only forwards batches and is mostly idle, so like the init overlap task it does not count
+    // against the concurrency. At a concurrency of two it decodes inline (chunked decode pays
+    // redundant reads a lone decoder cannot hide) and counts. Inserts cost more CPU than decoding,
+    // so an odd count gives the extra thread to the workers.
     let concurrency = init_concurrency.get();
     let decoders = if concurrency <= 2 { 0 } else { concurrency / 2 };
     let workers = if decoders == 0 {
