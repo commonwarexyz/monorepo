@@ -497,7 +497,7 @@ cfg_if::cfg_if! {
             Yaml(#[from] serde_yaml::Error),
             #[error("creation already attempted")]
             CreationAttempted,
-            #[error("invalid instance name: {0}")]
+            #[error("invalid instance name (must be non-empty, not `monitoring`, and contain only ASCII letters, digits, `-`, or `_`): {0}")]
             InvalidInstanceName(String),
             #[error("invalid storage class for {target}: {storage_class}")]
             InvalidStorageClass {

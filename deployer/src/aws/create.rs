@@ -59,8 +59,7 @@ pub struct RegionResources {
 /// Validates that instance names are unique, non-empty, not reserved, and contain only ASCII
 /// letters, digits, `-`, or `_`.
 ///
-/// Instance names are written unescaped into file paths, YAML, shell scripts, and AWS tags, so
-/// the character set is restricted rather than escaped per destination.
+/// Instance names are written unescaped into file paths, YAML, shell scripts, and AWS tags.
 fn validate_instance_names(config: &Config) -> Result<(), Error> {
     let mut instance_names = HashSet::new();
     for instance in &config.instances {
