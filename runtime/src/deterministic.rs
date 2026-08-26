@@ -1650,7 +1650,7 @@ mod tests {
     use commonware_parallel::Strategy;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
-    use commonware_utils::{NZUsize, Probability, ScriptedRng, channel::oneshot};
+    use commonware_utils::{NZUsize, ScriptedRng, channel::oneshot, probability};
     #[cfg(feature = "external")]
     use futures::StreamExt;
     #[cfg(not(feature = "external"))]
@@ -1924,7 +1924,7 @@ mod tests {
         let (stale_config, checkpoint) =
             deterministic::Runner::default().start_and_recover(|context| async move {
                 let config = context.storage_fault_config();
-                *config.write() = FaultConfig::default().open(Probability!(1.0));
+                *config.write() = FaultConfig::default().open(probability!(1.0));
                 config
             });
         *stale_config.write() = FaultConfig::default();
@@ -1940,8 +1940,8 @@ mod tests {
         let cfg = deterministic::Config::default()
             .with_rng(Box::new(ScriptedRng::new(retained_resize)))
             .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
-                failure_rate: Probability!(0.5),
-                partial_rate: Probability!(0.0),
+                failure_rate: probability!(0.5),
+                partial_rate: probability!(0.0),
             }));
         let (_, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|context| async move {
@@ -1974,8 +1974,8 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig::default().write(WriteConfig {
-                    failure_rate: Probability!(0.0),
-                    retention_rate: Probability!(0.5),
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(0.5),
                     mode: PartialWriteMode::Subset,
                 }));
             let (_, checkpoint) =
@@ -2355,7 +2355,7 @@ mod tests {
     fn test_storage_fault_injection_and_recovery() {
         // Phase 1: Run with 100% sync failure rate
         let cfg = deterministic::Config::default().with_storage_fault_config(FaultConfig {
-            sync_rate: Some(Probability!(1.0)),
+            sync_rate: Some(probability!(1.0)),
             ..Default::default()
         });
 
@@ -2408,7 +2408,7 @@ mod tests {
 
             // Enable sync faults dynamically
             let storage_fault_cfg = ctx.storage_fault_config();
-            storage_fault_cfg.write().sync_rate = Some(Probability!(1.0));
+            storage_fault_cfg.write().sync_rate = Some(probability!(1.0));
 
             // Now sync should fail
             blob.write_at(0, b"updated".to_vec(), WriteOptions::default())
@@ -2418,7 +2418,7 @@ mod tests {
             assert!(result.is_err(), "sync should fail with faults enabled");
 
             // Disable faults
-            storage_fault_cfg.write().sync_rate = Some(Probability!(0.0));
+            storage_fault_cfg.write().sync_rate = Some(probability!(0.0));
 
             // Sync should succeed again
             blob.sync()
@@ -2434,7 +2434,7 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
-                    open_rate: Some(Probability!(0.5)),
+                    open_rate: Some(probability!(0.5)),
                     ..Default::default()
                 });
 
@@ -2472,13 +2472,13 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
-                    open_rate: Some(Probability!(0.5)),
+                    open_rate: Some(probability!(0.5)),
                     write_rate: Some(WriteConfig {
-                        failure_rate: Probability!(0.3),
-                        retention_rate: Probability!(0.0),
+                        failure_rate: probability!(0.3),
+                        retention_rate: probability!(0.0),
                         mode: PartialWriteMode::Prefix,
                     }),
-                    sync_rate: Some(Probability!(0.2)),
+                    sync_rate: Some(probability!(0.2)),
                     ..Default::default()
                 });
 

@@ -52,6 +52,45 @@ impl From<Mode> for u8 {
     }
 }
 
+/// Creates a [`Mode`] from a `u8` literal or expression.
+///
+/// Literals are validated at compile time. Expressions are validated at runtime.
+///
+/// # Panics
+///
+/// The expression form panics if the reserved high bit is set. Use [`Mode::new`] or
+/// [`Mode::try_from`] to validate untrusted values without panicking.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_codec::{Mode, mode};
+///
+/// const ENABLED: Mode = mode!(1);
+/// assert_eq!(u8::from(ENABLED), 1);
+/// ```
+///
+/// ```compile_fail
+/// use commonware_codec::{Mode, mode};
+///
+/// const INVALID: Mode = mode!(0x80);
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! mode {
+    ($value:literal) => {
+        const { $crate::Mode::new($value).expect("mode value must fit in seven bits") }
+    };
+    ($value:expr) => {
+        $crate::Mode::new($value).expect("mode value must fit in seven bits")
+    };
+}
+
 /// Creates a canonical [`Modes`] packet from values convertible to [`Mode`].
 ///
 /// Each expression is converted independently before the packet is constructed, so mode values
@@ -60,10 +99,9 @@ impl From<Mode> for u8 {
 /// # Examples
 ///
 /// ```
-/// use commonware_codec::{Encode, Mode, modes};
+/// use commonware_codec::{Encode, mode, modes};
 ///
-/// let enabled = Mode::new(1).unwrap();
-/// let modes = modes![enabled, enabled].unwrap();
+/// let modes = modes![mode!(1), mode!(1)].unwrap();
 /// assert_eq!(modes.encode().as_ref(), &[0x81, 0x01]);
 /// ```
 ///
@@ -97,10 +135,9 @@ macro_rules! modes {
 /// # Examples
 ///
 /// ```
-/// use commonware_codec::{DecodeExt, Encode, Mode, Modes};
+/// use commonware_codec::{DecodeExt, Encode, Modes, mode};
 ///
-/// let modes = [1, 0, 2].map(|value| Mode::new(value).unwrap());
-/// let modes = Modes::new(modes).unwrap();
+/// let modes = Modes::new([mode!(1), mode!(0), mode!(2)]).unwrap();
 /// let encoded = modes.encode();
 /// assert_eq!(encoded.as_ref(), &[0x81, 0x80, 0x02]);
 /// assert_eq!(Modes::<3>::decode(encoded).unwrap(), modes);
@@ -249,6 +286,22 @@ mod tests {
             assert_eq!(Mode::new(value), None);
             assert_eq!(Mode::try_from(value), Err(InvalidMode));
         }
+    }
+
+    #[test]
+    fn mode_macro_constructs_literals_and_expressions() {
+        const MAX: Mode = mode!(0x7f);
+        let value = 1u8;
+
+        assert_eq!(u8::from(MAX), 0x7f);
+        assert_eq!(mode!(value), mode(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "mode value must fit in seven bits")]
+    fn mode_macro_rejects_invalid_expressions() {
+        let value = 0x80u8;
+        let _ = mode!(value);
     }
 
     #[test]

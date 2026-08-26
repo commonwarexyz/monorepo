@@ -697,7 +697,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, Probability, TestRng, ordered::Set, sync::Mutex,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, probability, sync::Mutex,
         test_rng,
     };
     use engine::Engine;
@@ -1084,7 +1084,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -1337,7 +1337,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, active, Action::Link(link.clone()), None).await;
 
@@ -1605,7 +1605,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -1845,7 +1845,7 @@ mod tests {
                 Link {
                     latency: link_latency,
                     jitter: Duration::from_millis(0),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 },
                 TermLength::new(NZU32!(128)),
                 ViewDelta::new(128),
@@ -1896,7 +1896,7 @@ mod tests {
                 Link {
                     latency: Duration::from_millis(1_000),
                     jitter: Duration::from_millis(1),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 },
                 TermLength::new(NZU32!(1000)),
                 ViewDelta::new(100),
@@ -2032,7 +2032,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
 
@@ -2202,7 +2202,7 @@ mod tests {
                 let link = Link {
                     latency: Duration::from_millis(50),
                     jitter: Duration::from_millis(50),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 };
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -2397,7 +2397,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2497,7 +2497,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_secs(3),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2536,7 +2536,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(3),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2670,7 +2670,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2907,7 +2907,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -3079,7 +3079,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_secs(3),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -3187,7 +3187,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -3381,7 +3381,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -3517,7 +3517,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
@@ -3724,7 +3724,7 @@ mod tests {
             let degraded_link = Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
-                success_rate: Probability!(0.5),
+                success_rate: probability!(0.5),
             };
             link_validators(
                 &mut oracle,
@@ -3927,7 +3927,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -4107,7 +4107,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -4262,7 +4262,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(100),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             fn link_graph(_: usize, i: usize, j: usize) -> bool {
                 if i == 0 || j == 0 {
@@ -4422,7 +4422,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(injector_pk.clone(), me.clone(), link)
@@ -4563,7 +4563,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -4721,7 +4721,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -4990,7 +4990,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -5138,7 +5138,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -5299,7 +5299,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -5438,7 +5438,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
-                success_rate: Probability!(0.98),
+                success_rate: probability!(0.98),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -5572,7 +5572,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -5728,7 +5728,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -6002,7 +6002,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for p in participants.iter() {
                 oracle
@@ -6332,7 +6332,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for p in participants.iter() {
                 oracle
@@ -6617,7 +6617,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for p in participants.iter() {
                 oracle
@@ -6906,7 +6906,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for p in participants.iter() {
                 oracle
@@ -7142,7 +7142,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(5),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -7294,7 +7294,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -8107,7 +8107,7 @@ mod tests {
     const TWINS_LINK: Link = Link {
         latency: Duration::from_millis(500),
         jitter: Duration::from_millis(500),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     };
 
     /// Runs `campaign` with `elector` over a fast link and the slow [TWINS_LINK].
@@ -8116,7 +8116,7 @@ mod tests {
             Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(10),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             },
             TWINS_LINK,
         ] {
