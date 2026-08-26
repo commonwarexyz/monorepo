@@ -217,12 +217,11 @@ impl IoUringLoop {
             .reconcile(ops.waiters.free_len(), &mut self.pending_waker_actions);
     }
 
-    /// Wind down work dropped on a foreign thread (see
-    /// [handle::OrphanMailbox]): admitted waiters orphan exactly as an
-    /// on-thread drop would, and parked admission attempts release their
-    /// capacity slots.
+    /// Wind down work routed through [handle::Handle] by a foreign-thread
+    /// drop: admitted waiters orphan exactly as an on-thread drop would, and
+    /// parked admission attempts release their capacity slots.
     fn process_orphans(&mut self, ops: &mut Ops) {
-        for orphan in self.handle.orphans.take() {
+        for orphan in self.handle.take_orphans() {
             match orphan {
                 handle::Orphan::Waiter(id) => {
                     handle::wind_down_orphan(ops, id, &mut self.pending_waker_actions);

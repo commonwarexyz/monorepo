@@ -795,22 +795,30 @@ impl Drop for Registration<'_> {
         });
         let Some(actions) = cancelled else {
             let slot = slot.take().expect("capacity slot lost on foreign drop");
-            self.handle.orphans.push(Orphan::Capacity(slot));
+            self.handle.push_orphan(Orphan::Capacity(slot));
             return;
         };
         wake_batch(actions);
     }
 }
 
-/// Thread-affine handle to the driver's op state, cloned by the network and
-/// storage front-ends and held by the event loop itself.
+/// Handle to driver state shared by the network and storage front-ends and the
+/// event loop itself.
 ///
-/// All access goes through the affinity-checked [Affine] cell.
+/// Operation state remains protected by an affinity-checked [Affine] cell,
+/// while foreign-thread drops reach the colocated mailbox without touching
+/// that cell.
 #[derive(Clone)]
 pub(crate) struct Handle {
-    ops: Arc<Affine<RefCell<Ops>>>,
+    inner: Arc<HandleInner>,
+}
+
+/// State with the same lifetime as every [Handle] clone.
+struct HandleInner {
+    /// Operation state accessible only from the owning runtime thread.
+    ops: Affine<RefCell<Ops>>,
     /// Cross-thread wind-down mailbox for foreign-thread drops.
-    pub(super) orphans: Arc<OrphanMailbox>,
+    orphans: OrphanMailbox,
 }
 
 /// Wind-down work dropped on a foreign thread, where the thread-affine op
@@ -833,7 +841,7 @@ pub(super) enum Orphan {
 }
 
 /// Cross-thread mailbox of [Orphan] wind-down work.
-pub(super) struct OrphanMailbox {
+struct OrphanMailbox {
     /// Fast-path gate so the loop's per-turn drain skips the lock when the
     /// mailbox is empty (the common case).
     pending: AtomicBool,
@@ -853,7 +861,7 @@ impl OrphanMailbox {
     ///
     /// A push racing the gate check lands on the next turn: its `wake` latch
     /// guarantees the loop runs again before parking indefinitely.
-    pub(super) fn take(&self) -> Vec<Orphan> {
+    fn take(&self) -> Vec<Orphan> {
         if !self.pending.load(Ordering::Acquire) {
             return Vec::new();
         }
@@ -869,19 +877,21 @@ impl Handle {
     /// The calling thread becomes the owning (runtime) thread.
     pub(crate) fn new(capacity: usize, waker: RingWaker) -> Self {
         Self {
-            ops: Arc::new(Affine::new(RefCell::new(Ops {
-                waiters: Waiters::new(capacity),
-                completions: TicketCompletions::new(),
-                backlog: VecDeque::with_capacity(capacity),
-                pending_cancels: VecDeque::with_capacity(capacity),
-                released_deadlines: Vec::new(),
-                capacity: CapacityWaiters::new(),
-                closed: false,
-            }))),
-            orphans: Arc::new(OrphanMailbox {
-                pending: AtomicBool::new(false),
-                orphans: Mutex::new(Vec::new()),
-                waker,
+            inner: Arc::new(HandleInner {
+                ops: Affine::new(RefCell::new(Ops {
+                    waiters: Waiters::new(capacity),
+                    completions: TicketCompletions::new(),
+                    backlog: VecDeque::with_capacity(capacity),
+                    pending_cancels: VecDeque::with_capacity(capacity),
+                    released_deadlines: Vec::new(),
+                    capacity: CapacityWaiters::new(),
+                    closed: false,
+                })),
+                orphans: OrphanMailbox {
+                    pending: AtomicBool::new(false),
+                    orphans: Mutex::new(Vec::new()),
+                    waker,
+                },
             }),
         }
     }
@@ -891,7 +901,7 @@ impl Handle {
     /// The borrow is a leaf section: callers must not invoke wakers or user
     /// code inside `f`.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&mut Ops) -> R) -> R {
-        self.ops.with(|cell| f(&mut cell.borrow_mut()))
+        self.inner.ops.with(|cell| f(&mut cell.borrow_mut()))
     }
 
     /// Assert that the caller is running on the driver's owning thread.
@@ -899,12 +909,24 @@ impl Handle {
     /// Front-ends call this before validation, no-op, or synchronous paths
     /// that would otherwise bypass the affinity check in op admission.
     pub(crate) fn assert_owner(&self) {
-        self.ops.with(|_| ());
+        self.inner.ops.with(|_| ());
     }
 
     /// Access the shared op state if called on the runtime thread.
     fn try_with<R>(&self, f: impl FnOnce(&mut Ops) -> R) -> Option<R> {
-        self.ops.try_with(|cell| f(&mut cell.borrow_mut()))
+        self.inner
+            .ops
+            .try_with(|cell| f(&mut cell.borrow_mut()))
+    }
+
+    /// Queue one foreign-thread drop for the owning event loop.
+    fn push_orphan(&self, orphan: Orphan) {
+        self.inner.orphans.push(orphan);
+    }
+
+    /// Take all foreign-thread drops queued for the owning event loop.
+    pub(super) fn take_orphans(&self) -> Vec<Orphan> {
+        self.inner.orphans.take()
     }
 
     /// Close the op state: subsequent admissions fail with their
@@ -1265,7 +1287,7 @@ fn orphan_waiter(handle: &Handle, id: WaiterId) {
         wind_down_orphan(ops, id, &mut actions);
         actions
     }) else {
-        handle.orphans.push(Orphan::Waiter(id));
+        handle.push_orphan(Orphan::Waiter(id));
         return;
     };
     wake_batch(actions);
@@ -1278,7 +1300,7 @@ fn orphan_ticket(handle: &Handle, id: CompletionId) {
         wind_down_ticket(ops, id, &mut actions);
         actions
     }) else {
-        handle.orphans.push(Orphan::Completion(id));
+        handle.push_orphan(Orphan::Completion(id));
         return;
     };
     wake_batch(actions);
