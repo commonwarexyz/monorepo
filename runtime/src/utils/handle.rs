@@ -292,8 +292,8 @@ where
 /// Supervision ties spawned tasks to their spawning task's lifetime, but work spawned from a plain
 /// future outlives that future's drop. Wrapping the handle (see [`Handle::abort_on_drop`]) ties the
 /// task to the guard instead, so cancelling the future holding it cannot leave the task running.
-/// Dropping the guard only signals the abort; use [`AbortOnDrop::abort`] to also await the task's
-/// exit.
+/// Dropping the guard only signals the abort. Use [`AbortOnDrop::abort`] to also await the
+/// task's exit.
 #[commonware_macros::stability(ALPHA)]
 pub struct AbortOnDrop<T: Send + 'static>(Option<Handle<T>>);
 

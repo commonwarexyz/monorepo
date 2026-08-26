@@ -190,7 +190,7 @@ pub trait Contiguous: Send + Sync {
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
     /// Return a stream of the items in `range`, in position order. `range` must fall within
-    /// `bounds()`; an empty range within `bounds()` yields an empty stream.
+    /// `bounds()`. An empty range within `bounds()` yields an empty stream.
     ///
     /// `buffer` controls the replay byte budget for each chunk. Every backing blob read from
     /// sealed history uses `read_options`. Backing reads from the live writable tip instead use
