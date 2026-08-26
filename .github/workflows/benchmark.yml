@@ -56,6 +56,10 @@ jobs:
             bench_target: "--bench iouring_scheduler"
             benchmark_name: "commonware-runtime-iouring-scheduler"
             storage_backends: true
+          - package: commonware-runtime
+            cargo_flags: "--features iouring"
+            bench_target: "--bench network"
+            benchmark_name: "commonware-runtime-network"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Run setup
@@ -104,34 +108,69 @@ jobs:
             --inflight 32
             --worker-threads 1
             --file-size 256M
-            --seed 0
             --output json
           )
+          sample_count=3
+          workloads=(read_rand read_rand write_rand write_sync)
+          cache_modes=(warm dont_cache "" "")
 
           run_storage() {
             local output="$1"
+            local sample="$2"
+            local workload="$3"
+            local cache_mode="$4"
             shift
-            : > "$output"
+            shift
+            shift
+            shift
+            local -a cache_args=()
+            if [[ -n "$cache_mode" ]]; then
+              cache_args=(--cache "$cache_mode")
+            fi
             cargo bench -p commonware-runtime --bench storage "$@" -- \
-              "${common_args[@]}" --workload read_rand --cache warm >> "$output"
-            cargo bench -p commonware-runtime --bench storage "$@" -- \
-              "${common_args[@]}" --workload write_rand >> "$output"
-            cargo bench -p commonware-runtime --bench storage "$@" -- \
-              "${common_args[@]}" --workload write_sync >> "$output"
+              "${common_args[@]}" --seed "$sample" --workload "$workload" \
+              "${cache_args[@]}" >> "$output"
           }
 
-          run_storage runtime-storage-results/tokio.jsonl
-          run_storage runtime-storage-results/iouring.jsonl --features iouring
+          : > runtime-storage-results/tokio.jsonl
+          : > runtime-storage-results/iouring.jsonl
+          for ((sample = 1; sample <= sample_count; sample++)); do
+            for workload_index in "${!workloads[@]}"; do
+              workload="${workloads[$workload_index]}"
+              cache_mode="${cache_modes[$workload_index]}"
+              if (( (sample + workload_index) % 2 == 0 )); then
+                run_storage runtime-storage-results/tokio.jsonl "$sample" \
+                  "$workload" "$cache_mode"
+                run_storage runtime-storage-results/iouring.jsonl "$sample" \
+                  "$workload" "$cache_mode" --features iouring
+              else
+                run_storage runtime-storage-results/iouring.jsonl "$sample" \
+                  "$workload" "$cache_mode" --features iouring
+                run_storage runtime-storage-results/tokio.jsonl "$sample" \
+                  "$workload" "$cache_mode"
+              fi
+            done
+          done
 
-          jq -s -e '
-            length == 3 and
-            map(.workload) == ["read_rand", "write_rand", "write_sync"] and
-            all(.[]; .backend == "tokio" and .worker_threads == 1)
+          jq -s -e --argjson samples "$sample_count" '
+            def count_workload($name; $cache):
+              map(select(.workload == $name and ((.cache // null) == $cache))) | length;
+            length == ($samples * 4) and
+            all(.[]; .backend == "tokio" and .worker_threads == 1) and
+            count_workload("read_rand"; "warm") == $samples and
+            count_workload("read_rand"; "dont_cache") == $samples and
+            count_workload("write_rand"; null) == $samples and
+            count_workload("write_sync"; null) == $samples
           ' runtime-storage-results/tokio.jsonl > /dev/null
-          jq -s -e '
-            length == 3 and
-            map(.workload) == ["read_rand", "write_rand", "write_sync"] and
-            all(.[]; .backend == "iouring" and .worker_threads == null)
+          jq -s -e --argjson samples "$sample_count" '
+            def count_workload($name; $cache):
+              map(select(.workload == $name and ((.cache // null) == $cache))) | length;
+            length == ($samples * 4) and
+            all(.[]; .backend == "iouring" and .worker_threads == null) and
+            count_workload("read_rand"; "warm") == $samples and
+            count_workload("read_rand"; "dont_cache") == $samples and
+            count_workload("write_rand"; null) == $samples and
+            count_workload("write_sync"; null) == $samples
           ' runtime-storage-results/iouring.jsonl > /dev/null
 
       - name: Upload matched storage results
@@ -165,6 +204,8 @@ jobs:
             benchmark_name: "commonware-utils"
           - package: commonware-runtime
             benchmark_name: "commonware-runtime-iouring-scheduler"
+          - package: commonware-runtime
+            benchmark_name: "commonware-runtime-network"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Download benchmark result
