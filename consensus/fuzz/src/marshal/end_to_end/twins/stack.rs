@@ -686,7 +686,7 @@ pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
     mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
     floor: Floor<SchemeOf<P>, Sha256Digest>,
     partition: String,
-    forwarding: commonware_consensus::simplex::ForwardingPolicy,
+    forwarding: commonware_consensus::simplex::ForwardPolicy,
     vote: (
         impl Sender<PublicKey = PublicKeyOf<P>>,
         impl Receiver<PublicKey = PublicKeyOf<P>>,

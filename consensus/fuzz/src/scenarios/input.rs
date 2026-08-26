@@ -9,7 +9,7 @@ use crate::{
     utils::{Partition, SetPartition},
 };
 use arbitrary::Arbitrary;
-use commonware_consensus::{marshal::mocks::harness::BLOCKS_PER_EPOCH, simplex::ForwardingPolicy};
+use commonware_consensus::{marshal::mocks::harness::BLOCKS_PER_EPOCH, simplex::ForwardPolicy};
 
 const MIN_REQUIRED: u64 = 1;
 /// Highest fresh block height this single-epoch harness can require.
@@ -130,7 +130,7 @@ pub struct MarshalScenarioPrefixInput {
     pub required_containers: u64,
     pub degraded_network: bool,
     pub partition: Partition,
-    pub forwarding: ForwardingPolicy,
+    pub forwarding: ForwardPolicy,
 }
 
 impl Arbitrary<'_> for MarshalScenarioPrefixInput {
@@ -152,9 +152,9 @@ impl Arbitrary<'_> for MarshalScenarioPrefixInput {
         let (fault_rounds, fault_rounds_bound) = sample_fault_rounds(u, required_containers)?;
 
         let forwarding = match u.int_in_range(0..=2)? {
-            0 => ForwardingPolicy::Disabled,
-            1 => ForwardingPolicy::SilentVoters,
-            _ => ForwardingPolicy::SilentLeader,
+            0 => ForwardPolicy::Disabled,
+            1 => ForwardPolicy::SilentVoters,
+            _ => ForwardPolicy::SilentLeader,
         };
 
         let remaining = u.len().min(crate::MAX_RAW_BYTES);

@@ -56,7 +56,7 @@ use commonware_macros::select;
 use commonware_p2p::simulated::{Link, Oracle};
 use commonware_runtime::{Clock, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{FuzzRng, NZUsize};
+use commonware_utils::{FuzzRng, NZUsize, probability};
 use futures::future::{join_all, select_all};
 use std::{
     sync::{Arc, atomic::AtomicUsize},
@@ -104,7 +104,7 @@ async fn apply_degraded_network<P: Simplex>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: 0.6,
+        success_rate: probability!(0.6),
     };
     for peer in participants
         .iter()
@@ -606,7 +606,7 @@ mod tests {
         scenarios::input::{BackfillFault, BlockFault, ConsensusMutation, FaultPlan, ScenarioKind},
         utils::Partition,
     };
-    use commonware_consensus::simplex::ForwardingPolicy;
+    use commonware_consensus::simplex::ForwardPolicy;
 
     fn input(scenario: ScenarioKind, config: Configuration) -> MarshalScenarioPrefixInput {
         MarshalScenarioPrefixInput {
@@ -623,7 +623,7 @@ mod tests {
             required_containers: 1,
             degraded_network: false,
             partition: Partition::Connected,
-            forwarding: ForwardingPolicy::Disabled,
+            forwarding: ForwardPolicy::Disabled,
         }
     }
 

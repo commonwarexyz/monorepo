@@ -210,10 +210,6 @@ impl<S: Strategy> Strategy for LiveScope<S> {
         self.inner.network_faults(required_containers, rng)
     }
 
-    fn messaging_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Vec<(View, u8)> {
-        self.inner.messaging_faults(required_containers, rng)
-    }
-
     fn emit_byte_corruption(&self) -> bool {
         false
     }
