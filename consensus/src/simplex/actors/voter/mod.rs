@@ -2638,7 +2638,7 @@ mod tests {
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
     }
 
-    /// Fast-skip eligibility after replay is derived from durable finalization and
+    /// Skip eligibility after replay is derived from durable finalization and
     /// term progress. Restarting must not restore budget consumed by an unfinalized
     /// term, while a later finalization must make a pending timeout eligible.
     #[test_traced("WARN")]
@@ -2660,7 +2660,7 @@ mod tests {
             let partition = "voter_replay_skip_budget".to_string();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
-            // Persist the artifacts produced when view 1 is fast-skipped. Replaying the
+            // Persist the artifacts produced when view 1 is skipped. Replaying the
             // nullification enters view 2 without advancing the finalized floor.
             let skipped_view = View::new(1);
             let skipped_round = Round::new(epoch, skipped_view);
@@ -2711,21 +2711,21 @@ mod tests {
                 }
             }
 
-            // The replayed term has exhausted budget 1, so this one-shot hint must
-            // remain pending instead of bypassing the five-second leader deadline.
+            // The replayed term has exhausted budget 1, so this one-shot hint must remain pending
+            // rather than trigger a skip before the five-second leader deadline.
             mailbox.timeout(
                 Round::new(epoch, recovered_view),
                 TimeoutReason::LeaderNullify,
             );
-            let no_fast_skip_deadline = context.current() + Duration::from_secs(1);
+            let no_skip_deadline = context.current() + Duration::from_secs(1);
             loop {
                 select! {
-                    _ = context.sleep_until(no_fast_skip_deadline) => break,
+                    _ = context.sleep_until(no_skip_deadline) => break,
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Constructed(Vote::Nullify(nullify)) = msg.unwrap()
                             && nullify.view() == recovered_view
                         {
-                            panic!("replay restored fast-skip budget for {recovered_view}");
+                            panic!("replay restored skip budget for {recovered_view}");
                         }
                     },
                 }
@@ -2736,7 +2736,7 @@ mod tests {
             let proposal = Proposal::new(
                 skipped_round,
                 View::zero(),
-                Sha256::hash(&[b"restore-fast-skip-budget"]),
+                Sha256::hash(&[b"restore-skip-budget"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox.resolved(Certificate::Finalization(finalization));
@@ -2745,7 +2745,7 @@ mod tests {
             loop {
                 select! {
                     _ = context.sleep_until(restored_deadline) => {
-                        panic!("finalization did not restore fast-skip budget for {recovered_view}");
+                        panic!("finalization did not restore skip budget for {recovered_view}");
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Constructed(Vote::Nullify(nullify)) = msg.unwrap()

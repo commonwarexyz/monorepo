@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-/// Selects the maximum number of unfinalized terms that may be fast-skipped.
+/// Selects the maximum number of unfinalized terms that may be skipped.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum SkipBudget {
     /// Uses the participant count as the budget.
@@ -36,20 +36,20 @@ impl SkipBudget {
     }
 }
 
-/// Configures fast skips when a leader is inactive or nullifies its view.
+/// Controls whether `nullify(v)` may be broadcast before the normal round deadlines.
 ///
-/// Ordinary round deadlines remain active when fast skipping is disabled.
+/// Normal round deadlines remain active when the policy does not permit a skip.
 #[derive(Debug, Clone, Copy)]
 pub enum SkipPolicy {
-    /// Disables fast skipping.
+    /// Disables skips.
     Disabled,
-    /// Enables fast skipping under the configured timeout and budget.
+    /// Enables skips under the configured timeout and budget.
     Enabled {
-        /// Duration after which an inactive leader is eligible for a fast skip.
+        /// Duration after which an inactive leader may trigger a skip.
         ///
         /// This timeout must be greater than the certification timeout and timeout retry.
         timeout: Duration,
-        /// Maximum number of unfinalized terms that may be fast-skipped.
+        /// Maximum number of unfinalized terms that may be skipped.
         budget: SkipBudget,
     },
 }
@@ -243,7 +243,7 @@ where
     /// journal) for recent activity.
     pub view_retention: ViewDelta,
 
-    /// Policy governing fast skips.
+    /// Policy governing skips.
     pub skip: SkipPolicy,
 
     /// Timeout to wait for a peer to respond to a request.

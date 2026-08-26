@@ -26,6 +26,9 @@
 //! [`Config::floor`](config::Config::floor) supplies the initial finalized state. Voting begins
 //! at view 1, with the first proposal referencing genesis as its parent.
 //!
+//! [`SkipPolicy`] controls whether `nullify(v)` may be broadcast before the normal round deadlines.
+//! Those deadlines remain active when the policy does not permit a skip.
+//!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
@@ -445,8 +448,9 @@
 //!
 //! If a validator is the leader for a view but cannot build a valid payload yet (for example because
 //! it is still syncing), it should decline the [`Automaton::propose`](crate::Automaton::propose)
-//! request by dropping the response channel. Simplex treats this as a missing proposal, broadcasts
-//! `nullify(v)`, and other validators can use the leader-nullify fast path to skip the view.
+//! request by dropping the response channel. Simplex treats this as a missing proposal and may
+//! broadcast `nullify(v)` before the normal round deadline. Other validators may do the same after
+//! receiving the leader's `nullify(v)`.
 //!
 //! Once `propose` returns a payload, the local proposer is committed to that payload for verification
 //! and certification. [`Automaton::verify`](crate::Automaton::verify) and
@@ -457,10 +461,11 @@
 //!
 //! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
-//! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
-//! a fast-skip signal and can halt progress because certification requests are not retried during
-//! the same run. The safe way to stop working on certification is to keep the request pending until
-//! Simplex drops it after finalizing the block or a descendant.
+//! uncertifiable for that round and also causes a local nullify. Closing `certify` does not cause
+//! `nullify(v)` to be broadcast before the normal round deadline and can halt progress because
+//! certification requests are not retried during the same run. The safe way to stop working on
+//! certification is to keep the request pending until Simplex drops it after finalizing the block
+//! or a descendant.
 
 pub mod elector;
 pub mod scheme;

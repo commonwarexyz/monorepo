@@ -2847,7 +2847,7 @@ mod tests {
                 assert!(
                     !state
                         .construct_nullify(view, TimeoutReason::Inactivity)
-                        .expect("fast-skip nullify")
+                        .expect("skip nullify")
                         .0
                 );
                 let nullification =
@@ -2910,7 +2910,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_restores_pending_fast_skip() {
+    fn finalization_restores_pending_skip() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, mut state) = setup_state(&mut context, 4, 9, 10, 1, 1);
@@ -2943,7 +2943,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_fast_skipping_defers_inactivity_to_leader_deadline() {
+    fn disabled_skip_defers_inactivity_to_leader_deadline() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, mut state) = setup_state(&mut context, 4, 7, 10, 1, 0);
@@ -2959,7 +2959,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_fast_skipping_defers_leader_nullify() {
+    fn disabled_skip_defers_leader_nullify() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, mut state) = setup_state(&mut context, 4, 7, 10, 1, 0);

@@ -459,7 +459,7 @@ where
                             }
                         }
 
-                        // With fast skipping enabled, tell the voter to expire its timeout
+                        // When skipping is enabled, tell the voter to expire its timeout
                         // when the leader nullified this view or has not been active recently.
                         //
                         // Activity is a best-effort, wall-clock signal: leader messages
@@ -635,7 +635,7 @@ where
                         .get_or_create_by(&sender)
                         .try_set_max(view.get());
 
-                    // With fast skipping enabled, a nullify from the current leader expires
+                    // When skipping is enabled, a nullify from the current leader expires
                     // the voter's timeout. We check after adding because duplicate votes are
                     // rejected.
                     if matches!(self.skip, SkipPolicy::Enabled { .. })
