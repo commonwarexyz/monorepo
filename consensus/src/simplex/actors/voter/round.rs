@@ -61,8 +61,8 @@ pub struct Round<S: Scheme, D: Digest> {
     certification_deadline: Option<SystemTime>,
     stall_deadline: Option<SystemTime>,
     retry_deadline: Option<SystemTime>,
-    // First event-driven timeout latched for this round (see latch_timeout).
-    // Later timeouts do not replace the latch.
+    // First explicit timeout latched for this round (see latch_timeout).
+    // Unlike retry_deadline, this is first-wins and never moves.
     latched_timeout: Option<(SystemTime, TimeoutReason)>,
 
     // Certificates received from batcher (constructed or from network).
@@ -471,13 +471,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.stall_deadline = stall_deadline;
     }
 
-    /// Latches the first event-driven timeout for this round. Later calls
-    /// preserve its deadline and reason. Calls after a nullify broadcast do
-    /// nothing because the retry schedule governs the round.
+    /// Latches the first explicit timeout for this round, pinning the moment it
+    /// expired. Later latches preserve the original deadline and reason, and
+    /// latching is ignored once a nullify broadcast began (retry cadence
+    /// governs the round from then on).
     ///
-    /// When allowed, [`Self::next_timeout`] returns the same latch on every poll.
-    /// Latching does not modify deadlines. A per-view timeout must not reset the
-    /// term-level stall deadline.
+    /// When allowed, a latched timeout makes [`Self::next_timeout`] fire
+    /// immediately (and stably across polls, carrying the latched reason)
+    /// without touching any deadline: in particular, the stall deadline anchors
+    /// term-level stall protection and must not be reset by a per-view timeout.
     pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
         if self.latched_timeout.is_none() && !self.broadcast_nullify {
             self.latched_timeout = Some((now, reason));
@@ -506,9 +508,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns the next round-local timeout and its reason.
-    ///
-    /// When `allow_latched_timeout` is false, this method ignores the latch
-    /// without clearing it.
     pub fn next_timeout(
         &mut self,
         now: SystemTime,
