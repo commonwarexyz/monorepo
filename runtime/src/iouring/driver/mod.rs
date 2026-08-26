@@ -32,6 +32,13 @@ use std::time::{Duration, Instant};
 /// sizes are rounded up to the next power of two before validation.
 pub const MAX_RING_SIZE: u32 = 32_768;
 
+/// Largest relative wait representable by Linux's signed nanosecond clock.
+///
+/// Longer user-space deadlines remain intact. The event loop wakes at this
+/// boundary and recomputes their remaining duration instead of overflowing
+/// the kernel timespec conversion.
+const MAX_KERNEL_WAIT: Duration = Duration::from_nanos(i64::MAX as u64);
+
 /// Round and validate a requested submission queue size before any
 /// size-proportional driver state is allocated.
 fn validated_ring_size(size: u32) -> u32 {
@@ -44,6 +51,29 @@ fn validated_ring_size(size: u32) -> u32 {
         MAX_RING_SIZE
     );
     size
+}
+
+/// Validate every pure ring invariant before construction has side effects.
+///
+/// Returns the effective ring size used for kernel and userspace capacity.
+pub(crate) fn validate_ring_config(cfg: &RingConfig, max_request_timeout: Duration) -> u32 {
+    let size = validated_ring_size(cfg.size);
+    TimeoutWheel::validate_layout(max_request_timeout, cfg.timeout_wheel_tick);
+    Spinner::validate_config(&cfg.idle_spinner);
+    size
+}
+
+/// Return the cancellation grace remaining at `now`.
+///
+/// Elapsed-time subtraction avoids constructing `started_at + grace`, which
+/// can overflow for an adversarially large duration.
+fn shutdown_grace_remaining(started_at: Instant, grace: Duration, now: Instant) -> Duration {
+    grace.saturating_sub(now.saturating_duration_since(started_at))
+}
+
+/// Bound one relative kernel wait without changing its user-space deadline.
+fn bounded_kernel_wait(timeout: Duration) -> Duration {
+    timeout.min(MAX_KERNEL_WAIT)
 }
 
 /// Packed `io_uring` `user_data` value.
@@ -97,7 +127,7 @@ impl Drop for PendingOperations {
 
 /// io_uring event loop state.
 pub(crate) struct IoUringLoop {
-    cfg: RingConfig,
+    shutdown_timeout: Option<Duration>,
     /// Number of logical requests retained by the driver. Internal SQEs (the
     /// wake poll and async cancels) are not counted. Tracked waiters and Ready
     /// detached ticket completions count once each.
@@ -138,24 +168,15 @@ impl IoUringLoop {
     /// wheel exceeds its slot limit, the wake `eventfd` cannot be created, or
     /// the spinner budget exceeds its configured maximum.
     pub(crate) fn new(
-        mut cfg: RingConfig,
+        cfg: RingConfig,
         max_request_timeout: Duration,
         registry: &mut impl Register,
     ) -> Result<(IoUring, Handle, Self), std::io::Error> {
-        assert!(
-            !max_request_timeout.is_zero(),
-            "max_request_timeout must be non-zero for timeout wheel"
-        );
-        assert!(
-            !cfg.timeout_wheel_tick.is_zero(),
-            "timeout_wheel_tick must be non-zero for timeout wheel"
-        );
-        cfg.size = validated_ring_size(cfg.size);
+        let size = validate_ring_config(&cfg, max_request_timeout) as usize;
 
         // Ask the kernel to construct the ring before allocating the waiter
         // table whose capacity is proportional to the effective ring size.
         let ring = new_ring(&cfg)?;
-        let size = cfg.size as usize;
         let pending_operations = PendingOperations::new(registry);
         let waker = Waker::new().expect("unable to create wake eventfd");
         let timeout_wheel =
@@ -167,7 +188,7 @@ impl IoUringLoop {
             ring,
             handle.clone(),
             Self {
-                cfg,
+                shutdown_timeout: cfg.shutdown_timeout,
                 pending_operations,
                 handle,
                 timeout_wheel,
@@ -594,6 +615,11 @@ impl IoUringLoop {
     /// This is a no-op when no active deadlines exist. Expired stale wheel
     /// entries are ignored when waiter generation no longer matches.
     fn advance_timeouts(&mut self, ops: &mut Ops) {
+        self.advance_timeouts_at(ops, Instant::now());
+    }
+
+    /// Advance timeout processing to an explicit monotonic instant.
+    fn advance_timeouts_at(&mut self, ops: &mut Ops, now: Instant) {
         // Release deadline accounting for ops whose tickets were dropped: the
         // wheel is loop-owned, so drop paths queue removals instead. Without
         // this the wheel would report the stale tick as the next deadline
@@ -608,7 +634,7 @@ impl IoUringLoop {
         }
 
         // No newly expired entries at this tick.
-        let Some(expired) = self.timeout_wheel.advance(Instant::now()) else {
+        let Some(expired) = self.timeout_wheel.advance(now) else {
             return;
         };
 
@@ -654,14 +680,28 @@ impl IoUringLoop {
     ///
     /// If `shutdown_timeout` is `None`, this waits until all waiters complete
     /// or are cancelled by their own deadlines. If `shutdown_timeout` is
-    /// `Some`, every request still outstanding when the budget expires is
-    /// cancelled, and the drain then waits for the kernel to retire it: a
-    /// request must never be dropped while the kernel may still reference its
-    /// buffers, so operations that cannot be cancelled (e.g. an executing disk
-    /// write) are awaited regardless of the budget.
+    /// `Some`, it is a cancellation grace measured from drain entry. Every
+    /// request still outstanding when the grace expires is cancelled, and the
+    /// drain then waits for kernel retirement. Operations that cannot be
+    /// cancelled (e.g. an executing disk write) may outlive the grace, so it is
+    /// not a total shutdown bound.
     fn drain(&mut self, ring: &mut IoUring) {
+        self.drain_with_shutdown_clock(ring, Instant::now);
+    }
+
+    /// Drain using `now` to measure the shutdown cancellation grace.
+    ///
+    /// The injectable clock keeps the whole-loop grace boundary deterministic
+    /// in tests. Request deadlines continue to use the runtime monotonic clock.
+    fn drain_with_shutdown_clock(
+        &mut self,
+        ring: &mut IoUring,
+        mut now: impl FnMut() -> Instant,
+    ) {
         let handle = self.handle.clone();
-        let mut remaining = self.cfg.shutdown_timeout;
+        let started_at = now();
+        let grace = self.shutdown_timeout;
+        let mut cancellation_requested = false;
 
         // Keep driving completions until all progressing waiters finish.
         loop {
@@ -684,11 +724,15 @@ impl IoUringLoop {
                 break;
             }
 
-            // Once the shutdown budget is exhausted, request cancellation of
-            // every remaining operation instead of abandoning it: an abandoned
-            // request would free buffers the kernel may still write into.
-            if remaining.is_some_and(|t| t.is_zero()) {
-                remaining = None;
+            // Cancellation grace starts at drain entry, so time spent reaping
+            // CQEs, processing orphans, and running callbacks counts just as
+            // time spent blocked in the kernel does.
+            if !cancellation_requested
+                && grace.is_some_and(|grace| {
+                    shutdown_grace_remaining(started_at, grace, now()).is_zero()
+                })
+            {
+                cancellation_requested = true;
                 handle.with(|ops| self.cancel_all(ops));
             }
 
@@ -725,6 +769,19 @@ impl IoUringLoop {
                 break;
             }
 
+            // Staging and its callbacks can consume the rest of the grace.
+            // Cancel once, then retry staging so every cancellation request
+            // reaches the kernel before the drain waits again.
+            if !cancellation_requested
+                && grace.is_some_and(|grace| {
+                    shutdown_grace_remaining(started_at, grace, now()).is_zero()
+                })
+            {
+                cancellation_requested = true;
+                handle.with(|ops| self.cancel_all(ops));
+                continue;
+            }
+
             // The wake poll must be live before any armed wait: with it
             // terminated, an orphan wake writes the eventfd without
             // producing a CQE and an unbounded wait sleeps through it. If
@@ -736,7 +793,12 @@ impl IoUringLoop {
                 continue;
             }
 
-            let timeout = match (remaining, self.timeout_wheel.next_deadline()) {
+            let remaining_grace = if cancellation_requested {
+                None
+            } else {
+                grace.map(|grace| shutdown_grace_remaining(started_at, grace, now()))
+            };
+            let timeout = match (remaining_grace, self.timeout_wheel.next_deadline()) {
                 (Some(remaining), Some(deadline)) => Some(remaining.min(deadline)),
                 (Some(remaining), None) => Some(remaining),
                 (None, Some(deadline)) => Some(deadline),
@@ -752,14 +814,8 @@ impl IoUringLoop {
             // latch either way.
             let arm = self.waker.arm();
             if !arm.wake_latched() {
-                let start = Instant::now();
                 self.submit_and_wait(ring, 1, timeout)
                     .expect("unable to submit to ring");
-
-                // Charge elapsed wall time against the shutdown budget.
-                if let Some(remaining) = remaining.as_mut() {
-                    *remaining = remaining.saturating_sub(start.elapsed());
-                }
             }
             drop(arm);
         }
@@ -792,6 +848,7 @@ impl IoUringLoop {
         let result = timeout.map_or_else(
             || ring.submit_and_wait(want).map(|_| ()),
             |timeout| {
+                let timeout = bounded_kernel_wait(timeout);
                 let ts = Timespec::new()
                     .sec(timeout.as_secs())
                     .nsec(timeout.subsec_nanos());
@@ -835,7 +892,7 @@ pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
     IoUring::builder()
         .setup_single_issuer()
         .setup_defer_taskrun()
-        .build(cfg.size)
+        .build(validated_ring_size(cfg.size))
 }
 
 /// Owned half of the io_uring driver: the ring plus the loop state that
@@ -1075,10 +1132,10 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
-        let (_ring, _handle, ioloop) =
+        let (_ring, handle, _ioloop) =
             IoUringLoop::new(cfg, Duration::from_secs(60), &mut registry)
                 .expect("io_uring creation should succeed");
-        assert_eq!(ioloop.cfg.size, 128);
+        handle.with(|ops| assert_eq!(ops.waiters.free_len(), 128));
     }
 
     #[test]
@@ -1094,6 +1151,148 @@ mod tests {
             validated_ring_size(MAX_RING_SIZE + 1);
         }));
         assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn test_shutdown_grace_remaining_uses_total_elapsed_time() {
+        let started_at = Instant::now();
+        let grace = Duration::from_millis(10);
+        assert_eq!(
+            shutdown_grace_remaining(started_at, grace, started_at),
+            grace
+        );
+        assert_eq!(
+            shutdown_grace_remaining(
+                started_at,
+                grace,
+                started_at
+                    .checked_add(Duration::from_millis(4))
+                    .expect("test instant should be representable"),
+            ),
+            Duration::from_millis(6)
+        );
+        assert_eq!(
+            shutdown_grace_remaining(
+                started_at,
+                grace,
+                started_at
+                    .checked_add(grace)
+                    .expect("test instant should be representable"),
+            ),
+            Duration::ZERO
+        );
+        assert_eq!(
+            shutdown_grace_remaining(
+                started_at,
+                grace,
+                started_at
+                    .checked_add(Duration::from_secs(1))
+                    .expect("test instant should be representable"),
+            ),
+            Duration::ZERO
+        );
+        assert_eq!(
+            shutdown_grace_remaining(started_at, Duration::MAX, started_at),
+            Duration::MAX
+        );
+    }
+
+    #[test]
+    fn test_kernel_wait_bounds_duration_max() {
+        assert_eq!(bounded_kernel_wait(Duration::MAX), MAX_KERNEL_WAIT);
+        assert_eq!(bounded_kernel_wait(MAX_KERNEL_WAIT), MAX_KERNEL_WAIT);
+        assert_eq!(
+            bounded_kernel_wait(Duration::from_millis(1)),
+            Duration::from_millis(1)
+        );
+
+        let mut registry = Registry::default();
+        let (mut ring, _handle, ioloop) =
+            IoUringLoop::new(RingConfig::default(), Duration::from_secs(60), &mut registry)
+                .expect("io_uring creation should succeed");
+        let entry = io_uring::opcode::Nop::new().build();
+        // SAFETY: the NOP references no external memory, and `entry` remains
+        // alive until the submission queue has copied it.
+        unsafe {
+            ring.submission()
+                .push(&entry)
+                .expect("ring should have submission capacity");
+        }
+        ioloop
+            .submit_and_wait(&mut ring, 1, Some(Duration::MAX))
+            .expect("bounded Duration::MAX wait should reach the kernel");
+        assert_eq!(ring.completion().count(), 1);
+    }
+
+    /// Run a drain whose synthetic grace expires on `expire_on_read`.
+    ///
+    /// Clock read zero records drain entry, read one follows CQE and callback
+    /// processing, and read two follows staging and its callbacks.
+    fn assert_shutdown_cancels_on_clock_read(expire_on_read: usize) {
+        let cfg = RingConfig {
+            size: 1,
+            shutdown_timeout: Some(Duration::from_secs(60)),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (mut ring, handle, mut ioloop) =
+            IoUringLoop::new(cfg, Duration::from_secs(60), &mut registry)
+                .expect("io_uring creation should succeed");
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(recv.as_mut().poll(&mut cx).is_pending());
+        ioloop.turn(&mut ring);
+        handle::wake_batch(
+            handle
+                .close()
+                .into_iter()
+                .map(handle::WakerAction::Wake),
+        );
+
+        let started_at = Instant::now();
+        let expired_at = started_at
+            .checked_add(Duration::from_secs(60))
+            .expect("test instant should be representable");
+        let mut clock_reads = 0;
+        ioloop.drain_with_shutdown_clock(&mut ring, || {
+            let now = if clock_reads < expire_on_read {
+                started_at
+            } else {
+                expired_at
+            };
+            clock_reads += 1;
+            now
+        });
+
+        assert_eq!(clock_reads, expire_on_read + 1);
+        match recv.as_mut().poll(&mut cx) {
+            Poll::Ready(Err((_, Error::Closed))) => {}
+            other => panic!("cancelled recv should observe closure, got {other:?}"),
+        }
+        assert_eq!(handle.with(|ops| ops.waiters.pending()), 0);
+    }
+
+    #[test]
+    fn test_shutdown_grace_includes_cqe_and_callback_work() {
+        // Expire at the first checkpoint so cancellation happens before the
+        // first kernel wait.
+        assert_shutdown_cancels_on_clock_read(1);
+    }
+
+    #[test]
+    fn test_shutdown_grace_includes_staging_and_callback_work() {
+        // Preserve the grace through the first checkpoint, then expire after
+        // staging so the driver retries with cancellation before waiting.
+        assert_shutdown_cancels_on_clock_read(2);
     }
 
     #[test]
@@ -3115,8 +3314,8 @@ mod tests {
 
     #[test]
     fn test_shutdown_waits_for_inflight_write() {
-        // Verify shutdown without a budget waits for the last in-flight
-        // request instead of abandoning it.
+        // Verify shutdown without a cancellation grace waits for the last
+        // in-flight request instead of abandoning it.
         let dir = std::env::temp_dir().join(format!(
             "commonware_iouring_shutdown_write_{}",
             std::process::id()
@@ -3159,8 +3358,8 @@ mod tests {
 
     #[test]
     fn test_shutdown_timeout_cancels_stuck_recv() {
-        // Verify a bounded shutdown cancels requests that never complete and
-        // the abandoned future observes the timeout result.
+        // Verify shutdown requests cancellation after the grace and the live
+        // future observes the closed result.
         let mut harness = TestLoop::new(RingConfig {
             shutdown_timeout: Some(Duration::from_millis(200)),
             ..Default::default()
@@ -3184,7 +3383,7 @@ mod tests {
         harness.shutdown();
         assert!(
             start.elapsed() < Duration::from_secs(5),
-            "bounded shutdown took {:?}",
+            "shutdown cancellation did not retire promptly: {:?}",
             start.elapsed()
         );
 
@@ -3200,7 +3399,7 @@ mod tests {
     #[test]
     fn test_shutdown_preserves_deadline_result() {
         // Verify an op whose own deadline expires during the drain reports
-        // timeout even when the shutdown budget is longer.
+        // timeout even when the shutdown cancellation grace is longer.
         let mut harness = TestLoop::new(RingConfig {
             shutdown_timeout: Some(Duration::from_secs(10)),
             timeout_wheel_tick: Duration::from_millis(5),
@@ -3713,7 +3912,7 @@ mod tests {
         });
 
         // The loop winds the orphan down (async-cancelling the recv) and the
-        // slot frees without any shutdown budget.
+        // slot frees without any shutdown cancellation grace.
         let start = Instant::now();
         while harness.tracked() != 0 {
             assert!(
@@ -3817,40 +4016,138 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_completion_races_timeout_expiry() {
-        // Data arriving in the same window as deadline expiry must resolve
-        // to either success or timeout, and never panic, double-remove a
-        // wheel tick, or leak the slot.
-        let mut harness = TestLoop::new(RingConfig {
-            timeout_wheel_tick: Duration::from_millis(1),
-            ..Default::default()
-        });
+    fn assert_recv_capacity_reused(harness: &mut TestLoop) {
+        let (left, right) = UnixStream::pair().unwrap();
+        (&right).write_all(&[9]).unwrap();
         let handle = harness.handle.clone();
-        for i in 0..40u64 {
-            let (left, right) = UnixStream::pair().unwrap();
-            let mut recv = Box::pin(handle.recv(
+        let (mut buf, read) = harness
+            .block_on(handle.recv(
                 Arc::new(left.into()),
                 IoBufMut::with_capacity(1),
                 0,
                 1,
                 false,
-                Instant::now() + Duration::from_millis(10),
-            ));
-            assert!(poll_once(&harness, &mut recv).is_pending());
-            harness.driver().turn();
-            // Race the write against deadline expiry from both sides.
-            std::thread::sleep(Duration::from_millis(if i % 2 == 0 { 9 } else { 11 }));
-            (&right).write_all(&[7]).unwrap();
-            match harness.block_on(recv) {
-                Ok((_, 1)) | Err((_, Error::Timeout)) => {}
-                other => panic!("unexpected recv result: {other:?}"),
-            }
-            assert_eq!(harness.tracked(), 0);
-        }
-        // No deadline accounting may survive the races.
+                Instant::now() + Duration::from_secs(30),
+            ))
+            .expect("reused waiter slot should complete");
+        assert_eq!(read, 1);
+        // SAFETY: the kernel filled `read` bytes before completion.
+        unsafe { buf.set_len(read) };
+        assert_eq!(buf.as_ref(), &[9]);
+        assert_eq!(harness.pending(), 0);
+        assert_eq!(harness.tracked(), 0);
+    }
+
+    #[test]
+    fn test_completion_before_timeout_expiry_wins() {
+        // Reap a successful CQE before advancing synthetic wheel time past
+        // the same request's deadline. Completion must remove timeout
+        // accounting before expiry observes the waiter.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            timeout_wheel_tick: Duration::from_millis(1),
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+        let (left, right) = UnixStream::pair().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            deadline,
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
         harness.driver().turn();
+
+        (&right).write_all(&[7]).unwrap();
+        let driver = harness.driver();
+        driver
+            .inner
+            .submit_and_wait(&mut driver.ring, 1, None)
+            .expect("recv completion should enter the CQ");
+        let owner = driver.inner.handle.clone();
+        owner.with(|ops| {
+            for cqe in driver.ring.completion() {
+                driver.inner.handle_cqe(ops, cqe);
+            }
+            driver.inner.advance_timeouts_at(
+                ops,
+                deadline
+                    .checked_add(Duration::from_millis(1))
+                    .expect("test deadline should be representable"),
+            );
+        });
+        driver.inner.flush_wakers();
+
+        assert_eq!(harness.pending(), 0);
+        assert_eq!(harness.tracked(), 1);
         assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+        let (mut buf, read) = match poll_once(&harness, &mut recv) {
+            Poll::Ready(Ok(result)) => result,
+            other => panic!("completion-first recv should succeed, got {other:?}"),
+        };
+        assert_eq!(read, 1);
+        // SAFETY: the kernel filled `read` bytes before completion.
+        unsafe { buf.set_len(read) };
+        assert_eq!(buf.as_ref(), &[7]);
+        assert_eq!(harness.pending(), 0);
+        assert_eq!(harness.tracked(), 0);
+        assert_recv_capacity_reused(&mut harness);
+    }
+
+    #[test]
+    fn test_timeout_expiry_before_completion_wins() {
+        // Advance synthetic wheel time first, then stage and retire the
+        // cancellation before any successful original CQE can arrive. The
+        // committed timeout must own the exact terminal result.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            timeout_wheel_tick: Duration::from_millis(1),
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+        let (left, _right) = UnixStream::pair().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            deadline,
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        harness.driver().turn();
+
+        let driver = harness.driver();
+        let owner = driver.inner.handle.clone();
+        owner.with(|ops| {
+            driver.inner.advance_timeouts_at(
+                ops,
+                deadline
+                    .checked_add(Duration::from_millis(1))
+                    .expect("test deadline should be representable"),
+            );
+            assert_eq!(ops.pending_cancels.len(), 1);
+            assert_eq!(ops.waiters.pending(), 1);
+        });
+        assert_eq!(driver.inner.timeout_wheel.next_deadline(), None);
+
+        match harness.block_on(recv) {
+            Err((_, Error::Timeout)) => {}
+            other => panic!("timeout-first recv should time out, got {other:?}"),
+        }
+        assert_eq!(harness.pending(), 0);
+        assert_eq!(harness.tracked(), 0);
+
+        assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+        harness
+            .handle
+            .with(|ops| assert!(ops.pending_cancels.is_empty()));
+        assert_recv_capacity_reused(&mut harness);
     }
 
     #[test]

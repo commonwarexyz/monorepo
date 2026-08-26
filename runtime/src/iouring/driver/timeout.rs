@@ -100,6 +100,16 @@ pub struct TimeoutWheel {
     start: Instant,
 }
 
+/// Allocation-free timeout-wheel layout derived from public configuration.
+struct Layout {
+    /// Power-of-two bucket count to allocate.
+    slots: usize,
+    /// Normalized timeout horizon in nanoseconds.
+    max_timeout_nanos: u64,
+    /// Tick granularity in nanoseconds.
+    tick_nanos: u64,
+}
+
 impl TimeoutWheel {
     /// Number of bits per word in the occupancy bitsets.
     const WORD_BITS: usize = u64::BITS as usize;
@@ -145,6 +155,31 @@ impl TimeoutWheel {
         slots
     }
 
+    /// Validate configuration without allocating the derived layout.
+    ///
+    /// Keeping the checked arithmetic here lets runtime startup reject the
+    /// same layout that construction will allocate, without allocating it.
+    pub(super) fn validate_layout(max_timeout: Duration, tick: Duration) {
+        let _ = Self::layout(max_timeout, tick);
+    }
+
+    /// Derive the exact allocation layout from validated public inputs.
+    fn layout(max_timeout: Duration, tick: Duration) -> Layout {
+        assert!(
+            !max_timeout.is_zero(),
+            "max_timeout must be non-zero for timeout wheel"
+        );
+        let tick_nanos = Self::duration_to_nanos_saturating(tick);
+        assert!(tick_nanos > 0, "timeout wheel tick must be non-zero");
+
+        let max_timeout = max_timeout.max(tick);
+        Layout {
+            slots: Self::slots_for(max_timeout, tick_nanos),
+            max_timeout_nanos: Self::duration_to_nanos_saturating(max_timeout),
+            tick_nanos,
+        }
+    }
+
     /// Create a timeout wheel.
     ///
     /// - `tick` defines the wheel granularity.
@@ -157,24 +192,21 @@ impl TimeoutWheel {
     ///
     /// Panics if `tick` or `max_timeout` is zero.
     pub fn new(max_timeout: Duration, tick: Duration, start: Instant) -> Self {
-        let tick_nanos = Self::duration_to_nanos_saturating(tick);
-        assert!(tick_nanos > 0, "timeout wheel tick must be non-zero");
-        let max_timeout = max_timeout.max(tick);
-        let slots = Self::slots_for(max_timeout, tick_nanos);
-        let buckets = vec![Vec::new(); slots];
+        let layout = Self::layout(max_timeout, tick);
+        let buckets = vec![Vec::new(); layout.slots];
 
         Self {
-            slot_mask: slots - 1,
+            slot_mask: layout.slots - 1,
             buckets,
-            occupied: vec![0; slots.div_ceil(Self::WORD_BITS)],
+            occupied: vec![0; layout.slots.div_ceil(Self::WORD_BITS)],
             occupied_slots: 0,
-            active_counts: vec![0; slots],
-            active_occupied: vec![0; slots.div_ceil(Self::WORD_BITS)],
+            active_counts: vec![0; layout.slots],
+            active_occupied: vec![0; layout.slots.div_ceil(Self::WORD_BITS)],
             current_tick: 0,
             min_scheduled_tick: Tick::MAX,
             active_deadlines: 0,
-            max_timeout_nanos: Self::duration_to_nanos_saturating(max_timeout),
-            tick_nanos,
+            max_timeout_nanos: layout.max_timeout_nanos,
+            tick_nanos: layout.tick_nanos,
             start,
         }
     }

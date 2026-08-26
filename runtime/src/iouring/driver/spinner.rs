@@ -93,18 +93,23 @@ pub struct Spinner {
 }
 
 impl Spinner {
-    /// Create a new spinner. Runs a one-time calibration loop using `probe`
-    /// to measure the per-iteration cost of the real spin condition. The probe
-    /// should have the same cost as the condition passed to [`Spinner::spin`].
-    ///
-    /// Panics if `budget_us > max_budget_us`.
-    pub fn new(cfg: &Config, probe: impl Fn() -> bool) -> Self {
+    /// Validate spinner configuration without running calibration.
+    pub(super) fn validate_config(cfg: &Config) {
         assert!(
             cfg.budget_us <= cfg.max_budget_us,
             "spinner budget_us ({}) must not exceed max_budget_us ({})",
             cfg.budget_us,
             cfg.max_budget_us,
         );
+    }
+
+    /// Create a new spinner. Runs a one-time calibration loop using `probe`
+    /// to measure the per-iteration cost of the real spin condition. The probe
+    /// should have the same cost as the condition passed to [`Spinner::spin`].
+    ///
+    /// Panics if `budget_us > max_budget_us`.
+    pub fn new(cfg: &Config, probe: impl Fn() -> bool) -> Self {
+        Self::validate_config(cfg);
         let iters_per_us = calibrate(probe);
         let min_budget = cfg.budget_us.saturating_mul(iters_per_us);
         Self {

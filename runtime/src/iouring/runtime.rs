@@ -43,7 +43,7 @@
 //! that worker has torn down, using the context from elsewhere fails loudly
 //! instead of submitting work nothing will run.
 
-use super::{Driver, RingConfig};
+use super::{Driver, RingConfig, driver::validate_ring_config};
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
@@ -172,8 +172,13 @@ pub struct Config {
     /// Configuration for the runtime's io_uring instance.
     ///
     /// One ring serves all storage and network I/O, so its `size` bounds the
-    /// number of concurrently in-flight logical operations (each in-flight
-    /// send, recv, accept, connect, read, write, or sync consumes one slot).
+    /// number of waiter-backed logical operations. An admitted request keeps
+    /// its slot while it is waiting in the submission backlog, in flight,
+    /// awaiting cancellation, or holding an ordinary `Ready` result. A pending
+    /// detached ticket also retains a slot. At terminal completion, a detached
+    /// ticket's output moves to a separate completion arena and its waiter slot
+    /// is recycled before its task waker runs. That output remains retained
+    /// outside this bound until its ticket is polled or dropped.
     /// The driver always enables single-issuer and deferred task-run modes
     /// because the runtime thread creates the ring and is its only submitter.
     /// The timeout wheel horizon is derived from the maximum of
@@ -227,9 +232,14 @@ impl Config {
     // Setters
     /// Sets the configuration for each worker's io_uring instance.
     ///
-    /// The ring `size` bounds the number of concurrently in-flight logical
-    /// operations per worker. Defaults to a 1024-entry ring. The runtime
-    /// derives the timeout wheel horizon from the configured network timeouts.
+    /// The ring `size` bounds the number of waiter-backed logical operations
+    /// per worker, including requests in the submission backlog, in flight,
+    /// awaiting cancellation, and ordinary completed results that have not
+    /// been consumed or dropped. Pending detached tickets also retain a slot.
+    /// Their terminal outputs move to a separate completion arena and remain
+    /// retained outside this bound until their tickets are polled or dropped.
+    /// Defaults to a 1024-entry ring. The runtime derives the timeout wheel
+    /// horizon from the configured network timeouts.
     pub const fn with_ring(mut self, ring: RingConfig) -> Self {
         self.ring = ring;
         self
@@ -382,9 +392,8 @@ impl Config {
     /// Rejects configurations the runtime must not start with.
     ///
     /// Called at the beginning of [crate::Runner::start], before any startup
-    /// side effect. Panics when either network timeout is zero or exceeds
-    /// [MAX_TIMER_DURATION], keeping timeout policy consistent with the
-    /// runtime's sleep clamp.
+    /// side effect. Panics when either network timeout violates policy, or
+    /// when the ring configuration cannot construct its exact derived layout.
     fn validate(&self) {
         assert!(
             !self.network_cfg.connect_timeout.is_zero(),
@@ -402,6 +411,12 @@ impl Config {
             self.network_cfg.read_write_timeout <= MAX_TIMER_DURATION,
             "read_write_timeout must be at most 30 years"
         );
+
+        let max_request_timeout = self
+            .network_cfg
+            .connect_timeout
+            .max(self.network_cfg.read_write_timeout);
+        validate_ring_config(&self.ring, max_request_timeout);
     }
 }
 
@@ -1705,9 +1720,61 @@ mod tests {
     #[test]
     fn test_config_accepts_maximum_network_timeouts() {
         Config::default()
+            .with_ring(RingConfig {
+                timeout_wheel_tick: Duration::from_secs(60 * 60),
+                ..RingConfig::default()
+            })
             .with_connect_timeout(MAX_TIMER_DURATION)
             .with_read_write_timeout(MAX_TIMER_DURATION)
             .validate();
+    }
+
+    #[test]
+    fn test_config_accepts_exact_timeout_wheel_slot_cap() {
+        // At a 5 ms tick, this horizon needs 1,048,575 ticks plus one guard
+        // tick, exactly the 1,048,576-slot wheel cap.
+        let horizon = Duration::from_millis(5_242_875);
+        Config::default()
+            .with_connect_timeout(horizon)
+            .with_read_write_timeout(horizon)
+            .validate();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "timeout wheel requires 2097152 slots, maximum is 1048576. Reduce network timeouts or increase timeout_wheel_tick"
+    )]
+    fn test_config_rejects_first_timeout_wheel_horizon_above_cap() {
+        let horizon = Duration::from_millis(5_242_875) + Duration::from_nanos(1);
+        Config::default()
+            .with_connect_timeout(horizon)
+            .with_read_write_timeout(horizon)
+            .validate();
+    }
+
+    #[test]
+    fn test_runner_rejects_timeout_wheel_before_startup_side_effects() {
+        // `/dev/null/child` would fail the startup sync with ENOTDIR if
+        // validation did not run before registry, pool, syncfs, and ring setup.
+        let horizon = Duration::from_millis(5_242_875) + Duration::from_nanos(1);
+        let cfg = Config::default()
+            .with_storage_directory("/dev/null/child")
+            .with_connect_timeout(horizon)
+            .with_read_write_timeout(horizon);
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(cfg).start(|_| async {
+                panic!("root future must not be constructed");
+            });
+        }))
+        .expect_err("invalid wheel layout must panic before startup");
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("wheel cap panic should carry a formatted message");
+        assert_eq!(
+            message,
+            "timeout wheel requires 2097152 slots, maximum is 1048576. \
+             Reduce network timeouts or increase timeout_wheel_tick"
+        );
     }
 
     #[test]

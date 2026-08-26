@@ -195,14 +195,21 @@ pub(super) enum Request {
     Sync(SyncRequest),
 }
 
-/// Terminal result of a logical request, parked in the waiter slot until the
-/// owning ticket takes it.
+/// Terminal result of a logical request.
 ///
-/// Buffers travel inside the payloads (including error variants), so ownership
-/// always returns to the caller once the kernel has retired the operation.
-/// Error payloads are boxed: [enum@Error] is large, errors are cold, and outputs
-/// move through the waiter slot on every operation, so success-path moves
-/// should not pay for error-variant width.
+/// For an ordinary op, the waiter owns this output in `Ready` until the op
+/// future consumes or drops it, so the waiter continues to occupy ring
+/// capacity. For a detached ticket, the completion arena owns the output
+/// after publication, and the driver recycles the waiter before its task
+/// waker runs.
+///
+/// Kernel-referenced resources remain in the pending request until terminal
+/// retirement. A recv or positional-read buffer then moves into this output
+/// and remains driver-owned until the result is consumed or dropped. Send and
+/// positional-write buffers are request-only, so they are dropped when the
+/// terminal output is published. Error payloads are boxed because [enum@Error]
+/// is large and errors are cold. Success-path moves should not pay for
+/// error-variant width.
 pub(super) enum Output {
     Send(Result<(), Box<Error>>),
     Recv(Result<(IoBufMut, usize), Box<(IoBufMut, Error)>>),

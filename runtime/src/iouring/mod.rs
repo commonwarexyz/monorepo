@@ -164,9 +164,9 @@
 //! abandoned operations), the runtime closes the driver and drains the loop:
 //! 1. New admissions fail with their kind-specific error
 //! 2. The drain waits for all progressing requests to complete or be cancelled
-//! 3. If `shutdown_timeout` is configured, every request still outstanding when the
-//!    budget expires is cancelled, and the drain then waits for the kernel to retire
-//!    it (buffers stay owned until then)
+//! 3. If `shutdown_timeout` is configured, it is a cancellation grace measured from
+//!    drain entry. Every request still outstanding when the grace expires is cancelled,
+//!    then the drain waits for the kernel to retire it (buffers stay owned until then)
 //! 4. Ready results owned by escaped tickets survive the drain in the completion arena:
 //!    they hold no kernel resources or waiter slots and are reclaimed when polled or dropped
 //!
@@ -233,19 +233,20 @@ pub struct RingConfig {
     /// queue entries, so the rounded size must not exceed [`MAX_RING_SIZE`].
     /// Larger rounded sizes panic during construction.
     pub size: u32,
-    /// The maximum time the io_uring event loop waits for outstanding
-    /// requests during the drain phase, after runtime teardown has closed the
-    /// driver to new admissions.
+    /// Grace before the io_uring event loop requests cancellation of every
+    /// request still outstanding during shutdown drain.
     ///
     /// If None, the event loop will wait indefinitely for in-flight requests
     /// to complete during that drain phase. In this case, the caller should be
     /// careful to ensure that submitted requests will eventually complete.
     ///
-    /// If Some, every request still outstanding when the budget expires is
-    /// cancelled. The drain then waits for the kernel to retire the cancelled
-    /// requests: a request is never dropped while the kernel may still
-    /// reference its buffers, so operations that cannot be cancelled (e.g. an
-    /// executing disk write) are awaited regardless of the budget.
+    /// If Some, the grace is measured from drain entry across completion and
+    /// orphan processing, staging, callbacks, retries, and kernel waits. Every
+    /// request still outstanding when it expires is cancelled exactly once.
+    /// The drain then waits for the kernel to retire the cancelled requests: a
+    /// request is never dropped while the kernel may still reference its
+    /// buffers, so operations that cannot be cancelled (e.g. an executing disk
+    /// write) are awaited after the grace. This is not a total shutdown bound.
     pub shutdown_timeout: Option<Duration>,
     /// Tick granularity used by the userspace timeout wheel.
     ///
