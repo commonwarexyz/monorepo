@@ -56,7 +56,7 @@ pub struct RegionResources {
     pub monitoring_sg_id: Option<String>,
 }
 
-/// Returns whether a name is non-empty and contains only ASCII letters, digits, `-`, or `_`.
+/// Returns whether `name` matches `[A-Za-z0-9_-]+`.
 fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -66,9 +66,9 @@ fn is_valid_name(name: &str) -> bool {
 
 /// Validates the deployment tag and instance names.
 ///
-/// The tag and instance names are written unescaped into file paths, YAML, shell scripts, S3
-/// keys, and AWS tags, so both must satisfy [`is_valid_name`]. Instance names must also be
-/// unique and must not be [`MONITORING_NAME`].
+/// Both are written unescaped into file paths, YAML, shell scripts, S3 keys, and AWS tags, so
+/// both must satisfy [`is_valid_name`]. Instance names must also be unique and must not be
+/// [`MONITORING_NAME`].
 fn validate_names(config: &Config) -> Result<(), Error> {
     if !is_valid_name(&config.tag) {
         return Err(Error::InvalidTag(config.tag.clone()));

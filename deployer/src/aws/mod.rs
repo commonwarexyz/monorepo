@@ -497,9 +497,9 @@ cfg_if::cfg_if! {
             Yaml(#[from] serde_yaml::Error),
             #[error("creation already attempted")]
             CreationAttempted,
-            #[error("invalid tag (must be non-empty and contain only ASCII letters, digits, `-`, or `_`): {0}")]
+            #[error("invalid tag (must match [A-Za-z0-9_-]+): {0}")]
             InvalidTag(String),
-            #[error("invalid instance name (must be non-empty, not `monitoring`, and contain only ASCII letters, digits, `-`, or `_`): {0}")]
+            #[error("invalid instance name (must match [A-Za-z0-9_-]+ and not be `monitoring`): {0}")]
             InvalidInstanceName(String),
             #[error("invalid storage class for {target}: {storage_class}")]
             InvalidStorageClass {
@@ -657,8 +657,7 @@ pub struct PortConfig {
 pub struct InstanceConfig {
     /// Name of the instance.
     ///
-    /// Must be unique, non-empty, not `monitoring`, and contain only ASCII letters, digits,
-    /// `-`, or `_`.
+    /// Must be unique, must not be `monitoring`, and must match `[A-Za-z0-9_-]+`.
     pub name: String,
 
     /// AWS region where the instance is deployed
@@ -728,7 +727,7 @@ pub struct MonitoringConfig {
 pub struct Config {
     /// Unique tag for the deployment.
     ///
-    /// Must be non-empty and contain only ASCII letters, digits, `-`, or `_`.
+    /// Must match `[A-Za-z0-9_-]+`.
     pub tag: String,
 
     /// Monitoring instance configuration
