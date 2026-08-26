@@ -416,7 +416,7 @@ impl<
     ///
     /// Once recovery starts, it consumes the verified votes. Do not cancel unless the round will
     /// also be discarded.
-    pub(super) async fn try_construct_certificate(
+    pub async fn try_construct_certificate(
         &mut self,
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
