@@ -512,6 +512,17 @@ impl TicketCompletions {
         }
     }
 
+    /// Return the waiter linked from a pending completion, or `None` when its
+    /// output is already ready.
+    ///
+    /// Panics if `completion_id` is stale or untracked.
+    pub fn pending_waiter(&self, completion_id: CompletionId) -> Option<WaiterId> {
+        match &self.entry(completion_id, "pending_waiter").completion {
+            Completion::Pending { waiter_id, .. } => Some(*waiter_id),
+            Completion::Ready(_) => None,
+        }
+    }
+
     /// Return the number of terminal outputs retained by tickets.
     pub const fn ready(&self) -> usize {
         self.ready
@@ -1079,14 +1090,59 @@ impl Waiters {
         let _ = self.take(index);
     }
 
+    /// Classify how a waiter's slot will wind down when its observer is dropped.
+    ///
+    /// Panics if the waiter is not tracked, the id is stale, or its observer
+    /// was already dropped.
+    pub fn classify_orphan(&self, waiter_id: WaiterId) -> DropOutcome {
+        let slot = self
+            .entries
+            .get(waiter_id.index() as usize)
+            .and_then(Option::as_ref)
+            .expect("classify_orphan called for untracked waiter");
+        assert_eq!(
+            slot.id, waiter_id,
+            "classify_orphan called with stale waiter id"
+        );
+        assert!(
+            !matches!(slot.observer, Observer::Orphaned),
+            "classify_orphan called for orphaned waiter"
+        );
+
+        let Lifecycle::Pending(request) = &slot.lifecycle else {
+            assert!(
+                matches!(slot.lifecycle, Lifecycle::Ready(_)),
+                "ticket-terminal waiter escaped driver commit"
+            );
+            return DropOutcome::Freed;
+        };
+        if !request.orphan_stops_progress() {
+            return DropOutcome::Detached;
+        }
+        match slot.state {
+            WaiterState::Active { target_tick } => DropOutcome::Cancel {
+                needs_sqe: slot.in_flight,
+                target_tick,
+            },
+            WaiterState::CancelRequested { .. } => DropOutcome::Cancel {
+                needs_sqe: false,
+                target_tick: None,
+            },
+        }
+    }
+
     /// Mark a waiter's observer as dropped and resolve how its slot winds down.
     ///
     /// Parked results are dropped and their slot freed immediately. Requests
     /// whose kind stops progressing without an observer transition to
     /// cancellation. Storage writes and syncs detach and keep running.
     ///
+    /// Returns the stored ordinary-op waker, if any, so its destruction can
+    /// run only after the caller releases the op-state borrow.
+    ///
     /// Panics if the waiter is not tracked or the id is stale.
-    pub fn mark_orphaned(&mut self, waiter_id: WaiterId) -> DropOutcome {
+    pub fn mark_orphaned(&mut self, waiter_id: WaiterId) -> (DropOutcome, Option<Waker>) {
+        let outcome = self.classify_orphan(waiter_id);
         let index = waiter_id.index() as usize;
         let slot = self
             .entries
@@ -1098,39 +1154,29 @@ impl Waiters {
             "mark_orphaned called with stale waiter id"
         );
 
-        let Lifecycle::Pending(request) = &slot.lifecycle else {
-            assert!(
-                matches!(slot.lifecycle, Lifecycle::Ready(_)),
-                "ticket-terminal waiter escaped driver commit"
-            );
-            let _ = self.take(index);
-            return DropOutcome::Freed;
+        let waker = match &mut slot.observer {
+            Observer::Op(waker) => waker.take(),
+            Observer::Ticket(_) => None,
+            Observer::Orphaned => panic!("mark_orphaned called for orphaned waiter"),
         };
 
+        if matches!(&outcome, DropOutcome::Freed) {
+            slot.observer = Observer::Orphaned;
+            let _ = self.take(index);
+            return (DropOutcome::Freed, waker);
+        }
+
         slot.observer = Observer::Orphaned;
-        if !request.orphan_stops_progress() {
-            return DropOutcome::Detached;
+        if matches!(&outcome, DropOutcome::Cancel { .. })
+            && matches!(slot.state, WaiterState::Active { .. })
+        {
+            // The ticket is gone, so the parked result (and its reason) is
+            // never observed.
+            slot.state = WaiterState::CancelRequested {
+                reason: CancelReason::Deadline,
+            };
         }
-        match slot.state {
-            WaiterState::Active { target_tick } => {
-                // The ticket is gone, so the parked result (and its reason)
-                // is never observed.
-                slot.state = WaiterState::CancelRequested {
-                    reason: CancelReason::Deadline,
-                };
-                DropOutcome::Cancel {
-                    needs_sqe: slot.in_flight,
-                    target_tick,
-                }
-            }
-            // Cancellation was already requested (e.g. by timeout expiry,
-            // which released deadline accounting), so the existing wind-down
-            // path retires the slot.
-            WaiterState::CancelRequested { .. } => DropOutcome::Cancel {
-                needs_sqe: false,
-                target_tick: None,
-            },
-        }
+        (outcome, waker)
     }
 
     /// Return whether a waiter currently has an operation SQE in flight.
@@ -1404,7 +1450,7 @@ mod tests {
             } if pending_waiter == waiter_id
         ));
         assert!(matches!(
-            waiters.mark_orphaned(waiter_id),
+            waiters.mark_orphaned(waiter_id).0,
             DropOutcome::Detached
         ));
         assert_eq!(completions.ready(), 0);
@@ -1735,7 +1781,7 @@ mod tests {
             let mut waiters = Waiters::new(1);
             let waiter_id = insert(&mut waiters, request, Some(tick));
             assert!(matches!(
-                waiters.mark_orphaned(waiter_id),
+                waiters.mark_orphaned(waiter_id).0,
                 DropOutcome::Cancel {
                     needs_sqe: false,
                     target_tick: Some(_),
@@ -1770,7 +1816,7 @@ mod tests {
             let waiter_id = insert(&mut waiters, request, Some(tick));
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
             assert!(matches!(
-                waiters.mark_orphaned(waiter_id),
+                waiters.mark_orphaned(waiter_id).0,
                 DropOutcome::Cancel {
                     needs_sqe: true,
                     ..
@@ -1799,7 +1845,7 @@ mod tests {
         let waiter_id = insert(&mut waiters, make_sync_request(), None);
         assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(matches!(
-            waiters.mark_orphaned(waiter_id),
+            waiters.mark_orphaned(waiter_id).0,
             DropOutcome::Detached
         ));
 
@@ -1825,7 +1871,7 @@ mod tests {
         let waiter_id = insert(&mut waiters, make_write_at_request(), None);
         assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(matches!(
-            waiters.mark_orphaned(waiter_id),
+            waiters.mark_orphaned(waiter_id).0,
             DropOutcome::Detached
         ));
 
@@ -1863,7 +1909,7 @@ mod tests {
         assert_eq!(waiters.len(), 1);
 
         assert!(matches!(
-            waiters.mark_orphaned(waiter_id),
+            waiters.mark_orphaned(waiter_id).0,
             DropOutcome::Freed
         ));
         assert!(waiters.is_empty());

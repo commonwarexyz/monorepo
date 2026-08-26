@@ -207,11 +207,7 @@ impl IoUringLoop {
                     handle::wind_down_orphan(ops, id, &mut self.pending_waker_actions);
                 }
                 handle::Orphan::Completion(id) => {
-                    let mut capacity_actions = handle::CapacityActions::new();
-                    let waker = handle::wind_down_ticket(ops, id, &mut capacity_actions);
-                    self.pending_waker_actions
-                        .extend(waker.map(handle::WakerAction::Drop));
-                    self.pending_waker_actions.extend(capacity_actions);
+                    handle::wind_down_ticket(ops, id, &mut self.pending_waker_actions);
                 }
                 handle::Orphan::Capacity(slot) => ops.capacity.cancel(
                     slot,
@@ -2382,6 +2378,197 @@ mod tests {
                 &PANICKING_DROP_WAKER_VTABLE,
             ))
         }
+    }
+
+    #[test]
+    fn test_pending_op_waker_drop_panics_after_owner_orphan_commit() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+
+        let waker = panicking_drop_waker();
+        {
+            let mut cx = Context::from_waker(&waker);
+            assert!(recv.as_mut().poll(&mut cx).is_pending());
+        }
+        // The waiter owns a clone. Forget the original so only orphan
+        // wind-down exercises the intentional RawWaker drop panic.
+        std::mem::forget(waker);
+
+        // Fill capacity before dropping the admitted op. Its reservation can
+        // be granted only after the committed cancel state retires the waiter.
+        let (waiting_left, _waiting_right) = UnixStream::pair().unwrap();
+        let mut waiting = Box::pin(handle.recv(
+            Arc::new(waiting_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        let flag = Arc::new(WokenFlag(AtomicBool::new(false)));
+        let flag_waker = arc_waker(Arc::clone(&flag));
+        let mut flag_cx = Context::from_waker(&flag_waker);
+        assert!(waiting.as_mut().poll(&mut flag_cx).is_pending());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(recv)))
+            .expect_err("stored op waker drop should panic");
+        assert_eq!(
+            panic.downcast_ref::<&'static str>(),
+            Some(&"intentional RawWaker drop panic")
+        );
+        harness.handle.with(|ops| {
+            assert_eq!(ops.waiters.len(), 1);
+            assert_eq!(ops.waiters.pending(), 1);
+            assert_eq!(ops.backlog.len(), 1);
+            assert!(ops.pending_cancels.is_empty());
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 1);
+        });
+
+        // The next turn observes the committed CancelRequested state, frees
+        // the waiter, and grants its capacity without touching the old waker.
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                harness.driver().turn();
+            }))
+            .is_ok()
+        );
+        assert_eq!(harness.tracked(), 0);
+        assert!(flag.0.load(Ordering::Acquire));
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+
+        // Releasing the granted successor proves the loop remains usable and
+        // does not encounter a second drop of the adversarial waker.
+        drop(waiting);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 0);
+            assert_eq!(ops.capacity.reserved(), 0);
+        });
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                harness.driver().turn();
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_foreign_op_waker_drop_panics_after_mailbox_orphan_commit() {
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+
+        let waker = panicking_drop_waker();
+        {
+            let mut cx = Context::from_waker(&waker);
+            assert!(recv.as_mut().poll(&mut cx).is_pending());
+        }
+        std::mem::forget(waker);
+        harness.driver().turn();
+        assert_eq!(harness.pending(), 1);
+
+        let (waiting_left, _waiting_right) = UnixStream::pair().unwrap();
+        let mut waiting = Box::pin(handle.recv(
+            Arc::new(waiting_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        let flag = Arc::new(WokenFlag(AtomicBool::new(false)));
+        let flag_waker = arc_waker(Arc::clone(&flag));
+        let mut flag_cx = Context::from_waker(&flag_waker);
+        assert!(waiting.as_mut().poll(&mut flag_cx).is_pending());
+
+        // The foreign destructor only publishes the waiter ID. Owner-side
+        // mailbox processing commits cancellation before dropping its waker.
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(recv)).join().unwrap();
+        });
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let driver = harness.driver();
+            let owner = driver.inner.handle.clone();
+            owner.with(|ops| driver.inner.process_orphans(ops));
+            driver.inner.flush_wakers();
+        }))
+        .expect_err("mailbox orphan waker drop should panic");
+        assert_eq!(
+            panic.downcast_ref::<&'static str>(),
+            Some(&"intentional RawWaker drop panic")
+        );
+        harness.handle.with(|ops| {
+            assert_eq!(ops.waiters.len(), 1);
+            assert_eq!(ops.waiters.pending(), 1);
+            assert_eq!(ops.pending_cancels.len(), 1);
+            assert_eq!(ops.released_deadlines.len(), 1);
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 1);
+        });
+
+        // Later turns release deadline accounting, submit the recorded
+        // cancel, retire the waiter, and grant the waiting task exactly once.
+        let start = Instant::now();
+        while harness.tracked() != 0 {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    harness.driver().turn();
+                    if harness.tracked() != 0 {
+                        harness.driver().park(Some(Duration::from_millis(10)));
+                    }
+                }))
+                .is_ok()
+            );
+        }
+        assert!(flag.0.load(Ordering::Acquire));
+        assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+        harness.handle.with(|ops| {
+            assert!(ops.pending_cancels.is_empty());
+            assert!(ops.released_deadlines.is_empty());
+            assert_eq!(ops.capacity.registered(), 1);
+            assert_eq!(ops.capacity.queued(), 0);
+            assert_eq!(ops.capacity.reserved(), 1);
+        });
+
+        drop(waiting);
+        harness.handle.with(|ops| {
+            assert_eq!(ops.capacity.registered(), 0);
+            assert_eq!(ops.capacity.reserved(), 0);
+        });
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                harness.driver().turn();
+            }))
+            .is_ok()
+        );
     }
 
     #[test]

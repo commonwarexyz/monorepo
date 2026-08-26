@@ -1143,9 +1143,62 @@ fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_
         .map_or(Poll::Pending, Poll::Ready)
 }
 
-/// Apply the orphan wind-down for `id` on the op table.
-pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl CapacityActionSink) {
-    match ops.waiters.mark_orphaned(id) {
+/// Reserve every destination an orphan transition can append to after it
+/// extracts an externally controlled waker.
+fn reserve_orphan_wind_down(
+    ops: &mut Ops,
+    outcome: &DropOutcome,
+    actions: &mut impl CapacityActionSink,
+) {
+    let capacity_actions = if matches!(outcome, DropOutcome::Freed) {
+        // A freed waiter can inspect every queued registration if each
+        // preceding RawWaker clone panics. Each failure records a wake and a
+        // deferred panic before reconciliation continues.
+        ops.capacity
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.state, CapacityState::Queued { .. }))
+            .count()
+            .checked_mul(2)
+            .expect("capacity action reservation overflowed")
+    } else {
+        0
+    };
+    actions.reserve(
+        capacity_actions
+            .checked_add(1)
+            .expect("orphan action reservation overflowed"),
+    );
+    if let DropOutcome::Cancel {
+        needs_sqe,
+        target_tick,
+    } = outcome
+    {
+        if *needs_sqe {
+            ops.pending_cancels.reserve(1);
+        }
+        if target_tick.is_some() {
+            ops.released_deadlines.reserve(1);
+        }
+    }
+}
+
+/// Apply a pre-reserved orphan wind-down for `id` on the op table.
+fn wind_down_orphan_prepared(
+    ops: &mut Ops,
+    id: WaiterId,
+    completion_waker: Option<Waker>,
+    actions: &mut impl CapacityActionSink,
+) {
+    let (outcome, op_waker) = ops.waiters.mark_orphaned(id);
+    if let Some(waker) = completion_waker {
+        actions.push(WakerAction::Drop(waker));
+    }
+    if let Some(waker) = op_waker {
+        actions.push(WakerAction::Drop(waker));
+    }
+
+    match outcome {
         // A parked result was dropped, freeing a slot.
         DropOutcome::Freed => ops.capacity.reconcile(ops.waiters.free_len(), actions),
         DropOutcome::Cancel {
@@ -1163,6 +1216,13 @@ pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl C
     }
 }
 
+/// Apply the orphan wind-down for `id` on the op table.
+pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl CapacityActionSink) {
+    let outcome = ops.waiters.classify_orphan(id);
+    reserve_orphan_wind_down(ops, &outcome, actions);
+    wind_down_orphan_prepared(ops, id, None, actions);
+}
+
 /// Apply detached-ticket wind-down after generation-validating its completion
 /// ID. Pending entries yield their active waiter for request-kind-specific
 /// cancellation or detach. Ready entries drop only their output because the
@@ -1171,13 +1231,25 @@ pub(super) fn wind_down_ticket(
     ops: &mut Ops,
     id: CompletionId,
     actions: &mut impl CapacityActionSink,
-) -> Option<Waker> {
+) {
+    let Some(waiter_id) = ops.completions.pending_waiter(id) else {
+        assert!(matches!(
+            ops.completions.mark_orphaned(id),
+            CompletionDropOutcome::Ready
+        ));
+        return;
+    };
+    let outcome = ops.waiters.classify_orphan(waiter_id);
+    reserve_orphan_wind_down(ops, &outcome, actions);
     match ops.completions.mark_orphaned(id) {
-        CompletionDropOutcome::Pending { waiter_id, waker } => {
-            wind_down_orphan(ops, waiter_id, actions);
-            waker
+        CompletionDropOutcome::Pending {
+            waiter_id: removed_waiter,
+            waker,
+        } => {
+            assert_eq!(removed_waiter, waiter_id, "completion waiter changed");
+            wind_down_orphan_prepared(ops, removed_waiter, waker, actions);
         }
-        CompletionDropOutcome::Ready => None,
+        CompletionDropOutcome::Ready => unreachable!("pending completion became ready"),
     }
 }
 
@@ -1201,15 +1273,14 @@ fn orphan_waiter(handle: &Handle, id: WaiterId) {
 
 /// Wind down a detached ticket using only its completion ID.
 fn orphan_ticket(handle: &Handle, id: CompletionId) {
-    let Some((waker, actions)) = handle.try_with(|ops| {
+    let Some(actions) = handle.try_with(|ops| {
         let mut actions = CapacityActions::new();
-        let waker = wind_down_ticket(ops, id, &mut actions);
-        (waker, actions)
+        wind_down_ticket(ops, id, &mut actions);
+        actions
     }) else {
         handle.orphans.push(Orphan::Completion(id));
         return;
     };
-    let actions = waker.map(WakerAction::Drop).into_iter().chain(actions);
     wake_batch(actions);
 }
 
@@ -1974,7 +2045,7 @@ mod tests {
 
         let actions = handle.with(|ops| {
             assert!(matches!(
-                ops.waiters.mark_orphaned(blocker),
+                ops.waiters.mark_orphaned(blocker).0,
                 DropOutcome::Cancel {
                     needs_sqe: false,
                     ..
@@ -2028,6 +2099,36 @@ mod tests {
             ));
             assert_eq!(ops.waiters.len(), 0);
         });
+    }
+
+    #[test]
+    fn test_pending_orphan_with_queued_successor_keeps_actions_inline() {
+        let handle = Handle::new(1, RingWaker::new().unwrap());
+        let blocker = handle.with(|ops| {
+            ops.waiters
+                .insert(recv_request(), futures::task::noop_waker())
+        });
+        let mut successor = Op::new(&handle, recv_request());
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut successor).poll(&mut cx).is_pending());
+
+        let actions = handle.with(|ops| {
+            assert_eq!(ops.capacity.queued(), 1);
+            let mut actions = CapacityActions::new();
+            wind_down_orphan(ops, blocker, &mut actions);
+
+            assert_eq!(actions.inline_len, 1);
+            assert!(actions.overflow.is_empty());
+            assert_eq!(actions.overflow.capacity(), 0);
+            assert_eq!(ops.capacity.queued(), 1);
+            assert_eq!(ops.capacity.reserved(), 0);
+            assert!(ops.pending_cancels.is_empty());
+            assert!(ops.released_deadlines.is_empty());
+            actions
+        });
+        wake_batch(actions);
+        drop(successor);
     }
 
     #[test]
