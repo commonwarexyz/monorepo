@@ -49,33 +49,6 @@ fn validated_ring_size(size: u32) -> u32 {
 /// Packed `io_uring` `user_data` value.
 type UserData = u64;
 
-/// Tracks io_uring metrics.
-#[derive(Debug)]
-pub(crate) struct Metrics {
-    /// Number of logical requests retained by the driver. Internal SQEs (the
-    /// wake poll and async cancels) are not counted. Tracked waiters and Ready
-    /// detached ticket completions count once each.
-    /// This is updated in the main loop and at shutdown drain exit, so it may
-    /// temporarily vary from the exact retained-operation count between update
-    /// points.
-    pending_operations: PendingOperations,
-}
-
-impl Metrics {
-    pub(crate) fn new(registry: &mut impl Register) -> Self {
-        Self {
-            pending_operations: PendingOperations {
-                gauge: registry.register(
-                    "pending_operations",
-                    "Number of retained logical operations in the io_uring loop",
-                    raw::Gauge::default(),
-                ),
-                reported: 0,
-            },
-        }
-    }
-}
-
 /// One driver's contribution to the runtime-wide pending-operations gauge.
 ///
 /// Every worker's driver registers the same gauge (the registry dedups by
@@ -90,6 +63,17 @@ struct PendingOperations {
 }
 
 impl PendingOperations {
+    fn new(registry: &mut impl Register) -> Self {
+        Self {
+            gauge: registry.register(
+                "pending_operations",
+                "Number of retained logical operations in the io_uring loop",
+                raw::Gauge::default(),
+            ),
+            reported: 0,
+        }
+    }
+
     /// Fold this driver's current pending count into the shared gauge.
     fn report(&mut self, pending: usize) {
         let pending = pending as GaugeValue;
@@ -114,7 +98,13 @@ impl Drop for PendingOperations {
 /// io_uring event loop state.
 pub(crate) struct IoUringLoop {
     cfg: RingConfig,
-    metrics: Metrics,
+    /// Number of logical requests retained by the driver. Internal SQEs (the
+    /// wake poll and async cancels) are not counted. Tracked waiters and Ready
+    /// detached ticket completions count once each.
+    /// This is updated in the main loop and at shutdown drain exit, so it may
+    /// temporarily vary from the exact retained-operation count between update
+    /// points.
+    pending_operations: PendingOperations,
     /// Shared op state, also reachable from the front-ends' op futures.
     handle: Handle,
     timeout_wheel: TimeoutWheel,
@@ -124,46 +114,6 @@ pub(crate) struct IoUringLoop {
     /// Scratch list of state panics, task-waker drops, and callbacks collected
     /// under the owner-state borrow and handled after it is released.
     pending_waker_actions: Vec<handle::WakerAction>,
-}
-
-/// Outcome of one `fill_submission_queue()` staging pass.
-///
-/// This tells the outer loop whether staging drained all currently visible
-/// work, hit submission-queue pressure, or hit waiter-capacity pressure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FillResult {
-    /// Staging drained all currently visible work without hitting a hard limit.
-    Drained,
-    /// The submission queue filled before waiter capacity was exhausted.
-    AtSubmissionQueueCapacity,
-    /// The waiter table filled, regardless of whether the submission queue also filled.
-    AtWaiterCapacity,
-}
-
-impl FillResult {
-    /// Derive the staging outcome from the current fill state.
-    ///
-    /// Submission-queue saturation dominates while stageable work remains:
-    /// the loop must flush and restage or admitted requests never reach the
-    /// kernel (ops are admitted into the slab by their futures before any
-    /// staging pass, so a full slab does not imply the kernel has work).
-    /// Otherwise waiter saturation is reported so the park path knows
-    /// completions must free capacity before admissions resume.
-    #[inline]
-    fn from_fill_state(ops: &Ops, submission_queue: &SubmissionQueue<'_>) -> Self {
-        if submission_queue.is_full()
-            && (!ops.backlog.is_empty() || !ops.pending_cancels.is_empty())
-        {
-            return Self::AtSubmissionQueueCapacity;
-        }
-        if ops.waiters.is_full() {
-            Self::AtWaiterCapacity
-        } else if submission_queue.is_full() {
-            Self::AtSubmissionQueueCapacity
-        } else {
-            Self::Drained
-        }
-    }
 }
 
 impl IoUringLoop {
@@ -203,7 +153,7 @@ impl IoUringLoop {
         // table whose capacity is proportional to the effective ring size.
         let ring = new_ring(&cfg)?;
         let size = cfg.size as usize;
-        let metrics = Metrics::new(registry);
+        let pending_operations = PendingOperations::new(registry);
         let waker = Waker::new().expect("unable to create wake eventfd");
         let timeout_wheel = TimeoutWheel::new(
             cfg.max_request_timeout,
@@ -218,7 +168,7 @@ impl IoUringLoop {
             handle.clone(),
             Self {
                 cfg,
-                metrics,
+                pending_operations,
                 handle,
                 timeout_wheel,
                 idle_spinner,
@@ -282,7 +232,7 @@ impl IoUringLoop {
     pub(crate) fn turn(&mut self, ring: &mut IoUring) {
         let handle = self.handle.clone();
         loop {
-            let (fill_result, kernel_idle) = handle.with(|ops| {
+            let (needs_flush, kernel_idle) = handle.with(|ops| {
                 // Wind down foreign-thread drops first: freed slots and
                 // cancel SQEs from the mailbox take effect this turn.
                 self.process_orphans(ops);
@@ -297,26 +247,21 @@ impl IoUringLoop {
                 self.advance_timeouts(ops);
 
                 // Stage as much admitted work as capacity allows.
-                let fill_result = self.fill_submission_queue(ops, ring);
+                let needs_flush = self.fill_submission_queue(ops, ring);
 
                 // Update pending operations metric.
-                self.metrics
-                    .pending_operations
-                    .report(ops.operation_count());
+                self.pending_operations.report(ops.operation_count());
 
-                (fill_result, ops.waiters.pending() == 0)
+                (needs_flush, ops.waiters.pending() == 0)
             });
 
             // Wake tasks whose results were parked, outside the state borrow.
             self.flush_wakers();
 
-            match fill_result {
-                FillResult::AtSubmissionQueueCapacity => {
-                    // Flush the staged batch into the kernel and stage more work.
-                    self.submit(ring).expect("unable to submit to ring");
-                    continue;
-                }
-                FillResult::AtWaiterCapacity | FillResult::Drained => {}
+            if needs_flush {
+                // Flush the staged batch into the kernel and stage more work.
+                self.submit(ring).expect("unable to submit to ring");
+                continue;
             }
 
             // Without progressing waiters there is nothing to flush or reap:
@@ -357,13 +302,8 @@ impl IoUringLoop {
             (wheel, limit) => wheel.or(limit),
         };
 
-        let (fully_idle, waiters_full) = self.handle.with(|ops| {
-            (
-                ops.waiters.pending() == 0
-                    && ops.backlog.is_empty()
-                    && ops.pending_cancels.is_empty(),
-                ops.waiters.is_full(),
-            )
+        let fully_idle = self.handle.with(|ops| {
+            ops.waiters.pending() == 0 && ops.backlog.is_empty() && ops.pending_cancels.is_empty()
         });
 
         // If the ring is truly idle and no deadline is pending, avoid
@@ -383,18 +323,10 @@ impl IoUringLoop {
             return;
         }
 
-        // Otherwise, arm the eventfd-backed blocking path. Under
-        // waiter-capacity pressure, admissions cannot proceed until
-        // completions free capacity, so block unless an out-of-band wake
-        // (e.g. a task wake) is latched. Otherwise block only if the post-arm
-        // snapshot still looks idle (no latched wake).
+        // Otherwise, arm the eventfd-backed blocking path and block only if no
+        // out-of-band wake (e.g. a task wake) is latched.
         let arm = self.waker.arm();
-        let may_block = if waiters_full {
-            !arm.wake_latched()
-        } else {
-            arm.still_idle()
-        };
-        if may_block {
+        if !arm.wake_latched() {
             self.submit_and_wait(ring, 1, deadline)
                 .expect("unable to submit to ring");
         }
@@ -485,8 +417,11 @@ impl IoUringLoop {
     /// In one pass, this may rearm wake polling, stage cancellations, and
     /// stage admitted requests.
     ///
-    /// Returns why staging stopped.
-    fn fill_submission_queue(&mut self, ops: &mut Ops, ring: &mut IoUring) -> FillResult {
+    /// Returns whether the turn must flush without waiting and stage another
+    /// batch before it can reap completions. When the last available waiter
+    /// exactly fills the SQ, the caller instead combines that flush with its
+    /// zero-timeout completion reap.
+    fn fill_submission_queue(&mut self, ops: &mut Ops, ring: &mut IoUring) -> bool {
         let mut submission_queue = ring.submission();
 
         // Reinstall wake poll only when a prior wake CQE indicated multishot
@@ -506,22 +441,25 @@ impl IoUringLoop {
                 // `submit_and_wait` would sleep without the eventfd wake path
                 // being live. Flush staged SQEs first, then retry rearm in the
                 // next pass.
-                return FillResult::AtSubmissionQueueCapacity;
+                return true;
             }
             self.wake_rearm_needed = false;
         }
 
         // Stage pending cancel SQEs first so timed-out requests are canceled promptly.
         if self.stage_cancellations(ops, &mut submission_queue) {
-            return FillResult::from_fill_state(ops, &submission_queue);
+            return true;
         }
 
         // Stage admitted requests in FIFO order.
-        if self.stage_backlog(ops, &mut submission_queue) {
-            return FillResult::from_fill_state(ops, &submission_queue);
-        }
+        let backlog_remains = self.stage_backlog(ops, &mut submission_queue);
 
-        FillResult::from_fill_state(ops, &submission_queue)
+        // With no free waiter and no work left to stage, the zero-timeout
+        // submit-and-wait below can flush this exact batch and reap in one
+        // kernel entry. Every other full-SQ state needs an immediate flush so
+        // staging can continue or a waiter-less internal SQE reaches the
+        // kernel before the turn returns.
+        submission_queue.is_full() && (backlog_remains || !ops.waiters.is_full())
     }
 
     /// Stage queued cancellation SQEs from `pending_cancels` in FIFO order.
@@ -832,9 +770,7 @@ impl IoUringLoop {
 
         let handle = self.handle.clone();
         handle.with(|ops| {
-            self.metrics
-                .pending_operations
-                .report(ops.operation_count());
+            self.pending_operations.report(ops.operation_count());
         });
     }
 
@@ -848,22 +784,17 @@ impl IoUringLoop {
     /// (available since kernel 5.11+). Without a timeout, it falls back to the
     /// standard `submit_and_wait`.
     ///
-    /// Transient `io_uring_enter(2)` errors (`EINTR`, `EAGAIN`, `EBUSY`) return
-    /// `Ok(true)` so the caller can drain CQEs and re-enter through its event
+    /// Timeouts and transient `io_uring_enter(2)` errors (`EINTR`, `EAGAIN`,
+    /// `EBUSY`) return `Ok(())` so the caller can drain CQEs and re-enter through its event
     /// loop.
-    ///
-    /// # Returns
-    /// * `Ok(true)` - Completions may be available (caller should drain CQEs)
-    /// * `Ok(false)` - Timed out waiting for completions (only when timeout is set)
-    /// * `Err(e)` - An unrecoverable error occurred during submission or waiting
     fn submit_and_wait(
         &self,
         ring: &mut IoUring,
         want: usize,
         timeout: Option<Duration>,
-    ) -> Result<bool, std::io::Error> {
+    ) -> Result<(), std::io::Error> {
         let result = timeout.map_or_else(
-            || ring.submit_and_wait(want).map(|_| true),
+            || ring.submit_and_wait(want).map(|_| ()),
             |timeout| {
                 let ts = Timespec::new()
                     .sec(timeout.as_secs())
@@ -872,19 +803,19 @@ impl IoUringLoop {
                 let args = SubmitArgs::new().timespec(&ts);
 
                 match ring.submitter().submit_with_args(want, &args) {
-                    Ok(_) => Ok(true),
-                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(false),
+                    Ok(_) => Ok(()),
+                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(()),
                     Err(err) => Err(err),
                 }
             },
         );
 
         match result {
-            Ok(v) => Ok(v),
+            Ok(()) => Ok(()),
             Err(err) => match err.raw_os_error() {
                 // Transient errors: return so the caller can drain
                 // CQEs and re-enter through its event loop.
-                Some(libc::EINTR | libc::EAGAIN | libc::EBUSY) => Ok(true),
+                Some(libc::EINTR | libc::EAGAIN | libc::EBUSY) => Ok(()),
                 _ => Err(err),
             },
         }
@@ -893,7 +824,7 @@ impl IoUringLoop {
     /// Submit pending SQEs without waiting for a completion.
     #[inline]
     fn submit(&self, ring: &mut IoUring) -> Result<(), std::io::Error> {
-        self.submit_and_wait(ring, 0, None).map(|_| ())
+        self.submit_and_wait(ring, 0, None)
     }
 }
 
@@ -3204,12 +3135,9 @@ mod tests {
     }
 
     #[test]
-    fn test_fill_reports_sq_pressure_over_waiter_pressure() {
-        // Verify the staging-pressure dominance rule directly: a full SQ with
-        // backlog work remaining must report submission-queue pressure (so the
-        // turn loop flushes and restages) even when the slab is also full,
-        // and only a full slab with nothing left to stage reports waiter
-        // pressure.
+    fn test_fill_requires_flush_only_for_sq_pressure() {
+        // A full SQ with backlog work remaining must request a flush even when
+        // the slab is also full.
         let mut harness = TestLoop::new(RingConfig {
             size: 2,
             ..Default::default()
@@ -3242,16 +3170,16 @@ mod tests {
         // (also true) waiter-capacity pressure.
         let driver_state = harness.handle.clone();
         let driver = harness.driver();
-        let fill =
+        let needs_flush =
             driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
-        assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
+        assert!(needs_flush);
 
-        // After flushing, the second op stages and nothing remains queued, so
-        // the full slab now reports waiter pressure.
+        // After flushing, the second op stages without filling the SQ, so no
+        // further flush is needed even though the slab remains full.
         driver.inner.submit(&mut driver.ring).unwrap();
-        let fill =
+        let needs_flush =
             driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
-        assert_eq!(fill, FillResult::AtWaiterCapacity);
+        assert!(!needs_flush);
 
         drop(recv_a);
         drop(recv_b);
@@ -3286,15 +3214,21 @@ mod tests {
             assert!(submission_queue.is_full());
         });
 
-        let fill =
+        let needs_flush =
             driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
-        assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
+        assert!(needs_flush);
         assert!(driver.inner.wake_rearm_needed);
 
         driver.inner.submit(&mut driver.ring).unwrap();
-        let fill =
-            driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
-        assert_eq!(fill, FillResult::AtWaiterCapacity);
+        let needs_flush = driver_state.with(|ops| {
+            let needs_flush = driver.inner.fill_submission_queue(ops, &mut driver.ring);
+            assert!(ops.waiters.is_full());
+            assert!(ops.backlog.is_empty());
+            needs_flush
+        });
+        // The wake poll exactly fills the SQ while the only waiter is in
+        // flight. The turn can flush and reap it in one submit-and-wait call.
+        assert!(!needs_flush);
         assert!(!driver.inner.wake_rearm_needed);
 
         drop(recv);
@@ -3323,13 +3257,13 @@ mod tests {
         // waiter table or leaving more work queued.
         let driver_state = harness.handle.clone();
         let driver = harness.driver();
-        let fill = driver_state.with(|ops| {
-            let fill = driver.inner.fill_submission_queue(ops, &mut driver.ring);
+        let needs_flush = driver_state.with(|ops| {
+            let needs_flush = driver.inner.fill_submission_queue(ops, &mut driver.ring);
             assert!(ops.backlog.is_empty());
             assert!(!ops.waiters.is_full());
-            fill
+            needs_flush
         });
-        assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
+        assert!(needs_flush);
 
         drop(recv);
     }
@@ -3378,15 +3312,15 @@ mod tests {
         driver.inner.submit(&mut driver.ring).unwrap();
         driver_state.with(|ops| driver.inner.cancel_all(ops));
 
-        let fill =
+        let needs_flush =
             driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
-        assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
+        assert!(needs_flush);
         driver_state.with(|ops| assert_eq!(ops.pending_cancels.len(), 1));
 
         driver.inner.submit(&mut driver.ring).unwrap();
-        let fill =
+        let needs_flush =
             driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
-        assert_eq!(fill, FillResult::AtWaiterCapacity);
+        assert!(!needs_flush);
         driver_state.with(|ops| assert!(ops.pending_cancels.is_empty()));
         driver.inner.submit(&mut driver.ring).unwrap();
 
@@ -3465,9 +3399,7 @@ mod tests {
             }
 
             let mut submission_queue = driver.ring.submission();
-            assert!(!driver
-                .inner
-                .stage_cancellations(ops, &mut submission_queue));
+            assert!(!driver.inner.stage_cancellations(ops, &mut submission_queue));
             assert!(ops.pending_cancels.is_empty());
             assert!(submission_queue.is_empty());
             waker

@@ -45,9 +45,12 @@ impl Cache {
         }
     }
 
-    /// Record that cache bypass is unsupported and use normal caching when
-    /// retried.
-    fn fallback(&mut self) -> bool {
+    /// Fall back to normal caching when `code` reports that cache bypass is
+    /// unsupported.
+    fn fallback_if_unsupported(&mut self, code: i32) -> bool {
+        if code != -libc::EOPNOTSUPP {
+            return false;
+        }
         match std::mem::replace(self, Self::Enabled) {
             Self::Disabled(supported) => {
                 supported.store(false, Ordering::Relaxed);
@@ -549,11 +552,6 @@ impl ReadAtRequest {
         self.cache.rw_flag()
     }
 
-    /// Fall back to normal caching when the cache-bypass hint is unsupported.
-    fn retry_cached(&mut self, code: i32) -> bool {
-        code == -libc::EOPNOTSUPP && self.cache.fallback()
-    }
-
     /// Build the next positioned read SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
@@ -583,7 +581,7 @@ impl ReadAtRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Error(code) if self.retry_cached(code) => None,
+            CqeResult::Error(code) if self.cache.fallback_if_unsupported(code) => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
             // does, so operators can distinguish failure causes. A shutdown
             // cancellation is not a kernel failure: it surfaces as closed.
@@ -679,11 +677,6 @@ impl WriteAtRequest {
         sync | self.cache.rw_flag()
     }
 
-    /// Fall back to normal caching when the cache-bypass hint is unsupported.
-    fn retry_cached(&mut self, code: i32) -> bool {
-        code == -libc::EOPNOTSUPP && self.cache.fallback()
-    }
-
     /// Build the next positioned write SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
         if self.state == WriteAtState::Syncing {
@@ -727,7 +720,7 @@ impl WriteAtRequest {
 
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Error(code) if self.retry_cached(code) => None,
+            CqeResult::Error(code) if self.cache.fallback_if_unsupported(code) => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
             // does. A zero-length write carries no errno and stays the
             // kind-specific failure. A shutdown cancellation is not a kernel
@@ -1846,7 +1839,7 @@ mod tests {
         assert!(!supported.load(Ordering::Relaxed));
         request.cache = Cache::Disabled(supported);
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
-        assert!(!request.cache.fallback());
+        assert!(!request.cache.fallback_if_unsupported(-libc::EOPNOTSUPP));
     }
 
     #[test]

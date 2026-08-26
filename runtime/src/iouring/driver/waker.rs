@@ -73,12 +73,6 @@ pub struct ArmGuard<'a> {
 }
 
 impl ArmGuard<'_> {
-    /// Return whether the post-arm snapshot still looked idle, meaning no
-    /// wake was latched.
-    pub const fn still_idle(&self) -> bool {
-        !self.wake_latched
-    }
-
     /// Return whether a wake was already latched before or during arming.
     pub const fn wake_latched(&self) -> bool {
         self.wake_latched
@@ -297,9 +291,8 @@ impl Waker {
     /// Arm the blocking wake path used around `submit_and_wait`.
     ///
     /// The returned guard automatically clears the current wait state on drop.
-    /// Call [`ArmGuard::still_idle`] to decide whether the loop may block on
-    /// the normal "still idle" path, or [`ArmGuard::wake_latched`] to detect
-    /// an already-latched wake.
+    /// Call [`ArmGuard::wake_latched`] to detect an already-latched wake before
+    /// blocking.
     pub fn arm(&self) -> ArmGuard<'_> {
         // Arming only updates the wake state machine. It does not publish queue
         // memory or consume any wake publication, so `Relaxed` is sufficient
@@ -713,7 +706,6 @@ pub mod tests {
 
         waker.wake();
         let arm = waker.arm();
-        assert!(!arm.still_idle());
         assert!(arm.wake_latched());
         drop(arm);
 
@@ -728,7 +720,6 @@ pub mod tests {
 
         waker.wake();
         let arm = waker.arm();
-        assert!(!arm.still_idle());
         assert!(arm.wake_latched());
         drop(arm);
 
@@ -737,7 +728,6 @@ pub mod tests {
 
         waker.wake();
         let arm = waker.arm();
-        assert!(!arm.still_idle());
         assert!(arm.wake_latched());
         drop(arm);
 
@@ -754,7 +744,6 @@ pub mod tests {
         let mut handles = Vec::new();
 
         let arm = waker.arm();
-        assert!(arm.still_idle());
         assert!(!arm.wake_latched());
         for _ in 0..4 {
             let notifier = waker.clone();
@@ -993,7 +982,6 @@ mod loom_tests {
 
             assert_eq!(eventfd_count(&waker), 0);
             let guard = waker.arm();
-            assert!(!guard.still_idle());
             assert!(guard.wake_latched());
             drop(guard);
 
@@ -1011,7 +999,7 @@ mod loom_tests {
             let waker = Waker::new().unwrap();
             let queued = Arc::new(QueuedRequest::empty());
             let guard = waker.arm();
-            assert!(guard.still_idle());
+            assert!(!guard.wake_latched());
 
             let notifier = thread::spawn({
                 let waker = waker.clone();
@@ -1048,7 +1036,7 @@ mod loom_tests {
             });
 
             let guard = waker.arm();
-            if guard.still_idle() {
+            if !guard.wake_latched() {
                 wait_for_eventfd_readiness(&waker);
             }
 
