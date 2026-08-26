@@ -126,10 +126,9 @@ pub struct Config<S: Strategy> {
     /// The page cache to use for caching data.
     pub page_cache: CacheRef,
 
-    /// Capacity (in entries, rounded up to a multiple of the shard count and preallocated eagerly)
-    /// of the position-keyed node cache serving historical node reads. `None` disables it. The
-    /// cache pays off for access patterns that repeatedly read the same positions, such as grafted
-    /// reads over hot regions or repeated proof generation.
+    /// Capacity (in entries) of the position-keyed node cache serving historical node reads.
+    /// `None` disables it. The cache pays off for access patterns that repeatedly read the same
+    /// positions, such as grafted reads over hot regions or repeated proof generation.
     pub node_cache_size: Option<NonZeroUsize>,
 }
 
@@ -3995,11 +3994,10 @@ mod tests {
 /// A sharded, position-keyed cache of node digests read from the merkle journal.
 ///
 /// Journal node positions are append-only and written exactly once, so entries need no
-/// coherence protocol; hot bitmap chunks re-read the same subtree-root nodes every block,
-/// which makes historical node reads overwhelmingly re-reads (measured ~98% on the eth
-/// workload). The two lifecycle events are handled by the owner: rewind (positions can be
-/// reused) clears wholesale, and reads gate cache probes on the journal's retained bounds
-/// (entries below the pruning boundary linger until CLOCK eviction but are unreachable).
+/// coherence protocol. The owner handles the two lifecycle events: rewind (which lets new
+/// appends reuse truncated positions) clears the cache wholesale, and reads gate cache
+/// probes on the journal's retained bounds (entries below the pruning boundary linger
+/// until CLOCK eviction but are unreachable).
 pub(crate) mod node_cache {
     use ahash::RandomState;
     use commonware_cryptography::Digest;
