@@ -1186,8 +1186,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 enum Admission {
     /// Cache faulted pages for future reads.
     Admit,
-    /// Read past the cache, leaving it untouched. Constructed only by ALPHA consumers
-    /// (the merkle node cache), so it follows their verbose stability gate.
+    /// Do not cache faulted pages.
     #[cfg(not(any(
         commonware_stability_BETA,
         commonware_stability_GAMMA,
@@ -1223,9 +1222,9 @@ impl<E: Context, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
 
 impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Like [`super::Contiguous::read_many`], but cache misses read from the blobs without
-    /// admitting pages into the page cache. Suited to bulk scans of items that will not be
-    /// read again soon: admission would churn the cache and serialize concurrent scanning
-    /// tasks on its lock.
+    /// admitting pages into the page cache. Suited to bulk scans of items that will not be read
+    /// again soon: admission would churn the cache and serialize concurrent scanning tasks on its
+    /// lock.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn read_many_uncached(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
         if positions.is_empty() {
@@ -1450,8 +1449,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         self.read_many_admission(positions, Admission::Admit).await
     }
 
-    /// Like [`Self::read_many_inner`], but cache misses do not admit pages into the page
-    /// cache. Suited to bulk scans of items that will not be read again soon.
+    /// Like [`Self::read_many_inner`], but cache misses do not admit pages into the page cache.
+    /// Suited to bulk scans of items that will not be read again soon.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn read_many_uncached_inner(
         &self,

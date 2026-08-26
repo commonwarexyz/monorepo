@@ -5,7 +5,7 @@ use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache::Clock, sync::RwLock};
-use futures::{FutureExt, StreamExt as _, future::Shared, stream::FuturesUnordered};
+use futures::{FutureExt, future::Shared};
 use std::{
     collections::hash_map::Entry,
     future::Future,
@@ -328,102 +328,56 @@ impl CacheRef {
         Ok(())
     }
 
-    /// Like [`Self::read`], but a cache miss reads the page directly from `blob` without
-    /// admitting it into the page cache. Suited to bulk scans of pages that will not be
-    /// read again soon: admission would churn the cache and serialize concurrent scanning
-    /// tasks on its lock.
-    pub(super) async fn read_uncached<B: Blob>(
-        &self,
-        blob: &B,
-        blob_id: u64,
-        mut buf: &mut [u8],
-        mut offset: u64,
-    ) -> Result<(), Error> {
-        while !buf.is_empty() {
-            // Serve what we can from pages already cached.
-            {
-                let page_cache = self.cache.read();
-                let count = page_cache.read_at(blob_id, buf, offset);
-                if count != 0 {
-                    offset += count as u64;
-                    buf = &mut buf[count..];
-                    continue;
-                }
-            }
-
-            // Read the faulted page directly, leaving the cache untouched.
-            let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
-            let offset_in_page = offset_in_page as usize;
-            let page =
-                super::get_page_from_blob(blob, page_num, self.page_size, ReadOptions::default())
-                    .await?;
-            let page = page.as_ref();
-            assert!(
-                page.len() > offset_in_page,
-                "read past the blob's last valid page"
-            );
-            let count = (page.len() - offset_in_page).min(buf.len());
-            buf[..count].copy_from_slice(&page[offset_in_page..offset_in_page + count]);
-            offset += count as u64;
-            buf = &mut buf[count..];
-        }
-
-        Ok(())
-    }
-
-    /// Like [`Self::read_uncached`], but for many ranges at once: consecutive ranges that
-    /// lie within the same page are served by a single page fetch. `ranges` must be sorted
-    /// by offset. Ranges that cross a page boundary take the per-range path.
+    /// Read many sorted ranges directly from `blob` without admitting their pages into the
+    /// page cache. Suited to bulk scans of pages that will not be read again soon:
+    /// admission would churn the cache and serialize concurrent scanning tasks on its lock.
+    ///
+    /// Each distinct page covered by `ranges` is fetched exactly once, and every range
+    /// (including page-crossing ones) is copied out of the fetched pages.
     pub(super) async fn read_uncached_many<B: Blob>(
         &self,
         blob: &B,
-        blob_id: u64,
         ranges: &mut [(&mut [u8], u64)],
     ) -> Result<(), Error> {
-        let fits = |buf: &[u8], offset: u64| {
-            let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
-            (offset_in_page as usize + buf.len() <= self.page_size as usize).then_some(page_num)
-        };
-        let mut groups = ranges
-            .chunk_by_mut(|(a_buf, a_off), (b_buf, b_off)| {
-                match (fits(a_buf, *a_off), fits(b_buf, *b_off)) {
-                    (Some(a_page), Some(b_page)) => a_page == b_page,
-                    _ => false,
+        // Plan one fetch per distinct page covered by any range. Sorted ranges cover a
+        // non-decreasing page sequence, so deduplication only needs the last entry.
+        let mut pages = Vec::new();
+        for (buf, offset) in ranges.iter() {
+            let first = Cache::offset_to_page(self.page_size, *offset).0;
+            let last = Cache::offset_to_page(self.page_size, offset + buf.len() as u64 - 1).0;
+            for page_num in first..=last {
+                if pages.last() != Some(&page_num) {
+                    pages.push(page_num);
                 }
-            })
-            .map(|group| self.read_uncached_group(blob, blob_id, group))
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = groups.next().await {
-            result?;
+            }
         }
-        Ok(())
-    }
-
-    /// Serve one same-page group of `ranges` with a single page fetch. Singleton groups
-    /// (including page-crossing ranges) delegate to [`Self::read_uncached`].
-    async fn read_uncached_group<B: Blob>(
-        &self,
-        blob: &B,
-        blob_id: u64,
-        group: &mut [(&mut [u8], u64)],
-    ) -> Result<(), Error> {
-        if let [(buf, offset)] = group {
-            return self.read_uncached(blob, blob_id, buf, *offset).await;
-        }
-
-        let (page_num, _) = Cache::offset_to_page(self.page_size, group[0].1);
-        let page =
+        let fetched = futures::future::try_join_all(pages.iter().map(|&page_num| {
             super::get_page_from_blob(blob, page_num, self.page_size, ReadOptions::default())
-                .await?;
-        let page = page.as_ref();
-        for (buf, offset) in group.iter_mut() {
-            let (_, offset_in_page) = Cache::offset_to_page(self.page_size, *offset);
-            let offset_in_page = offset_in_page as usize;
-            assert!(
-                page.len() >= offset_in_page + buf.len(),
-                "read past the blob's last valid page"
-            );
-            buf.copy_from_slice(&page[offset_in_page..offset_in_page + buf.len()]);
+        }))
+        .await?;
+
+        // Scatter each range out of the fetched pages. The flattened (range, page) access
+        // sequence is non-decreasing in page number, so a single cursor suffices.
+        let mut cursor = 0;
+        for (buf, offset) in ranges.iter_mut() {
+            let mut buf: &mut [u8] = buf;
+            let mut offset = *offset;
+            while !buf.is_empty() {
+                let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
+                while pages[cursor] != page_num {
+                    cursor += 1;
+                }
+                let page = fetched[cursor].as_ref();
+                let offset_in_page = offset_in_page as usize;
+                assert!(
+                    page.len() > offset_in_page,
+                    "read past the blob's last valid page"
+                );
+                let count = (page.len() - offset_in_page).min(buf.len());
+                buf[..count].copy_from_slice(&page[offset_in_page..offset_in_page + count]);
+                offset += count as u64;
+                buf = &mut buf[count..];
+            }
         }
         Ok(())
     }
@@ -799,6 +753,111 @@ mod tests {
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
         }
+    }
+
+    /// A blob that serves reads from an in-memory physical image and counts them.
+    #[derive(Clone)]
+    struct CountingBlob {
+        data: Arc<Vec<u8>>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl Blob for CountingBlob {
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
+                .await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            let start = offset as usize;
+            Ok(IoBufsMut::from(self.data[start..start + len].to_vec()))
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<crate::IoBufs> + Send,
+            _options: WriteOptions,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
+    }
+
+    /// `read_uncached_many` fetches each distinct covered page exactly once, including for
+    /// ranges that cross page boundaries.
+    #[test_traced("DEBUG")]
+    fn test_read_uncached_many_fetches_each_page_once() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context: deterministic::Context| async move {
+            // Three full physical pages with distinct logical bytes per page.
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut image = Vec::new();
+            let mut logical = Vec::new();
+            for page in 0u8..3 {
+                let page_bytes = vec![page + 1; page_size];
+                let crc = Crc32::checksum(&page_bytes);
+                image.extend_from_slice(&page_bytes);
+                image.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
+                logical.extend_from_slice(&page_bytes);
+            }
+            let reads = Arc::new(AtomicUsize::new(0));
+            let blob = CountingBlob {
+                data: Arc::new(image),
+                reads: reads.clone(),
+            };
+            let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(8));
+
+            // Sorted ranges: two on page 0, one crossing pages 0-1, one on page 1, and one
+            // crossing pages 1-2.
+            let p = PAGE_SIZE_U64;
+            let specs = [(0, 8), (100, 16), (p - 4, 8), (p + 50, 8), (2 * p - 4, 8)];
+            let mut bufs: Vec<Vec<u8>> = specs.iter().map(|&(_, len)| vec![0; len]).collect();
+            let mut ranges: Vec<(&mut [u8], u64)> = bufs
+                .iter_mut()
+                .zip(&specs)
+                .map(|(buf, &(offset, _))| (buf.as_mut_slice(), offset))
+                .collect();
+            cache_ref
+                .read_uncached_many(&blob, &mut ranges)
+                .await
+                .unwrap();
+
+            for (buf, &(offset, len)) in bufs.iter().zip(&specs) {
+                assert_eq!(
+                    buf.as_slice(),
+                    &logical[offset as usize..offset as usize + len]
+                );
+            }
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                3,
+                "one fetch per covered page"
+            );
+        });
     }
 
     #[derive(Clone)]

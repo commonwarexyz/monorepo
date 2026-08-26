@@ -590,8 +590,8 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Like [`Self::read_many_into`], but cache misses read from the blob without admitting
-    /// pages into the page cache.
+    /// Like [`Self::read_many_into`], but cache misses read from the blob without admitting pages
+    /// into the page cache.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn read_many_into_uncached(
         &self,
