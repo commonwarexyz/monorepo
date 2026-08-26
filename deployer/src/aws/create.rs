@@ -56,20 +56,27 @@ pub struct RegionResources {
     pub monitoring_sg_id: Option<String>,
 }
 
-/// Validates that instance names are unique, non-empty, not reserved, and contain only ASCII
-/// letters, digits, `-`, or `_`.
+/// Returns whether a name is non-empty and contains only ASCII letters, digits, `-`, or `_`.
+fn is_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Validates the deployment tag and instance names.
 ///
-/// Instance names are written unescaped into file paths, YAML, shell scripts, and AWS tags.
-fn validate_instance_names(config: &Config) -> Result<(), Error> {
+/// The tag and instance names are written unescaped into file paths, YAML, shell scripts, S3
+/// keys, and AWS tags, so both must satisfy [`is_valid_name`]. Instance names must also be
+/// unique and must not be [`MONITORING_NAME`].
+fn validate_names(config: &Config) -> Result<(), Error> {
+    if !is_valid_name(&config.tag) {
+        return Err(Error::InvalidTag(config.tag.clone()));
+    }
     let mut instance_names = HashSet::new();
     for instance in &config.instances {
         let name = &instance.name;
-        if name.is_empty()
-            || name == MONITORING_NAME
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        if name == MONITORING_NAME || !is_valid_name(name) {
             return Err(Error::InvalidInstanceName(name.clone()));
         }
         if !instance_names.insert(name) {
@@ -173,7 +180,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Validate the configuration before allocating any AWS resources.
-    validate_instance_names(&config)?;
+    validate_names(&config)?;
     validate_storage_config(&config)?;
 
     // Determine unique regions
@@ -1521,7 +1528,7 @@ fn grouped_subnets(
 mod tests {
     use super::{
         RegionResources, grouped_subnets, run_launches, select_availability_zone_groups,
-        select_group_availability_zone, validate_instance_names, validate_storage_config,
+        select_group_availability_zone, validate_names, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
     use std::{
@@ -1853,7 +1860,7 @@ mod tests {
             ],
         );
 
-        validate_instance_names(&cfg).expect("names are valid");
+        validate_names(&cfg).expect("names are valid");
     }
 
     #[test]
@@ -1873,12 +1880,24 @@ mod tests {
                 vec![instance(name, "us-east-1", "c8g.4xlarge", None)],
             );
 
-            let err = validate_instance_names(&cfg).expect_err(name);
+            let err = validate_names(&cfg).expect_err(name);
 
             assert!(
                 matches!(err, Error::InvalidInstanceName(n) if n == name),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn tag_rejects_path_and_shell_characters() {
+        for tag in ["", "../x", "/tmp", "a b", "$(id)"] {
+            let mut cfg = config(monitoring("gp3", None), Vec::new());
+            cfg.tag = tag.to_string();
+
+            let err = validate_names(&cfg).expect_err(tag);
+
+            assert!(matches!(err, Error::InvalidTag(t) if t == tag), "{tag}");
         }
     }
 
@@ -1892,7 +1911,7 @@ mod tests {
             ],
         );
 
-        let err = validate_instance_names(&cfg).expect_err("duplicate name");
+        let err = validate_names(&cfg).expect_err("duplicate name");
 
         assert!(matches!(err, Error::DuplicateInstanceName(n) if n == "worker"));
     }
