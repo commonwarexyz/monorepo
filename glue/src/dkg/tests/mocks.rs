@@ -18,7 +18,9 @@ use commonware_consensus::{
         core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         standard::Standard,
     },
-    simplex::{self, Plan, elector::RoundRobin, mocks::scheme, types::Context},
+    simplex::{
+        self, ForwardPolicy, Plan, SkipPolicy, elector::RoundRobin, mocks::scheme, types::Context,
+    },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -729,11 +731,11 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         timeout_retry: Duration::from_millis(500),
         fetch_timeout: Duration::from_millis(100),
         view_retention: ViewDelta::new(8),
-        skip: simplex::SkipPolicy::Enabled {
+        skip: SkipPolicy::Enabled {
             timeout: Duration::from_secs(1),
             budget: simplex::SkipBudget::Participants,
         },
-        forward: simplex::ForwardPolicy::Disabled,
+        forward: ForwardPolicy::Disabled,
         track_historical_votes: false,
     }
 }

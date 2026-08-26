@@ -18,7 +18,11 @@ use commonware_consensus::{
     marshal::{
         self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
     },
-    simplex::{SkipBudget, SkipPolicy, config::ForwardPolicy, elector::RoundRobin},
+    simplex::{
+        SkipBudget,
+        config::{ForwardPolicy, SkipPolicy},
+        elector::RoundRobin,
+    },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{ed25519, sha256::Sha256};
