@@ -46,16 +46,17 @@ use std::{
 /// monomorphized [TaskCell] methods the compiler sees the concrete future
 /// type end to end.
 pub(super) trait Erased: Send + Sync {
-    /// Poll the stored future, returning true when this call completed it
-    /// (the caller then frees the task's arena slot).
-    fn poll(self: Arc<Self>) -> bool;
+    /// Poll the stored future, returning its arena slot only when this call
+    /// completed it (the caller then frees that slot).
+    ///
+    /// A pending future or stale token for an already-cleared future returns
+    /// `None`.
+    fn poll(self: Arc<Self>) -> Option<usize>;
 
     /// Resolve the task without polling: drop the future in place (which
     /// resolves any join handle with [Error::Closed]).
     fn clear(&self);
 
-    /// The arena slot owning this task.
-    fn slot(&self) -> usize;
 }
 
 /// A spawned task: one allocation holding the concrete future and the
@@ -136,7 +137,7 @@ impl<F> Erased for TaskCell<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    fn poll(self: Arc<Self>) -> bool {
+    fn poll(self: Arc<Self>) -> Option<usize> {
         // Borrow the task allocation while polling. Futures that retain the
         // waker still clone it into an owned `ArcWake` waker as usual.
         let waker = waker_ref(&self);
@@ -148,7 +149,7 @@ where
             // stays set (the wake that scheduled this poll set it), so later
             // wakes cannot re-queue the cell again.
             let Some(future) = slot.as_mut() else {
-                return false;
+                return None;
             };
             // Release the queued latch before polling so wakes during the
             // poll re-queue the task. The acquiring swap pairs with the
@@ -166,9 +167,9 @@ where
                     *slot = None;
                     // Terminal: late wakes must not re-queue a dead cell.
                     self.queued.store(true, Ordering::Relaxed);
-                    true
+                    Some(self.slot)
                 }
-                Poll::Pending => false,
+                Poll::Pending => None,
             }
         })
     }
@@ -191,10 +192,6 @@ where
             unsafe { std::ptr::drop_in_place(future) };
             drop(mark_cleared);
         });
-    }
-
-    fn slot(&self) -> usize {
-        self.slot
     }
 }
 
@@ -582,9 +579,25 @@ mod tests {
         })
     }
 
-    /// Return the slot order represented by a drained token batch.
-    fn slots(tasks: &[Arc<dyn Erased>]) -> Vec<usize> {
-        tasks.iter().map(|task| task.slot()).collect()
+    /// Build an unregistered ready task cell for ready-lane order tests.
+    fn ready_cell(tasks: &Arc<Tasks>, slot: usize) -> Arc<TaskCell<std::future::Ready<()>>> {
+        Arc::new(TaskCell {
+            slot,
+            tasks: Arc::downgrade(tasks),
+            queued: AtomicBool::new(true),
+            future: Affine::pinned(
+                std::thread::current().id(),
+                RefCell::new(Some(std::future::ready(()))),
+            ),
+        })
+    }
+
+    /// Poll a drained batch of ready tokens and return their completion slots.
+    fn completed_slots(tasks: &mut Vec<Arc<dyn Erased>>) -> Vec<usize> {
+        tasks
+            .drain(..)
+            .map(|task| task.poll().expect("ready token must complete"))
+            .collect()
     }
 
     /// Append an unregistered token to one ready lane without unparking.
@@ -624,21 +637,19 @@ mod tests {
         let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
         assert!(tasks.take_root_ready());
         for slot in 0..2 {
-            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Normal);
+            queue_token(&tasks, ready_cell(&tasks, slot), ReadyLane::Normal);
         }
         for slot in 10..14 {
-            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Event);
+            queue_token(&tasks, ready_cell(&tasks, slot), ReadyLane::Event);
         }
 
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 4, 1);
-        assert_eq!(slots(&scratch), vec![10, 0, 1, 11]);
         assert_eq!(scratch.len(), 4);
+        assert_eq!(completed_slots(&mut scratch), vec![10, 0, 1, 11]);
 
-        scratch.clear();
         tasks.drain_into(&mut scratch, 4, 1);
-        assert_eq!(slots(&scratch), vec![12, 13]);
-        scratch.clear();
+        assert_eq!(completed_slots(&mut scratch), vec![12, 13]);
         assert!(!tasks.has_ready());
     }
 
@@ -646,8 +657,8 @@ mod tests {
     fn test_zero_limit_drain_preserves_ready_tokens() {
         let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
         assert!(tasks.take_root_ready());
-        queue_token(&tasks, pending_cell(&tasks, 0, true), ReadyLane::Normal);
-        queue_token(&tasks, pending_cell(&tasks, 10, true), ReadyLane::Event);
+        queue_token(&tasks, ready_cell(&tasks, 0), ReadyLane::Normal);
+        queue_token(&tasks, ready_cell(&tasks, 10), ReadyLane::Event);
 
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 0, 1);
@@ -660,7 +671,7 @@ mod tests {
         }
 
         tasks.drain_into(&mut scratch, 2, 1);
-        assert_eq!(slots(&scratch), vec![10, 0]);
+        assert_eq!(completed_slots(&mut scratch), vec![10, 0]);
         assert!(!tasks.has_ready());
     }
 
@@ -671,19 +682,17 @@ mod tests {
         let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
         assert!(tasks.take_root_ready());
         for slot in 0..3 {
-            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Normal);
+            queue_token(&tasks, ready_cell(&tasks, slot), ReadyLane::Normal);
         }
         for slot in 10..13 {
-            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Event);
+            queue_token(&tasks, ready_cell(&tasks, slot), ReadyLane::Event);
         }
 
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 4, 2);
-        assert_eq!(slots(&scratch), vec![10, 11, 0, 1]);
-        scratch.clear();
+        assert_eq!(completed_slots(&mut scratch), vec![10, 11, 0, 1]);
         tasks.drain_into(&mut scratch, 4, 2);
-        assert_eq!(slots(&scratch), vec![12, 2]);
-        scratch.clear();
+        assert_eq!(completed_slots(&mut scratch), vec![12, 2]);
         assert!(!tasks.has_ready());
     }
 
@@ -696,14 +705,10 @@ mod tests {
         let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
         assert!(tasks.take_root_ready());
         for slot in 0..READY_TASKS_PER_TURN * 2 {
-            queue_token(&tasks, pending_cell(&tasks, slot, true), ReadyLane::Normal);
+            queue_token(&tasks, ready_cell(&tasks, slot), ReadyLane::Normal);
         }
         for slot in 0..READY_TASKS_PER_TURN {
-            queue_token(
-                &tasks,
-                pending_cell(&tasks, 1_000 + slot, true),
-                ReadyLane::Event,
-            );
+            queue_token(&tasks, ready_cell(&tasks, 1_000 + slot), ReadyLane::Event);
         }
 
         let mut scratch = Vec::with_capacity(READY_TASKS_PER_TURN);
@@ -713,20 +718,19 @@ mod tests {
             EVENT_READY_TASKS_PER_TURN,
         );
         assert_eq!(
-            slots(&scratch),
+            completed_slots(&mut scratch),
             (1_000..1_000 + EVENT_READY_TASKS_PER_TURN)
                 .chain(0..READY_TASKS_PER_TURN - EVENT_READY_TASKS_PER_TURN)
                 .collect::<Vec<_>>()
         );
 
-        scratch.clear();
         tasks.drain_into(
             &mut scratch,
             READY_TASKS_PER_TURN,
             EVENT_READY_TASKS_PER_TURN,
         );
         assert_eq!(
-            slots(&scratch),
+            completed_slots(&mut scratch),
             (1_000 + EVENT_READY_TASKS_PER_TURN..1_000 + READY_TASKS_PER_TURN)
                 .chain(
                     READY_TASKS_PER_TURN - EVENT_READY_TASKS_PER_TURN
@@ -790,7 +794,7 @@ mod tests {
 
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 1, 1);
-        assert!(!scratch.pop().unwrap().poll());
+        assert_eq!(scratch.pop().unwrap().poll(), None);
 
         let ready = tasks.ready.lock();
         assert_eq!(ready.normal.len(), 1);
@@ -897,17 +901,15 @@ mod tests {
         let completing_token = scratch.pop().unwrap();
         {
             let _event_delivery = tasks.event_delivery();
-            assert!(completing_token.poll());
+            assert_eq!(completing_token.poll(), Some(8));
         }
-        queue_token(&tasks, pending_cell(&tasks, 9, true), ReadyLane::Normal);
-        queue_token(&tasks, pending_cell(&tasks, 10, true), ReadyLane::Normal);
+        queue_token(&tasks, ready_cell(&tasks, 9), ReadyLane::Normal);
+        queue_token(&tasks, ready_cell(&tasks, 10), ReadyLane::Normal);
 
         tasks.drain_into(&mut scratch, 2, 1);
         let stale = scratch.remove(0);
-        assert_eq!(stale.slot(), 8);
-        assert!(!stale.poll());
-        assert_eq!(slots(&scratch), vec![9]);
-        scratch.clear();
+        assert_eq!(stale.poll(), None);
+        assert_eq!(completed_slots(&mut scratch), vec![9]);
         let ready = tasks.ready.lock();
         assert_eq!(ready.normal.len(), 1);
         assert!(ready.event.is_empty());
@@ -1031,26 +1033,26 @@ mod tests {
         let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
         assert!(tasks.take_root_ready());
         for _ in 0..=LIMIT {
-            assert!(Tasks::register(&tasks, std::future::pending::<()>()));
+            assert!(Tasks::register(&tasks, std::future::ready(())));
         }
 
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, LIMIT, 1);
         assert_eq!(scratch.len(), LIMIT);
-        assert_eq!(
-            scratch.iter().map(|task| task.slot()).collect::<Vec<_>>(),
-            (0..LIMIT).collect::<Vec<_>>()
-        );
+        let first = completed_slots(&mut scratch);
+        assert_eq!(first, (0..LIMIT).collect::<Vec<_>>());
+        for slot in first {
+            tasks.remove(slot);
+        }
         assert_eq!(tasks.ready.lock().normal.len(), 1);
         assert!(tasks.has_ready(), "shared remainder must prevent parking");
 
-        scratch.clear();
         tasks.drain_into(&mut scratch, LIMIT, 1);
         assert_eq!(scratch.len(), 1);
-        assert_eq!(scratch[0].slot(), LIMIT);
+        assert_eq!(completed_slots(&mut scratch), vec![LIMIT]);
+        tasks.remove(LIMIT);
         assert!(!tasks.has_ready());
 
-        scratch.clear();
         tasks.clear();
     }
 
@@ -1078,8 +1080,7 @@ mod tests {
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 1, 1);
         let task = scratch.pop().unwrap();
-        let slot = task.slot();
-        assert!(task.poll());
+        let slot = task.poll().expect("live task must complete");
         tasks.remove(slot);
 
         // The self-wake token precedes this replacement in FIFO order, and
@@ -1089,15 +1090,13 @@ mod tests {
 
         tasks.drain_into(&mut scratch, 1, 1);
         let stale = scratch.pop().unwrap();
-        assert_eq!(stale.slot(), slot);
-        assert!(!stale.poll(), "completed self-wake must be inert");
+        assert_eq!(stale.poll(), None, "completed self-wake must be inert");
         assert_eq!(tasks.ready.lock().normal.len(), 1);
         assert!(tasks.has_ready(), "replacement must remain ready");
 
         tasks.drain_into(&mut scratch, 1, 1);
         let replacement = scratch.pop().unwrap();
-        assert_eq!(replacement.slot(), slot);
-        assert!(replacement.poll());
+        assert_eq!(replacement.poll(), Some(slot));
         tasks.remove(slot);
         assert!(!tasks.has_ready());
         tasks.clear();

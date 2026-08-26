@@ -788,8 +788,7 @@ impl Worker {
                     }
                     remaining -= drained;
                     for task in scratch.drain(..) {
-                        let slot = task.slot();
-                        if task.poll() {
+                        if let Some(slot) = task.poll() {
                             executor.tasks.remove(slot);
                         }
                     }
