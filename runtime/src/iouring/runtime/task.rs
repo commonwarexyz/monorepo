@@ -148,9 +148,7 @@ where
             // was already freed, so report no completion. The queued latch
             // stays set (the wake that scheduled this poll set it), so later
             // wakes cannot re-queue the cell again.
-            let Some(future) = slot.as_mut() else {
-                return None;
-            };
+            let future = slot.as_mut()?;
             // Release the queued latch before polling so wakes during the
             // poll re-queue the task. The acquiring swap pairs with the
             // release half of coalesced wakes' latch RMWs (which bypass the

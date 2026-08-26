@@ -128,15 +128,21 @@ const EVENT_READY_TASKS_PER_TURN: usize = READY_TASKS_PER_TURN / 2;
 /// Type-erased payload retained while teardown completes.
 type PanicPayload = Box<dyn std::any::Any + Send>;
 
+/// Retain the earliest panic without running adversarial drop glue from a
+/// later payload while teardown is still in progress.
+fn retain_first_panic(first_panic: &mut Option<PanicPayload>, payload: PanicPayload) {
+    if first_panic.is_none() {
+        *first_panic = Some(payload);
+    } else {
+        std::mem::forget(payload);
+    }
+}
+
 /// Run one cleanup step, retaining the earliest panic without dropping any
 /// later adversarial payloads.
 fn capture_cleanup_panic(first_panic: &mut Option<PanicPayload>, cleanup: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(cleanup)) {
-        if first_panic.is_none() {
-            *first_panic = Some(payload);
-        } else {
-            std::mem::forget(payload);
-        }
+        retain_first_panic(first_panic, payload);
     }
 }
 
@@ -455,6 +461,11 @@ struct Shared {
 }
 
 impl Shared {
+    /// Retain the first worker panic observed by a shared shutdown path.
+    fn retain_worker_panic(&self, payload: PanicPayload) {
+        retain_first_panic(&mut self.worker_panic.lock(), payload);
+    }
+
     /// Join any finished worker threads, retaining live ones.
     ///
     /// Without reaping, every completed dedicated (or blocking shared) task
@@ -472,7 +483,7 @@ impl Shared {
             if list[index].is_finished() {
                 let worker = list.swap_remove(index);
                 if let Err(payload) = worker.join() {
-                    let _ = self.worker_panic.lock().get_or_insert(payload);
+                    self.retain_worker_panic(payload);
                 }
             } else {
                 index += 1;
@@ -562,14 +573,22 @@ impl Executor {
     /// Panics if this worker already tore down: the alarm was discarded, so
     /// the sleep fails loudly in the polling task instead of hanging it.
     fn refresh_alarm(&self, alarm: &Alarm, waker: &Waker) -> bool {
-        let sleeping = self.sleeping.lock();
-        assert!(sleeping.is_some(), "sleep outlived its io_uring worker");
-        let mut slot = alarm.waker.lock();
-        let Some(current) = slot.as_mut() else {
-            return true;
+        // Waker clone and drop callbacks are arbitrary user code. Clone the
+        // incoming waker before acquiring either sleeper lock, then detach the
+        // old one under the locks and release it afterward.
+        let replacement = waker.clone();
+        let (fired, detached) = {
+            let sleeping = self.sleeping.lock();
+            assert!(sleeping.is_some(), "sleep outlived its io_uring worker");
+            let mut slot = alarm.waker.lock();
+            if slot.is_some() {
+                (false, slot.replace(replacement))
+            } else {
+                (true, Some(replacement))
+            }
         };
-        current.clone_from(waker);
-        false
+        drop(detached);
+        fired
     }
 
     /// Cancel a registered alarm: release its waker (and the task resources
@@ -579,17 +598,22 @@ impl Executor {
     /// the heap's size stays proportional to live sleepers regardless of how
     /// many long-deadline sleeps are cancelled (e.g. by losing a `select!`).
     fn cancel_alarm(&self, alarm: &Alarm) {
-        let mut guard = self.sleeping.lock();
-        // Worker already torn down: the heap (and this alarm) was discarded.
-        let Some(sleeping) = guard.as_mut() else {
-            return;
+        let detached = {
+            let mut guard = self.sleeping.lock();
+            // Worker already torn down: the heap (and this alarm) was
+            // discarded.
+            let Some(sleeping) = guard.as_mut() else {
+                return;
+            };
+            // An already-empty slot means the alarm fired and left the heap.
+            let detached = alarm.waker.lock().take();
+            if detached.is_some() {
+                sleeping.cancelled += 1;
+                sleeping.compact_if_needed();
+            }
+            detached
         };
-        // An already-empty slot means the alarm fired and left the heap.
-        if alarm.waker.lock().take().is_none() {
-            return;
-        }
-        sleeping.cancelled += 1;
-        sleeping.compact_if_needed();
+        drop(detached);
     }
 
     /// Wake any sleepers whose deadlines have elapsed.
@@ -600,6 +624,9 @@ impl Executor {
             let sleeping = sleeping
                 .as_mut()
                 .expect("alarm queue closed while the worker loop is running");
+            // Reserve before detaching the first waker. A capacity panic must
+            // not unwind a detached RawWaker while either sleeper lock is held.
+            due.reserve(sleeping.alarms.len());
             while let Some(next) = sleeping.alarms.peek() {
                 if next.time > current {
                     break;
@@ -616,8 +643,13 @@ impl Executor {
             // holds at quiescence, not just at the last cancellation.
             sleeping.compact_if_needed();
         }
+        let mut first_panic = None;
         for waker in due {
-            waker.wake();
+            capture_cleanup_panic(&mut first_panic, || waker.wake_by_ref());
+            capture_cleanup_panic(&mut first_panic, move || drop(waker));
+        }
+        if let Some(payload) = first_panic {
+            resume_unwind(payload);
         }
     }
 
@@ -1079,7 +1111,7 @@ impl crate::Runner for Runner {
             };
             for worker in batch {
                 if let Err(payload) = worker.join() {
-                    let _ = worker_panic.get_or_insert(payload);
+                    retain_first_panic(&mut worker_panic, payload);
                 }
             }
         }
@@ -1089,19 +1121,30 @@ impl crate::Runner for Runner {
         // usually its cause: a dead worker fails the tasks that depended on
         // it), so it wins. The root panic beats join-loop and teardown-era
         // payloads, which are its downstream cascade.
+        let mut first_panic = None;
         if let Some(payload) = stashed {
-            resume_unwind(payload);
+            retain_first_panic(&mut first_panic, payload);
         }
         let output = match output {
-            Ok(output) => output,
-            Err(payload) => resume_unwind(payload),
+            Ok(output) => Some(output),
+            Err(payload) => {
+                retain_first_panic(&mut first_panic, payload);
+                None
+            }
         };
-        if let Some(payload) = shared.worker_panic.lock().take().or(worker_panic) {
-            resume_unwind(payload);
+        if let Some(payload) = shared.worker_panic.lock().take() {
+            retain_first_panic(&mut first_panic, payload);
+        }
+        if let Some(payload) = worker_panic {
+            retain_first_panic(&mut first_panic, payload);
+        }
+        gauge.dec();
+        if first_panic.is_some() {
+            capture_cleanup_panic(&mut first_panic, move || drop(output));
+            resume_unwind(first_panic.expect("runner panic disappeared"));
         }
 
-        gauge.dec();
-        output
+        output.expect("root output missing without a panic")
     }
 }
 
@@ -1207,7 +1250,7 @@ impl Context {
                         // still fail `start` through the join path's final
                         // take, not vanish because this worker exits cleanly.
                         if let Some(panic) = panicker.notify(panic) {
-                            let _ = panic_shared.worker_panic.lock().get_or_insert(panic);
+                            panic_shared.retain_worker_panic(panic);
                         }
                         publisher.publish(Err(Error::Exited));
                     }
@@ -1337,7 +1380,7 @@ impl crate::Spawner for Context {
             executor.shared.panicker.clone(),
             Arc::clone(&parent),
             move |panic| {
-                let _ = panic_shared.worker_panic.lock().get_or_insert(panic);
+                panic_shared.retain_worker_panic(panic);
             },
         );
 
@@ -1706,7 +1749,173 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize},
             mpsc::{Receiver, SyncSender},
         },
+        task::{RawWaker, RawWakerVTable},
     };
+
+    /// A panic payload whose destructor detects unsafe retention fallback.
+    struct AdversarialPayload {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl AdversarialPayload {
+        fn new(drops: &Arc<AtomicUsize>) -> Self {
+            Self {
+                drops: Arc::clone(drops),
+            }
+        }
+    }
+
+    impl Drop for AdversarialPayload {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+            panic!("adversarial panic payload dropped");
+        }
+    }
+
+    #[derive(Default)]
+    struct ReentrantWakerCounts {
+        callbacks: AtomicUsize,
+        clones: AtomicUsize,
+        drops: AtomicUsize,
+    }
+
+    /// Raw-waker state whose callbacks reacquire both sleeper locks.
+    struct ReentrantWaker {
+        executor: Weak<Executor>,
+        alarm: Mutex<Option<Weak<Alarm>>>,
+        counts: Arc<ReentrantWakerCounts>,
+    }
+
+    impl ReentrantWaker {
+        fn assert_locks_available(&self) {
+            let executor = self.executor.upgrade().expect("executor dropped");
+            let alarm = self.alarm.lock().as_ref().and_then(Weak::upgrade);
+            let _sleeping = executor
+                .sleeping
+                .try_lock()
+                .expect("waker callback ran under the sleeping lock");
+            if let Some(alarm) = alarm.as_ref() {
+                let _slot = alarm
+                    .waker
+                    .try_lock()
+                    .expect("waker callback ran under the alarm lock");
+            }
+            self.counts.callbacks.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    unsafe fn clone_reentrant_waker(data: *const ()) -> RawWaker {
+        let state = {
+            // SAFETY: every raw waker using this vtable stores the pointer
+            // returned by Arc::into_raw for ReentrantWaker.
+            unsafe { &*data.cast::<ReentrantWaker>() }
+        };
+        state.assert_locks_available();
+        state.counts.clones.fetch_add(1, Ordering::AcqRel);
+        // SAFETY: the raw waker owns one strong reference, and cloning it
+        // creates one additional reference for the returned raw waker.
+        unsafe { Arc::increment_strong_count(data.cast::<ReentrantWaker>()) };
+        RawWaker::new(data, &REENTRANT_WAKER_VTABLE)
+    }
+
+    unsafe fn wake_reentrant_waker(data: *const ()) {
+        let state = {
+            // SAFETY: wake consumes the raw waker's one strong reference.
+            unsafe { Arc::from_raw(data.cast::<ReentrantWaker>()) }
+        };
+        state.assert_locks_available();
+    }
+
+    unsafe fn wake_reentrant_waker_by_ref(data: *const ()) {
+        let state = {
+            // SAFETY: wake_by_ref borrows the strong reference held by the
+            // raw waker for the duration of this callback.
+            unsafe { &*data.cast::<ReentrantWaker>() }
+        };
+        state.assert_locks_available();
+    }
+
+    unsafe fn drop_reentrant_waker(data: *const ()) {
+        let state = {
+            // SAFETY: drop consumes the raw waker's one strong reference.
+            unsafe { Arc::from_raw(data.cast::<ReentrantWaker>()) }
+        };
+        state.assert_locks_available();
+        state.counts.drops.fetch_add(1, Ordering::AcqRel);
+    }
+
+    static REENTRANT_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        clone_reentrant_waker,
+        wake_reentrant_waker,
+        wake_reentrant_waker_by_ref,
+        drop_reentrant_waker,
+    );
+
+    fn reentrant_waker(
+        executor: &Arc<Executor>,
+    ) -> (Waker, Arc<ReentrantWaker>, Arc<ReentrantWakerCounts>) {
+        let counts = Arc::new(ReentrantWakerCounts::default());
+        let state = Arc::new(ReentrantWaker {
+            executor: Arc::downgrade(executor),
+            alarm: Mutex::new(None),
+            counts: Arc::clone(&counts),
+        });
+        let raw = RawWaker::new(
+            Arc::into_raw(Arc::clone(&state)).cast(),
+            &REENTRANT_WAKER_VTABLE,
+        );
+        let waker = {
+            // SAFETY: raw owns one Arc strong reference and its vtable
+            // preserves that ownership contract across clone, wake, and drop.
+            unsafe { Waker::from_raw(raw) }
+        };
+        (waker, state, counts)
+    }
+
+    enum WakePanic {
+        Static(&'static str),
+        Adversarial(Arc<AtomicUsize>),
+    }
+
+    /// Waker state that can panic independently from wake and drop callbacks.
+    struct BatchWaker {
+        wakes: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        wake_panic: Option<WakePanic>,
+        drop_panic: Option<Arc<AtomicUsize>>,
+    }
+
+    impl BatchWaker {
+        fn on_wake(&self) {
+            self.wakes.fetch_add(1, Ordering::AcqRel);
+            match &self.wake_panic {
+                Some(WakePanic::Static(message)) => panic!("{message}"),
+                Some(WakePanic::Adversarial(drops)) => {
+                    std::panic::panic_any(AdversarialPayload::new(drops));
+                }
+                None => {}
+            }
+        }
+    }
+
+    impl std::task::Wake for BatchWaker {
+        fn wake(self: Arc<Self>) {
+            self.on_wake();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.on_wake();
+        }
+    }
+
+    impl Drop for BatchWaker {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+            if let Some(drops) = &self.drop_panic {
+                std::panic::panic_any(AdversarialPayload::new(drops));
+            }
+        }
+    }
 
     /// Property: network timeouts at exactly the 30-year policy bound pass
     /// validation. Setup: both timeouts set to [MAX_TIMER_DURATION]. Action:
@@ -3309,6 +3518,162 @@ mod tests {
         );
     }
 
+    /// Multiple worker failures must preserve the first payload, avoid later
+    /// payload destructors, join the complete worker batch, and isolate drop
+    /// glue on an already-produced root output before resuming the panic.
+    #[test]
+    fn test_worker_panic_batch_preserves_precedence_and_cleanup() {
+        enum Failure {
+            First,
+            Adversarial(Arc<AtomicUsize>),
+        }
+
+        struct WorkerPanic {
+            started: Option<SyncSender<()>>,
+            release: Receiver<()>,
+            dropping: Option<SyncSender<()>>,
+            failure: Option<Failure>,
+        }
+
+        impl Future for WorkerPanic {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
+                if let Some(started) = self.started.take() {
+                    started.send(()).unwrap();
+                }
+                self.release.recv().unwrap();
+                Poll::Ready(())
+            }
+        }
+
+        impl Drop for WorkerPanic {
+            fn drop(&mut self) {
+                if let Some(dropping) = self.dropping.take() {
+                    let _ = dropping.send(());
+                }
+                match self.failure.take().expect("worker failure missing") {
+                    Failure::First => panic!("first worker panic"),
+                    Failure::Adversarial(drops) => {
+                        std::panic::panic_any(AdversarialPayload::new(&drops));
+                    }
+                }
+            }
+        }
+
+        struct SlowWorker {
+            started: Option<SyncSender<()>>,
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Future for SlowWorker {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
+                if let Some(started) = self.started.take() {
+                    started.send(()).unwrap();
+                }
+                Poll::Pending
+            }
+        }
+
+        impl Drop for SlowWorker {
+            fn drop(&mut self) {
+                std::thread::sleep(Duration::from_millis(300));
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        #[derive(Debug)]
+        struct RootOutput {
+            drops: Arc<AtomicUsize>,
+            payload_drops: Arc<AtomicUsize>,
+        }
+
+        impl Drop for RootOutput {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::AcqRel);
+                std::panic::panic_any(AdversarialPayload::new(&self.payload_drops));
+            }
+        }
+
+        let later_payload_drops = Arc::new(AtomicUsize::new(0));
+        let slow_worker_dropped = Arc::new(AtomicBool::new(false));
+        let root_output_drops = Arc::new(AtomicUsize::new(0));
+        let root_payload_drops = Arc::new(AtomicUsize::new(0));
+
+        let observed_later_payload_drops = Arc::clone(&later_payload_drops);
+        let observed_slow_worker_drop = Arc::clone(&slow_worker_dropped);
+        let observed_root_output_drops = Arc::clone(&root_output_drops);
+        let observed_root_payload_drops = Arc::clone(&root_payload_drops);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(move |context| async move {
+                let (first_started_send, first_started_recv) =
+                    std::sync::mpsc::sync_channel(0);
+                let (first_release_send, first_release_recv) =
+                    std::sync::mpsc::sync_channel(0);
+                let (first_dropping_send, first_dropping_recv) =
+                    std::sync::mpsc::sync_channel(0);
+                let _first = context.child("first").dedicated().spawn(move |_| {
+                    WorkerPanic {
+                        started: Some(first_started_send),
+                        release: first_release_recv,
+                        dropping: Some(first_dropping_send),
+                        failure: Some(Failure::First),
+                    }
+                });
+                first_started_recv.recv().unwrap();
+
+                let (later_started_send, later_started_recv) =
+                    std::sync::mpsc::sync_channel(0);
+                let (later_release_send, later_release_recv) =
+                    std::sync::mpsc::sync_channel(0);
+                let (later_dropping_send, later_dropping_recv) =
+                    std::sync::mpsc::sync_channel(0);
+                let _later = context.child("later").dedicated().spawn(move |_| {
+                    WorkerPanic {
+                        started: Some(later_started_send),
+                        release: later_release_recv,
+                        dropping: Some(later_dropping_send),
+                        failure: Some(Failure::Adversarial(observed_later_payload_drops)),
+                    }
+                });
+                later_started_recv.recv().unwrap();
+
+                let (slow_started_send, slow_started_recv) =
+                    std::sync::mpsc::sync_channel(0);
+                let _slow = context.child("slow").dedicated().spawn(move |_| {
+                    SlowWorker {
+                        started: Some(slow_started_send),
+                        dropped: observed_slow_worker_drop,
+                    }
+                });
+                slow_started_recv.recv().unwrap();
+
+                first_release_send.send(()).unwrap();
+                later_release_send.send(()).unwrap();
+                first_dropping_recv.recv().unwrap();
+                later_dropping_recv.recv().unwrap();
+
+                RootOutput {
+                    drops: observed_root_output_drops,
+                    payload_drops: observed_root_payload_drops,
+                }
+            })
+        }));
+
+        let payload = result.expect_err("worker panic should fail start");
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("first worker panic")
+        );
+        drop(payload);
+        assert_eq!(later_payload_drops.load(Ordering::Acquire), 0);
+        assert!(slow_worker_dropped.load(Ordering::Acquire));
+        assert_eq!(root_output_drops.load(Ordering::Acquire), 1);
+        assert_eq!(root_payload_drops.load(Ordering::Acquire), 0);
+    }
+
     /// A dedicated task may hold another worker's context across that
     /// worker's teardown: the escape check must tolerate the cross-worker
     /// race instead of panicking.
@@ -3416,6 +3781,111 @@ mod tests {
             });
             origin.await.unwrap();
             assert!(matches!(sleeper.await, Err(Error::Exited)));
+        });
+    }
+
+    /// Alarm refresh and cancellation must run RawWaker clone and drop
+    /// callbacks only after releasing both sleeper locks.
+    #[test]
+    fn test_sleep_waker_callbacks_run_outside_locks() {
+        Runner::default().start(|context| async move {
+            let executor = context.executor.upgrade().unwrap();
+            let (old_waker, old_state, old_counts) = reentrant_waker(&executor);
+            let alarm = Arc::new(Alarm {
+                time: Instant::now() + Duration::from_secs(3600),
+                waker: Mutex::new(Some(old_waker)),
+            });
+            *old_state.alarm.lock() = Some(Arc::downgrade(&alarm));
+            executor.register_alarm(Arc::clone(&alarm));
+
+            let (replacement, replacement_state, replacement_counts) =
+                reentrant_waker(&executor);
+            *replacement_state.alarm.lock() = Some(Arc::downgrade(&alarm));
+
+            assert!(!executor.refresh_alarm(&alarm, &replacement));
+            assert_eq!(old_counts.clones.load(Ordering::Acquire), 0);
+            assert_eq!(old_counts.drops.load(Ordering::Acquire), 1);
+            assert_eq!(old_counts.callbacks.load(Ordering::Acquire), 1);
+            assert_eq!(replacement_counts.clones.load(Ordering::Acquire), 1);
+            assert_eq!(replacement_counts.drops.load(Ordering::Acquire), 0);
+            assert_eq!(replacement_counts.callbacks.load(Ordering::Acquire), 1);
+
+            executor.cancel_alarm(&alarm);
+            assert_eq!(replacement_counts.drops.load(Ordering::Acquire), 1);
+            assert_eq!(replacement_counts.callbacks.load(Ordering::Acquire), 2);
+
+            drop(replacement);
+            assert_eq!(replacement_counts.drops.load(Ordering::Acquire), 2);
+            assert_eq!(replacement_counts.callbacks.load(Ordering::Acquire), 3);
+        });
+    }
+
+    /// Every detached due waker receives both callback attempts even when
+    /// earlier wake and drop callbacks panic. The first panic wins and later
+    /// adversarial payloads remain undisposed.
+    #[test]
+    fn test_ready_sleepers_isolate_all_waker_panics() {
+        Runner::default().start(|context| async move {
+            let executor = context.executor.upgrade().unwrap();
+            let first_wakes = Arc::new(AtomicUsize::new(0));
+            let first_drops = Arc::new(AtomicUsize::new(0));
+            let first_drop_payload_drops = Arc::new(AtomicUsize::new(0));
+            let second_wakes = Arc::new(AtomicUsize::new(0));
+            let second_drops = Arc::new(AtomicUsize::new(0));
+            let second_wake_payload_drops = Arc::new(AtomicUsize::new(0));
+            let second_drop_payload_drops = Arc::new(AtomicUsize::new(0));
+            let final_wakes = Arc::new(AtomicUsize::new(0));
+            let final_drops = Arc::new(AtomicUsize::new(0));
+
+            let first = Waker::from(Arc::new(BatchWaker {
+                wakes: Arc::clone(&first_wakes),
+                drops: Arc::clone(&first_drops),
+                wake_panic: Some(WakePanic::Static("first wake panic")),
+                drop_panic: Some(Arc::clone(&first_drop_payload_drops)),
+            }));
+            let second = Waker::from(Arc::new(BatchWaker {
+                wakes: Arc::clone(&second_wakes),
+                drops: Arc::clone(&second_drops),
+                wake_panic: Some(WakePanic::Adversarial(Arc::clone(
+                    &second_wake_payload_drops,
+                ))),
+                drop_panic: Some(Arc::clone(&second_drop_payload_drops)),
+            }));
+            let final_waker = Waker::from(Arc::new(BatchWaker {
+                wakes: Arc::clone(&final_wakes),
+                drops: Arc::clone(&final_drops),
+                wake_panic: None,
+                drop_panic: None,
+            }));
+
+            let first_deadline = Instant::now() + Duration::from_secs(3600);
+            for (offset, waker) in [(0, first), (1, second), (2, final_waker)] {
+                executor.register_alarm(Arc::new(Alarm {
+                    time: first_deadline + Duration::from_nanos(offset),
+                    waker: Mutex::new(Some(waker)),
+                }));
+            }
+
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                executor.wake_ready_sleepers(first_deadline + Duration::from_nanos(3));
+            }));
+            let payload = result.expect_err("first wake should panic");
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+            assert_eq!(message, Some("first wake panic"));
+            drop(payload);
+
+            assert_eq!(first_wakes.load(Ordering::Acquire), 1);
+            assert_eq!(first_drops.load(Ordering::Acquire), 1);
+            assert_eq!(second_wakes.load(Ordering::Acquire), 1);
+            assert_eq!(second_drops.load(Ordering::Acquire), 1);
+            assert_eq!(final_wakes.load(Ordering::Acquire), 1);
+            assert_eq!(final_drops.load(Ordering::Acquire), 1);
+            assert_eq!(first_drop_payload_drops.load(Ordering::Acquire), 0);
+            assert_eq!(second_wake_payload_drops.load(Ordering::Acquire), 0);
+            assert_eq!(second_drop_payload_drops.load(Ordering::Acquire), 0);
         });
     }
 
