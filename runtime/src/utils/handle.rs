@@ -317,6 +317,7 @@ impl<T: Send + 'static> AbortOnDrop<T> {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl<T, E1> AbortOnDrop<Result<T, E1>>
 where
     T: Send + 'static,
@@ -326,7 +327,6 @@ where
     /// error or a failed join), abort and join every remaining guard before surfacing it,
     /// so no task outlives the failure (dropping a guard only signals the abort without
     /// awaiting it). Joining in order makes the surfaced failure deterministic.
-    #[commonware_macros::stability(ALPHA)]
     pub async fn join_all<E2>(guards: Vec<Self>) -> Result<Vec<T>, E2>
     where
         E2: From<E1> + From<Error>,
