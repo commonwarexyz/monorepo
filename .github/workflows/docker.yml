@@ -47,10 +47,12 @@ jobs:
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
       - name: Create matrix
         id: platforms
+        shell: bash
         env:
           TARGET: ${{ steps.target-spec.outputs.target }}
         run: |
-          echo "matrix=$(docker buildx bake -f docker/docker-bake.hcl "$TARGET" --print | jq -cr --arg target "$TARGET" '.target[$target].platforms')" >> "$GITHUB_OUTPUT"
+          matrix="$(docker buildx bake -f docker/docker-bake.hcl "$TARGET" --print | jq -cr --arg target "$TARGET" '.target[$target].platforms')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
       - name: Show matrix
         env:
           MATRIX: ${{ steps.platforms.outputs.matrix }}
