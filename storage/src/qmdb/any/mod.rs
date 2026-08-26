@@ -138,9 +138,9 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
 
     /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
     /// for index types that build serially, and the number of build tasks for index types that
-    /// build in parallel. A value of `1` builds the index entirely on the init task. A value of
-    /// `2` decodes on the init task and inserts on one worker. Larger values split between decode
-    /// and insert tasks while the init task merely forwards batches.
+    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
+    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
+    /// between spawned decode and insert tasks while the init task merely forwards batches.
     pub init_concurrency: B,
 }
 
