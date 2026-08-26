@@ -137,18 +137,20 @@ impl<V> Certification<V> {
         Some((batch, invalid))
     }
 
-    /// Completes with a verified quorum, surrendering it for certificate
-    /// recovery, or `None` if the quorum is unmet.
-    fn try_complete(&mut self) -> Option<Vec<V>> {
-        let State::Incomplete { verified, .. } = &mut self.state else {
+    /// Returns a copy of the verified quorum for certificate recovery, or
+    /// `None` if the quorum is unmet. Votes remain buffered until recovery
+    /// succeeds.
+    fn verified_quorum(&self) -> Option<Vec<V>>
+    where
+        V: Clone,
+    {
+        let State::Incomplete { verified, .. } = &self.state else {
             return None;
         };
         if verified.len() < self.quorum {
             return None;
         }
-        let votes = mem::take(verified);
-        self.complete();
-        Some(votes)
+        Some(verified.clone())
     }
 
     /// Completes, dropping all buffered votes.
@@ -307,13 +309,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// (notarization, then nullification, then finalization) with an unconsumed
     /// verified quorum. Call repeatedly to drain every constructible kind.
     ///
-    /// Once recovery starts, it consumes the verified votes. Do not cancel unless
-    /// the verifier will also be discarded.
+    /// Verified votes remain buffered when assembly cannot yet recover a
+    /// certificate and are dropped only after successful recovery.
     pub async fn try_construct_certificate(
         &mut self,
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
-        if let Some(notarizes) = self.notarize.try_complete() {
+        if let Some(notarizes) = self.notarize.verified_quorum() {
             let span = info_span!(
                 "simplex.batcher.try_construct_notarization",
                 epoch = self.round.epoch().traced(),
@@ -322,13 +324,15 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             let scheme = Arc::clone(&self.scheme);
             let notarization = offload(span, strategy, move |strategy| {
                 Notarization::from_owned_notarizes(scheme.as_ref(), notarizes, &strategy)
-                    .expect("verified notarize quorum must assemble")
             })
             .await;
-            return Some(Certificate::Notarization(notarization));
+            if let Some(notarization) = notarization {
+                self.notarize.complete();
+                return Some(Certificate::Notarization(notarization));
+            }
         }
 
-        if let Some(nullifies) = self.nullify.try_complete() {
+        if let Some(nullifies) = self.nullify.verified_quorum() {
             let span = info_span!(
                 "simplex.batcher.try_construct_nullification",
                 epoch = self.round.epoch().traced(),
@@ -337,13 +341,15 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             let scheme = Arc::clone(&self.scheme);
             let nullification = offload(span, strategy, move |strategy| {
                 Nullification::from_owned_nullifies(scheme.as_ref(), nullifies, &strategy)
-                    .expect("verified nullify quorum must assemble")
             })
             .await;
-            return Some(Certificate::Nullification(nullification));
+            if let Some(nullification) = nullification {
+                self.nullify.complete();
+                return Some(Certificate::Nullification(nullification));
+            }
         }
 
-        if let Some(finalizes) = self.finalize.try_complete() {
+        if let Some(finalizes) = self.finalize.verified_quorum() {
             let span = info_span!(
                 "simplex.batcher.try_construct_finalization",
                 epoch = self.round.epoch().traced(),
@@ -352,10 +358,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             let scheme = Arc::clone(&self.scheme);
             let finalization = offload(span, strategy, move |strategy| {
                 Finalization::from_owned_finalizes(scheme.as_ref(), finalizes, &strategy)
-                    .expect("verified finalize quorum must assemble")
             })
             .await;
-            return Some(Certificate::Finalization(finalization));
+            if let Some(finalization) = finalization {
+                self.finalize.complete();
+                return Some(Certificate::Finalization(finalization));
+            }
         }
 
         None
@@ -2194,12 +2202,17 @@ mod tests {
         assert_eq!(batch, 2);
         assert!(invalid.is_empty());
         assert!(votes.pending().is_empty());
-        assert!(votes.try_complete().is_none());
+        assert!(votes.verified_quorum().is_none());
 
-        // At quorum, recovery surrenders the votes and completes. All later
-        // votes are dropped.
+        // At quorum, recovery can inspect the verified votes without
+        // completing until certificate assembly succeeds.
         votes.add(3, true);
-        assert_eq!(votes.try_complete(), Some(vec![1, 2, 3]));
+        assert_eq!(votes.verified_quorum(), Some(vec![1, 2, 3]));
+        assert!(!votes.is_complete());
+
+        // Successful certificate assembly completes the certification. All
+        // later votes are dropped.
+        votes.complete();
         assert!(votes.is_complete());
         votes.add(5, false);
         assert!(votes.pending().is_empty());
@@ -2210,7 +2223,7 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(votes.try_complete().is_none());
+        assert!(votes.verified_quorum().is_none());
 
         // Network certificates complete without any votes.
         let mut votes = Certification::<u64>::new(3, true);
@@ -2260,6 +2273,53 @@ mod tests {
 
     /// Constructible kinds drain in certificate order, exercising local
     /// assembly for every kind.
+    #[test_async]
+    async fn test_construct_keeps_votes_when_scheme_cannot_assemble_yet() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } =
+            bls12381_threshold_std::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
+
+        let round = Round::new(Epoch::new(0), View::new(1));
+
+        // Intentionally make the batcher's vote-count quorum smaller than the
+        // threshold scheme's assembly requirement.
+        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), 2);
+
+        let leader = create_notarize(&schemes[0], round, View::new(0), 1);
+        verifier.set_leader(leader.signer(), Some(&leader));
+
+        for scheme in schemes.iter().take(2) {
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
+                true,
+            );
+        }
+
+        // Two verified votes satisfy the batcher's configured quorum, but the
+        // threshold scheme still cannot assemble a certificate.
+        assert!(
+            verifier
+                .try_construct_certificate(&Sequential)
+                .await
+                .is_none()
+        );
+
+        // Recovery must retain the verified votes so a later vote can complete
+        // the certificate.
+        assert_eq!(verifier.notarize.verified().len(), 2);
+        assert!(!verifier.notarize.is_complete());
+
+        verifier.add(
+            Vote::Notarize(create_notarize(&schemes[2], round, View::new(0), 1)),
+            true,
+        );
+
+        assert!(matches!(
+            verifier.try_construct_certificate(&Sequential).await,
+            Some(Certificate::Notarization(_))
+        ));
+    }
+
     #[test_async]
     async fn test_construct_drains_kinds_in_order() {
         let mut rng = test_rng();
