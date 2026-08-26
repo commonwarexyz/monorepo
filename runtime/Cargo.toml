@@ -103,6 +103,12 @@ path = "src/iouring/benches/bench.rs"
 required-features = ["iouring"]
 
 [[bench]]
+name = "network"
+harness = false
+path = "src/network/benches/bench.rs"
+required-features = ["iouring"]
+
+[[bench]]
 name = "buffer_paged"
 harness = false
 path = "src/utils/buffer/benches/bench.rs"
