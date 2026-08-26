@@ -41,7 +41,7 @@ const MAX_TIMEOUT_WHEEL_SLOTS: usize = 1 << 20;
 
 /// Monotonic timeout-wheel tick in the wheel's local time domain.
 ///
-/// This is derived from `start` and `tick_nanos` inside [`TimeoutWheel::advance`]
+/// This is derived from `start` and `tick_nanos` inside [`TimeoutWheel::advance_into`]
 /// and [`TimeoutWheel::target_tick`]. It is not wall-clock time and should be
 /// treated as an opaque counter.
 pub type Tick = u64;
@@ -219,7 +219,7 @@ impl TimeoutWheel {
     ///   `current_tick + max_timeout_ticks`.
     ///
     /// This does not read wall-clock time, callers are expected to keep
-    /// `current_tick` fresh by calling [`Self::advance`] each loop iteration.
+    /// `current_tick` fresh by calling [`Self::advance_into`] each loop iteration.
     pub fn target_tick(&self, deadline: Instant) -> Option<Tick> {
         let deadline_nanos =
             Self::duration_to_nanos_saturating(deadline.saturating_duration_since(self.start));
@@ -236,7 +236,7 @@ impl TimeoutWheel {
 
     /// Schedule `id` at `target_tick`.
     ///
-    /// Callers should call [`Self::advance`] before scheduling in each loop
+    /// Callers should call [`Self::advance_into`] before scheduling in each loop
     /// iteration so `current_tick` reflects recent wall-clock progress. Scheduling
     /// against a stale `current_tick` can extend effective timeout latency.
     ///
