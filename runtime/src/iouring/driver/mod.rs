@@ -279,11 +279,31 @@ impl IoUringLoop {
             });
 
             // Wake tasks whose results were parked, outside the state borrow.
+            // RawWaker callbacks are arbitrary code and may synchronously
+            // poll another driver operation.
+            let invoked_callbacks = !self.pending_waker_actions.is_empty();
             self.flush_wakers();
 
             if needs_flush {
                 // Flush the staged batch into the kernel and stage more work.
                 self.submit(ring).expect("unable to submit to ring");
+                continue;
+            }
+
+            // A callback may have admitted work after the staging snapshot
+            // above. Reenter the turn before consulting that stale snapshot,
+            // so every new request receives an SQE and timeout-wheel entry and
+            // every cancellation or released deadline is processed before a
+            // blocking park. Foreign callbacks publish through the orphan
+            // mailbox and latch RingWaker, so only owner-local queues need
+            // this synchronous recheck.
+            if invoked_callbacks
+                && handle.with(|ops| {
+                    !ops.backlog.is_empty()
+                        || !ops.pending_cancels.is_empty()
+                        || !ops.released_deadlines.is_empty()
+                })
+            {
                 continue;
             }
 
@@ -1129,6 +1149,7 @@ pub(crate) mod testing {
 mod tests {
     use super::{handle::SyncTicket, testing::*, *};
     use crate::{Error, IoBuf, IoBufMut, IoBufs, WriteOptions, telemetry::metrics::Registry};
+    use commonware_utils::sync::Mutex;
     use futures::task::{ArcWake, waker as arc_waker};
     use std::{
         fs::File,
@@ -1139,10 +1160,7 @@ mod tests {
             unix::net::UnixStream,
         },
         pin::Pin,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
+        sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}},
         task::{Context, Poll},
         time::{Duration, Instant},
     };
@@ -3084,6 +3102,94 @@ mod tests {
         });
         drop(third);
         assert_eq!(harness.tracked(), 0);
+    }
+
+    /// A capacity callback may synchronously poll its operation. Work admitted
+    /// by that reentrant poll must be staged before the turn can return.
+    #[test]
+    fn test_capacity_waker_reentrant_admission_is_staged_in_same_turn() {
+        /// Result produced by the reentrantly polled receive operation.
+        type RecvResult = Result<(IoBufMut, usize), (IoBufMut, Error)>;
+
+        /// Waker that synchronously polls a capacity-blocked receive.
+        struct ReentrantAdmission {
+            /// Receive future waiting for the capacity callback.
+            future: Mutex<Pin<Box<dyn Future<Output = RecvResult> + Send>>>,
+            /// Number of capacity callbacks observed by the test.
+            callbacks: AtomicUsize,
+        }
+
+        impl ArcWake for ReentrantAdmission {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                arc_self.callbacks.fetch_add(1, Ordering::AcqRel);
+                let waker = futures::task::noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                assert!(arc_self.future.lock().as_mut().poll(&mut cx).is_pending());
+            }
+        }
+
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+
+        // Occupy the only waiter with a ticket whose CQE frees the slot
+        // inside the driver turn and grants the queued successor.
+        let (sync_left, _sync_right) = UnixStream::pair().unwrap();
+        // SAFETY: `sync_left` is a valid owned fd and is transferred into File.
+        let file = unsafe { File::from_raw_fd(sync_left.into_raw_fd()) };
+        let ticket = harness.block_on(handle.start_sync(Arc::new(file)));
+
+        let (recv_left, _recv_right) = UnixStream::pair().unwrap();
+        let recv_handle = handle.clone();
+        let admission = Arc::new(ReentrantAdmission {
+            future: Mutex::new(Box::pin(async move {
+                recv_handle
+                    .recv(
+                        Arc::new(recv_left.into()),
+                        IoBufMut::with_capacity(1),
+                        0,
+                        1,
+                        false,
+                        Instant::now() + Duration::from_secs(60),
+                    )
+                    .await
+            })),
+            callbacks: AtomicUsize::new(0),
+        });
+        let admission_waker = arc_waker(Arc::clone(&admission));
+        let mut admission_cx = Context::from_waker(&admission_waker);
+        assert!(
+            admission
+                .future
+                .lock()
+                .as_mut()
+                .poll(&mut admission_cx)
+                .is_pending()
+        );
+
+        // Drive until the sync CQE grants capacity and invokes the callback.
+        let start = Instant::now();
+        while admission.callbacks.load(Ordering::Acquire) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            harness.driver().turn();
+            if admission.callbacks.load(Ordering::Acquire) == 0 {
+                harness.driver().park(Some(Duration::from_millis(10)));
+            }
+        }
+
+        // The callback admitted the recv after the turn's first staging pass.
+        // It must nevertheless have an SQE and timeout entry before return.
+        harness.handle.with(|ops| {
+            assert!(ops.backlog.is_empty());
+            assert_eq!(ops.waiters.pending(), 1);
+        });
+        assert!(harness.driver().inner.timeout_wheel.next_deadline().is_some());
+
+        drop(ticket);
+        drop(admission_waker);
+        drop(admission);
     }
 
     #[test]
