@@ -702,7 +702,18 @@ impl IoUringLoop {
     /// async-cancel SQE queued, and waiters parked in the backlog retire
     /// locally when restaged.
     fn cancel_all(&mut self, ops: &mut Ops) {
-        for (waiter_id, target_tick, in_flight) in ops.waiters.cancel_active() {
+        let cancelled = ops.waiters.cancel_active();
+        self.queue_cancellations(ops, cancelled);
+    }
+
+    /// Release timeout accounting and queue any kernel cancellations required
+    /// by already-transitioned waiters.
+    fn queue_cancellations(
+        &mut self,
+        ops: &mut Ops,
+        cancelled: impl IntoIterator<Item = (WaiterId, Option<Tick>, bool)>,
+    ) {
+        for (waiter_id, target_tick, in_flight) in cancelled {
             if let Some(tick) = target_tick {
                 self.timeout_wheel.remove(tick);
             }
@@ -710,6 +721,37 @@ impl IoUringLoop {
                 ops.pending_cancels.push_back(waiter_id);
             }
         }
+    }
+
+    /// Expire request deadlines through the shutdown boundary, then cancel
+    /// every operation that remained active at that boundary.
+    ///
+    /// The loop may resume after both an operation deadline and the shutdown
+    /// grace elapsed. Advancing to the grace boundary first preserves their
+    /// chronological error precedence: earlier request deadlines report
+    /// [Error::Timeout], while operations whose deadlines were later report
+    /// [Error::Closed]. A deadline exactly at the boundary reports
+    /// [Error::Timeout] because its operation budget is exhausted there.
+    fn cancel_at_shutdown_boundary(
+        &mut self,
+        ops: &mut Ops,
+        started_at: Instant,
+        grace: Duration,
+    ) {
+        // The caller invokes this only after observing a representable
+        // Instant at least grace beyond started_at, so the intervening
+        // boundary must also be representable.
+        let boundary = started_at
+            .checked_add(grace)
+            .expect("expired shutdown boundary is not representable");
+        self.advance_timeouts_at(ops, boundary);
+
+        // The wheel rounds deadlines up to ticks. Compare the original
+        // absolute deadlines so two events within one tick retain their true
+        // order at shutdown.
+        let expired = ops.waiters.cancel_deadlines_through(boundary);
+        self.queue_cancellations(ops, expired);
+        self.cancel_all(ops);
     }
 
     /// Drain in-flight requests during shutdown.
@@ -763,13 +805,21 @@ impl IoUringLoop {
             // Cancellation grace starts at drain entry, so time spent reaping
             // CQEs, processing orphans, and running callbacks counts just as
             // time spent blocked in the kernel does.
-            if !cancellation_requested
-                && grace.is_some_and(|grace| {
-                    shutdown_grace_remaining(started_at, grace, now()).is_zero()
-                })
-            {
+            //
+            // Sample request time before the grace clock. If the grace is not
+            // yet expired, this bounds the following timeout advance to a
+            // point known to precede the shutdown boundary. A pause between
+            // these checkpoints therefore cannot let a later request deadline
+            // overtake an earlier shutdown.
+            let timeout_now = Instant::now();
+            if let Some(grace) = grace.filter(|grace| {
+                !cancellation_requested
+                    && shutdown_grace_remaining(started_at, *grace, now()).is_zero()
+            }) {
                 cancellation_requested = true;
-                handle.with(|ops| self.cancel_all(ops));
+                handle.with(|ops| {
+                    self.cancel_at_shutdown_boundary(ops, started_at, grace);
+                });
             }
 
             // Keep userspace deadline processing alive during shutdown so
@@ -777,7 +827,7 @@ impl IoUringLoop {
             // and continue staging requeued requests so partially-complete or
             // retrying requests can keep making progress.
             let pending = handle.with(|ops| {
-                self.advance_timeouts(ops);
+                self.advance_timeouts_at(ops, timeout_now);
                 {
                     let mut submission_queue = ring.submission();
                     self.stage_cancellations(ops, &mut submission_queue);
@@ -808,13 +858,14 @@ impl IoUringLoop {
             // Staging and its callbacks can consume the rest of the grace.
             // Cancel once, then retry staging so every cancellation request
             // reaches the kernel before the drain waits again.
-            if !cancellation_requested
-                && grace.is_some_and(|grace| {
-                    shutdown_grace_remaining(started_at, grace, now()).is_zero()
-                })
-            {
+            if let Some(grace) = grace.filter(|grace| {
+                !cancellation_requested
+                    && shutdown_grace_remaining(started_at, *grace, now()).is_zero()
+            }) {
                 cancellation_requested = true;
-                handle.with(|ops| self.cancel_all(ops));
+                handle.with(|ops| {
+                    self.cancel_at_shutdown_boundary(ops, started_at, grace);
+                });
                 continue;
             }
 
@@ -1268,9 +1319,10 @@ mod tests {
     /// Clock read zero records drain entry, read one follows CQE and callback
     /// processing, and read two follows staging and its callbacks.
     fn assert_shutdown_cancels_on_clock_read(expire_on_read: usize) {
+        let shutdown_timeout = Duration::from_secs(30);
         let cfg = RingConfig {
             size: 1,
-            shutdown_timeout: Some(Duration::from_secs(60)),
+            shutdown_timeout: Some(shutdown_timeout),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1294,7 +1346,7 @@ mod tests {
 
         let started_at = Instant::now();
         let expired_at = started_at
-            .checked_add(Duration::from_secs(60))
+            .checked_add(shutdown_timeout)
             .expect("test instant should be representable");
         let mut clock_reads = 0;
         ioloop.drain_with_shutdown_clock(&mut ring, || {
@@ -1327,6 +1379,141 @@ mod tests {
         // Preserve the grace through the first checkpoint, then expire after
         // staging so the driver retries with cancellation before waiting.
         assert_shutdown_cancels_on_clock_read(2);
+    }
+
+    #[test]
+    fn test_shutdown_overdue_deadline_precedes_overdue_grace() {
+        let timeout_wheel_tick = Duration::from_secs(1);
+        let shutdown_timeout = Duration::from_millis(20);
+        let cfg = RingConfig {
+            size: 1,
+            shutdown_timeout: Some(shutdown_timeout),
+            timeout_wheel_tick,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (mut ring, handle, mut ioloop) =
+            IoUringLoop::new(cfg, Duration::from_secs(60), &mut registry)
+                .expect("io_uring creation should succeed");
+        let (left, _right) = UnixStream::pair().unwrap();
+        let operation_deadline = Instant::now() + Duration::from_millis(100);
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            operation_deadline,
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(recv.as_mut().poll(&mut cx).is_pending());
+        ioloop.turn(&mut ring);
+        assert_eq!(handle.with(|ops| ops.waiters.pending()), 1);
+
+        // Cross the absolute operation deadline while remaining in its coarse
+        // wheel tick. Shutdown must compare the original deadline, not let
+        // tick rounding change which event happened first.
+        let overdue_at = operation_deadline
+            .checked_add(Duration::from_millis(5))
+            .expect("test instant should be representable");
+        std::thread::sleep(overdue_at.saturating_duration_since(Instant::now()));
+        assert!(Instant::now() >= overdue_at);
+        handle::wake_batch(handle.close().into_iter().map(handle::WakerAction::Wake));
+
+        // Expire the synthetic grace at the first post-CQE checkpoint. The
+        // earlier operation deadline must retain priority.
+        let started_at = Instant::now();
+        let expired_at = started_at
+            .checked_add(shutdown_timeout)
+            .expect("test instant should be representable");
+        let mut clock_reads = 0;
+        ioloop.drain_with_shutdown_clock(&mut ring, || {
+            let now = if clock_reads == 0 {
+                started_at
+            } else {
+                expired_at
+            };
+            clock_reads += 1;
+            now
+        });
+
+        assert_eq!(clock_reads, 2);
+        assert_eq!(handle.with(|ops| ops.waiters.pending()), 0);
+        match recv.as_mut().poll(&mut cx) {
+            Poll::Ready(Err((_, Error::Timeout))) => {}
+            other => panic!("overdue recv deadline should precede shutdown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shutdown_grace_precedes_later_deadline_across_checkpoint_pause() {
+        let timeout_wheel_tick = Duration::from_millis(1);
+        let shutdown_timeout = Duration::from_millis(5);
+        let cfg = RingConfig {
+            size: 1,
+            shutdown_timeout: Some(shutdown_timeout),
+            timeout_wheel_tick,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (mut ring, handle, mut ioloop) =
+            IoUringLoop::new(cfg, Duration::from_secs(60), &mut registry)
+                .expect("io_uring creation should succeed");
+        let (left, _right) = UnixStream::pair().unwrap();
+        let operation_deadline = Instant::now() + Duration::from_millis(50);
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            operation_deadline,
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(recv.as_mut().poll(&mut cx).is_pending());
+        ioloop.turn(&mut ring);
+        assert_eq!(handle.with(|ops| ops.waiters.pending()), 1);
+        handle::wake_batch(handle.close().into_iter().map(handle::WakerAction::Wake));
+
+        let started_at = Instant::now();
+        let shutdown_boundary = started_at
+            .checked_add(shutdown_timeout)
+            .expect("test instant should be representable");
+        assert!(operation_deadline > shutdown_boundary);
+        let before_shutdown = shutdown_boundary
+            .checked_sub(Duration::from_nanos(1))
+            .expect("test instant should be representable");
+        let after_deadline_tick = operation_deadline
+            .checked_add(timeout_wheel_tick)
+            .expect("test instant should be representable");
+        let mut clock_reads = 0;
+        ioloop.drain_with_shutdown_clock(&mut ring, || {
+            let now = match clock_reads {
+                0 => started_at,
+                1 => {
+                    // Simulate a pause after timeout time was sampled but
+                    // before the first grace observation returns. The grace
+                    // sample still precedes shutdown, while wall time crosses
+                    // the later request deadline.
+                    std::thread::sleep(
+                        after_deadline_tick.saturating_duration_since(Instant::now()),
+                    );
+                    before_shutdown
+                }
+                _ => shutdown_boundary,
+            };
+            clock_reads += 1;
+            now
+        });
+
+        assert_eq!(clock_reads, 3);
+        assert_eq!(handle.with(|ops| ops.waiters.pending()), 0);
+        match recv.as_mut().poll(&mut cx) {
+            Poll::Ready(Err((_, Error::Closed))) => {}
+            other => panic!("earlier shutdown grace should precede deadline, got {other:?}"),
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ use super::{
 };
 use crate::Error;
 use io_uring::squeue::Entry as SqueueEntry;
-use std::task::Waker;
+use std::{task::Waker, time::Instant};
 use tracing::warn;
 
 /// Install an already-cloned observer waker and detach the superseded clone.
@@ -907,6 +907,40 @@ impl Waiters {
         }
     }
 
+    /// Request deadline cancellation for every active request whose absolute
+    /// deadline is at or before `boundary`.
+    ///
+    /// This exact comparison is used at shutdown, where the timeout wheel's
+    /// rounded tick cannot decide whether a request deadline or the shutdown
+    /// grace happened first. Returns the same scheduling metadata as
+    /// [`Self::cancel_active`] so callers can release wheel accounting and
+    /// stage kernel cancellations.
+    pub fn cancel_deadlines_through(
+        &mut self,
+        boundary: Instant,
+    ) -> Vec<(WaiterId, Option<Tick>, bool)> {
+        let mut cancelled = Vec::new();
+        for slot in self.entries.iter_mut().filter_map(Option::as_mut) {
+            let Lifecycle::Pending(request) = &slot.lifecycle else {
+                continue;
+            };
+            let WaiterState::Active { target_tick } = slot.state else {
+                continue;
+            };
+            if !request
+                .deadline()
+                .is_some_and(|deadline| deadline <= boundary)
+            {
+                continue;
+            }
+            slot.state = WaiterState::CancelRequested {
+                reason: CancelReason::Deadline,
+            };
+            cancelled.push((slot.id, target_tick, slot.in_flight));
+        }
+        cancelled
+    }
+
     /// Request cancellation for every progressing waiter.
     ///
     /// Returns, for each transitioned waiter, its id, its deadline tick (so
@@ -1383,6 +1417,7 @@ mod tests {
         os::fd::OwnedFd,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::Arc,
+        time::Duration,
     };
 
     /// Build a `Sync` request backed by a socket fd so waiter tests can
@@ -1405,13 +1440,17 @@ mod tests {
     }
 
     fn make_recv_request() -> Request {
+        make_recv_request_with_deadline(None)
+    }
+
+    fn make_recv_request_with_deadline(deadline: Option<Instant>) -> Request {
         Request::Recv(RecvRequest {
             fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
             buf: IoBufMut::with_capacity(5),
             offset: 0,
             len: 5,
             exact: true,
-            deadline: None,
+            deadline,
         })
     }
 
@@ -2284,6 +2323,56 @@ mod tests {
         assert_eq!(transitioned[0].0, in_flight);
         assert_eq!(transitioned[0].1, Some(2));
         assert!(transitioned[0].2);
+    }
+
+    #[test]
+    fn test_waiters_cancel_deadlines_through_uses_absolute_deadline() {
+        let boundary = Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("test boundary should be representable");
+        let before = boundary
+            .checked_sub(Duration::from_nanos(1))
+            .expect("test deadline should be representable");
+        let after = boundary
+            .checked_add(Duration::from_nanos(1))
+            .expect("test deadline should be representable");
+        let mut waiters = Waiters::new(4);
+
+        let earlier = insert(
+            &mut waiters,
+            make_recv_request_with_deadline(Some(before)),
+            Some(11),
+        );
+        assert!(matches!(waiters.stage(earlier), StageOutcome::Submit(_)));
+        let equal = waiters.insert(
+            make_recv_request_with_deadline(Some(boundary)),
+            noop_waker(),
+        );
+        let later = insert(
+            &mut waiters,
+            make_recv_request_with_deadline(Some(after)),
+            Some(13),
+        );
+        let untimed = insert(&mut waiters, make_sync_request(), None);
+
+        assert_eq!(
+            waiters.cancel_deadlines_through(boundary),
+            vec![(earlier, Some(11), true), (equal, None, false)]
+        );
+        for waiter_id in [earlier, equal] {
+            assert!(matches!(
+                waiter_state(&waiters, waiter_id),
+                Some(WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline
+                })
+            ));
+        }
+        for waiter_id in [later, untimed] {
+            assert!(matches!(
+                waiter_state(&waiters, waiter_id),
+                Some(WaiterState::Active { .. })
+            ));
+        }
     }
 
     #[test]
