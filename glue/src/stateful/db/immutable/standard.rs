@@ -8,7 +8,7 @@
 
 use crate::stateful::db::{
     LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    Unmerkleized as UnmerkleizedTrait, Writer, sync_standard_db,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -311,14 +311,11 @@ where
         )
     }
 
-    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
-        let (batch, inactivity_floor) = {
-            let guard = db.read().await;
-            (guard.new_batch(), guard.inactivity_floor_loc())
-        };
+    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = db.with(|db| (db.new_batch(), db.inactivity_floor_loc()));
         ImmutableUnmerkleized {
             batch,
-            db,
+            db: db.reader(),
             metadata: None,
             inactivity_floor,
         }
@@ -421,14 +418,11 @@ where
         )
     }
 
-    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
-        let (batch, inactivity_floor) = {
-            let guard = db.read().await;
-            (guard.new_batch(), guard.inactivity_floor_loc())
-        };
+    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = db.with(|db| (db.new_batch(), db.inactivity_floor_loc()));
         ImmutableUnmerkleized {
             batch,
-            db,
+            db: db.reader(),
             metadata: None,
             inactivity_floor,
         }

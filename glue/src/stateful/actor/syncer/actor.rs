@@ -266,7 +266,7 @@ mod tests {
 
         fn readers(&self) -> Self::Readers {}
 
-        async fn new_batches(_readers: &Self::Readers) -> Self::Unmerkleized {
+        fn new_batches(&self) -> Self::Unmerkleized {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 

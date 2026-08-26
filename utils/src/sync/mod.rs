@@ -82,6 +82,12 @@ impl<T> TracedAsyncRwLock<T> {
         self.inner.read().await
     }
 
+    /// Acquire a shared read guard without waiting, or `None` while a writer holds or awaits
+    /// the lock.
+    pub fn try_read(&self) -> Option<AsyncRwLockReadGuard<'_, T>> {
+        self.inner.try_read().ok()
+    }
+
     /// Acquire an exclusive write guard, recording lock-wait time.
     #[tracing::instrument(name = "utils.rwlock.write", level = "info", skip_all, fields(lock = self.name))]
     pub async fn write(&self) -> AsyncRwLockWriteGuard<'_, T> {

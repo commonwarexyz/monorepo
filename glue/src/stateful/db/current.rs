@@ -6,7 +6,7 @@
 
 use crate::stateful::db::{
     LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    Unmerkleized as UnmerkleizedTrait, Writer, sync_standard_db,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -532,11 +532,11 @@ where
         )
     }
 
-    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
-        let batch = db.read().await.new_batch();
+    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
+        let batch = db.with(|db| db.new_batch());
         CurrentUnmerkleized {
             batch,
-            db,
+            db: db.reader(),
             metadata: None,
         }
     }
@@ -649,11 +649,11 @@ where
         )
     }
 
-    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
-        let batch = db.read().await.new_batch();
+    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
+        let batch = db.with(|db| db.new_batch());
         CurrentUnmerkleized {
             batch,
-            db,
+            db: db.reader(),
             metadata: None,
         }
     }
@@ -848,11 +848,11 @@ where
         )
     }
 
-    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
-        let batch = db.read().await.new_batch();
+    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
+        let batch = db.with(|db| db.new_batch());
         CurrentUnmerkleized {
             batch,
-            db,
+            db: db.reader(),
             metadata: None,
         }
     }
@@ -974,11 +974,11 @@ where
         )
     }
 
-    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
-        let batch = db.read().await.new_batch();
+    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
+        let batch = db.with(|db| db.new_batch());
         CurrentUnmerkleized {
             batch,
-            db,
+            db: db.reader(),
             metadata: None,
         }
     }
@@ -1252,10 +1252,10 @@ mod tests {
     use std::num::{NonZeroU16, NonZeroUsize};
 
     /// A fresh batch over the set's single database.
-    async fn new_batch<D: ManagedDb<deterministic::Context> + 'static>(
+    fn new_batch<D: ManagedDb<deterministic::Context> + 'static>(
         db: &Single<D>,
     ) -> D::Unmerkleized {
-        <Single<D> as DatabaseSet<deterministic::Context>>::new_batches(&db.readers()).await
+        <Single<D> as DatabaseSet<deterministic::Context>>::new_batches(db)
     }
 
     /// Apply `batch` into `set`, start durability, and wait for the deferred flush, boxing
@@ -1394,7 +1394,6 @@ mod tests {
             let missing = Sha256::hash(&[b"missing"]);
 
             let batch = new_batch(&db)
-                .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
@@ -1444,7 +1443,7 @@ mod tests {
             let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
-            let mut seed = new_batch(&db).await;
+            let mut seed = new_batch(&db);
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
@@ -1460,7 +1459,7 @@ mod tests {
             let upserts = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
-            let mut explicit = new_batch(&db).await;
+            let mut explicit = new_batch(&db);
             let explicit_values = explicit.get_many(&keys).await.unwrap();
             for (slot, value) in &indexed_updates {
                 explicit = explicit.write(read_keys[*slot], *value);
@@ -1475,7 +1474,7 @@ mod tests {
                     .root();
 
             // Staged path, with metadata set on the staged batch.
-            let staged_batch = new_batch(&db).await;
+            let staged_batch = new_batch(&db);
             let split = 2;
             let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
             let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
@@ -1492,7 +1491,7 @@ mod tests {
             assert_eq!(explicit_root, staged_root);
 
             // Metadata set before staging must be carried through to staged merkleize.
-            let carried_batch = new_batch(&db).await.with_metadata(metadata);
+            let carried_batch = new_batch(&db).with_metadata(metadata);
             let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
             let carried_root = staged
                 .merkleize(indexed_updates.clone(), upserts.clone())
@@ -1518,7 +1517,6 @@ mod tests {
             let missing = Sha256::hash(&[b"missing"]);
 
             let batch = new_batch(&db)
-                .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
@@ -1549,14 +1547,13 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
-            let (_writer, reader) = split(db);
+            let (writer, _) = split(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
-            let batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(reader)
-                .await
+            let batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&writer)
                 .write(key, Some(value))
                 .with_metadata(metadata);
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
@@ -1609,7 +1606,6 @@ mod tests {
             let value1 = Sha256::hash(&[b"value1"]);
             let metadata1 = Sha256::hash(&[b"metadata1"]);
             let batch1 = new_batch(&db)
-                .await
                 .write(key1, Some(value1))
                 .with_metadata(metadata1);
             let merkleized1 = crate::stateful::db::Unmerkleized::merkleize(batch1)
@@ -1622,7 +1618,6 @@ mod tests {
             let value2 = Sha256::hash(&[b"value2"]);
             let metadata2 = Sha256::hash(&[b"metadata2"]);
             let batch2 = new_batch(&db)
-                .await
                 .write(key2, Some(value2))
                 .with_metadata(metadata2);
             let merkleized2 = crate::stateful::db::Unmerkleized::merkleize(batch2)
@@ -1643,14 +1638,13 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
-            let (_writer, reader) = split(db);
+            let (writer, _) = split(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader)
-                .await
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&writer)
                 .write(key, Some(value))
                 .with_metadata(metadata);
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)

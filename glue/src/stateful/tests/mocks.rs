@@ -1,8 +1,8 @@
 use crate::stateful::{
     Application, ExecutionError, Input, Proposed,
     db::{
-        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, Single, Unmerkleized,
-        UnmerkleizedOf, Writer,
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Single, Unmerkleized, UnmerkleizedOf,
+        Writer,
     },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -180,7 +180,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
+    fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 

@@ -10,14 +10,12 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::{
-            mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
-        },
+        core::{mailbox::Message, processing::Processing},
         metrics::Metrics as StatefulMetrics,
-        processor::{Applied, PendingSyncTargets, Processor, Pruning},
+        processor::{PendingSyncTargets, Processor, Pruning, Request as VerificationRequest},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, Publisher, SnapshotsOf},
+    db::{Anchor, DatabaseSet, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -342,8 +340,9 @@ where
         let mut completed_height = anchor.height;
 
         let _ = metrics.sync_done.try_set(1);
-        let mut processor = Processor::new(application, databases, anchor, metrics, pruning);
-        processor = processor.publish_snapshot(&mut snapshot_publisher).await;
+        let mut processor = Processor::new(application, anchor, metrics, pruning);
+        let (mut databases, snapshots) = databases.snapshot().await;
+        snapshot_publisher.publish(processor.processed_height(), snapshots);
 
         let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
@@ -367,7 +366,12 @@ where
                             );
                             return;
                         },
-                        _ = processor.notify_finalized(context.as_present(), block.as_ref()) => {
+                        _ = Processor::notify_finalized(
+                            processor.app(),
+                            databases.readers(),
+                            context.as_present(),
+                            block.as_ref(),
+                        ) => {
                             acknowledgement.acknowledge();
                         },
                     }
@@ -375,7 +379,12 @@ where
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     // Exiting on stop leaves the block unacknowledged, and
                     // marshal redelivers it after a restart.
-                    let applied;
+                    let Some(finalizing) =
+                        processor.begin_finalize(context.as_present(), block.as_ref())
+                    else {
+                        panic!("sync handoff block cannot be a duplicate")
+                    };
+                    let sync_targets = A::sync_targets(block.as_ref());
                     select! {
                         _ = &mut shutdown => {
                             warn!(
@@ -384,13 +393,24 @@ where
                             );
                             return;
                         },
-                        driven = processor.finalize(context.as_present(), block.as_ref(), false) => {
-                            (processor, applied) = driven;
+                        driven = Processor::apply_finalized(
+                            processor.app(),
+                            databases,
+                            context.as_present(),
+                            block.as_ref(),
+                            finalizing.batch(),
+                            &sync_targets,
+                            false,
+                        ) => {
+                            (databases, _, _) = driven;
                         },
                     }
-                    let Some(Applied { prune, .. }) = applied else {
-                        panic!("sync handoff block cannot be a duplicate")
-                    };
+                    let prune = processor.finish_finalize(
+                        context.as_present(),
+                        block.as_ref(),
+                        sync_targets,
+                        finalizing,
+                    );
                     pending_acknowledgements.push(acknowledgement);
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
@@ -410,8 +430,8 @@ where
                     );
                     return;
                 },
-                driven = processor.sync() => {
-                    (processor, snapshots, barrier) = driven;
+                driven = databases.finalize() => {
+                    (databases, snapshots, barrier) = driven;
                 },
             }
 
@@ -437,11 +457,13 @@ where
         // what the prune cadence needs, so this fires only in tests that feed
         // more handoffs than the window holds.
         if let Some(prune) = pending_prune {
-            processor = processor.prune(prune, &marshal).await;
+            databases = prune.run(databases, &marshal).await;
             // The published snapshots were captured before this prune. Republish
             // so serving stops pinning the pruned state. Every handoff barrier
             // was awaited above, so the republished state is already durable.
-            processor = processor.publish_snapshot(&mut snapshot_publisher).await;
+            let snapshots;
+            (databases, snapshots) = databases.snapshot().await;
+            snapshot_publisher.publish(processor.processed_height(), snapshots);
         }
 
         Processing {
@@ -452,7 +474,7 @@ where
             snapshot_publisher,
             skip_finalized_until: Some(completed_height),
         }
-        .start(processor, deferred_verifications)
+        .start(processor, databases, deferred_verifications)
         .await
     }
 }

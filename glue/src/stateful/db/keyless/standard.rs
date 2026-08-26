@@ -7,7 +7,7 @@
 
 use crate::stateful::db::{
     LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    Unmerkleized as UnmerkleizedTrait, Writer, sync_standard_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -277,14 +277,11 @@ where
         )
     }
 
-    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
-        let (batch, inactivity_floor) = {
-            let guard = db.read().await;
-            (guard.new_batch(), guard.inactivity_floor_loc())
-        };
+    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = db.with(|db| (db.new_batch(), db.inactivity_floor_loc()));
         KeylessUnmerkleized {
             batch,
-            db,
+            db: db.reader(),
             metadata: None,
             inactivity_floor,
         }
@@ -380,14 +377,11 @@ where
         )
     }
 
-    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
-        let (batch, inactivity_floor) = {
-            let guard = db.read().await;
-            (guard.new_batch(), guard.inactivity_floor_loc())
-        };
+    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = db.with(|db| (db.new_batch(), db.inactivity_floor_loc()));
         KeylessUnmerkleized {
             batch,
-            db,
+            db: db.reader(),
             metadata: None,
             inactivity_floor,
         }
@@ -581,8 +575,7 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let (writer, reader) = split(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
-                .await
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&writer)
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
@@ -617,10 +610,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let (_writer, reader) = split(db);
+            let (writer, _) = split(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader)
-                .await
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&writer)
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
@@ -672,8 +664,7 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let (writer, reader) = split(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
-                .await
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&writer)
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
@@ -684,9 +675,7 @@ mod tests {
 
             // A fresh batch without an explicit floor must commit at the raised
             // floor instead of regressing it to zero.
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
-                .await
-                .append(U64::new(8));
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&writer).append(U64::new(8));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();

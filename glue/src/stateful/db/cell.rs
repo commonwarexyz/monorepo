@@ -94,6 +94,22 @@ impl<T> Writer<T> {
         Reader(self.0.clone())
     }
 
+    /// Run `f` over the database without waiting.
+    ///
+    /// A mutation exists only inside [`Self::mutate`], which consumes the writer, so
+    /// holding `&self` proves no write is held or queued and a read guard is free.
+    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        let guard = self
+            .0
+            .state
+            .try_read()
+            .expect("no mutation is pending while the writer is held");
+        match &*guard {
+            State::Live(db) => f(db),
+            State::Poisoned => unreachable!("a writer only exists while its cell is live"),
+        }
+    }
+
     /// Run one consuming mutation to completion, returning the writer.
     ///
     /// Waits at most one storage call to start, since new read guards queue

@@ -32,11 +32,10 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
-pub(super) use mailbox::Verification;
+pub(super) use mailbox::{Verification, WeakAncestry};
 
 mod processing;
 mod syncing;
-mod verifications;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
@@ -276,12 +275,13 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
+        let processor = Processor::new(self.application, anchor, metrics, self.pruning);
 
         // The recovered state alone must publish before the loop starts, so
         // serving begins before the next finalization.
         let mut snapshot_publisher = self.snapshot_publisher;
-        let processor = processor.publish_snapshot(&mut snapshot_publisher).await;
+        let (databases, snapshots) = databases.snapshot().await;
+        snapshot_publisher.publish(processor.processed_height(), snapshots);
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -290,7 +290,7 @@ where
             snapshot_publisher,
             skip_finalized_until,
         }
-        .start(processor, Vec::new())
+        .start(processor, databases, Vec::new())
         .await
     }
 }

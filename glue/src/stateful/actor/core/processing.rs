@@ -17,13 +17,10 @@
 use crate::stateful::{
     Application, Input,
     actor::{
-        core::{
-            mailbox::Message,
-            verifications::{Handler as Verifications, Request as VerificationRequest},
-        },
-        processor::{Applied, Processor},
+        core::mailbox::Message,
+        processor::{Handler as Verifications, Processor, Request as VerificationRequest},
     },
-    db::{Barrier, Publisher, SnapshotsOf},
+    db::{Barrier, DatabaseSet, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -156,10 +153,11 @@ async fn sync_completion(sync: &mut Option<Handle<(Height, bool)>>) -> (Height, 
 async fn start_sync<E, A, S, V>(
     shutdown: &mut (impl Future + Unpin),
     durability: &mut Durability,
-    verifications: &mut Verifications<S, V>,
-    processor: Processor<E, A>,
+    verifications: &mut Verifications<E, A, S, V>,
+    processor: &mut Processor<E, A>,
+    databases: A::Databases,
     publisher: &mut Publisher<SnapshotsOf<A::Databases, E>>,
-) -> Option<Processor<E, A>>
+) -> Option<A::Databases>
 where
     E: Rng + Spawner + Metrics + Clock + 'static,
     A: Application<E> + 'static,
@@ -169,22 +167,22 @@ where
 {
     // A requested successor is a no-op when no applied suffix remains uncovered.
     if !durability.needs_sync() {
-        return Some(processor);
+        return Some(databases);
     }
 
     // Capture the dirty prefix before waiting for the database writer. Drive verification readers
     // until the barrier starts, then bind its completion to exactly the prefix it captured.
     let height = durability.latest_applied();
-    let (processor, snapshots, barrier) = select! {
+    let (databases, snapshots, barrier) = select! {
         _ = &mut *shutdown => return None,
-        result = verifications.drive(processor.sync()) => result,
+        result = verifications.drive(processor, databases.finalize()) => result,
     };
 
     // The snapshots serve immediately; peers verify what they fetch against a
     // finalized root, so serving safely runs ahead of disk.
     publisher.publish(height, snapshots);
     durability.started(height, barrier);
-    Some(processor)
+    Some(databases)
 }
 
 pub(super) struct Processing<E, A, S, V>
@@ -230,13 +228,14 @@ where
     pub async fn start(
         mut self,
         mut processor: Processor<E, A>,
+        mut databases: A::Databases,
         deferred: Vec<VerificationRequest<E, A>>,
     ) {
         let mut pending_prune = None;
         let mut deferred_message = None;
         let mut verifications = Verifications::new(self.marshal.clone());
         for request in deferred {
-            verifications.schedule(processor.verifier(), request);
+            processor.schedule(&mut verifications, request);
         }
 
         // One signal for the actor's whole life. Re-creating it per iteration
@@ -263,19 +262,21 @@ where
                     &mut shutdown,
                     &mut durability,
                     &mut verifications,
-                    processor,
+                    &mut processor,
+                    databases,
                     &mut self.snapshot_publisher,
                 )
                 .await
                 else {
                     return;
                 };
-                processor = driven;
+                databases = driven;
             }
 
-            // Publish completed verdicts before admitting another message, so
-            // mailbox traffic cannot starve them.
+            // Publish completed verdicts and step their jobs before admitting
+            // another message, so mailbox traffic cannot starve them.
             verifications.complete_ready();
+            processor.settle(&mut verifications, Some(&databases));
 
             // A message deferred by an active proposal is the FIFO barrier
             // for subsequent mailbox work, so handle it before later arrivals.
@@ -303,6 +304,8 @@ where
                         let mailbox = &mut self.mailbox;
                         let sync = &mut durability.sync;
                         let verifications = &mut verifications;
+                        let processor = &mut processor;
+                        let databases = &databases;
                         Either::Right(async move {
                             loop {
                                 select! {
@@ -316,6 +319,7 @@ where
                                         break Some(Step::Sync(completion));
                                     },
                                     _ = verifications.next_completed() => {
+                                        processor.settle(verifications, Some(databases));
                                         continue;
                                     },
                                 }
@@ -353,35 +357,30 @@ where
                         upstream,
                         provider: self.provider.clone(),
                     };
-                    let actor_context = self.context.as_present();
-                    let proposal = processor
-                        .propose(
-                            actor_context,
-                            self.marshal.clone(),
-                            context,
-                            ancestry,
-                            input,
-                            response,
-                        )
-                        .instrument(process);
-                    futures::pin_mut!(proposal);
+                    processor.propose(
+                        &mut verifications,
+                        process,
+                        context,
+                        ancestry,
+                        input,
+                        response,
+                    );
                     let mut receive_messages = true;
-                    loop {
+                    while verifications.proposing() {
                         if receive_messages {
                             select! {
                                 _ = &mut shutdown => {
                                     debug!("shutdown signal received, stopping processing");
                                     return;
                                 },
-                                _ = &mut proposal => break,
                                 message = self.mailbox.recv() => match message {
                                     Some(Message::Verify {
                                         span,
                                         context,
                                         ancestry,
                                         verification,
-                                    }) => verifications.schedule(
-                                        processor.verifier(),
+                                    }) => processor.schedule(
+                                        &mut verifications,
                                         VerificationRequest {
                                             span,
                                             context,
@@ -406,10 +405,10 @@ where
                                     debug!("shutdown signal received, stopping processing");
                                     return;
                                 },
-                                _ = &mut proposal => break,
                                 _ = verifications.next_completed() => {},
                             }
                         }
+                        processor.settle(&mut verifications, Some(&databases));
                     }
                 }
                 Step::Message(Message::Verify {
@@ -418,8 +417,8 @@ where
                     ancestry,
                     verification,
                 }) => {
-                    verifications.schedule(
-                        processor.verifier(),
+                    processor.schedule(
+                        &mut verifications,
                         VerificationRequest {
                             span,
                             context,
@@ -438,26 +437,43 @@ where
                         // `Application::finalized` is at-least-once. Exiting on
                         // stop leaves the block unacknowledged, and marshal
                         // redelivers it after restart.
-                        let notify =
-                            processor.notify_finalized(self.context.as_present(), block.as_ref());
+                        let notify = Processor::notify_finalized(
+                            processor.app(),
+                            databases.readers(),
+                            self.context.as_present(),
+                            block.as_ref(),
+                        );
                         select! {
                             _ = &mut shutdown => {
                                 debug!("shutdown signal received, stopping processing");
                                 return;
                             },
-                            _ = verifications.drive(notify).instrument(process) => {
+                            _ = verifications.drive(&mut processor, notify).instrument(process) => {
                                 acknowledgement.acknowledge();
                             },
                         }
+                        processor.settle(&mut verifications, Some(&databases));
                         continue;
                     }
+
+                    let Some(finalizing) =
+                        processor.begin_finalize(self.context.as_present(), block.as_ref())
+                    else {
+                        // A duplicate report. Marshal redelivers a processed height
+                        // only after a restart, where startup aligned the databases
+                        // to durable state.
+                        acknowledgement.acknowledge();
+                        continue;
+                    };
 
                     // Verification jobs keep running during the apply,
                     // pausing at their next batch read. Exiting on stop drops
                     // the un-applied batches, and marshal redelivers the
                     // unacknowledged block after restart.
+                    let sync_targets = A::sync_targets(block.as_ref());
                     let should_start_sync = durability.sync.is_none();
-                    let applied;
+                    let app = processor.app();
+                    let (snapshots, barrier);
                     select! {
                         _ = &mut shutdown => {
                             warn!(
@@ -467,30 +483,32 @@ where
                             return;
                         },
                         driven = verifications
-                            .drive(processor.finalize(
-                                self.context.as_present(),
-                                block.as_ref(),
-                                should_start_sync,
-                            ))
+                            .drive(
+                                &mut processor,
+                                Processor::apply_finalized(
+                                    app,
+                                    databases,
+                                    self.context.as_present(),
+                                    block.as_ref(),
+                                    finalizing.batch(),
+                                    &sync_targets,
+                                    should_start_sync,
+                                ),
+                            )
                             .instrument(process.clone()) => {
-                            (processor, applied) = driven;
+                            (databases, snapshots, barrier) = driven;
                         },
                     }
+                    let prune = processor.finish_finalize(
+                        self.context.as_present(),
+                        block.as_ref(),
+                        sync_targets,
+                        finalizing,
+                    );
+                    processor.settle(&mut verifications, Some(&databases));
 
                     // Keep the publication bookkeeping under the same span.
                     let _span = process.entered();
-                    let Some(Applied {
-                        snapshots,
-                        barrier,
-                        prune,
-                    }) = applied
-                    else {
-                        // A duplicate report. Marshal redelivers a processed height
-                        // only after a restart, where startup aligned the databases
-                        // to durable state.
-                        acknowledgement.acknowledge();
-                        continue;
-                    };
                     debug!(
                         height = block.height().get(),
                         "applied finalized database batch"
@@ -529,7 +547,9 @@ where
                                     return;
                                 }
                             },
-                            _ = verifications.next_completed() => {},
+                            _ = verifications.next_completed() => {
+                                processor.settle(&mut verifications, Some(&databases));
+                            },
                         }
                     }
 
@@ -543,14 +563,16 @@ where
                             &mut shutdown,
                             &mut durability,
                             &mut verifications,
-                            processor,
+                            &mut processor,
+                            databases,
                             &mut self.snapshot_publisher,
                         )
                         .await
                         else {
                             return;
                         };
-                        processor = driven;
+                        databases = driven;
+                        processor.settle(&mut verifications, Some(&databases));
                         loop {
                             select! {
                                 _ = &mut shutdown => {
@@ -563,19 +585,26 @@ where
                                     }
                                     break;
                                 },
-                                _ = verifications.next_completed() => {},
+                                _ = verifications.next_completed() => {
+                                    processor.settle(&mut verifications, Some(&databases));
+                                },
                             }
                         }
                         assert!(durability.covers(prune.barrier_height));
                     }
-                    processor = verifications
-                        .drive(processor.prune(prune, &self.marshal))
+                    databases = verifications
+                        .drive(&mut processor, prune.run(databases, &self.marshal))
                         .await;
+                    processor.settle(&mut verifications, Some(&databases));
                     // The published snapshots predate this prune and pin the pruned
                     // storage, so capture and publish afresh right away.
-                    processor = verifications
-                        .drive(processor.publish_snapshot(&mut self.snapshot_publisher))
+                    let snapshots;
+                    (databases, snapshots) = verifications
+                        .drive(&mut processor, databases.snapshot())
                         .await;
+                    self.snapshot_publisher
+                        .publish(processor.processed_height(), snapshots);
+                    processor.settle(&mut verifications, Some(&databases));
                 }
                 Step::Sync(completion) => {
                     if !durability.complete(completion) {
@@ -996,13 +1025,7 @@ mod tests {
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let publication_context = context.child("publication");
             let (publisher, _subscriber) = Publisher::new(&publication_context);
@@ -1016,7 +1039,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
             let mut mailbox = Mailbox::new(sender);
 
             // Verifying the child reconstructs the parent's state with `apply`.
@@ -1094,13 +1117,7 @@ mod tests {
         app: GatedApp,
         marshal: fixtures::MarshalFixture,
     ) -> GatedApplication {
-        let processor = Processor::new(
-            app,
-            test_databases(),
-            anchor(0, 0),
-            StatefulMetrics::new(context),
-            None,
-        );
+        let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(context), None);
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let publication_context = context.child("publication");
         let (publisher, reader) = Publisher::new(&publication_context);
@@ -1114,7 +1131,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.start(processor, Vec::new()));
+            .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
         (Mailbox::new(sender), reader, marshal.guards, actor)
     }
 
@@ -1170,15 +1187,12 @@ mod tests {
             stale_verifies: Arc::default(),
             observed_contexts: Arc::default(),
         };
-        let processor = Processor::new(
-            app,
-            databases,
-            anchor(0, 0),
-            StatefulMetrics::new(context),
-            pruning,
-        );
+        let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(context), pruning);
         let (mut publisher, reader) = Publisher::new(context);
-        let processor = processor.publish_snapshot(&mut publisher).await;
+        let (databases, snapshots) =
+            <_ as crate::stateful::db::DatabaseSet<deterministic::Context>>::snapshot(databases)
+                .await;
+        publisher.publish(processor.processed_height(), snapshots);
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -1190,7 +1204,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.start(processor, Vec::new()));
+            .spawn(move |_| processing.start(processor, databases, Vec::new()));
         (Mailbox::new(sender), control, reader, marshal.guards, actor)
     }
 
@@ -1239,15 +1253,12 @@ mod tests {
         };
         let pruning = prune_config
             .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
-        let processor = Processor::new(
-            app,
-            databases,
-            anchor(0, 0),
-            StatefulMetrics::new(context),
-            pruning,
-        );
+        let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(context), pruning);
         let (mut publisher, _subscriber) = Publisher::new(context);
-        let processor = processor.publish_snapshot(&mut publisher).await;
+        let (databases, snapshots) =
+            <_ as crate::stateful::db::DatabaseSet<deterministic::Context>>::snapshot(databases)
+                .await;
+        publisher.publish(processor.processed_height(), snapshots);
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -1259,7 +1270,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.start(processor, Vec::new()));
+            .spawn(move |_| processing.start(processor, databases, Vec::new()));
         (Mailbox::new(sender), control, marshal.guards, actor)
     }
 
@@ -2141,13 +2152,7 @@ mod tests {
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(1, 1),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(1, 1), StatefulMetrics::new(&context), None);
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let publication_context = context.child("publication");
@@ -2162,7 +2167,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
 
             let mut verifier = mailbox.clone();
             let mut verify_child = Box::pin(verifier.verify(
@@ -2230,13 +2235,7 @@ mod tests {
                 false,
             )
             .await;
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
 
             // Defer a verification as the syncing actor does before its
             // database set is ready.
@@ -2283,7 +2282,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, vec![request]));
+                .spawn(move |_| processing.start(processor, test_databases(), vec![request]));
 
             started.await.expect("deferred verification should resume");
             release
@@ -2331,13 +2330,7 @@ mod tests {
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let publication_context = context.child("publication");
@@ -2352,7 +2345,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
 
             let consensus_context = first_child.context();
             let mut first_verifier = mailbox.clone();
@@ -2414,6 +2407,99 @@ mod tests {
         });
     }
 
+    /// When the job replaying a shared parent is cancelled, a waiting sibling
+    /// takes the replay over instead of failing.
+    #[test]
+    fn cancelled_replay_owner_hands_the_replay_to_a_waiter() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let first_child = TestBlock::child(&parent, 2);
+            let second_child = TestBlock::child(&parent, 3);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"replay-owner-cancel", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "replay-owner-cancel",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let (first_gate, first_started, _first_release) = application_gate();
+            let (second_gate, second_started, second_release) = application_gate();
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
+                finalized_gate: Arc::new(Mutex::new(None)),
+                gate_height: parent.height(),
+                apply_calls: apply_calls.clone(),
+                verify_calls: verify_calls.clone(),
+            };
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mailbox = Mailbox::new(sender);
+            let publication_context = context.child("publication");
+            let (publisher, _subscriber) = Publisher::new(&publication_context);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                snapshot_publisher: publisher,
+                skip_finalized_until: None,
+            };
+            let actor = context
+                .child("loop")
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
+
+            let mut first_verifier = mailbox.clone();
+            let mut first = Box::pin(first_verifier.verify(
+                (context.child("first_verify"), first_child.context()),
+                ancestry::from_iter([Arc::new(first_child), Arc::new(parent.clone())]),
+            ));
+            let mut second_verifier = mailbox.clone();
+            let mut second = Box::pin(second_verifier.verify(
+                (context.child("second_verify"), second_child.context()),
+                ancestry::from_iter([Arc::new(second_child), Arc::new(parent.clone())]),
+            ));
+            assert!(poll!(&mut first).is_pending());
+            assert!(poll!(&mut second).is_pending());
+            first_started
+                .await
+                .expect("the first sibling should own the replay");
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                apply_calls.load(Ordering::SeqCst),
+                1,
+                "siblings needing the same parent should share one replay",
+            );
+
+            // Dropping the owner's request cancels its replay mid-apply.
+            drop(first);
+            second_started
+                .await
+                .expect("the waiting sibling should take the replay over");
+            second_release
+                .send(())
+                .expect("the replay should remain active");
+            verify_started
+                .await
+                .expect("verification should reach the application");
+            let _ = verify_release.send(());
+            assert!(second.await);
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+            actor.abort();
+            drop(marshal.guards);
+        });
+    }
+
     /// A candidate whose own finalization completes while its parent replay is
     /// parked is answered true from the canonical chain, even though the replay
     /// resolves as invalid ancestry afterward.
@@ -2444,13 +2530,7 @@ mod tests {
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let publication_context = context.child("publication");
@@ -2465,7 +2545,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
 
             // The candidate's verification parks inside the shared replay of its
             // unknown parent.
@@ -2526,13 +2606,7 @@ mod tests {
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let publication_context = context.child("publication");
@@ -2547,7 +2621,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
 
             // The candidate's verification parks inside the shared replay of its
             // unknown parent.
@@ -2610,13 +2684,7 @@ mod tests {
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let publication_context = context.child("publication");
@@ -2631,7 +2699,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
 
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
@@ -2701,13 +2769,7 @@ mod tests {
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let publication_context = context.child("publication");
@@ -2722,7 +2784,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
 
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
@@ -2816,13 +2878,7 @@ mod tests {
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
+            let processor = Processor::new(app, anchor(0, 0), StatefulMetrics::new(&context), None);
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let publication_context = context.child("publication");
@@ -2837,7 +2893,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
 
             let mut first_verifier = mailbox.clone();
             let mut first_attempt = Box::pin(first_verifier.verify(
@@ -2945,7 +3001,6 @@ mod tests {
             );
             let processor = Processor::new(
                 app,
-                databases,
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
@@ -2964,7 +3019,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, databases, Vec::new()));
 
             let (acknowledgement, waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
@@ -3810,7 +3865,6 @@ mod tests {
             .await;
             let processor = Processor::new(
                 FatalProposeApp,
-                test_databases(),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
@@ -3829,7 +3883,7 @@ mod tests {
             };
             let _actor = context
                 .child("loop")
-                .spawn(move |_| processing.start(processor, Vec::new()));
+                .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
 
             let genesis = TestBlock::new(0, 0);
             let proposal_context = TestBlock::child(&genesis, 1).context();
@@ -3925,7 +3979,6 @@ mod tests {
             ParkedApp {
                 started: Arc::new(Mutex::new(Some(started_tx))),
             },
-            test_databases(),
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
@@ -3943,7 +3996,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.start(processor, Vec::new()));
+            .spawn(move |_| processing.start(processor, test_databases(), Vec::new()));
         (Mailbox::new(sender), started, marshal.guards, actor)
     }
 

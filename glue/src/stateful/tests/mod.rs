@@ -1065,8 +1065,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     .await;
     let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases.readers())
-    .await;
+    >>::new_batches(&databases);
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
 
@@ -1120,8 +1119,7 @@ async fn build_multi_chain(
     .await;
     let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases.readers())
-    .await;
+    >>::new_batches(&databases);
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
     let mut speculative = Vec::with_capacity(blocks as usize);
