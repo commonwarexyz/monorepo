@@ -233,20 +233,6 @@ pub struct RingConfig {
     /// queue entries, so the rounded size must not exceed [`MAX_RING_SIZE`].
     /// Larger rounded sizes panic during construction.
     pub size: u32,
-    /// Maximum request timeout supported by the userspace timeout wheel.
-    ///
-    /// Deadlines are clamped to this horizon. This value should be set to the
-    /// largest expected per-request deadline budget. Must be non-zero, and the
-    /// runtime raises it to cover both configured network timeouts.
-    ///
-    /// The wheel allocates a power of two of slots above
-    /// `ceil(horizon / tick) + 1`, capped at 1,048,576 slots: a configuration
-    /// that rounds above the cap panics at startup, before allocation. At the
-    /// cap the wheel holds about 28 MiB of fixed metadata per worker on 64-bit
-    /// builds, and with the default 5 ms [Self::timeout_wheel_tick] the cap
-    /// corresponds to a horizon of about 87 minutes. Larger horizons require a
-    /// coarser tick.
-    pub max_request_timeout: Duration,
     /// The maximum time the io_uring event loop waits for outstanding
     /// requests during the drain phase, after runtime teardown has closed the
     /// driver to new admissions.
@@ -266,12 +252,13 @@ pub struct RingConfig {
     /// Smaller values increase timing precision but increase wakeup and wheel
     /// processing frequency. Must be non-zero.
     ///
-    /// The tick also bounds the wheel size: slots round up to a power of two
-    /// above `ceil(horizon / tick) + 1` and are capped at 1,048,576, so a
-    /// smaller tick supports a shorter [Self::max_request_timeout] horizon
+    /// The tick also bounds the wheel size. Its horizon is derived from the
+    /// maximum configured network timeout, and its slot count rounds up to a
+    /// power of two above `ceil(horizon / tick) + 1`. The wheel is capped at
+    /// 1,048,576 slots, so a smaller tick supports a shorter derived horizon
     /// before the startup panic (about 87 minutes at the default 5 ms tick).
-    /// At the cap the wheel holds about 28 MiB of fixed metadata per worker
-    /// on 64-bit builds.
+    /// At the cap the wheel holds about 28 MiB of fixed metadata per worker on
+    /// 64-bit builds. Larger horizons require a coarser tick.
     pub timeout_wheel_tick: Duration,
     /// Adaptive idle spinner configuration.
     pub idle_spinner: SpinnerConfig,
@@ -281,7 +268,6 @@ impl Default for RingConfig {
     fn default() -> Self {
         Self {
             size: 128,
-            max_request_timeout: Duration::from_secs(60),
             shutdown_timeout: None,
             timeout_wheel_tick: Duration::from_millis(5),
             idle_spinner: SpinnerConfig::default(),

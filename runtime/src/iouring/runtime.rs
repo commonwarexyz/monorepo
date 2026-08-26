@@ -161,8 +161,9 @@ pub struct Config {
     /// send, recv, accept, connect, read, write, or sync consumes one slot).
     /// The driver always enables single-issuer and deferred task-run modes
     /// because the runtime thread creates the ring and is its only submitter.
-    /// `max_request_timeout` is raised to at least `read_write_timeout` and
-    /// `connect_timeout` so network deadlines are never clamped.
+    /// The timeout wheel horizon is derived from the maximum of
+    /// `read_write_timeout` and `connect_timeout` so network deadlines are
+    /// never clamped.
     ring: RingConfig,
 
     /// Whether or not to catch panics.
@@ -213,7 +214,7 @@ impl Config {
     ///
     /// The ring `size` bounds the number of concurrently in-flight logical
     /// operations per worker. Defaults to a 1024-entry ring. The runtime
-    /// raises `max_request_timeout` to cover both network timeouts.
+    /// derives the timeout wheel horizon from the configured network timeouts.
     pub const fn with_ring(mut self, ring: RingConfig) -> Self {
         self.ring = ring;
         self
@@ -250,8 +251,8 @@ impl Config {
     ///
     /// Defaults to 10 seconds. Zero and values above 30 years panic in
     /// [crate::Runner::start], a policy bound kept consistent with the
-    /// runtime's sleep clamp. The runtime raises the ring's timeout wheel
-    /// horizon to cover both network timeouts, so at the default
+    /// runtime's sleep clamp. The timeout wheel horizon is the maximum of the
+    /// configured network timeouts, so at the default
     /// [RingConfig::timeout_wheel_tick] the wheel's 1,048,576-slot cap
     /// (about 87 minutes of horizon) is what rejects oversized network
     /// timeouts at startup.
@@ -265,8 +266,8 @@ impl Config {
     ///
     /// Defaults to 60 seconds. Zero and values above 30 years panic in
     /// [crate::Runner::start], a policy bound kept consistent with the
-    /// runtime's sleep clamp. The runtime raises the ring's timeout wheel
-    /// horizon to cover both network timeouts, so at the default
+    /// runtime's sleep clamp. The timeout wheel horizon is the maximum of the
+    /// configured network timeouts, so at the default
     /// [RingConfig::timeout_wheel_tick] the wheel's 1,048,576-slot cap
     /// (about 87 minutes of horizon) is what rejects oversized network
     /// timeouts at startup.
@@ -631,18 +632,22 @@ impl Worker {
         let mut registry = shared.registry.clone();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
-        let mut ring_cfg = shared.cfg.ring.clone();
-        ring_cfg.max_request_timeout = ring_cfg
-            .max_request_timeout
-            .max(shared.cfg.network_cfg.read_write_timeout)
+        let max_request_timeout = shared
+            .cfg
+            .network_cfg
+            .read_write_timeout
             .max(shared.cfg.network_cfg.connect_timeout);
-        let (driver, handle) = Driver::new(ring_cfg, &mut runtime_registry.sub_registry("iouring"))
-            .unwrap_or_else(|err| {
-                panic!(
-                    "unable to create io_uring instance ({err}): this runtime requires Linux \
+        let (driver, handle) = Driver::new(
+            shared.cfg.ring.clone(),
+            max_request_timeout,
+            &mut runtime_registry.sub_registry("iouring"),
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "unable to create io_uring instance ({err}): this runtime requires Linux \
                          6.1+ (IORING_SETUP_SINGLE_ISSUER and IORING_SETUP_DEFER_TASKRUN)"
-                )
-            });
+            )
+        });
 
         // Initialize storage and network against this worker's driver.
         let storage = MeteredStorage::new(

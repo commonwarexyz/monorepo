@@ -50,6 +50,9 @@ use tracing::warn;
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
 
+/// Default timeout for each network read, write, and in-flight accept.
+const DEFAULT_READ_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Listen backlog requested for bound sockets.
 ///
 /// The kernel caps this at `net.core.somaxconn`.
@@ -77,8 +80,8 @@ pub struct Config {
     /// in-flight accept (which is transparently reissued on expiry).
     ///
     /// This is a network-level policy and is independent from io_uring loop
-    /// tuning. The runtime raises the loop timeout horizon as needed so this
-    /// value is never clamped by the ring's `max_request_timeout`.
+    /// tuning. The runtime derives the loop timeout horizon from this value
+    /// and [Self::connect_timeout], so this value is never clamped.
     /// Zero and values above the runtime's 30-year timer policy are rejected at startup.
     pub read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
@@ -94,7 +97,7 @@ impl Default for Config {
             tcp_nodelay: Some(true),
             zero_linger: true,
             connect_timeout: Duration::from_secs(10),
-            read_write_timeout: iouring::RingConfig::default().max_request_timeout,
+            read_write_timeout: DEFAULT_READ_WRITE_TIMEOUT,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
         }
     }
@@ -652,16 +655,13 @@ mod tests {
 
     /// Start a test network backed by a loop harness on this thread, mirroring
     /// how the runtime hands the network a driver for the runtime-driven loop.
-    fn test_network_with_ring(cfg: Config, mut ring: iouring::RingConfig) -> (TestLoop, Network) {
+    fn test_network_with_ring(cfg: Config, ring: iouring::RingConfig) -> (TestLoop, Network) {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         // Match the runtime's startup behavior so network deadlines are never
-        // clamped by the ring's timeout horizon.
-        ring.max_request_timeout = ring
-            .max_request_timeout
-            .max(cfg.read_write_timeout)
-            .max(cfg.connect_timeout);
-        let harness = TestLoop::new(ring);
+        // clamped by the loop's timeout horizon.
+        let max_request_timeout = cfg.read_write_timeout.max(cfg.connect_timeout);
+        let harness = TestLoop::new_with_max_request_timeout(ring, max_request_timeout);
         let network = Network::new(cfg, harness.handle.clone(), pool);
         (harness, network)
     }

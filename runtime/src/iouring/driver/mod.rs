@@ -123,6 +123,8 @@ impl IoUringLoop {
     /// The calling thread becomes the handle's owning (runtime) thread.
     /// Ring creation completes before the waiter table and queues whose
     /// capacities are proportional to the effective ring size are allocated.
+    /// `max_request_timeout` sets the timeout wheel horizon and must cover
+    /// every request deadline.
     ///
     /// # Errors
     ///
@@ -137,10 +139,11 @@ impl IoUringLoop {
     /// the spinner budget exceeds its configured maximum.
     pub(crate) fn new(
         mut cfg: RingConfig,
+        max_request_timeout: Duration,
         registry: &mut impl Register,
     ) -> Result<(IoUring, Handle, Self), std::io::Error> {
         assert!(
-            !cfg.max_request_timeout.is_zero(),
+            !max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"
         );
         assert!(
@@ -155,11 +158,8 @@ impl IoUringLoop {
         let size = cfg.size as usize;
         let pending_operations = PendingOperations::new(registry);
         let waker = Waker::new().expect("unable to create wake eventfd");
-        let timeout_wheel = TimeoutWheel::new(
-            cfg.max_request_timeout,
-            cfg.timeout_wheel_tick,
-            Instant::now(),
-        );
+        let timeout_wheel =
+            TimeoutWheel::new(max_request_timeout, cfg.timeout_wheel_tick, Instant::now());
         let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.signalled());
         let handle = Handle::new(size, waker.clone());
 
@@ -858,11 +858,14 @@ impl Driver {
     /// Create the driver and its shared submission handle.
     ///
     /// The calling thread becomes the ring's owner and only submitter.
+    /// `max_request_timeout` sets the timeout wheel horizon and must cover
+    /// every request deadline admitted by the driver.
     pub(crate) fn new(
         cfg: RingConfig,
+        max_request_timeout: Duration,
         registry: &mut impl Register,
     ) -> Result<(Self, Handle), std::io::Error> {
-        let (ring, handle, inner) = IoUringLoop::new(cfg, registry)?;
+        let (ring, handle, inner) = IoUringLoop::new(cfg, max_request_timeout, registry)?;
         Ok((Self { ring, inner }, handle))
     }
 
@@ -956,10 +959,19 @@ pub(crate) mod testing {
     }
 
     impl TestLoop {
+        /// Create a loop harness with a 60-second timeout horizon.
         pub(crate) fn new(cfg: RingConfig) -> Self {
+            Self::new_with_max_request_timeout(cfg, Duration::from_secs(60))
+        }
+
+        /// Create a loop harness with the provided timeout horizon.
+        pub(crate) fn new_with_max_request_timeout(
+            cfg: RingConfig,
+            max_request_timeout: Duration,
+        ) -> Self {
             let mut registry = Registry::default();
-            let (driver, handle) =
-                Driver::new(cfg, &mut registry).expect("unable to create io_uring instance");
+            let (driver, handle) = Driver::new(cfg, max_request_timeout, &mut registry)
+                .expect("unable to create io_uring instance");
             Self {
                 handle,
                 driver: Some(driver),
@@ -1068,7 +1080,8 @@ mod tests {
         };
         let mut registry = Registry::default();
         let (_ring, _handle, ioloop) =
-            IoUringLoop::new(cfg, &mut registry).expect("io_uring creation should succeed");
+            IoUringLoop::new(cfg, Duration::from_secs(60), &mut registry)
+                .expect("io_uring creation should succeed");
         assert_eq!(ioloop.cfg.size, 128);
     }
 
@@ -1141,10 +1154,7 @@ mod tests {
     #[test]
     fn test_recv_timeout() {
         // Verify a timed recv completes with timeout once its deadline expires.
-        let mut harness = TestLoop::new(RingConfig {
-            max_request_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
 
         let handle = harness.handle.clone();
@@ -1172,7 +1182,6 @@ mod tests {
         // cancel a newly inserted waiter that reused the same slot.
         let mut harness = TestLoop::new(RingConfig {
             size: 8,
-            max_request_timeout: Duration::from_millis(200),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
         });
@@ -1294,10 +1303,7 @@ mod tests {
     fn test_drop_cancels_inflight_recv() {
         // Verify dropping an op future mid-flight eagerly cancels the
         // operation and frees its slot without waiting for the deadline.
-        let mut harness = TestLoop::new(RingConfig {
-            max_request_timeout: Duration::from_secs(60),
-            ..Default::default()
-        });
+        let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
         let fd = Arc::new(OwnedFd::from(left));
 
@@ -1456,8 +1462,18 @@ mod tests {
             "Number of retained logical operations in the io_uring loop",
             raw::Gauge::default(),
         );
-        let (mut driver_a, handle_a) = Driver::new(RingConfig::default(), &mut registry).unwrap();
-        let (mut driver_b, _handle_b) = Driver::new(RingConfig::default(), &mut registry).unwrap();
+        let (mut driver_a, handle_a) = Driver::new(
+            RingConfig::default(),
+            Duration::from_secs(60),
+            &mut registry,
+        )
+        .unwrap();
+        let (mut driver_b, _handle_b) = Driver::new(
+            RingConfig::default(),
+            Duration::from_secs(60),
+            &mut registry,
+        )
+        .unwrap();
 
         // Admit a sync whose ticket is never awaited. Its terminal result
         // parks in driver A's completion arena after a socket fd fails fsync.
@@ -1503,6 +1519,7 @@ mod tests {
                 size: 1,
                 ..Default::default()
             },
+            Duration::from_secs(60),
             &mut registry,
         )
         .unwrap();
@@ -1576,10 +1593,7 @@ mod tests {
         // the armed eventfd path and cancel the in-flight accept, instead of
         // latching a wake nothing observes while the drain sleeps toward the
         // distant wheel deadline.
-        let mut harness = TestLoop::new(RingConfig {
-            max_request_timeout: Duration::from_secs(3600),
-            ..Default::default()
-        });
+        let mut harness = TestLoop::new(RingConfig::default());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let fd: Arc<OwnedFd> = Arc::new(OwnedFd::from(listener));
 
@@ -1620,7 +1634,6 @@ mod tests {
         // sleeps through it toward the distant wheel deadline.
         let mut harness = TestLoop::new(RingConfig {
             size: 1,
-            max_request_timeout: Duration::from_secs(3600),
             ..Default::default()
         });
         let handle = harness.handle.clone();
@@ -1849,7 +1862,6 @@ mod tests {
     fn test_ready_ticket_poll_does_not_double_release_capacity() {
         let mut harness = TestLoop::new(RingConfig {
             size: 1,
-            max_request_timeout: Duration::from_secs(60),
             ..Default::default()
         });
         let handle = harness.handle.clone();
@@ -2964,7 +2976,6 @@ mod tests {
         // the abandoned future observes the timeout result.
         let mut harness = TestLoop::new(RingConfig {
             shutdown_timeout: Some(Duration::from_millis(200)),
-            max_request_timeout: Duration::from_secs(60),
             ..Default::default()
         });
         let (left, _right) = UnixStream::pair().unwrap();
@@ -3005,7 +3016,6 @@ mod tests {
         // timeout even when the shutdown budget is longer.
         let mut harness = TestLoop::new(RingConfig {
             shutdown_timeout: Some(Duration::from_secs(10)),
-            max_request_timeout: Duration::from_secs(60),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
         });
@@ -3044,7 +3054,6 @@ mod tests {
         // wheel report an elapsed deadline forever, degrading park into a
         // busy loop.
         let mut harness = TestLoop::new(RingConfig {
-            max_request_timeout: Duration::from_secs(1),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
         });
@@ -3096,7 +3105,6 @@ mod tests {
         // out-of-band wake still unparks a blocked loop.
         let mut harness = TestLoop::new(RingConfig {
             size: 1,
-            max_request_timeout: Duration::from_secs(60),
             ..Default::default()
         });
         let (left, _right) = UnixStream::pair().unwrap();
@@ -3420,7 +3428,6 @@ mod tests {
         // leave drain blocked in a kernel wait that nothing will complete.
         let mut harness = TestLoop::new(RingConfig {
             shutdown_timeout: None,
-            max_request_timeout: Duration::from_secs(60),
             ..Default::default()
         });
         let (left, _right) = UnixStream::pair().unwrap();
@@ -3456,7 +3463,6 @@ mod tests {
         // restaged by drain until the remaining bytes complete it.
         let mut harness = TestLoop::new(RingConfig {
             shutdown_timeout: None,
-            max_request_timeout: Duration::from_secs(60),
             ..Default::default()
         });
         let (left, right) = UnixStream::pair().unwrap();
@@ -3497,10 +3503,7 @@ mod tests {
         // through the orphan mailbox: subsequent turns wind it down
         // (cancelling the in-flight recv) instead of leaking the slot until
         // shutdown.
-        let mut harness = TestLoop::new(RingConfig {
-            max_request_timeout: Duration::from_secs(60),
-            ..Default::default()
-        });
+        let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
 
         let handle = harness.handle.clone();
@@ -3543,7 +3546,6 @@ mod tests {
         // re-parking.
         let mut harness = TestLoop::new(RingConfig {
             size: 1,
-            max_request_timeout: Duration::from_secs(60),
             ..Default::default()
         });
         let (left_a, _right_a) = UnixStream::pair().unwrap();
@@ -3588,7 +3590,6 @@ mod tests {
         // across submit cycles instead of stranding in-flight waiters.
         let mut harness = TestLoop::new(RingConfig {
             size: 8,
-            max_request_timeout: Duration::from_secs(1),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
         });
@@ -3635,7 +3636,6 @@ mod tests {
         // to either success or timeout, and never panic, double-remove a
         // wheel tick, or leak the slot.
         let mut harness = TestLoop::new(RingConfig {
-            max_request_timeout: Duration::from_secs(1),
             timeout_wheel_tick: Duration::from_millis(1),
             ..Default::default()
         });
@@ -3671,7 +3671,6 @@ mod tests {
         // An exact recv that made partial progress (requeued) must resolve
         // with timeout at its deadline and return the buffer.
         let mut harness = TestLoop::new(RingConfig {
-            max_request_timeout: Duration::from_secs(1),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
         });
@@ -3711,7 +3710,6 @@ mod tests {
         // releases its wheel tick. Dropping the future in that window must
         // not double-release deadline accounting or leak the slot.
         let mut harness = TestLoop::new(RingConfig {
-            max_request_timeout: Duration::from_secs(1),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
         });

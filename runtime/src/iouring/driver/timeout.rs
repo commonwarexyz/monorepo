@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 /// stay reachable by increasing the tick.
 ///
 /// This limit must agree with the public documentation on
-/// `RingConfig::max_request_timeout` and `RingConfig::timeout_wheel_tick`.
+/// `RingConfig::timeout_wheel_tick`.
 const MAX_TIMEOUT_WHEEL_SLOTS: usize = 1 << 20;
 
 /// Monotonic timeout-wheel tick in the wheel's local time domain.
@@ -140,7 +140,7 @@ impl TimeoutWheel {
         assert!(
             slots <= MAX_TIMEOUT_WHEEL_SLOTS,
             "timeout wheel requires {slots} slots, maximum is {MAX_TIMEOUT_WHEEL_SLOTS}. \
-             Reduce max_request_timeout or increase timeout_wheel_tick"
+             Reduce network timeouts or increase timeout_wheel_tick"
         );
         slots
     }
@@ -935,7 +935,7 @@ mod tests {
         assert_eq!(
             message,
             "timeout wheel requires 2097152 slots, maximum is 1048576. \
-             Reduce max_request_timeout or increase timeout_wheel_tick"
+             Reduce network timeouts or increase timeout_wheel_tick"
         );
     }
 
