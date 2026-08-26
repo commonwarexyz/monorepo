@@ -657,7 +657,7 @@ pub struct PortConfig {
 pub struct InstanceConfig {
     /// Name of the instance.
     ///
-    /// Must be unique, must not be `monitoring`, and must match `[A-Za-z0-9_-]+`.
+    /// Must be unique ignoring case, must not be `monitoring`, and must match `[A-Za-z0-9_-]+`.
     pub name: String,
 
     /// AWS region where the instance is deployed

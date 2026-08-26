@@ -67,7 +67,8 @@ fn is_valid_name(name: &str) -> bool {
 /// Validates the deployment tag and instance names.
 ///
 /// Both are written unescaped into file paths, YAML, shell scripts, S3 keys, and AWS tags.
-/// Instance names must also be unique and must not be [`MONITORING_NAME`].
+/// Instance names must also be unique ignoring case, because they name generated files on
+/// the operator's filesystem, and must not be [`MONITORING_NAME`].
 fn validate_names(config: &Config) -> Result<(), Error> {
     if !is_valid_name(&config.tag) {
         return Err(Error::InvalidTag(config.tag.clone()));
@@ -78,7 +79,7 @@ fn validate_names(config: &Config) -> Result<(), Error> {
         if name == MONITORING_NAME || !is_valid_name(name) {
             return Err(Error::InvalidInstanceName(name.clone()));
         }
-        if !instance_names.insert(name) {
+        if !instance_names.insert(name.to_ascii_lowercase()) {
             return Err(Error::DuplicateInstanceName(name.clone()));
         }
     }
@@ -1897,13 +1898,13 @@ mod tests {
             monitoring("gp3", None),
             vec![
                 instance("worker", "us-east-1", "c8g.4xlarge", None),
-                instance("worker", "us-west-2", "c8g.4xlarge", None),
+                instance("Worker", "us-west-2", "c8g.4xlarge", None),
             ],
         );
 
-        let err = validate_names(&cfg).expect_err("duplicate name");
+        let err = validate_names(&cfg).expect_err("duplicate name ignoring case");
 
-        assert!(matches!(err, Error::DuplicateInstanceName(n) if n == "worker"));
+        assert!(matches!(err, Error::DuplicateInstanceName(n) if n == "Worker"));
     }
 
     #[test]
