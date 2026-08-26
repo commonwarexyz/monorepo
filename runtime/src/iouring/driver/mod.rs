@@ -343,20 +343,11 @@ impl IoUringLoop {
                 continue;
             }
 
-            // A callback may have admitted work after the staging snapshot
-            // above. Reenter the turn before consulting that stale snapshot,
-            // so every new request receives an SQE and timeout-wheel entry and
-            // every cancellation or released deadline is processed before a
-            // blocking park. Foreign callbacks publish through the orphan
-            // mailbox and latch RingWaker, so only owner-local queues need
-            // this synchronous recheck.
-            if invoked_callbacks
-                && handle.with(|ops| {
-                    !ops.backlog.is_empty()
-                        || !ops.pending_cancels.is_empty()
-                        || !ops.released_deadlines.is_empty()
-                })
-            {
+            // A callback may admit work or consume enough time for a request
+            // deadline to expire after the staging snapshot above. Reenter
+            // once after every nonempty batch so both queues and timeout time
+            // are refreshed before the turn can return to a blocking park.
+            if invoked_callbacks {
                 continue;
             }
 
@@ -900,12 +891,20 @@ impl IoUringLoop {
                 }
                 ops.waiters.pending()
             });
+            let invoked_callbacks = !self.pending_waker_actions.is_empty();
             self.flush_wakers();
 
             // Staging can directly complete the last waiter (for example, when a
             // timed-out requeued request is retired instead of reissued).
             if pending == 0 {
                 break;
+            }
+
+            // Callback time can cross a request deadline after timeout_now
+            // was sampled. Restart so cancellation is staged before deriving
+            // a kernel wait from the timeout wheel.
+            if invoked_callbacks {
+                continue;
             }
 
             // Staging and its callbacks can consume the rest of the grace.
@@ -3507,6 +3506,55 @@ mod tests {
         drop(ticket);
         drop(admission_waker);
         drop(admission);
+    }
+
+    #[test]
+    fn test_turn_refreshes_deadlines_after_waker_callback() {
+        struct SleepPast(Instant);
+
+        impl ArcWake for SleepPast {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                std::thread::sleep(arc_self.0.saturating_duration_since(Instant::now()));
+            }
+        }
+
+        let cfg = RingConfig {
+            timeout_wheel_tick: Duration::from_millis(1),
+            ..RingConfig::default()
+        };
+        let mut registry = Registry::default();
+        let (mut ring, handle, mut ioloop) =
+            IoUringLoop::new(cfg, Duration::from_secs(1), &mut registry)
+                .expect("io_uring creation should succeed");
+        let (left, _right) = UnixStream::pair().unwrap();
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            deadline,
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(recv.as_mut().poll(&mut cx).is_pending());
+        ioloop.turn(&mut ring);
+        assert!(ioloop.timeout_wheel.next_deadline().is_some());
+
+        // The callback consumes the entire remaining timeout without
+        // publishing any driver work. The turn must refresh deadlines before
+        // it can return control to a blocking park.
+        let sleepy = arc_waker(Arc::new(SleepPast(deadline + Duration::from_millis(5))));
+        ioloop
+            .pending_waker_actions
+            .push(handle::WakerAction::Wake(sleepy));
+        ioloop.turn(&mut ring);
+        assert_eq!(ioloop.timeout_wheel.next_deadline(), None);
+
+        drop(recv);
+        handle::wake_batch(handle.close().into_iter().map(handle::WakerAction::Wake));
+        ioloop.drain(&mut ring);
     }
 
     #[test]
