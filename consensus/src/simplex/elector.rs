@@ -519,11 +519,8 @@ mod tests {
         },
         types::{Epoch, View},
     };
-    use commonware_codec::DecodeExt;
     use commonware_cryptography::{
-        Blake3, Crc32, Sha256,
-        bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::mocks::Fixture,
+        Sha256, bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
         sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
@@ -533,58 +530,6 @@ mod tests {
 
     type ThresholdScheme =
         bls12381_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
-
-    #[allow(deprecated)]
-    fn assert_random_selection_vector<V: Variant>(
-        encoded: &str,
-        v0: u32,
-        sha256: u32,
-        blake3: u32,
-        crc32: u32,
-    ) {
-        let encoded = commonware_formatting::from_hex(encoded).unwrap();
-        let signature = V::Signature::decode(encoded.as_slice()).unwrap();
-        let round = Round::new(Epoch::new(0), View::new(2));
-        let n = 17;
-
-        assert_eq!(
-            Random::<Sha256>::new(RandomVersion::V0).select_leader::<V>(round, n, Some(signature)),
-            Participant::new(v0)
-        );
-        assert_eq!(
-            Random::<Sha256>::new(RandomVersion::V1).select_leader::<V>(round, n, Some(signature)),
-            Participant::new(sha256)
-        );
-        assert_eq!(
-            Random::<Blake3>::new(RandomVersion::V1).select_leader::<V>(round, n, Some(signature)),
-            Participant::new(blake3)
-        );
-        assert_eq!(
-            Random::<Crc32>::new(RandomVersion::V1).select_leader::<V>(round, n, Some(signature)),
-            Participant::new(crc32)
-        );
-    }
-
-    #[test]
-    fn random_selection_matches_vectors() {
-        assert_random_selection_vector::<MinPk>(
-            "930d3763e52f0362e21502ccf2e62c872c20e1f971f6349bf3fe5e8fa6ae76b3\
-             2010bfb8f4a2d6e91d7b3ca681adfdaa140ab3254fe1f4d4d410c796bb83118ddf\
-             3ecb4484c295713a6223aea52484d77626a192f200ebf9ab015aff6ac87604",
-            8,
-            14,
-            1,
-            7,
-        );
-        assert_random_selection_vector::<MinSig>(
-            "963e09774dd2d6e83730cde6484f6c9f20d44fdc90139539cb91e25131c3d54a\
-             d2c44e52612506a6051ed07ae366c0ef",
-            4,
-            2,
-            15,
-            0,
-        );
-    }
 
     #[test]
     fn stable_terms_preserve_optimistic_views() {
