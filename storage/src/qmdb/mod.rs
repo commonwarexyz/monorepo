@@ -677,13 +677,18 @@ where
 {
     let count = snapshot.partition_count();
 
-    // Split the concurrency budget (less this task, which coordinates and is mostly idle) between
-    // decode tasks and insert workers. Inserts cost more CPU than decoding, so an odd budget gives
-    // the extra thread to the workers. A budget of one yields a single worker fed by this task
-    // decoding inline.
-    let budget = init_concurrency.get() - 1;
-    let decoders = budget / 2;
-    let workers = (budget - decoders).min(count);
+    // Split the concurrency between decode tasks and insert workers. With decode tasks this
+    // task only forwards batches and is mostly idle, so like the init overlap task it does
+    // not count against the concurrency; at a concurrency of two it decodes inline (chunked
+    // decode pays redundant reads a lone decoder cannot hide) and counts. Inserts cost more
+    // CPU than decoding, so an odd count gives the extra thread to the workers.
+    let concurrency = init_concurrency.get();
+    let decoders = if concurrency <= 2 { 0 } else { concurrency / 2 };
+    let workers = if decoders == 0 {
+        concurrency.saturating_sub(1).min(count)
+    } else {
+        (concurrency - decoders).min(count)
+    };
 
     // No workers: build on this task.
     if workers == 0 {
@@ -741,14 +746,10 @@ where
         handles.push(handle.abort_on_drop());
     }
 
-    // Replay the log and route each keyed op to the worker owning its partition. Decoding the
-    // stream is the build's serial bottleneck at large sizes, so when the budget grants decode
-    // tasks, contiguous position chunks are decoded (and routed) on those tasks; this task forwards
-    // each chunk's batches in position order, preserving the per-worker op order the insert path
-    // relies on. With no decode tasks, this task decodes and routes inline. Routing runs in an
-    // inner future so any decode failure is captured rather than returned immediately: returning
-    // while the worker handles are merely dropped would leave the workers running detached,
-    // retaining the log and their range allocations after init has already failed.
+    // Route each replayed op to the worker owning its partition, forwarding decoded chunks
+    // in position order to preserve the per-worker op order the insert path relies on.
+    // Routing runs in an inner future so a failure here still drains the workers below
+    // rather than leaving them running detached.
     //
     // A closed worker channel means that worker terminated early (e.g. returned an `Error<F>` while
     // resolving a collision). Routing stops on the first such send failure and the join below
