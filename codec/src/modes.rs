@@ -3,19 +3,104 @@
 use crate::{EncodeSize, Error, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
 
-/// A canonical packet of ordered mode values.
+// The high bit is packet framing rather than mode value data.
+const CONTINUATION_BIT: u8 = 1 << 7;
+
+/// Error returned when a value cannot be represented as a [`Mode`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("mode value must fit in seven bits")]
+pub struct InvalidMode;
+
+/// A seven-bit value in an ordered [`Modes`] packet.
 ///
-/// Each mode supports values from 0 through 127. The high bit indicates that
-/// another mode follows, and trailing zero-valued modes are omitted. Appending
-/// a new mode with value zero therefore preserves the existing encoding. A
-/// `Modes` value denotes a present packet. An all-zero list denotes no packet.
+/// The high bit is reserved for packet framing and cannot be represented by this type.
 ///
 /// # Examples
 ///
 /// ```
-/// use commonware_codec::{DecodeExt, Encode, Modes};
+/// use commonware_codec::Mode;
 ///
-/// let modes = Modes::new([1, 0, 2]).unwrap();
+/// let mode = Mode::new(0x7f).unwrap();
+/// assert_eq!(u8::from(mode), 0x7f);
+/// assert!(Mode::new(0x80).is_none());
+/// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Mode(u8);
+
+impl Mode {
+    /// Creates a mode value, or returns `None` when the reserved high bit is set.
+    pub const fn new(value: u8) -> Option<Self> {
+        if value < CONTINUATION_BIT {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+}
+
+impl TryFrom<u8> for Mode {
+    type Error = InvalidMode;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or(InvalidMode)
+    }
+}
+
+impl From<Mode> for u8 {
+    fn from(mode: Mode) -> Self {
+        mode.0
+    }
+}
+
+/// Creates a canonical [`Modes`] packet from values convertible to [`Mode`].
+///
+/// Each expression is converted independently before the packet is constructed, so mode values
+/// may have different source types. Returns `None` when every converted value is zero.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_codec::{Encode, Mode, modes};
+///
+/// let enabled = Mode::new(1).unwrap();
+/// let modes = modes![enabled, enabled].unwrap();
+/// assert_eq!(modes.encode().as_ref(), &[0x81, 0x01]);
+/// ```
+///
+/// ```compile_fail
+/// use commonware_codec::modes;
+///
+/// let _ = modes![1u8];
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! modes {
+    ($($mode:expr),* $(,)?) => {
+        $crate::Modes::new([
+            $(::core::convert::Into::<$crate::Mode>::into($mode)),*
+        ])
+    };
+}
+
+/// A canonical packet of ordered mode values.
+///
+/// The high bit indicates that another mode follows, and trailing zero-valued
+/// modes are omitted. Appending a new mode with value zero therefore preserves
+/// the existing encoding. A `Modes` value denotes a present packet. An all-zero
+/// list denotes no packet.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_codec::{DecodeExt, Encode, Mode, Modes};
+///
+/// let modes = [1, 0, 2].map(|value| Mode::new(value).unwrap());
+/// let modes = Modes::new(modes).unwrap();
 /// let encoded = modes.encode();
 /// assert_eq!(encoded.as_ref(), &[0x81, 0x80, 0x02]);
 /// assert_eq!(Modes::<3>::decode(encoded).unwrap(), modes);
@@ -27,28 +112,19 @@ pub struct Modes<const N: usize> {
 }
 
 impl<const N: usize> Modes<N> {
-    // The high bit is framing rather than value data; when set, another mode follows.
-    const CONTINUATION_BIT: u8 = 1 << 7;
-
     /// Creates a canonical packet from `modes`.
     ///
     /// Returns `None` when every mode is zero. Callers must represent this as an
     /// absent packet rather than an empty packet.
     ///
-    /// # Panics
-    ///
-    /// Panics if any mode uses the reserved high bit.
-    pub fn new(mut modes: [u8; N]) -> Option<Self> {
-        assert!(
-            modes.iter().all(|&mode| mode < Self::CONTINUATION_BIT),
-            "mode must fit in seven bits"
-        );
-        let last = modes.iter().rposition(|&mode| mode != 0)?;
-        for mode in &mut modes[..last] {
-            *mode |= Self::CONTINUATION_BIT;
+    pub fn new(modes: [Mode; N]) -> Option<Self> {
+        let mut encoded = modes.map(u8::from);
+        let last = encoded.iter().rposition(|&mode| mode != 0)?;
+        for mode in &mut encoded[..last] {
+            *mode |= CONTINUATION_BIT;
         }
         Some(Self {
-            encoded: modes,
+            encoded,
             len: last + 1,
         })
     }
@@ -80,7 +156,7 @@ impl<const N: usize> Read for Modes<N> {
         for index in 0..N {
             let byte = u8::read(buf)?;
             encoded[index] = byte;
-            if byte & Self::CONTINUATION_BIT == 0 {
+            if byte & CONTINUATION_BIT == 0 {
                 if byte == 0 {
                     return Err(Error::Invalid("Modes", "trailing mode must be non-zero"));
                 }
@@ -108,6 +184,7 @@ impl<'a, const N: usize> arbitrary::Arbitrary<'a> for Modes<N> {
             *mode = u.int_in_range(0..=0x7f)?;
         }
         modes[len - 1] = u.int_in_range(1..=0x7f)?;
+        let modes = modes.map(|mode| Mode::new(mode).expect("generated mode fits in seven bits"));
         Self::new(modes).ok_or(arbitrary::Error::IncorrectFormat)
     }
 }
@@ -117,8 +194,12 @@ mod tests {
     use super::*;
     use crate::{DecodeExt, Encode};
 
+    fn mode(value: u8) -> Mode {
+        Mode::new(value).unwrap()
+    }
+
     fn assert_encoding<const N: usize>(modes: [u8; N], expected: &[u8]) {
-        let modes = Modes::new(modes).unwrap();
+        let modes = Modes::new(modes.map(mode)).unwrap();
         assert_eq!(modes.encode_size(), expected.len());
         let encoded = modes.encode();
         assert_eq!(encoded.as_ref(), expected);
@@ -129,7 +210,7 @@ mod tests {
     fn encodes_continuations() {
         // Empty and all-default mode lists have no packet.
         assert!(Modes::<0>::new([]).is_none());
-        assert!(Modes::new([0, 0]).is_none());
+        assert!(Modes::new([mode(0), mode(0)]).is_none());
 
         // A trailing default is absent, preserving the shorter encoding.
         assert_encoding([1, 0], &[0x01]);
@@ -143,9 +224,31 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "mode must fit in seven bits")]
-    fn reserved_bit_panics() {
-        let _ = Modes::new([0, 0x80]);
+    fn macro_converts_heterogeneous_values() {
+        struct Enabled;
+
+        impl From<Enabled> for Mode {
+            fn from(_: Enabled) -> Self {
+                mode(1)
+            }
+        }
+
+        let modes = modes![Enabled, mode(0), Enabled].unwrap();
+        assert_eq!(modes.encode().as_ref(), &[0x81, 0x80, 0x01]);
+    }
+
+    #[test]
+    fn mode_enforces_seven_bit_values() {
+        for value in [0, 0x7f] {
+            let mode = Mode::new(value).unwrap();
+            assert_eq!(u8::from(mode), value);
+            assert_eq!(Mode::try_from(value), Ok(mode));
+        }
+
+        for value in [0x80, 0xff] {
+            assert_eq!(Mode::new(value), None);
+            assert_eq!(Mode::try_from(value), Err(InvalidMode));
+        }
     }
 
     #[test]

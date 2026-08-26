@@ -233,7 +233,7 @@ commonware_macros::stability_scope!(BETA {
     pub use config::RangeCfg;
     pub use error::Error;
     pub use extensions::*;
-    pub use modes::Modes;
+    pub use modes::{InvalidMode, Mode, Modes};
 });
 
 commonware_macros::stability_scope!(ALPHA {
