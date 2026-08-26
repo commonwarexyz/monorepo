@@ -4020,6 +4020,7 @@ mod tests {
 /// reused) clears wholesale, and reads gate cache probes on the journal's retained bounds
 /// (entries below the pruning boundary linger until CLOCK eviction but are unreachable).
 pub(crate) mod node_cache {
+    use ahash::RandomState;
     use commonware_cryptography::Digest;
     use commonware_runtime::{
         Metrics,
@@ -4035,8 +4036,8 @@ pub(crate) mod node_cache {
     /// regularly strided with constant low bits, which unmixed modulo selection would
     /// collapse into a single shard, wasting the other shards' capacity.
     fn shard_index(position: u64) -> usize {
-        (position.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (u64::BITS - SHARDS.trailing_zeros()))
-            as usize
+        const STATE: RandomState = RandomState::with_seeds(0, 0, 0, 0);
+        (STATE.hash_one(position) % SHARDS as u64) as usize
     }
 
     /// See the module docs.
