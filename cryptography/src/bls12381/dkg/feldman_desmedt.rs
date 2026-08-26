@@ -113,19 +113,20 @@
 //!
 //! ## Errors and Failures
 //!
-//! [`enum@Error`] reports invalid caller input or incomplete local state. [`Fault`]
-//! identifies a participant and an operation-specific reason. [`FaultReason`]
-//! covers dealer messages and logs, while [`PlayerAckFaultReason`] covers player
-//! acknowledgements. [`Failure`] reports that the protocol round did not produce
-//! the requested result.
+//! [`enum@Error`] reports invalid caller input or incomplete local state.
+//! [`DealerMessageError`] and [`PlayerAckError`] explain why live messages were
+//! rejected without attributing the failure to a participant. [`FaultReason`]
+//! describes invalid content in a configured dealer's signed log. [`Failure`]
+//! reports that the protocol round did not produce the requested result.
 //!
-//! Participant attribution is only sound when the caller authenticated the
-//! identity supplied to [`Player::dealer_message`] or [`Dealer::receive_player_ack`],
-//! or recorded the pair returned by [`SignedDealerLog::check`] in [`Logs`]. For
-//! [`Failure::InsufficientLogs`], `faults` contains attributable validation
-//! faults while `unavailable` contains configured dealers that supplied no usable
-//! log. A safe [`DealerLogSummary::TooManyReveals`] log is unavailable rather
-//! than faulty.
+//! These categories reflect the evidence available to each operation. A
+//! live-message error explains why input was rejected but does not establish who
+//! caused it. A [`FaultReason`] supports dealer attribution only for invalid
+//! content in a configured dealer's log authenticated by [`SignedDealerLog::check`].
+//!
+//! [`Failure::InsufficientLogs`] separates those faults from configured dealers
+//! with no usable log. A safe [`DealerLogSummary::TooManyReveals`] log is
+//! unavailable because it intentionally omits its results.
 //!
 //! [`Player::finalize`] can encounter either kind of problem, so it returns
 //! [`FinalizeError`] to distinguish a local [`enum@Error`] from a protocol [`Failure`].
@@ -191,10 +192,10 @@
 //! construction is used.
 //!
 //! In practice:
-//! - [`Player::dealer_message`] returns [`Fault`] for a provably invalid
-//!   message (an implicit complaint) and `Ok(None)` for a benign duplicate
-//! - [`Dealer::receive_player_ack`] validates acknowledgements and returns
-//!   [`PlayerAckFault`] when one is invalid
+//! - [`Player::dealer_message`] returns [`DealerMessageError`] for an invalid
+//!   message and `Ok(None)` for a benign duplicate
+//! - [`Dealer::receive_player_ack`] returns [`PlayerAckError`] when an
+//!   acknowledgement cannot be used
 //! - Other custom mechanisms can exclude dealers before calling [`observe`] or [`Player::finalize`],
 //!   to enforce other rules for "misbehavior" beyond what the DKG does already.
 //!
@@ -394,14 +395,10 @@ pub enum Error {
     MissingPlayerDealing,
 }
 
-/// The reason for a provable protocol fault.
+/// The reason a configured dealer's signed log proves a protocol fault.
 #[derive(Clone, Debug, Error)]
 pub enum FaultReason {
-    #[error("participant is not a dealer in this round")]
-    UnexpectedDealer,
-    #[error("participant is not a player in this round")]
-    UnexpectedPlayer,
-    #[error("player acknowledgement signature did not verify")]
+    #[error("dealer log contains an acknowledgement signature that does not verify")]
     InvalidAck,
     #[error("dealer reveal does not match its commitment")]
     InvalidReveal,
@@ -414,8 +411,6 @@ pub enum FaultReason {
     },
     #[error("dealer commitment does not match its previous share")]
     MismatchedReshareCommitment,
-    #[error("dealer share does not match its commitment")]
-    InvalidDealerShare,
     #[error("dealer log player set does not match the round")]
     MismatchedLogPlayers,
     /// The dealer published explicit results containing too many reveals.
@@ -426,30 +421,91 @@ pub enum FaultReason {
     ExcessiveReveals,
 }
 
-/// The reason a player acknowledgement was rejected.
+/// The reason an initial dealer message was rejected.
+///
+/// Initial dealer messages carry no dealer signature in this construction, so
+/// the caller is responsible for authenticating the `dealer` supplied to
+/// [`Player::dealer_message`]. The dealer later signs the public message as part
+/// of the [`SignedDealerLog`] produced by [`Dealer::finalize`].
 #[derive(Clone, Debug, Error)]
-pub enum PlayerAckFaultReason {
+pub enum DealerMessageError {
+    #[error("participant is not a dealer in this round")]
+    UnexpectedDealer,
+    #[error("invalid dealer commitment degree: expected {expected}, got {actual}")]
+    InvalidCommitmentDegree {
+        /// The commitment degree required by the round.
+        expected: u32,
+        /// The commitment degree supplied by the dealer.
+        actual: u32,
+    },
+    #[error("dealer commitment does not match its previous share")]
+    MismatchedReshareCommitment,
+    #[error("dealer share does not match its commitment")]
+    InvalidDealerShare,
+}
+
+/// The reason a live player acknowledgement was rejected.
+#[derive(Clone, Debug, Error)]
+pub enum PlayerAckError {
     #[error("participant is not a player in this round")]
     UnexpectedPlayer,
-    #[error("player acknowledgement signature did not verify")]
+    #[error("player acknowledgement signature does not match the dealer transcript")]
     InvalidAck,
 }
 
-/// A provable protocol fault attributed to a participant.
+/// Failures determined solely from a dealer's public message.
 ///
-/// The caller must authenticate the participant identity supplied to the method
-/// returning this fault before using it for attribution.
-#[derive(Clone, Debug, Error)]
-#[error("participant {participant} committed a protocol fault: {reason}")]
-pub struct Fault<P, R = FaultReason> {
-    /// The participant that committed the fault.
-    pub participant: P,
-    /// The reason for the fault.
-    pub reason: R,
+/// The shared validator returns exactly these cases. Each validation boundary
+/// maps them into its operation-specific public error without widening that
+/// error's reachable variants.
+enum DealerPubMsgError {
+    /// The commitment degree differs from the degree required by the round.
+    InvalidCommitmentDegree { expected: u32, actual: u32 },
+    /// The commitment constant does not preserve the dealer's previous share.
+    MismatchedReshareCommitment,
 }
 
-/// A provable fault returned while processing a player acknowledgement.
-pub type PlayerAckFault<P> = Fault<P, PlayerAckFaultReason>;
+// Live validation exposes the rejection without claiming signed-log evidence.
+impl From<DealerPubMsgError> for DealerMessageError {
+    fn from(error: DealerPubMsgError) -> Self {
+        match error {
+            DealerPubMsgError::InvalidCommitmentDegree { expected, actual } => {
+                Self::InvalidCommitmentDegree { expected, actual }
+            }
+            DealerPubMsgError::MismatchedReshareCommitment => Self::MismatchedReshareCommitment,
+        }
+    }
+}
+
+// Signed-log validation records the same rejection as dealer-authenticated evidence.
+impl From<DealerPubMsgError> for FaultReason {
+    fn from(error: DealerPubMsgError) -> Self {
+        match error {
+            DealerPubMsgError::InvalidCommitmentDegree { expected, actual } => {
+                Self::InvalidCommitmentDegree { expected, actual }
+            }
+            DealerPubMsgError::MismatchedReshareCommitment => Self::MismatchedReshareCommitment,
+        }
+    }
+}
+
+/// Non-fault outcome of checking a dealer log against a round.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DealerLogOutcome {
+    /// The configured dealer's log contains verified results.
+    Available,
+    /// The configured dealer omitted results to avoid excessive reveals.
+    Unavailable,
+}
+
+/// The reason a dealer log was rejected for a round.
+#[derive(Clone, Debug)]
+enum DealerLogError {
+    /// The supplied identity is not a dealer in the round.
+    UnexpectedDealer,
+    /// The configured dealer's signed log proves a protocol fault.
+    Fault(FaultReason),
+}
 
 /// A protocol round failure.
 #[derive(Debug, Error)]
@@ -461,9 +517,10 @@ pub enum Failure<P> {
         required: u32,
         /// Number of usable dealer logs found.
         found: u32,
-        /// Recorded identities whose logs prove a protocol fault.
+        /// Configured dealers whose signed logs prove a protocol fault.
         ///
-        /// Attribution reflects the dealer keys passed to [`Logs::record`].
+        /// Attribution assumes [`Logs::record`] receives only pairs returned by
+        /// [`SignedDealerLog::check`].
         faults: Map<P, FaultReason>,
         /// Configured dealers for which no usable log was available.
         ///
@@ -737,18 +794,18 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         &self,
         dealer: &P,
         pub_msg: &DealerPubMsg<V>,
-    ) -> Result<(), FaultReason> {
+    ) -> Result<(), DealerPubMsgError> {
         let expected = self.degree::<M>();
         let actual = pub_msg.commitment.degree_exact();
         if expected != actual {
-            return Err(FaultReason::InvalidCommitmentDegree { expected, actual });
+            return Err(DealerPubMsgError::InvalidCommitmentDegree { expected, actual });
         }
         if let Some(previous) = self.previous.as_ref() {
             let share_commitment = previous
                 .share_commitment(dealer)
                 .expect("Info::new validates previous output and dealer membership");
             if *pub_msg.commitment.constant() != share_commitment {
-                return Err(FaultReason::MismatchedReshareCommitment);
+                return Err(DealerPubMsgError::MismatchedReshareCommitment);
             }
         }
         Ok(())
@@ -756,19 +813,18 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 
     fn check_dealer_priv_msg(
         &self,
-        player: &P,
+        player: Participant,
         pub_msg: &DealerPubMsg<V>,
         priv_msg: &DealerPrivMsg,
-    ) -> Result<(), FaultReason> {
+    ) -> bool {
         let scalar = self
-            .player_scalar(player)
-            .ok_or(FaultReason::UnexpectedPlayer)?;
+            .mode
+            .scalar(self.num_players(), player)
+            .expect("Player::new validates the participant index");
         let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
         priv_msg
             .share
             .expose(|share| expected == V::Public::generator() * share)
-            .then_some(())
-            .ok_or(FaultReason::InvalidDealerShare)
     }
 
     fn check_dealer_log<M: Faults, B: BatchVerifier<PublicKey = P>>(
@@ -778,12 +834,17 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         round_transcript: &Transcript,
         dealer: &P,
         log: &DealerLog<V, P>,
-    ) -> Result<bool, FaultReason> {
-        self.dealer_index(dealer)
-            .ok_or(FaultReason::UnexpectedDealer)?;
-        self.check_dealer_pub_msg::<M>(dealer, &log.pub_msg)?;
-        let Some(results_iter) = log.zip_players(&self.players)? else {
-            return Ok(false);
+    ) -> Result<DealerLogOutcome, DealerLogError> {
+        if self.dealer_index(dealer).is_none() {
+            return Err(DealerLogError::UnexpectedDealer);
+        }
+        self.check_dealer_pub_msg::<M>(dealer, &log.pub_msg)
+            .map_err(|error| DealerLogError::Fault(error.into()))?;
+        let Some(results_iter) = log
+            .zip_players(&self.players)
+            .map_err(DealerLogError::Fault)?
+        else {
+            return Ok(DealerLogOutcome::Unavailable);
         };
         let ack_summary = transcript_for_ack(round_transcript, dealer, &log.pub_msg).summarize();
         let mut ack_batch = B::new(self.players.len());
@@ -795,13 +856,13 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             match result {
                 AckOrReveal::Ack(ack) => {
                     if !ack_summary.add_to_batch(&mut ack_batch, player, &ack.sig) {
-                        return Err(FaultReason::InvalidAck);
+                        return Err(DealerLogError::Fault(FaultReason::InvalidAck));
                     }
                 }
                 AckOrReveal::Reveal(priv_msg) => {
                     reveal_count += 1;
                     if reveal_count > max_reveals {
-                        return Err(FaultReason::ExcessiveReveals);
+                        return Err(DealerLogError::Fault(FaultReason::ExcessiveReveals));
                     }
                     let player_scalar = self
                         .player_scalar(player)
@@ -819,7 +880,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             }
         }
         if !ack_batch.verify(&mut *rng, strategy) {
-            return Err(FaultReason::InvalidAck);
+            return Err(DealerLogError::Fault(FaultReason::InvalidAck));
         }
         let lhs = log.pub_msg.commitment.lin_comb_eval(
             reveal_eval_points
@@ -828,9 +889,9 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             strategy,
         );
         if lhs != V::Public::generator() * &reveal_sum {
-            return Err(FaultReason::InvalidReveal);
+            return Err(DealerLogError::Fault(FaultReason::InvalidReveal));
         }
-        Ok(true)
+        Ok(DealerLogOutcome::Available)
     }
 }
 
@@ -1054,23 +1115,6 @@ where
         let sig = u.arbitrary()?;
         Ok(Self { sig })
     }
-}
-
-/// The result of validating an untrusted protocol message from a peer.
-///
-/// This drives peer punishment in adversarial deployments. A [`Verdict::Fault`]
-/// is a provable protocol violation, so the sender should be penalized (e.g.
-/// blocked). A [`Verdict::Skip`] is a benign non-action, such as a duplicate,
-/// that must not be penalized.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum Verdict<T> {
-    /// The message validated. Carries any resulting artifact.
-    Valid(T),
-    /// The message is not actionable, but the sender is not provably faulty.
-    Skip,
-    /// The message is provably invalid; the sender should be penalized.
-    Fault,
 }
 
 #[derive(Clone, PartialEq)]
@@ -1489,7 +1533,7 @@ fn transcript_for_log<V: Variant, P: PublicKey>(
 pub struct Logs<V: Variant, P: PublicKey, M: Faults> {
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-    known: BTreeMap<P, Result<bool, FaultReason>>,
+    known: BTreeMap<P, Result<DealerLogOutcome, DealerLogError>>,
     phantom_m: PhantomData<M>,
 }
 
@@ -1513,7 +1557,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         strategy: &impl Strategy,
         transcript: &Transcript,
         dealers: &[(&P, &DealerLog<V, P>)],
-    ) -> Vec<(P, Result<bool, FaultReason>)> {
+    ) -> Vec<(P, Result<DealerLogOutcome, DealerLogError>)> {
         let checks: Vec<_> = dealers
             .iter()
             .map(|&(dealer, log)| {
@@ -1541,9 +1585,9 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// Return `true` if the dealer was already present in the log, in which
     /// case its log will be replaced.
     ///
-    /// Validation failures are attributed to the `dealer` supplied here. Use
-    /// the pair returned by [`SignedDealerLog::check`] unless that identity was
-    /// authenticated by another mechanism.
+    /// This method does not authenticate the log. Faults reported by
+    /// [`Failure::InsufficientLogs`] are attributable only when `dealer` and
+    /// `log` are the pair returned by [`SignedDealerLog::check`].
     pub fn record(&mut self, dealer: P, log: DealerLog<V, P>) -> bool {
         self.known.remove(&dealer);
         self.logs.insert(dealer, log).is_some()
@@ -1576,7 +1620,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
                 break;
             };
             match self.known.get(dealer) {
-                Some(Ok(true)) => need -= 1,
+                Some(Ok(DealerLogOutcome::Available)) => need -= 1,
                 Some(_) => {}
                 None => {
                     need -= 1;
@@ -1590,7 +1634,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
             Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, &pending);
         let mut all_pending_usable = true;
         for (dealer, result) in pending_results {
-            let is_usable = matches!(result, Ok(true));
+            let is_usable = matches!(result, Ok(DealerLogOutcome::Available));
             self.known.insert(dealer, result);
             all_pending_usable &= is_usable;
         }
@@ -1629,24 +1673,39 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         let out: Map<_, _> = self
             .logs
             .into_iter()
-            .filter(|(dealer, _)| matches!(self.known.get(dealer), Some(Ok(true))))
+            .filter(|(dealer, _)| {
+                matches!(
+                    self.known.get(dealer),
+                    Some(Ok(DealerLogOutcome::Available))
+                )
+            })
             .take(required_count)
             .try_collect()
             .expect("dealers should be unique");
         let found = u32::try_from(out.len()).expect("valid dealer count exceeds u32::MAX");
         if found < required {
-            let unavailable = self
-                .info
-                .dealers
-                .iter()
-                .filter(|dealer| !matches!(self.known.get(*dealer), Some(Ok(true)) | Some(Err(_))))
-                .cloned()
-                .try_collect::<Set<_>>()
-                .expect("configured dealers are unique");
+            let unavailable =
+                self.info
+                    .dealers
+                    .iter()
+                    .filter(|dealer| match self.known.get(*dealer) {
+                        None
+                        | Some(Ok(DealerLogOutcome::Unavailable))
+                        | Some(Err(DealerLogError::UnexpectedDealer)) => true,
+                        Some(Ok(DealerLogOutcome::Available))
+                        | Some(Err(DealerLogError::Fault(_))) => false,
+                    })
+                    .cloned()
+                    .try_collect::<Set<_>>()
+                    .expect("configured dealers are unique");
             let faults = self
                 .known
                 .into_iter()
-                .filter_map(|(dealer, result)| result.err().map(|error| (dealer, error)))
+                .filter_map(|(dealer, result)| match result {
+                    Err(DealerLogError::Fault(fault)) => Some((dealer, fault)),
+                    Ok(DealerLogOutcome::Available | DealerLogOutcome::Unavailable)
+                    | Err(DealerLogError::UnexpectedDealer) => None,
+                })
                 .try_collect::<Map<_, _>>()
                 .expect("checked dealers are unique");
             return Err(Failure::InsufficientLogs {
@@ -1749,25 +1808,19 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// Acknowledgements should really only be processed once per player,
     /// but this method is idempotent nonetheless.
     ///
-    /// The caller must authenticate `player` before treating a returned
-    /// [`PlayerAckFault`] as attributable to that participant. A failed
-    /// acknowledgement signature does not authenticate its purported signer.
+    /// A rejection is not attributed to `player`: a signature mismatch can also
+    /// arise when a dealer equivocates and the player acknowledges a different
+    /// public message.
     pub fn receive_player_ack(
         &mut self,
         player: S::PublicKey,
         ack: PlayerAck<S::PublicKey>,
-    ) -> Result<(), PlayerAckFault<S::PublicKey>> {
+    ) -> Result<(), PlayerAckError> {
         let Some(res_mut) = self.results.get_value_mut(&player) else {
-            return Err(Fault {
-                participant: player,
-                reason: PlayerAckFaultReason::UnexpectedPlayer,
-            });
+            return Err(PlayerAckError::UnexpectedPlayer);
         };
         if !self.transcript.verify(&player, &ack.sig) {
-            return Err(Fault {
-                participant: player,
-                reason: PlayerAckFaultReason::InvalidAck,
-            });
+            return Err(PlayerAckError::InvalidAck);
         }
         *res_mut = AckOrReveal::Ack(ack);
         Ok(())
@@ -2009,33 +2062,30 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// provide this is by using an authenticated channel, e.g. via
     /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     ///
-    /// Returns an attributable [`Fault`] if the message is invalid,
-    /// `Ok(None)` if a message from this dealer was already processed, and
-    /// `Ok(Some(_))` with the acknowledgement otherwise. Attribution is only
-    /// sound if the caller authenticated `dealer` as described above.
+    /// Returns [`DealerMessageError`] if the message is invalid, `Ok(None)` if a
+    /// message from this dealer was already processed, and `Ok(Some(_))` with
+    /// the acknowledgement otherwise. The error carries no attribution. A
+    /// transport-aware caller can apply its own attribution policy to `dealer`.
     pub fn dealer_message<M: Faults>(
         &mut self,
         dealer: S::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> Result<Option<PlayerAck<S::PublicKey>>, Fault<S::PublicKey>> {
+    ) -> Result<Option<PlayerAck<S::PublicKey>>, DealerMessageError> {
         if self.view.contains_key(&dealer) {
             return Ok(None);
         }
-        let validation = self
+        if self.info.dealer_index(&dealer).is_none() {
+            return Err(DealerMessageError::UnexpectedDealer);
+        }
+        self.info
+            .check_dealer_pub_msg::<M>(&dealer, &pub_msg)
+            .map_err(DealerMessageError::from)?;
+        if !self
             .info
-            .dealer_index(&dealer)
-            .ok_or(FaultReason::UnexpectedDealer)
-            .and_then(|_| self.info.check_dealer_pub_msg::<M>(&dealer, &pub_msg))
-            .and_then(|_| {
-                self.info
-                    .check_dealer_priv_msg(&self.me_pub, &pub_msg, &priv_msg)
-            });
-        if let Err(reason) = validation {
-            return Err(Fault {
-                participant: dealer,
-                reason,
-            });
+            .check_dealer_priv_msg(self.index, &pub_msg, &priv_msg)
+        {
+            return Err(DealerMessageError::InvalidDealerShare);
         }
         let sig = transcript_for_ack(&self.transcript, &dealer, &pub_msg).sign(&self.me);
         self.view.insert(dealer, (pub_msg, priv_msg));
@@ -3265,7 +3315,7 @@ mod test {
         info: &Info<MinPk, ed25519::PublicKey>,
         dealer: &ed25519::PublicKey,
         log: &PreVerifyLog,
-    ) -> Result<bool, FaultReason> {
+    ) -> Result<DealerLogOutcome, DealerLogError> {
         let transcript = transcript_for_round(info);
         PreVerifyLogs::check_dealers::<ed25519::Batch>(
             &mut test_rng(),
@@ -3984,7 +4034,22 @@ mod test {
             AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::zero()));
 
         let result = check_pre_verify_log(&fixture.info, &dealer.key, &log);
-        assert!(matches!(result, Err(FaultReason::InvalidReveal)));
+        assert!(matches!(
+            result,
+            Err(DealerLogError::Fault(FaultReason::InvalidReveal))
+        ));
+    }
+
+    #[test]
+    fn dealer_log_identifies_unexpected_dealer() {
+        let fixture = PreVerifyFixture::new();
+        let dealer = &fixture.dealers[0];
+        let stranger = ed25519::PrivateKey::from_seed(u64::MAX).public_key();
+        assert!(fixture.info.dealer_index(&stranger).is_none());
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &stranger, &dealer.valid),
+            Err(DealerLogError::UnexpectedDealer)
+        ));
     }
 
     #[test]
@@ -4006,10 +4071,12 @@ mod test {
         };
         assert!(matches!(
             check_pre_verify_log(&fixture.info, &dealer.key, &log),
-            Err(FaultReason::InvalidCommitmentDegree {
-                expected: error_expected,
-                actual: error_actual,
-            }) if error_expected == expected && error_actual == actual
+            Err(DealerLogError::Fault(
+                FaultReason::InvalidCommitmentDegree {
+                    expected: error_expected,
+                    actual: error_actual,
+                }
+            )) if error_expected == expected && error_actual == actual
         ));
 
         let info = reshare_info(20_000);
@@ -4021,16 +4088,74 @@ mod test {
             .share_commitment(&dealer)
             .unwrap();
         let pub_msg = pub_msg_with_different_constant(&info, &expected, 20_005);
+        let log = DealerLog {
+            pub_msg,
+            results: DealerResult::TooManyReveals,
+        };
         assert!(matches!(
-            info.check_dealer_pub_msg::<N3f1>(&dealer, &pub_msg),
-            Err(FaultReason::MismatchedReshareCommitment)
+            check_pre_verify_log(&info, &dealer, &log),
+            Err(DealerLogError::Fault(
+                FaultReason::MismatchedReshareCommitment
+            ))
         ));
+    }
+
+    #[test]
+    fn dealer_public_message_distinguishes_live_errors() -> anyhow::Result<()> {
+        // Initial-round validation preserves the exact degree mismatch.
+        let fixture = PreVerifyFixture::new();
+        let dealer = fixture.dealers[0].key.clone();
+        let expected = fixture.info.degree::<N3f1>();
+        let actual = 0;
+        assert_ne!(expected, actual);
+        let pub_msg = DealerPubMsg::<MinPk> {
+            commitment: Poly::commit(Poly::new_with_constant(
+                TestRng::new(10_000),
+                actual,
+                Scalar::one(),
+            )),
+        };
+        let mut player = Player::new(fixture.info, ed25519::PrivateKey::from_seed(0))?;
+        assert!(matches!(
+            player.dealer_message::<N3f1>(
+                dealer,
+                pub_msg,
+                DealerPrivMsg::new(Scalar::zero()),
+            ),
+            Err(DealerMessageError::InvalidCommitmentDegree {
+                expected: error_expected,
+                actual: error_actual,
+            }) if error_expected == expected && error_actual == actual
+        ));
+
+        // Reshare validation preserves the previous-share mismatch.
+        let info = reshare_info(20_000);
+        let dealer = info.dealers.iter().next().unwrap().clone();
+        let expected = info
+            .previous
+            .as_ref()
+            .unwrap()
+            .share_commitment(&dealer)
+            .unwrap();
+        let pub_msg = pub_msg_with_different_constant(&info, &expected, 20_005);
+        let mut player = Player::new(info, ed25519::PrivateKey::from_seed(20_000))?;
+        assert!(matches!(
+            player.dealer_message::<N3f1>(dealer, pub_msg, DealerPrivMsg::new(Scalar::zero()),),
+            Err(DealerMessageError::MismatchedReshareCommitment)
+        ));
+
+        Ok(())
     }
 
     #[test]
     fn dealer_log_distinguishes_unavailable_and_faulty_outcomes() {
         let fixture = PreVerifyFixture::new();
         let dealer = &fixture.dealers[0];
+
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &dealer.key, &dealer.valid),
+            Ok(DealerLogOutcome::Available)
+        ));
 
         let mut log = dealer.valid.clone();
         let DealerResult::Ok(results) = &mut log.results else {
@@ -4039,14 +4164,14 @@ mod test {
         results.truncate(results.len() - 1);
         assert!(matches!(
             check_pre_verify_log(&fixture.info, &dealer.key, &log),
-            Err(FaultReason::MismatchedLogPlayers)
+            Err(DealerLogError::Fault(FaultReason::MismatchedLogPlayers))
         ));
 
         let mut log = dealer.valid.clone();
         log.results = DealerResult::TooManyReveals;
         assert!(matches!(
             check_pre_verify_log(&fixture.info, &dealer.key, &log),
-            Ok(false)
+            Ok(DealerLogOutcome::Unavailable)
         ));
 
         let mut log = dealer.valid.clone();
@@ -4061,7 +4186,7 @@ mod test {
         }
         assert!(matches!(
             check_pre_verify_log(&fixture.info, &dealer.key, &log),
-            Err(FaultReason::ExcessiveReveals)
+            Err(DealerLogError::Fault(FaultReason::ExcessiveReveals))
         ));
     }
 
@@ -4617,7 +4742,7 @@ mod test {
     }
 
     #[test]
-    fn dealer_message_reports_faults_and_skips_duplicates() -> anyhow::Result<()> {
+    fn dealer_message_reports_errors_and_skips_duplicates() -> anyhow::Result<()> {
         let a = ed25519::PrivateKey::from_seed(0);
         let b = ed25519::PrivateKey::from_seed(1);
         let stranger = ed25519::PrivateKey::from_seed(2);
@@ -4647,8 +4772,7 @@ mod test {
             .map(|(_, msg)| msg.clone())
             .expect("share for b");
 
-        // A dealing whose private share does not match the public commitment at
-        // our index is a provable fault.
+        // Persisted invalid input is reported as local state corruption.
         assert!(matches!(
             Player::resume::<N3f1>(
                 info.clone(),
@@ -4661,23 +4785,13 @@ mod test {
         let mut player = Player::new(info, b)?;
         assert!(matches!(
             player.dealer_message::<N3f1>(a_pk.clone(), pub_msg.clone(), priv_for_a),
-            Err(Fault {
-                participant,
-                reason: FaultReason::InvalidDealerShare,
-            }) if participant == a_pk
+            Err(DealerMessageError::InvalidDealerShare)
         ));
 
-        // A dealing from a key outside the dealer set is a provable fault.
+        // Live message errors expose the rejection reason without attributing it.
         assert!(matches!(
-            player.dealer_message::<N3f1>(
-                stranger_pk.clone(),
-                pub_msg.clone(),
-                priv_for_b.clone(),
-            ),
-            Err(Fault {
-                participant,
-                reason: FaultReason::UnexpectedDealer,
-            }) if participant == stranger_pk
+            player.dealer_message::<N3f1>(stranger_pk, pub_msg.clone(), priv_for_b.clone(),),
+            Err(DealerMessageError::UnexpectedDealer)
         ));
 
         // A correct dealing validates.
@@ -4697,7 +4811,7 @@ mod test {
     }
 
     #[test]
-    fn receive_player_ack_reports_participant_faults() -> anyhow::Result<()> {
+    fn receive_player_ack_reports_non_attributable_errors() -> anyhow::Result<()> {
         let a = ed25519::PrivateKey::from_seed(0);
         let stranger = ed25519::PrivateKey::from_seed(1);
         let (a_pk, stranger_pk) = (a.public_key(), stranger.public_key());
@@ -4713,31 +4827,36 @@ mod test {
         )?;
 
         let (mut dealer, pub_msg, priv_msgs) =
-            Dealer::start::<N3f1>(&mut test_rng(), info.clone(), a.clone(), None)?;
-        let mut player = Player::new(info, a.clone())?;
+            Dealer::start::<N3f1>(TestRng::new(0), info.clone(), a.clone(), None)?;
+        let (_, alternate_pub_msg, alternate_priv_msgs) =
+            Dealer::start::<N3f1>(TestRng::new(1), info.clone(), a.clone(), None)?;
+        assert_ne!(pub_msg, alternate_pub_msg);
+
+        let mut player = Player::new(info.clone(), a.clone())?;
         let ack = player
             .dealer_message::<N3f1>(a_pk.clone(), pub_msg, priv_msgs[0].1.clone())?
             .expect("valid ack");
 
-        // An ack signature that does not verify is a provable fault.
-        let forged = PlayerAck {
-            sig: a.sign(b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST", b"not an ack"),
-        };
+        // An honest player can acknowledge an alternate public message from an
+        // equivocating dealer. A signature mismatch therefore cannot identify a
+        // faulty player.
+        let mut alternate_player = Player::new(info, a)?;
+        let alternate_ack = alternate_player
+            .dealer_message::<N3f1>(
+                a_pk.clone(),
+                alternate_pub_msg,
+                alternate_priv_msgs[0].1.clone(),
+            )?
+            .expect("valid ack for alternate message");
         assert!(matches!(
-            dealer.receive_player_ack(a_pk.clone(), forged),
-            Err(Fault {
-                participant,
-                reason: PlayerAckFaultReason::InvalidAck,
-            }) if participant == a_pk
+            dealer.receive_player_ack(a_pk.clone(), alternate_ack),
+            Err(PlayerAckError::InvalidAck)
         ));
 
-        // An ack attributed to a player outside the round is a participant fault.
+        // Out-of-round identities produce the precise non-attributed error.
         assert!(matches!(
-            dealer.receive_player_ack(stranger_pk.clone(), ack.clone()),
-            Err(Fault {
-                participant,
-                reason: PlayerAckFaultReason::UnexpectedPlayer,
-            }) if participant == stranger_pk
+            dealer.receive_player_ack(stranger_pk, ack.clone()),
+            Err(PlayerAckError::UnexpectedPlayer)
         ));
 
         // The genuine ack is still accepted.

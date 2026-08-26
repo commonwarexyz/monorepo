@@ -383,6 +383,19 @@ mod tests {
         batch_verify_correct::<MinSig>();
     }
 
+    fn batch_verify_rejects_empty<V: Variant>() {
+        assert!(matches!(
+            V::batch_verify(&mut test_rng(), &[], &[], &[], &Sequential),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_empty() {
+        batch_verify_rejects_empty::<MinPk>();
+        batch_verify_rejects_empty::<MinSig>();
+    }
+
     fn batch_verify_rejects_identity_entry<V: Variant>() {
         let mut rng = test_rng();
         let (private, public) = ops::keypair::<_, V>(&mut rng);

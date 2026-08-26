@@ -355,14 +355,14 @@ where
 mod tests {
     use super::{dealer_for_phase, startup_height, state_sync_skips_inclusion_prefix};
     use crate::dkg::{
-        reshare::store::Store,
+        reshare::store::{AckOutcome, Store},
         tests::mocks::{MemorySecretStore, TestBlsVariant},
     };
     use commonware_consensus::types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height};
     use commonware_cryptography::{
         Signer,
         bls12381::{
-            dkg::feldman_desmedt::{Info, Player, Reveal, Verdict, deal},
+            dkg::feldman_desmedt::{Info, Player, Reveal, deal},
             primitives::sharing::Mode,
         },
         ed25519::{PrivateKey, PublicKey},
@@ -488,7 +488,7 @@ mod tests {
                     recovered_dealer
                         .handle(&mut store, epoch, player_key, ack)
                         .await,
-                    Verdict::Valid(())
+                    Ok(AckOutcome::Recorded)
                 ));
             }
             assert!(

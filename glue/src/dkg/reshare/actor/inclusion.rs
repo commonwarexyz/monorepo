@@ -1544,7 +1544,10 @@ mod tests {
     use super::*;
     use crate::dkg::{
         fence::Fence,
-        reshare::actor::{Config, DkgConfig, utils},
+        reshare::{
+            actor::{Config, DkgConfig, utils},
+            store::AckOutcome,
+        },
         state_sync::Plan as StateSyncPlan,
         tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant},
     };
@@ -1555,7 +1558,7 @@ mod tests {
         bls12381::{
             dkg::feldman_desmedt::{
                 Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Player as CryptoPlayer,
-                Reveal, SignedDealerLog, Verdict, deal,
+                Reveal, SignedDealerLog, deal,
             },
             primitives::sharing::Mode as SharingMode,
         },
@@ -1789,7 +1792,7 @@ mod tests {
             dealer
                 .handle(&mut store, Epoch::zero(), public_key.clone(), ack)
                 .await,
-            Verdict::Valid(())
+            Ok(AckOutcome::Recorded)
         ));
         assert!(dealer.finalize::<N3f1>());
         let signed_log = dealer.finalized().expect("signed dealer log");
