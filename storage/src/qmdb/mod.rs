@@ -747,20 +747,18 @@ where
         handles.push(handle.abort_on_drop());
     }
 
-    // Route each replayed op to the worker owning its partition, forwarding decoded chunks
-    // in position order to preserve the per-worker op order the insert path relies on.
-    // Routing runs in an inner future so a failure here still drains the workers below
-    // rather than leaving them running detached.
+    // Route each replayed op to the worker owning its partition, forwarding decoded chunks in
+    // position order to preserve the per-worker op order the insert path relies on. Routing runs in
+    // an inner future so a failure here still drains the workers below rather than leaving them
+    // running detached.
     //
     // A closed worker channel means that worker terminated early (e.g. returned an `Error<F>` while
     // resolving a collision). Routing stops on the first such send failure and the join below
     // surfaces that worker's error, rather than panicking on the send.
     let mut pending = VecDeque::new();
     let routing_result: Result<RoutingOutcome, Error<F>> = async {
-        // With no decode tasks, decode and route on this task over one continuous replay. Per-chunk
-        // replays each open a fresh buffered reader that re-reads its window from the blob,
-        // redundant I/O the concurrent build hides by overlapping decoders but a serial build pays
-        // on its critical path (measured 265s vs 369s on a 1.66B-op log).
+        // With no decode tasks, decode and route on this task over one continuous replay to
+        // avoid per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
         if decoders == 0 {
             let stream = log
                 .replay(floor, init_buffer, ReadOptions::default())
