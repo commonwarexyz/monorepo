@@ -58,9 +58,8 @@
 use super::{
     Tick,
     request::{
-        AcceptRequest, Cache, ConnectRequest, IOVEC_BATCH_SIZE, Output, RawSocketAddr,
-        ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest,
-        WriteAtState,
+        AcceptRequest, Cache, ConnectRequest, Output, RawSocketAddr, ReadAtRequest, RecvRequest,
+        Request, SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
     },
     waiter::{
         CompletionDropOutcome, CompletionId, DropOutcome, PollState, TicketCompletions, WaiterId,
@@ -1239,9 +1238,9 @@ impl Handle {
     /// Submit a positioned write with the provided options and wait for its
     /// completion.
     ///
-    /// A durable write that fits one submission carries `RWF_DSYNC`. A larger
-    /// write is submitted plain and finished with one data sync, avoiding one
-    /// device flush per submission.
+    /// A durable write submits all of its bytes before issuing one data sync.
+    /// The file-wide sync may also persist earlier dirty data, but callers
+    /// cannot rely on that stronger durability boundary.
     pub(crate) async fn write_at(
         &self,
         file: Arc<File>,
@@ -1250,12 +1249,10 @@ impl Handle {
         options: WriteOptions,
         cache: Cache,
     ) -> Result<(), Error> {
-        let state = if !options.contains(WriteOptions::SYNC) {
-            WriteAtState::Writing
-        } else if bufs.chunk_count() <= IOVEC_BATCH_SIZE {
-            WriteAtState::WritingSync
-        } else {
+        let state = if options.contains(WriteOptions::SYNC) {
             WriteAtState::WritingBeforeSync
+        } else {
+            WriteAtState::Writing
         };
         let request = Request::WriteAt(WriteAtRequest {
             file,

@@ -623,8 +623,6 @@ impl ReadAtRequest {
 pub(super) enum WriteAtState {
     /// Submit writes without per-write durability.
     Writing,
-    /// Submit writes with `RWF_DSYNC`.
-    WritingSync,
     /// Submit plain writes, then issue one trailing data sync.
     WritingBeforeSync,
     /// Issue the trailing data sync.
@@ -672,15 +670,9 @@ pub(super) struct WriteAtRequest {
 }
 
 impl WriteAtRequest {
-    /// Use `RWF_DSYNC` because the write contract does not require
-    /// timestamp-only metadata.
+    /// Return the cache policy for the next write SQE.
     fn rw_flags(&mut self) -> i32 {
-        let sync = if self.state == WriteAtState::WritingSync {
-            libc::RWF_DSYNC
-        } else {
-            0
-        };
-        sync | self.cache.rw_flag()
+        self.cache.rw_flag()
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
@@ -1785,17 +1777,16 @@ mod tests {
             other => panic!("expected EIO write failure, got {other:?}"),
         }
 
-        // Single-submission synchronous writes use the same logical error
-        // surface as regular writes and add `RWF_DSYNC` to the SQE flags.
+        // A durable write reports write errors before entering its sync phase.
         let mut write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            state: WriteAtState::WritingSync,
+            state: WriteAtState::WritingBeforeSync,
             cache: Cache::Enabled,
         };
-        assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
+        assert_eq!(write.rw_flags(), 0);
         let mut request = Request::WriteAt(write);
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, -libc::EINVAL)
@@ -1829,14 +1820,49 @@ mod tests {
     }
 
     #[test]
-    fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
+    fn test_single_submission_sync_write_finishes_with_datasync() {
+        let mut request = WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            state: WriteAtState::WritingBeforeSync,
+            cache: Cache::Enabled,
+        };
+
+        let write = request.build_sqe();
+        assert_eq!(write.get_opcode(), u32::from(opcode::Write::CODE));
+        assert_eq!(request.rw_flags(), 0);
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 5)
+                .is_none()
+        );
+        assert!(matches!(request.state, WriteAtState::Syncing));
+
+        let sync = request.build_sqe();
+        assert_eq!(sync.get_opcode(), u32::from(opcode::Fsync::CODE));
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EINTR)
+                .is_none()
+        );
+        assert!(matches!(request.state, WriteAtState::Syncing));
+        assert!(matches!(
+            request.on_cqe(WaiterState::Active { target_tick: None }, 0),
+            Some(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn test_uncached_durable_write_retries_without_hint_when_unsupported() {
         let supported = Arc::new(AtomicBool::new(true));
         let mut request = make_write_request(
             Cache::Disabled(supported.clone()),
-            WriteAtState::WritingSync,
+            WriteAtState::WritingBeforeSync,
         );
 
-        assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
+        assert_eq!(request.rw_flags(), libc::RWF_DONTCACHE);
         assert!(
             request
                 .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
@@ -1844,8 +1870,36 @@ mod tests {
         );
         assert!(!supported.load(Ordering::Relaxed));
         request.cache = Cache::Disabled(supported);
-        assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
-        assert!(!request.cache.fallback_if_unsupported(-libc::EOPNOTSUPP));
+        assert_eq!(request.rw_flags(), 0);
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 5)
+                .is_none()
+        );
+        assert!(matches!(request.state, WriteAtState::Syncing));
+        assert!(matches!(
+            request.on_cqe(WaiterState::Active { target_tick: None }, 0),
+            Some(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn test_sync_write_reports_trailing_datasync_error() {
+        let mut request = make_write_request(Cache::Enabled, WriteAtState::WritingBeforeSync);
+
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 5)
+                .is_none()
+        );
+        assert!(matches!(request.state, WriteAtState::Syncing));
+        let result = request
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
+            .expect("data-sync failure should be terminal");
+        match result {
+            Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
+            other => panic!("expected EIO data-sync failure, got {other:?}"),
+        }
     }
 
     #[test]
