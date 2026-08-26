@@ -1,8 +1,8 @@
 //! Scheduler benchmarks for io_uring and Commonware's one-worker Tokio runtime.
 //!
-//! The suites cover fixed-total self-wake and foreign-wake work, ready task
-//! spawn and join, fixed-total timer cancellation, and timer consumer latency
-//! under a self-waking ready load.
+//! The suites cover fixed-total self-wake and foreign-wake work, low-load
+//! parked wakes, ready task spawn and join, fixed-total timer cancellation,
+//! and timer consumer latency under a self-waking ready load.
 //!
 //! Each throughput sample reports one root-level workload interval. The interval
 //! starts after runtime construction and root entry, spans all self-wake or
@@ -13,6 +13,17 @@
 //! scheduler reinjection. Helper shutdown and joining are excluded. These rows
 //! are not proven parked-wake latency measurements because the helper may wake
 //! a task before the executor enters the kernel.
+//!
+//! Parked-wake rows leave the runtime root pending with no other benchmark
+//! work, then have a foreign helper wait 5 milliseconds before waking it. The
+//! reported interval starts when the helper publishes its timestamp immediately
+//! before `Waker::wake` and ends when the root next polls its wait future. It
+//! includes timestamp publication, the wake call, scheduler reinjection and
+//! unpark, root scheduling, and the final future poll. Runtime construction,
+//! the request handoff, the 5 millisecond park-settle delay, helper shutdown,
+//! and helper joining are excluded. The delay is a practical assumption that
+//! the otherwise idle runtime has passed its spin phase and parked. Host
+//! preemption means the benchmark cannot directly prove kernel park state.
 //!
 //! Timer latency instead reports the sum of consumer-local intervals under the
 //! persistent load. Each interval starts when the timer consumer is first
@@ -41,6 +52,8 @@ use criterion::{criterion_group, criterion_main};
 #[cfg(target_os = "linux")]
 mod foreign_wake;
 #[cfg(target_os = "linux")]
+mod parked_wake;
+#[cfg(target_os = "linux")]
 mod self_wake;
 #[cfg(target_os = "linux")]
 mod spawn_join;
@@ -55,6 +68,7 @@ mod timer_latency;
 criterion_group!(
     benches,
     foreign_wake::bench,
+    parked_wake::bench,
     self_wake::bench,
     spawn_join::bench,
     timer_cancel::bench,
