@@ -11,41 +11,59 @@ use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use rand_core::CryptoRng;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
-/// Limits fast skips to a configured number of unfinalized terms.
-/// Ordinary round deadlines remain active when fast skips are unavailable.
+/// Selects the maximum number of unfinalized terms that may be fast-skipped.
 #[derive(Debug, Clone, Copy, Default)]
-pub enum FastSkipBudget {
+pub enum SkipBudget {
     /// Uses the participant count as the budget.
     #[default]
     Participants,
     /// Uses the specified budget.
-    ///
-    /// Zero prevents fast skips.
-    Fixed(u64),
+    Fixed(NonZeroU64),
 }
 
-impl FastSkipBudget {
+impl SkipBudget {
     /// Resolves the configured budget for a participant count.
     pub(crate) const fn resolve(self, participants: usize) -> u64 {
         match self {
             Self::Participants => participants as u64,
-            Self::Fixed(budget) => budget,
+            Self::Fixed(budget) => budget.get(),
         }
     }
 }
 
+/// Configures fast skips when a leader is inactive or nullifies its view.
+///
+/// Ordinary round deadlines remain active when fast skipping is disabled.
+#[derive(Debug, Clone, Copy)]
+pub enum SkipPolicy {
+    /// Disables fast skipping.
+    Disabled,
+    /// Enables fast skipping under the configured timeout and budget.
+    Enabled {
+        /// Duration after which an inactive leader is eligible for a fast skip.
+        ///
+        /// This timeout must be greater than the certification timeout and timeout retry.
+        timeout: Duration,
+        /// Maximum number of unfinalized terms that may be fast-skipped.
+        budget: SkipBudget,
+    },
+}
+
 #[cfg(test)]
 mod tests {
-    use super::FastSkipBudget;
+    use super::SkipBudget;
+    use std::num::NonZeroU64;
 
     #[test]
-    fn fast_skip_budget_resolves() {
-        assert_eq!(FastSkipBudget::default().resolve(4), 4);
-        assert_eq!(FastSkipBudget::Participants.resolve(7), 7);
-        assert_eq!(FastSkipBudget::Fixed(0).resolve(4), 0);
-        assert_eq!(FastSkipBudget::Fixed(9).resolve(4), 9);
+    fn skip_budget_resolves() {
+        assert_eq!(SkipBudget::default().resolve(4), 4);
+        assert_eq!(SkipBudget::Participants.resolve(7), 7);
+        assert_eq!(SkipBudget::Fixed(NonZeroU64::new(9).unwrap()).resolve(4), 9);
     }
 }
 
@@ -58,22 +76,22 @@ mod tests {
 /// locally, so a certificate signer whose vote never reached us still counts
 /// as silent.
 #[derive(Debug, Clone, Copy)]
-pub enum ForwardingPolicy {
+pub enum ForwardPolicy {
     /// Do nothing when a proposal becomes eligible for forwarding.
     Disabled,
     /// Forward the block to all participants whose matching vote was not
     /// observed locally.
     ///
-    /// To only send to the leader of the newly entered view, see [ForwardingPolicy::SilentLeader].
+    /// To only send to the leader of the newly entered view, see [ForwardPolicy::SilentLeader].
     SilentVoters,
     /// Forward the block to the leader of the newly entered view if the
     /// leader's matching vote was not observed locally.
     ///
-    /// To forward to all such participants, see [ForwardingPolicy::SilentVoters].
+    /// To forward to all such participants, see [ForwardPolicy::SilentVoters].
     SilentLeader,
 }
 
-impl ForwardingPolicy {
+impl ForwardPolicy {
     /// Returns true if the policy is enabled.
     pub const fn is_enabled(&self) -> bool {
         !matches!(self, Self::Disabled)
@@ -238,20 +256,14 @@ where
     /// journal) for recent activity.
     pub view_retention: ViewDelta,
 
-    /// Move to nullify immediately if the selected leader has been inactive
-    /// for at least this long while a quorum of participants has been active.
-    ///
-    /// This timeout must be greater than the certification timeout and timeout retry.
-    pub skip_timeout: Duration,
-
     /// Policy governing fast skips.
-    pub fast_skip_budget: FastSkipBudget,
+    pub skip: SkipPolicy,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
     /// Policy for proactively forwarding blocks when entering the next view.
-    pub forwarding: ForwardingPolicy,
+    pub forward: ForwardPolicy,
 }
 
 impl<
@@ -280,7 +292,7 @@ impl<
 
         // Vote-to-nullify timeouts.
         // certification_timeout > leader_timeout > 0.
-        // skip_timeout > certification_timeout and timeout_retry.
+        // skip timeout > certification_timeout and timeout_retry, when enabled.
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"
@@ -290,14 +302,16 @@ impl<
             "certification timeout must be greater than leader timeout"
         );
 
-        assert!(
-            self.skip_timeout > self.certification_timeout,
-            "skip timeout must be greater than certification timeout"
-        );
-        assert!(
-            self.skip_timeout > self.timeout_retry,
-            "skip timeout must be greater than timeout retry"
-        );
+        if let SkipPolicy::Enabled { timeout, .. } = self.skip {
+            assert!(
+                timeout > self.certification_timeout,
+                "skip timeout must be greater than certification timeout"
+            );
+            assert!(
+                timeout > self.timeout_retry,
+                "skip timeout must be greater than timeout retry"
+            );
+        }
         assert!(
             self.timeout_retry > Duration::default(),
             "timeout retry broadcast must be greater than zero"

@@ -439,6 +439,7 @@ mod tests {
         partition: String,
         epoch: Epoch,
         floor: Floor<S, Sha256Digest>,
+        fast_skip_budget: u64,
         page_cache: CacheRef,
     }
 
@@ -466,6 +467,7 @@ mod tests {
             partition,
             epoch,
             floor,
+            fast_skip_budget,
             page_cache,
         } = start;
         let me = participants[0].clone();
@@ -503,7 +505,7 @@ mod tests {
             leader_timeout: Duration::from_secs(5),
             certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
-            fast_skip_budget: u64::MAX,
+            fast_skip_budget,
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
@@ -641,6 +643,7 @@ mod tests {
                         partition,
                         epoch,
                         floor: Floor::Finalized(floor_finalization),
+                        fast_skip_budget: u64::MAX,
                         page_cache,
                     },
                 )
@@ -721,6 +724,7 @@ mod tests {
                         partition,
                         epoch,
                         floor: Floor::Finalized(floor_finalization),
+                        fast_skip_budget: u64::MAX,
                         page_cache,
                     },
                 )
@@ -809,6 +813,7 @@ mod tests {
                         partition,
                         epoch,
                         floor: Floor::Finalized(floor_finalization),
+                        fast_skip_budget: u64::MAX,
                         page_cache,
                     },
                 )
@@ -2551,6 +2556,127 @@ mod tests {
         );
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(ed25519::fixture);
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
+    }
+
+    /// Fast-skip eligibility after replay is derived from durable finalization and
+    /// term progress. Restarting must not restore budget consumed by an unfinalized
+    /// term, while a later finalization must make a pending timeout eligible.
+    #[test_traced("WARN")]
+    fn test_replay_preserves_exhausted_fast_skip_budget() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_replay_fast_skip_budget".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_replay_fast_skip_budget".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            // Persist the artifacts produced when view 1 is fast-skipped. Replaying the
+            // nullification enters view 2 without advancing the finalized floor.
+            let skipped_view = View::new(1);
+            let skipped_round = Round::new(epoch, skipped_view);
+            let (mut nullifies, nullification) =
+                build_nullification(&schemes, skipped_round, quorum);
+            let local_nullify = nullifies.remove(0);
+            seed_voter_journal_artifacts(
+                context.child("seed_journal"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                skipped_view,
+                vec![
+                    Artifact::Nullify(local_nullify),
+                    Artifact::Nullification(nullification),
+                ],
+            )
+            .await;
+
+            let (mut mailbox, mut batcher_receiver, _resolver_receiver, _relay, _reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                        fast_skip_budget: 1,
+                        page_cache,
+                    },
+                )
+                .await;
+
+            let recovered_view = View::new(2);
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current, finalized, ..
+                    } => {
+                        assert_eq!(current, recovered_view);
+                        assert_eq!(finalized, View::zero());
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // The replayed term has exhausted budget 1, so this one-shot hint must
+            // remain pending instead of bypassing the five-second leader deadline.
+            mailbox.timeout(
+                Round::new(epoch, recovered_view),
+                TimeoutReason::LeaderNullify,
+            );
+            let no_fast_skip_deadline = context.current() + Duration::from_secs(1);
+            loop {
+                select! {
+                    _ = context.sleep_until(no_fast_skip_deadline) => break,
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Nullify(nullify)) = msg.unwrap()
+                            && nullify.view() == recovered_view
+                        {
+                            panic!("replay restored fast-skip budget for {recovered_view}");
+                        }
+                    },
+                }
+            }
+
+            // Finalizing view 1 moves the first unfinalized term to view 2. The
+            // retained hint is now eligible and must fire before the ordinary deadline.
+            let proposal = Proposal::new(
+                skipped_round,
+                View::zero(),
+                Sha256::hash(&[b"restore-fast-skip-budget"]),
+            );
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+            mailbox.resolved(Certificate::Finalization(finalization));
+
+            let restored_deadline = context.current() + Duration::from_secs(1);
+            loop {
+                select! {
+                    _ = context.sleep_until(restored_deadline) => {
+                        panic!("finalization did not restore fast-skip budget for {recovered_view}");
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Nullify(nullify)) = msg.unwrap()
+                            && nullify.view() == recovered_view
+                        {
+                            break;
+                        }
+                    },
+                }
+            }
+        });
     }
 
     #[test_traced]

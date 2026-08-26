@@ -43,7 +43,7 @@ use commonware_consensus::{
     },
     simplex::{
         self,
-        config::ForwardingPolicy,
+        config::ForwardPolicy,
         elector::RoundRobin,
         types::{Context, Finalization},
     },
@@ -1159,9 +1159,11 @@ impl EngineDefinition for ReshareEngine {
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_secs(2),
                     view_retention: ViewDelta::new(10),
-                    skip_timeout: Duration::from_secs(5),
-                    fast_skip_budget: simplex::FastSkipBudget::Participants,
-                    forwarding: ForwardingPolicy::Disabled,
+                    skip: simplex::SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(5),
+                        budget: simplex::SkipBudget::Participants,
+                    },
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 },
                 gate,

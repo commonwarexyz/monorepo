@@ -246,11 +246,13 @@ fn main() {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(11),
-                fast_skip_budget: simplex::FastSkipBudget::Participants,
+                skip: simplex::SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(11),
+                    budget: simplex::SkipBudget::Participants,
+                },
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
-                forwarding: simplex::ForwardingPolicy::Disabled,
+                forward: simplex::ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
         );

@@ -13,7 +13,8 @@ use commonware_consensus::{
     CertifiableAutomaton, Heightable, Relay,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
-        self, Floor, ForwardingPolicy, Plan, elector::Config as Elector, scheme, types::Context,
+        self, Floor, ForwardPolicy, Plan, SkipPolicy, elector::Config as Elector, scheme,
+        types::Context,
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
@@ -124,11 +125,8 @@ pub struct SimplexConfig<L> {
     /// Number of views behind the finalized tip to retain validator activity.
     pub view_retention: ViewDelta,
 
-    /// Time a leader may remain inactive before triggering immediate nullification.
-    pub skip_timeout: Duration,
-
     /// Policy governing fast skips.
-    pub fast_skip_budget: simplex::FastSkipBudget,
+    pub skip: SkipPolicy,
 
     /// Track individual votes after certification.
     ///
@@ -139,7 +137,7 @@ pub struct SimplexConfig<L> {
     pub track_historical_votes: bool,
 
     /// Policy for proactively forwarding certified blocks.
-    pub forwarding: ForwardingPolicy,
+    pub forward: ForwardPolicy,
 }
 
 /// Configuration for the [`Actor`].
@@ -761,9 +759,8 @@ where
                 timeout_retry: self.simplex.timeout_retry,
                 fetch_timeout: self.simplex.fetch_timeout,
                 view_retention: self.simplex.view_retention,
-                skip_timeout: self.simplex.skip_timeout,
-                fast_skip_budget: self.simplex.fast_skip_budget,
-                forwarding: self.simplex.forwarding,
+                skip: self.simplex.skip,
+                forward: self.simplex.forward,
                 track_historical_votes: self.simplex.track_historical_votes,
             },
         );

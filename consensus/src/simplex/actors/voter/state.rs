@@ -2920,7 +2920,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_fast_skip_budget_defers_inactivity_to_leader_deadline() {
+    fn disabled_fast_skipping_defers_inactivity_to_leader_deadline() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, state) = setup_state(&mut context, 4, 7, 10, 1);
@@ -2937,7 +2937,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_fast_skip_budget_defers_leader_nullify() {
+    fn disabled_fast_skipping_defers_leader_nullify() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, state) = setup_state(&mut context, 4, 7, 10, 1);

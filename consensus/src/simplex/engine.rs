@@ -1,6 +1,6 @@
 use super::{
     actors::{batcher, resolver, voter},
-    config::Config,
+    config::{Config, SkipPolicy},
     elector::{self, Elector as _},
     types::{Activity, Context},
 };
@@ -58,9 +58,10 @@ impl<
     pub fn new(mut context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert(&mut context);
-        let fast_skip_budget = cfg
-            .fast_skip_budget
-            .resolve(cfg.scheme.participants().len());
+        let fast_skip_budget = match cfg.skip {
+            SkipPolicy::Disabled => 0,
+            SkipPolicy::Enabled { budget, .. } => budget.resolve(cfg.scheme.participants().len()),
+        };
         let elector = cfg.elector.build(cfg.scheme.participants());
         let terms = elector.terms();
         let term_length = terms.length();
@@ -84,9 +85,9 @@ impl<
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
                 view_retention: cfg.view_retention,
-                skip_timeout: cfg.skip_timeout,
+                skip: cfg.skip,
                 lookahead: Lookahead::new(&terms),
-                forwarding: cfg.forwarding,
+                forward: cfg.forward,
                 floor: cfg.floor.view(),
             },
         );
