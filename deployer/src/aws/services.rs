@@ -852,6 +852,35 @@ pub struct InstanceUrls {
     pub images: Vec<(&'static str, String)>,
 }
 
+/// Disables automatic APT upgrades without interrupting active package operations.
+pub(crate) const DISABLE_AUTOMATIC_APT_UPGRADES: &str = r#"set -e
+sudo timeout 10m cloud-init status --wait
+sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer
+sudo systemctl mask apt-daily.timer apt-daily-upgrade.timer
+sudo tee /etc/apt/apt.conf.d/99commonware-disable-periodic >/dev/null <<'EOF'
+APT::Periodic::Enable "0";
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+
+# Let active package operations finish instead of interrupting them.
+sudo timeout 10m sh -c '
+while
+    ! systemctl show --property=ActiveState --value apt-daily.service | grep -Eq "^(inactive|failed)$" ||
+    ! systemctl show --property=ActiveState --value apt-daily-upgrade.service | grep -Eq "^(inactive|failed)$" ||
+    fuser -s /var/lib/apt/daily_lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+    sleep 1
+done
+'
+
+for timer in apt-daily.timer apt-daily-upgrade.timer; do
+    [ "$(systemctl is-enabled "$timer" 2>/dev/null || true)" = masked ]
+done
+for setting in Enable Update-Package-Lists Unattended-Upgrade; do
+    [ "$(apt-config shell VALUE "APT::Periodic::$setting/i")" = "VALUE='0'" ]
+done
+"#;
+
 /// Phase 1 (optional): Install apt packages on binary instances
 /// Only needed when profiling is enabled or NVMe instance-store devices are mounted.
 pub(crate) fn install_binary_apt_cmd(profiling: bool, nvme: bool) -> Option<String> {
@@ -1338,6 +1367,29 @@ mod tests {
                 .map(|image| (image, format!("image-url-{image}")))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn test_disables_automatic_apt_upgrades() {
+        let cmd = DISABLE_AUTOMATIC_APT_UPGRADES;
+        let positions = [
+            "cloud-init status --wait",
+            "systemctl disable --now",
+            "systemctl mask apt-daily.timer apt-daily-upgrade.timer",
+            "99commonware-disable-periodic",
+            "systemctl show --property=ActiveState --value apt-daily.service",
+            "systemctl is-enabled",
+            "apt-config shell",
+        ]
+        .map(|step| cmd.find(step).unwrap());
+        assert!(positions.is_sorted());
+        for setting in ["Enable", "Update-Package-Lists", "Unattended-Upgrade"] {
+            assert!(cmd.contains(&format!("APT::Periodic::{setting} \"0\";")));
+        }
+        assert!(cmd.contains("fuser -s /var/lib/apt/daily_lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock"));
+        assert!(!cmd.contains("systemctl is-active"));
+        assert!(!cmd.contains("fuser -k"));
+        assert!(!cmd.contains("systemctl stop apt-daily"));
     }
 
     #[test]
