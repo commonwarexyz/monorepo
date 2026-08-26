@@ -577,8 +577,6 @@ pub struct Waiters {
     /// Stack of reusable waiter IDs. Removing a slot advances its generation
     /// before the ID is returned here, rejecting late CQEs for its old owner.
     free: Vec<WaiterId>,
-    /// Number of tracked waiters currently stored in `entries`.
-    len: usize,
     /// Number of tracked waiters still in [Lifecycle::Pending].
     pending: usize,
 }
@@ -599,20 +597,19 @@ impl Waiters {
         Self {
             entries,
             free,
-            len: 0,
             pending: 0,
         }
     }
 
     /// Return the number of currently tracked waiters.
     pub const fn len(&self) -> usize {
-        self.len
+        self.entries.len() - self.free.len()
     }
 
     /// Return whether there are no tracked waiters.
     #[cfg_attr(not(test), allow(dead_code))]
     pub const fn is_empty(&self) -> bool {
-        self.len == 0
+        self.entries.len() == self.free.len()
     }
 
     /// Return the number of tracked waiters whose request is still
@@ -626,8 +623,9 @@ impl Waiters {
     }
 
     /// Return whether all waiter slots are currently occupied.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn is_full(&self) -> bool {
-        self.len == self.entries.len()
+        self.free.is_empty()
     }
 
     /// Return the authoritative number of free waiter slots.
@@ -683,7 +681,6 @@ impl Waiters {
             lifecycle: Lifecycle::Pending(request),
         });
         assert!(replaced.is_none(), "free slot should not contain waiter");
-        self.len += 1;
         self.pending += 1;
         id
     }
@@ -696,7 +693,6 @@ impl Waiters {
     fn take(&mut self, index: usize) -> Lifecycle {
         let slot = self.entries[index].take().expect("tracked waiter missing");
         self.free.push(slot.id.next_generation());
-        self.len -= 1;
         if matches!(slot.lifecycle, Lifecycle::Pending(_)) {
             self.pending -= 1;
         }

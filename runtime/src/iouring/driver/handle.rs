@@ -612,29 +612,18 @@ impl CapacityWaiters {
 
     /// Invalidate every live registration and return all stored wakers.
     fn close(&mut self) -> Vec<Waker> {
-        // The arena retains its high-water mark, which can greatly exceed the
-        // live set after cancellation churn. Grow only for live wakers during
-        // this one-time shutdown path instead of reserving for recycled slots.
         let mut wakers = Vec::new();
         self.head = None;
         self.tail = None;
         self.free = None;
         self.reserved = 0;
-        for index in (0..self.nodes.len()).rev() {
-            let next = self.free;
-            let state =
-                std::mem::replace(&mut self.nodes[index].state, CapacityState::Free { next });
-            match state {
+        for node in self.nodes.drain(..).rev() {
+            match node.state {
                 CapacityState::Free { .. } => {}
                 CapacityState::Queued { waker, .. } | CapacityState::Granted { waker } => {
-                    self.nodes[index].generation = self.nodes[index]
-                        .generation
-                        .checked_add(1)
-                        .expect("capacity generation overflowed");
                     wakers.push(waker);
                 }
             }
-            self.free = Some(index);
         }
         wakers
     }
@@ -1086,20 +1075,22 @@ impl Handle {
     }
 }
 
-/// Poll one admission attempt for `request`.
+/// Poll one admission attempt for `request`, using `admit` to bind its observer.
 ///
 /// On a closed driver the request resolves immediately to its kind-specific
 /// failure (returned as `Err`). On a full slab the task parks on the capacity
 /// wait list through `registration` (one slot per attempt, refreshed on
 /// re-polls and released here once the attempt resolves). Otherwise the
-/// request is admitted: the slab owns it (along with the task waker) and its
-/// id is pushed onto the backlog for the loop.
-fn poll_admission(
+/// observer-specific state and waiter are published under one op-state borrow,
+/// then the waiter id is pushed onto the backlog. The generic closure is
+/// monomorphized for ordinary ops and detached tickets.
+fn poll_admission<T>(
     handle: &Handle,
     request: &mut Option<Request>,
     registration: &mut Registration<'_>,
     cx: &mut Context<'_>,
-) -> (Poll<Result<WaiterId, Output>>, CapacityActions) {
+    admit: impl FnOnce(&mut Ops, Request, Waker) -> (T, WaiterId),
+) -> (Poll<Result<T, Output>>, CapacityActions) {
     let mut actions = CapacityActions::new();
     let outcome = handle.with(|ops| {
         if ops.closed {
@@ -1119,65 +1110,15 @@ fn poll_admission(
             CapacityAdmission::Direct(waker) | CapacityAdmission::Granted(waker) => waker,
         };
         let request = request.take().expect("request consumed before admission");
-        let id = ops.waiters.insert(request, observer_waker);
+        let (id, waiter_id) = admit(ops, request, observer_waker);
         assert!(ops.capacity.reserved <= ops.waiters.free_len());
-        ops.backlog.push_back(id);
+        ops.backlog.push_back(waiter_id);
         Admission::Admitted(id)
     });
     let poll = match outcome {
         Admission::Admitted(id) => Poll::Ready(Ok(id)),
         Admission::Full => Poll::Pending,
         Admission::Closed => {
-            let request = request.take().expect("request lost on closed driver");
-            Poll::Ready(Err(request.fail()))
-        }
-    };
-    (poll, actions)
-}
-
-/// Poll one detached-ticket admission attempt.
-///
-/// Closed and full handling matches ordinary op admission. Once capacity is
-/// available, the completion and waiter are bound under one op-state borrow,
-/// and the ticket receives only the independently generational completion ID.
-fn poll_ticket_admission(
-    handle: &Handle,
-    request: &mut Option<Request>,
-    registration: &mut Registration<'_>,
-    cx: &mut Context<'_>,
-) -> (Poll<Result<CompletionId, Output>>, CapacityActions) {
-    let mut actions = CapacityActions::new();
-    let outcome = handle.with(|ops| {
-        if ops.closed {
-            if let Some(slot) = registration.slot.take() {
-                ops.capacity
-                    .cancel(slot, ops.waiters.free_len(), &mut actions);
-            }
-            return TicketAdmission::Closed;
-        }
-        let observer_waker = match ops.capacity.poll(
-            &mut registration.slot,
-            ops.waiters.free_len(),
-            cx.waker(),
-            &mut actions,
-        ) {
-            CapacityAdmission::Queued => return TicketAdmission::Full,
-            CapacityAdmission::Direct(waker) | CapacityAdmission::Granted(waker) => waker,
-        };
-        let request = request.take().expect("request consumed before admission");
-        let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
-        let (completion_id, waiter_id) = completions
-            .insert_pending(observer_waker, |completion_id| {
-                waiters.insert_ticket(request, completion_id)
-            });
-        assert!(ops.capacity.reserved <= ops.waiters.free_len());
-        ops.backlog.push_back(waiter_id);
-        TicketAdmission::Admitted(completion_id)
-    });
-    let poll = match outcome {
-        TicketAdmission::Admitted(id) => Poll::Ready(Ok(id)),
-        TicketAdmission::Full => Poll::Pending,
-        TicketAdmission::Closed => {
             let request = request.take().expect("request lost on closed driver");
             Poll::Ready(Err(request.fail()))
         }
@@ -1273,15 +1214,8 @@ fn orphan_ticket(handle: &Handle, id: CompletionId) {
 }
 
 /// Outcome of one admission attempt.
-enum Admission {
-    Admitted(WaiterId),
-    Full,
-    Closed,
-}
-
-/// Outcome of one detached-ticket admission attempt.
-enum TicketAdmission {
-    Admitted(CompletionId),
+enum Admission<T> {
+    Admitted(T),
     Full,
     Closed,
 }
@@ -1336,8 +1270,16 @@ impl Future for Op<'_> {
         let this = self.get_mut();
         match &mut this.state {
             OpState::Queued(request) => {
-                let (admission, actions) =
-                    poll_admission(this.handle, request, &mut this.registration, cx);
+                let (admission, actions) = poll_admission(
+                    this.handle,
+                    request,
+                    &mut this.registration,
+                    cx,
+                    |ops, request, waker| {
+                        let waiter_id = ops.waiters.insert(request, waker);
+                        (waiter_id, waiter_id)
+                    },
+                );
                 match admission {
                     // Completion cannot be ready before the loop's next turn,
                     // so an admitted op always returns pending here.
@@ -1422,8 +1364,20 @@ impl Ticket {
         // while parked releases its capacity slot.
         let mut registration = Registration::new(handle);
         let (state, actions) = std::future::poll_fn(|cx| {
-            let (admission, actions) =
-                poll_ticket_admission(handle, &mut request, &mut registration, cx);
+            let (admission, actions) = poll_admission(
+                handle,
+                &mut request,
+                &mut registration,
+                cx,
+                |ops, request, waker| {
+                    let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
+                    let (completion_id, waiter_id) = completions
+                        .insert_pending(waker, |completion_id| {
+                            waiters.insert_ticket(request, completion_id)
+                        });
+                    (completion_id, waiter_id)
+                },
+            );
             match admission {
                 Poll::Ready(Ok(id)) => Poll::Ready((TicketState::Waiting(id), actions)),
                 Poll::Ready(Err(output)) => {
@@ -1932,10 +1886,13 @@ mod tests {
 
         let closed = capacity.close();
         assert_eq!(closed.len(), 3);
+        assert!(closed[0].will_wake(&wakers[2]));
+        assert!(closed[1].will_wake(&wakers[1]));
+        assert!(closed[2].will_wake(&wakers[0]));
         assert_eq!(capacity.registered(), 0);
         assert_eq!(capacity.reserved(), 0);
         assert_eq!(capacity.queued(), 0);
-        assert_eq!(capacity.arena_len(), 3);
+        assert_eq!(capacity.arena_len(), 0);
         for waker in closed {
             waker.wake();
         }
