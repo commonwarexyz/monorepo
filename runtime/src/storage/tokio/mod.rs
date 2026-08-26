@@ -38,19 +38,19 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Config {
     pub storage_directory: PathBuf,
     pub maximum_buffer_size: usize,
-    pub blob_layouts: RangeInclusive<Layout>,
+    pub blob_layout: RangeInclusive<Layout>,
 }
 
 impl Config {
     pub const fn new(
         storage_directory: PathBuf,
         maximum_buffer_size: usize,
-        blob_layouts: RangeInclusive<Layout>,
+        blob_layout: RangeInclusive<Layout>,
     ) -> Self {
         Self {
             storage_directory,
             maximum_buffer_size,
-            blob_layouts,
+            blob_layout,
         }
     }
 }
@@ -66,8 +66,8 @@ pub struct Storage {
 async fn resolve_header(
     file: &mut fs::File,
     raw_len: u64,
-    versions: &RangeInclusive<u16>,
     layouts: &RangeInclusive<Layout>,
+    versions: &RangeInclusive<u16>,
     partition: &str,
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, Error> {
@@ -75,7 +75,7 @@ async fn resolve_header(
     file.read_exact(&mut raw)
         .await
         .map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, layouts, partition, name)
+    super::header::resolve(&raw, raw_len, layouts, versions, partition, name)
 }
 
 impl Storage {
@@ -135,8 +135,8 @@ impl crate::Storage for Storage {
         let existing = resolve_header(
             &mut file,
             raw_len,
+            &self.cfg.blob_layout,
             &versions,
-            &self.cfg.blob_layouts,
             partition,
             name,
         )
@@ -152,6 +152,7 @@ impl crate::Storage for Storage {
                 // path.
                 let parent = parent.to_path_buf();
                 let storage_directory = self.cfg.storage_directory.clone();
+                let blob_layout = self.cfg.blob_layout.clone();
                 let err_partition = partition.to_string();
                 let err_name = hex(name);
                 let creation = tokio::task::spawn(async move {
@@ -164,7 +165,7 @@ impl crate::Storage for Storage {
                     sync_dir(&storage_directory).await?;
 
                     // Truncate to zero before writing, per the [Header::create] contract.
-                    let (region, blob_version) = Header::create(&versions);
+                    let (region, blob_version) = Header::create(&blob_layout, &versions);
                     let data_offset = region.len() as u64;
                     file.set_len(0).await.map_err(|e| {
                         Error::BlobResizeFailed(err_partition.clone(), err_name.clone(), e.into())
@@ -257,6 +258,7 @@ impl crate::Storage for Storage {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::{Header, *};
     use crate::{
@@ -490,7 +492,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
             },
             test_pool(),
         );
@@ -579,7 +581,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
             },
             test_pool(),
         );
@@ -626,7 +628,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
             },
             test_pool(),
         );
@@ -654,7 +656,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
             },
             test_pool(),
         );
@@ -700,7 +702,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
             },
             test_pool(),
         );
@@ -731,7 +733,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
             },
             test_pool(),
         );
@@ -785,7 +787,7 @@ mod tests {
                 Config {
                     storage_directory: storage_directory.clone(),
                     maximum_buffer_size: 1024 * 1024,
-                    blob_layouts: Layout::ALL,
+                    blob_layout: Layout::ALL,
                 },
                 test_pool(),
             );

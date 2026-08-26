@@ -60,7 +60,7 @@ stability_scope!(BETA {
     pub mod metered;
 
     mod header;
-    pub(crate) use crate::BlobHeaderLayout as Layout;
+    pub(crate) use crate::BlobLayout as Layout;
     pub(crate) use header::Header;
 
     /// Validate that a partition name contains only allowed characters.

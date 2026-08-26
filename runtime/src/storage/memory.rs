@@ -18,8 +18,8 @@ fn resolve_header(
     super::header::resolve(
         raw,
         content.len() as u64,
-        versions,
         &Layout::ALL,
+        versions,
         partition,
         name,
     )
@@ -143,7 +143,7 @@ impl crate::Storage for Storage {
                 generations.get_or_insert(&key),
             ),
             None => {
-                let (region, blob_version) = Header::create(&versions);
+                let (region, blob_version) = Header::create(&Layout::ALL, &versions);
                 let data_offset = region.len() as u64;
                 content.clear();
                 content.extend_from_slice(&region);
@@ -467,6 +467,7 @@ impl crate::Blob for Blob {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::{Header, *};
     use crate::{
@@ -728,7 +729,7 @@ mod tests {
         // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
         // region (the full state enumeration lives in the Layout::interrupted_creation
         // unit tables)
-        let (region, _) = Header::create(&(0..=0));
+        let (region, _) = Header::create(&Layout::ALL, &(0..=0));
         let states = [region[..10].to_vec()];
         for (i, state) in states.into_iter().enumerate() {
             let name = format!("torn_{i}").into_bytes();

@@ -41,8 +41,8 @@ use std::{
 fn resolve_header(
     file: &mut File,
     raw_len: u64,
-    versions: &RangeInclusive<u16>,
     layouts: &RangeInclusive<Layout>,
+    versions: &RangeInclusive<u16>,
     partition: &str,
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, Error> {
@@ -50,7 +50,7 @@ fn resolve_header(
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, layouts, partition, name)
+    super::header::resolve(&raw, raw_len, layouts, versions, partition, name)
 }
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -77,8 +77,8 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
-    /// Blob header layouts accepted by storage.
-    pub blob_layouts: RangeInclusive<Layout>,
+    /// Blob layouts accepted by storage.
+    pub blob_layout: RangeInclusive<Layout>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated io_uring worker thread.
@@ -89,7 +89,7 @@ pub struct Config {
 pub struct Storage {
     lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
-    blob_layouts: RangeInclusive<Layout>,
+    blob_layout: RangeInclusive<Layout>,
     io_handle: iouring::Handle,
     pool: BufferPool,
 }
@@ -99,7 +99,7 @@ impl Storage {
     pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
-            blob_layouts,
+            blob_layout,
             mut iouring_config,
             thread_stack_size,
         } = cfg;
@@ -115,7 +115,7 @@ impl Storage {
         let storage = Self {
             lock: Arc::new(Mutex::new(())),
             storage_directory,
-            blob_layouts,
+            blob_layout,
             io_handle,
             pool,
         };
@@ -164,8 +164,8 @@ impl crate::Storage for Storage {
         let existing = resolve_header(
             &mut file,
             raw_len,
+            &self.blob_layout,
             &versions,
-            &self.blob_layouts,
             partition,
             name,
         )?;
@@ -181,7 +181,7 @@ impl crate::Storage for Storage {
                 sync_dir(&self.storage_directory)?;
 
                 // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, blob_version) = Header::create(&versions);
+                let (region, blob_version) = Header::create(&self.blob_layout, &versions);
                 let data_offset = region.len() as u64;
                 file.set_len(0)
                     .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
@@ -446,6 +446,7 @@ impl crate::Blob for Blob {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::{Header, *};
     use crate::{
@@ -484,7 +485,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
@@ -977,7 +978,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_root.clone(),
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
@@ -1013,7 +1014,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
-                blob_layouts: Layout::ALL,
+                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },

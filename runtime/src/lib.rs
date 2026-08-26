@@ -75,26 +75,27 @@ stability_scope!(BETA {
 
     pub mod telemetry;
 
-    /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
-    pub const DEFAULT_BLOB_VERSION: u16 = 0;
-
-    /// Version of a [`Blob`]'s on-disk header layout.
+    /// Runtime layout of a [`Blob`].
     ///
-    /// This versions the runtime-owned container, not the application-owned blob contents
-    /// version passed to [`Storage::open_versioned`].
+    /// This versions the runtime-owned container, including its header and data offset, not the
+    /// application-owned blob contents version passed to [`Storage::open_versioned`].
+    ///
+    /// This can be used to orchestrate rollback-safe upgrades.
     #[repr(u16)]
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub enum BlobHeaderLayout {
+    pub enum BlobLayout {
         /// An 8-byte header, with data beginning immediately after it.
+        #[deprecated(note = "unaligned pages can degrade performance")]
         V0 = 0,
         /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
         V1 = 1,
     }
 
-    impl BlobHeaderLayout {
-        /// All blob header layouts supported by this runtime.
-        pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=Self::V1;
-    }
+    /// Default runtime layout used when creating a [`Blob`].
+    pub const DEFAULT_BLOB_LAYOUT: BlobLayout = BlobLayout::V1;
+
+    /// Default application-owned [`Blob`] contents version used by [`Storage::open`].
+    pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
@@ -143,10 +144,10 @@ stability_scope!(BETA {
         BlobInsufficientLength,
         #[error("blob corrupt: {0}/{1} reason: {2}")]
         BlobCorrupt(String, String, String),
-        #[error("blob header layout mismatch: expected one of {expected:?}, found {found:?}")]
-        BlobHeaderLayoutMismatch {
-            expected: std::ops::RangeInclusive<BlobHeaderLayout>,
-            found: BlobHeaderLayout,
+        #[error("blob layout mismatch: expected one of {expected:?}, found {found:?}")]
+        BlobLayoutMismatch {
+            expected: std::ops::RangeInclusive<BlobLayout>,
+            found: BlobLayout,
         },
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
         BlobVersionMismatch {
@@ -661,8 +662,8 @@ stability_scope!(BETA {
         ///
         /// # Layout
         ///
-        /// New blobs are created with the latest header layout. Reopening an existing blob
-        /// honors the layout recorded in its header.
+        /// New blobs are created with the latest layout allowed by the runtime. Reopening an
+        /// existing blob honors the layout recorded in its header.
         ///
         /// # Returns
         ///
