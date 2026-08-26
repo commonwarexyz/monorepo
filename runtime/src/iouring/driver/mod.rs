@@ -784,12 +784,7 @@ impl IoUringLoop {
     /// [Error::Timeout], while operations whose deadlines were later report
     /// [Error::Closed]. A deadline exactly at the boundary reports
     /// [Error::Timeout] because its operation budget is exhausted there.
-    fn cancel_at_shutdown_boundary(
-        &mut self,
-        ops: &mut Ops,
-        started_at: Instant,
-        grace: Duration,
-    ) {
+    fn cancel_at_shutdown_boundary(&mut self, ops: &mut Ops, started_at: Instant, grace: Duration) {
         // The caller invokes this only after observing a representable
         // Instant at least grace beyond started_at, so the intervening
         // boundary must also be representable.

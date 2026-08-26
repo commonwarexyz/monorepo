@@ -841,10 +841,7 @@ mod tests {
 
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 4, 2);
-        assert_eq!(
-            completed_slots(&tasks, &mut scratch),
-            vec![10, 11, 0, 1]
-        );
+        assert_eq!(completed_slots(&tasks, &mut scratch), vec![10, 11, 0, 1]);
         tasks.drain_into(&mut scratch, 4, 2);
         assert_eq!(completed_slots(&tasks, &mut scratch), vec![12, 2]);
         assert!(!tasks.has_ready());
@@ -1252,8 +1249,7 @@ mod tests {
         let mut scratch = Vec::new();
         tasks.drain_into(&mut scratch, 1, 1);
         let task = scratch.pop().unwrap();
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.poll(&tasks)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.poll(&tasks)));
         let payload = result.expect_err("ready future drop must panic");
         assert_eq!(
             payload.downcast_ref::<&str>(),

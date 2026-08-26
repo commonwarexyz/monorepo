@@ -527,8 +527,7 @@ mod tests {
     use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
     use futures::{
-        Future as _,
-        future,
+        Future as _, future,
         stream::{AbortHandle, Abortable},
         task::{ArcWake, waker_ref},
     };
