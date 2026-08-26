@@ -58,7 +58,7 @@ impl<
     pub fn new(mut context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert(&mut context);
-        let fast_skip_budget = match cfg.skip {
+        let skip_budget = match cfg.skip {
             SkipPolicy::Disabled => 0,
             SkipPolicy::Enabled { budget, .. } => budget.resolve(cfg.scheme.participants().len()),
         };
@@ -109,7 +109,7 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
-                fast_skip_budget,
+                skip_budget,
                 view_retention: cfg.view_retention,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,

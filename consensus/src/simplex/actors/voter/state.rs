@@ -137,7 +137,7 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     leader_timeout: Duration,
     certification_timeout: Duration,
     timeout_retry: Duration,
-    fast_skip_budget: u64,
+    skip_budget: u64,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
@@ -231,7 +231,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let nullifications = context.family("nullifications", "nullifications");
 
         let lookahead = Lookahead::new(&cfg.elector.terms());
-        let fast_skip_budget = cfg.scheme.participants().len() as u64;
+        let skip_budget = cfg.scheme.participants().len() as u64;
 
         Self {
             context,
@@ -243,7 +243,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             leader_timeout: cfg.leader_timeout,
             certification_timeout: cfg.certification_timeout,
             timeout_retry: cfg.timeout_retry,
-            fast_skip_budget,
+            skip_budget,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
@@ -263,8 +263,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Overrides the fast-skip budget.
-    pub const fn with_fast_skip_budget(mut self, fast_skip_budget: u64) -> Self {
-        self.fast_skip_budget = fast_skip_budget;
+    pub const fn with_skip_budget(mut self, skip_budget: u64) -> Self {
+        self.skip_budget = skip_budget;
         self
     }
 
@@ -491,7 +491,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let spent = current
             .checked_sub(first_unfinalized)
             .expect("current term must not precede the first unfinalized term");
-        spent < self.fast_skip_budget
+        spent < self.skip_budget
     }
 
     /// Returns the oldest entered, unfinalized view's stall deadline in
@@ -2794,7 +2794,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_skip_budget_allows_repeated_leaders() {
+    fn skip_budget_allows_repeated_leaders() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, state) = setup_state_with(
@@ -2809,7 +2809,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = fixture;
-            let mut state = state.with_fast_skip_budget(3);
+            let mut state = state.with_skip_budget(3);
             let first_leader = state.leader_index(View::new(1));
 
             for view in 1..=3 {
@@ -2842,7 +2842,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_skip_budget_counts_terms() {
+    fn skip_budget_counts_terms() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, state) = setup_state_with(
@@ -2857,7 +2857,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = fixture;
-            let mut state = state.with_fast_skip_budget(2);
+            let mut state = state.with_skip_budget(2);
 
             for view in [View::new(1), View::new(6)] {
                 assert_eq!(state.current_view(), view);
@@ -2892,7 +2892,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = fixture;
-            let mut state = state.with_fast_skip_budget(1);
+            let mut state = state.with_skip_budget(1);
 
             let proposal = Proposal::new(
                 Rnd::new(state.epoch(), View::new(1)),
@@ -2924,7 +2924,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, state) = setup_state(&mut context, 4, 7, 10, 1);
-            let mut state = state.with_fast_skip_budget(0);
+            let mut state = state.with_skip_budget(0);
             let view = state.current_view();
             let now = context.current();
 
@@ -2941,7 +2941,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, state) = setup_state(&mut context, 4, 7, 10, 1);
-            let mut state = state.with_fast_skip_budget(0);
+            let mut state = state.with_skip_budget(0);
             let view = state.current_view();
             let now = context.current();
             let proposal = Proposal::new(

@@ -179,7 +179,7 @@ impl<
                 timeout_retry: cfg.timeout_retry,
             },
         )
-        .with_fast_skip_budget(cfg.fast_skip_budget);
+        .with_skip_budget(cfg.skip_budget);
         (
             Self {
                 context: ContextCell::new(context),
