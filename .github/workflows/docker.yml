@@ -39,12 +39,12 @@ jobs:
         env:
           INPUT_TARGET: ${{ inputs.target }}
         run: |
-          TARGET="$INPUT_TARGET"
-          if [[ -z "$TARGET" ]]; then
-              TARGET="${GIT_REF_NAME%/*}"
+          export TARGET="$INPUT_TARGET"
+          if [[ -z $TARGET ]]; then
+              export TARGET="${GIT_REF_NAME%/*}"
           fi
           echo "Target: $TARGET"
-          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
       - name: Create matrix
         id: platforms
         shell: bash
@@ -54,10 +54,8 @@ jobs:
           matrix="$(docker buildx bake -f docker/docker-bake.hcl "$TARGET" --print | jq -cr --arg target "$TARGET" '.target[$target].platforms')"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
       - name: Show matrix
-        env:
-          MATRIX: ${{ steps.platforms.outputs.matrix }}
         run: |
-          echo "$MATRIX"
+          echo ${{ steps.platforms.outputs.matrix }}
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
