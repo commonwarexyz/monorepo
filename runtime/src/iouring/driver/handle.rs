@@ -53,7 +53,9 @@
 //! Every state transition completes while [Ops] is borrowed. Stored waker
 //! drops and callbacks are detached into [WakerAction] values, then processed
 //! after releasing that borrow. This lets callback panics propagate without
-//! exposing partially published capacity or completion state.
+//! exposing partially published capacity or completion state. During an
+//! existing unwind, callback panic payloads are forgotten after all actions
+//! run so an owner destructor cannot abort the process with a second panic.
 
 use super::{
     Tick,
@@ -275,8 +277,10 @@ impl IntoIterator for CapacityActions {
 /// panic from an earlier callback must therefore not strand later callbacks
 /// whose queued or granted state already changed. Stored wakers can also run
 /// user RawWaker code on drop, so their destruction follows the same ordering
-/// and unwind isolation.
+/// and unwind isolation. If a batch begins during an existing unwind, its
+/// callback panic is forgotten instead of causing a double-panic abort.
 pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
+    let already_panicking = std::thread::panicking();
     let mut first_callback_panic = None;
     for action in actions {
         match action {
@@ -307,7 +311,11 @@ pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
         }
     }
     if let Some(payload) = first_callback_panic {
-        std::panic::resume_unwind(payload);
+        if already_panicking {
+            std::mem::forget(payload);
+        } else {
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
@@ -2920,5 +2928,44 @@ mod tests {
         let payload = result.expect_err("wake batch should resume first panic");
         std::mem::forget(payload);
         assert!(flag.0.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_wake_batch_preserves_active_unwind() {
+        const CASE: &str = "_COMMONWARE_RUNTIME_IOURING_WAKE_BATCH_UNWIND_CASE";
+        const TEST: &str =
+            "iouring::driver::handle::tests::test_wake_batch_preserves_active_unwind";
+
+        if std::env::var_os(CASE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CASE, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "wake batch unwind case aborted\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        struct DropWakerOnUnwind(Option<Waker>);
+
+        impl Drop for DropWakerOnUnwind {
+            fn drop(&mut self) {
+                wake_batch([WakerAction::Drop(
+                    self.0.take().expect("waker dropped twice"),
+                )]);
+            }
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _drop = DropWakerOnUnwind(Some(payload_panicking_drop_waker()));
+            panic!("outer panic");
+        }));
+        let payload = result.expect_err("outer panic should propagate");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"outer panic"));
     }
 }
