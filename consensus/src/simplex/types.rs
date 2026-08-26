@@ -1369,11 +1369,11 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     where
         I: Iterator<Item = Notarize<S, D>> + Send,
     {
-        let mut notarizes = notarizes.into_iter();
+        let (first, notarizes) = notarizes.into_parts();
         let Notarize {
             proposal,
             attestation,
-        } = notarizes.next().expect("non-empty notarize votes");
+        } = first;
         let attestations =
             NonEmpty::new(attestation, notarizes.map(|notarize| notarize.attestation));
         let certificate = scheme.assemble(attestations, strategy)?;
@@ -1630,8 +1630,7 @@ impl<S: Scheme> Nullification<S> {
     where
         I: Iterator<Item = Nullify<S>> + Send,
     {
-        let mut nullifies = nullifies.into_iter();
-        let first = nullifies.next().expect("non-empty nullify votes");
+        let (first, nullifies) = nullifies.into_parts();
         let round = first.round;
         let attestations = NonEmpty::new(
             first.attestation,
@@ -1896,11 +1895,11 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     where
         I: Iterator<Item = Finalize<S, D>> + Send,
     {
-        let mut finalizes = finalizes.into_iter();
+        let (first, finalizes) = finalizes.into_parts();
         let Finalize {
             proposal,
             attestation,
-        } = finalizes.next().expect("non-empty finalize votes");
+        } = first;
         let attestations =
             NonEmpty::new(attestation, finalizes.map(|finalize| finalize.attestation));
         let certificate = scheme.assemble(attestations, strategy)?;

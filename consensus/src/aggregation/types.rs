@@ -322,8 +322,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         S: scheme::Scheme<D>,
         I: Iterator<Item = &'a Ack<S, D>> + Send,
     {
-        let mut acks = acks.into_iter();
-        let first = acks.next().expect("non-empty acknowledgements");
+        let (first, acks) = acks.into_parts();
         let item = first.item.clone();
         let attestations = NonEmpty::new(
             first.attestation.clone(),

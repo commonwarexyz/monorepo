@@ -260,6 +260,9 @@ where
                         );
                     }
                     Err(DkgAckError::InvalidAck) => {
+                        // This actor sends one dealer transcript to every player and recreates it
+                        // unchanged after restart. Because `from` is authenticated, a player that
+                        // acknowledges any other transcript can be blocked.
                         commonware_p2p::block!(self.blocker, from, ?epoch, "invalid ack signature");
                     }
                 }
@@ -552,26 +555,44 @@ mod tests {
                 )
                 .expect("target is a dealer");
 
-            // Build a valid acknowledgement from a configured player. The actor
-            // receives it from an authenticated identity outside the player set.
+            // Build a valid acknowledgement for a different dealer transcript.
+            let ack_player = signers[2].clone();
             let (_source, public, private) =
                 CryptoDealer::start::<N3f1>(TestRng::new(1), info.clone(), target.clone(), None)
                     .expect("source dealer should start");
             let private = private
                 .into_iter()
                 .find_map(|(recipient, private)| {
-                    (recipient == dealer.public_key()).then_some(private)
+                    (recipient == ack_player.public_key()).then_some(private)
                 })
                 .expect("dealing for configured player");
             let mut source_player =
-                CryptoPlayer::new(info, dealer.clone()).expect("dealer is a player");
+                CryptoPlayer::new(info, ack_player.clone()).expect("ack sender is a player");
             let ack = source_player
                 .dealer_message::<N3f1>(target.public_key(), public, private)
                 .expect("valid fixture dealing")
                 .expect("new fixture dealing");
 
-            // The precise membership error is blockable at the authenticated
-            // transport boundary.
+            // The local dealer has one recoverable transcript, so a configured
+            // authenticated player acknowledging another transcript is blocked.
+            actor
+                .handle_message(
+                    Epoch::zero(),
+                    &mut store,
+                    Some(&mut local_dealer),
+                    None,
+                    &mut sender,
+                    (
+                        ack_player.public_key(),
+                        Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Ack(ack.clone())
+                            .encode()
+                            .into(),
+                    ),
+                )
+                .await;
+
+            // The same acknowledgement from an authenticated non-player is a
+            // distinct membership violation.
             actor
                 .handle_message(
                     Epoch::zero(),
@@ -592,6 +613,7 @@ mod tests {
                 oracle.blocked().await.expect("network remains available"),
                 vec![
                     (target.public_key(), dealer.public_key()),
+                    (target.public_key(), ack_player.public_key()),
                     (target.public_key(), outsider.public_key()),
                 ]
             );
