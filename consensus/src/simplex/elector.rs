@@ -33,7 +33,7 @@ use commonware_cryptography::{
     Hasher, PublicKey, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
 use commonware_utils::{modulo, ordered::Set};
-use std::{marker::PhantomData, time::Duration};
+use std::{fmt, marker::PhantomData, time::Duration};
 
 /// Configuration for creating an [`Elector`].
 ///
@@ -48,7 +48,7 @@ use std::{marker::PhantomData, time::Duration};
 /// This is stronger than returning the same output for identical inputs because
 /// honest participants may call [`Elector::elect`] with different certificates for
 /// the same round. See [`Elector`] for the certificate handling requirements.
-pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
+pub trait Config<S: Scheme>: Clone + Send + 'static {
     /// The initialized elector type.
     type Elector: Elector<S>;
 
@@ -340,6 +340,21 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
     }
 }
 
+/// Signature-to-leader mapping used by [`Random`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RandomVersion {
+    /// Maps the encoded threshold signature directly to a participant.
+    #[deprecated(
+        note = "mapping encoded threshold signature directly to participants can bias selection"
+    )]
+    V0,
+    /// Hashes the encoded threshold signature before mapping it to a participant.
+    ///
+    /// The hasher is selected by [`Random`]'s `H` type parameter and defaults to [`Sha256`].
+    V1,
+}
+
 /// Configuration for leader election using threshold signature randomness.
 ///
 /// Uses the seed signature from BLS threshold certificates to derive unpredictable
@@ -351,16 +366,33 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 ///
 /// Only works with [`super::scheme::bls12381_threshold::vrf`]
 /// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
-#[derive(Clone, Debug, Default)]
-pub struct Random;
+pub struct Random<H: Hasher = Sha256> {
+    version: RandomVersion,
+    _hasher: PhantomData<H>,
+}
 
-impl Random {
+impl<H: Hasher> Random<H> {
+    /// Creates a configuration with the specified signature-to-leader mapping.
+    pub const fn new(version: RandomVersion) -> Self {
+        Self {
+            version,
+            _hasher: PhantomData,
+        }
+    }
+
     /// Returns the selected leader index for the given round and seed signature.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is zero, or if a seed signature is missing after view 1.
+    #[allow(deprecated)]
     pub fn select_leader<V: Variant>(
+        self,
         round: Round,
         n: u32,
         seed_signature: Option<V::Signature>,
     ) -> Participant {
+        assert_ne!(n, 0, "no participants");
         assert!(seed_signature.is_some() || round.view() == View::new(1));
 
         let Some(seed_signature) = seed_signature else {
@@ -370,21 +402,53 @@ impl Random {
         };
 
         // Use the seed signature as a source of randomness
-        Participant::new(modulo(seed_signature.encode().as_ref(), n as u64) as u32)
+        let encoded = seed_signature.encode();
+        let index = match self.version {
+            RandomVersion::V0 => modulo(encoded.as_ref(), u64::from(n)),
+            RandomVersion::V1 => modulo(H::hash(&[encoded.as_ref()]).as_ref(), u64::from(n)),
+        };
+        Participant::new(u32::try_from(index).expect("leader index must fit in u32"))
     }
 }
 
-impl<P, V> Config<bls12381_threshold_vrf::Scheme<P, V>> for Random
+impl<H: Hasher> Clone for Random<H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<H: Hasher> Copy for Random<H> {}
+
+impl<H: Hasher> fmt::Debug for Random<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.version.fmt(f)
+    }
+}
+
+impl<H: Hasher> PartialEq for Random<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
+    }
+}
+
+impl<H: Hasher> Eq for Random<H> {}
+
+impl<P, V, H> Config<bls12381_threshold_vrf::Scheme<P, V>> for Random<H>
 where
     P: PublicKey,
     V: Variant,
+    H: Hasher,
 {
-    type Elector = RandomElector<bls12381_threshold_vrf::Scheme<P, V>>;
+    type Elector = RandomElector<bls12381_threshold_vrf::Scheme<P, V>, H>;
 
-    fn build(self, participants: &Set<P>) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>> {
+    fn build(
+        self,
+        participants: &Set<P>,
+    ) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>, H> {
         assert!(!participants.is_empty(), "no participants");
         RandomElector {
             n: participants.len() as u32,
+            version: self,
             _phantom: PhantomData,
         }
     }
@@ -393,17 +457,37 @@ where
 /// Initialized random leader elector using threshold signature randomness.
 ///
 /// Created via [`Random::build`].
-#[derive(Clone, Debug)]
-pub struct RandomElector<S: Scheme> {
+pub struct RandomElector<S: Scheme, H: Hasher = Sha256> {
     n: u32,
+    version: Random<H>,
     _phantom: PhantomData<S>,
 }
 
-impl<P, V> Elector<bls12381_threshold_vrf::Scheme<P, V>>
-    for RandomElector<bls12381_threshold_vrf::Scheme<P, V>>
+impl<S: Scheme, H: Hasher> Clone for RandomElector<S, H> {
+    fn clone(&self) -> Self {
+        Self {
+            n: self.n,
+            version: self.version,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<S: Scheme, H: Hasher> fmt::Debug for RandomElector<S, H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RandomElector")
+            .field("n", &self.n)
+            .field("version", &self.version)
+            .finish()
+    }
+}
+
+impl<P, V, H> Elector<bls12381_threshold_vrf::Scheme<P, V>>
+    for RandomElector<bls12381_threshold_vrf::Scheme<P, V>, H>
 where
     P: PublicKey,
     V: Variant,
+    H: Hasher,
 {
     fn terms(&self) -> Terms {
         Terms::rotating()
@@ -414,7 +498,7 @@ where
         round: Round,
         certificate: Option<&bls12381_threshold_vrf::Certificate<V>>,
     ) -> Participant {
-        Random::select_leader::<V>(
+        self.version.select_leader::<V>(
             round,
             self.n,
             certificate.map(|c| {
@@ -436,8 +520,11 @@ mod tests {
         },
         types::{Epoch, View},
     };
+    use commonware_codec::DecodeExt;
     use commonware_cryptography::{
-        Sha256, bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
+        Blake3, Crc32, Sha256,
+        bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::mocks::Fixture,
         sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
@@ -447,6 +534,58 @@ mod tests {
 
     type ThresholdScheme =
         bls12381_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
+
+    #[allow(deprecated)]
+    fn assert_random_selection_vector<V: Variant>(
+        encoded: &str,
+        v0: u32,
+        sha256: u32,
+        blake3: u32,
+        crc32: u32,
+    ) {
+        let encoded = commonware_formatting::from_hex(encoded).unwrap();
+        let signature = V::Signature::decode(encoded.as_slice()).unwrap();
+        let round = Round::new(Epoch::new(0), View::new(2));
+        let n = 17;
+
+        assert_eq!(
+            Random::<Sha256>::new(RandomVersion::V0).select_leader::<V>(round, n, Some(signature)),
+            Participant::new(v0)
+        );
+        assert_eq!(
+            Random::<Sha256>::new(RandomVersion::V1).select_leader::<V>(round, n, Some(signature)),
+            Participant::new(sha256)
+        );
+        assert_eq!(
+            Random::<Blake3>::new(RandomVersion::V1).select_leader::<V>(round, n, Some(signature)),
+            Participant::new(blake3)
+        );
+        assert_eq!(
+            Random::<Crc32>::new(RandomVersion::V1).select_leader::<V>(round, n, Some(signature)),
+            Participant::new(crc32)
+        );
+    }
+
+    #[test]
+    fn random_selection_matches_vectors() {
+        assert_random_selection_vector::<MinPk>(
+            "930d3763e52f0362e21502ccf2e62c872c20e1f971f6349bf3fe5e8fa6ae76b3\
+             2010bfb8f4a2d6e91d7b3ca681adfdaa140ab3254fe1f4d4d410c796bb83118ddf\
+             3ecb4484c295713a6223aea52484d77626a192f200ebf9ab015aff6ac87604",
+            8,
+            14,
+            1,
+            7,
+        );
+        assert_random_selection_vector::<MinSig>(
+            "963e09774dd2d6e83730cde6484f6c9f20d44fdc90139539cb91e25131c3d54a\
+             d2c44e52612506a6051ed07ae366c0ef",
+            4,
+            2,
+            15,
+            0,
+        );
+    }
 
     #[test]
     fn stable_terms_preserve_optimistic_views() {
@@ -682,7 +821,8 @@ mod tests {
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> =
+            Random::new(RandomVersion::V1).build(&participants);
 
         // For view 1 (no certificate), Random should behave like RoundRobin
         let leaders: Vec<_> = (0..n as u64)
@@ -709,7 +849,8 @@ mod tests {
         let Fixture { participants, .. } =
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let random: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let random: RandomElector<ThresholdScheme> =
+            Random::new(RandomVersion::V1).build(&participants);
         let round_robin: RoundRobinElector<ThresholdScheme> =
             RoundRobin::<Sha256>::default().build(&participants);
 
@@ -730,7 +871,8 @@ mod tests {
             ..
         } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> =
+            Random::new(RandomVersion::V1).build(&participants);
         let quorum = N3f1::quorum(schemes.len()) as usize;
 
         // Create certificate for round (1, 2)
@@ -775,7 +917,7 @@ mod tests {
     #[should_panic(expected = "no participants")]
     fn random_build_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        let _: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let _: RandomElector<ThresholdScheme> = Random::new(RandomVersion::V1).build(&participants);
     }
 
     #[test]
@@ -785,7 +927,8 @@ mod tests {
         let Fixture { participants, .. } =
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> =
+            Random::new(RandomVersion::V1).build(&participants);
 
         // View 2 requires a certificate
         let round = Round::new(Epoch::new(1), View::new(2));
@@ -828,59 +971,68 @@ mod tests {
             }
         }
 
-        /// Conformance test for Random leader election.
+        /// Conformance test for Random V0 leader election.
         ///
-        /// Verifies that `Random::select_leader` produces deterministic results
-        /// given the same inputs. This tests the `modulo` function usage and
-        /// threshold signature encoding for leader selection.
-        struct RandomSelectLeaderConformance;
+        /// Pins mapping the encoded threshold signature directly to a participant
+        /// with modulo reduction.
+        struct RandomV0SelectLeaderConformance;
 
-        impl Conformance for RandomSelectLeaderConformance {
+        /// Conformance test for Random V1 leader election.
+        ///
+        /// Pins hashing the encoded threshold signature before mapping it to a
+        /// participant with modulo reduction.
+        struct RandomV1SelectLeaderConformance;
+
+        fn random_select_leader_commit(seed: u64, version: Random) -> Vec<u8> {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+            let n = rng.random_range(4..=10);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
+            let participants = Set::try_from_iter(participants).unwrap();
+            let elector: RandomElector<ThresholdScheme> = version.build(&participants);
+            let quorum =
+                usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+
+            let epoch = rng.random_range(0..1000);
+            let view = rng.random_range(2..=101);
+            let round = Round::new(Epoch::new(epoch), View::new(view));
+            let attestations: Vec<_> = schemes
+                .iter()
+                .take(quorum)
+                .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
+                .collect();
+            let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
+
+            let leader = elector.elect(round, Some(&cert));
+            let round_v1 = Round::new(Epoch::new(epoch), View::new(1));
+            let leader_v1 = elector.elect(round_v1, None);
+
+            let mut result = leader.encode_mut();
+            leader_v1.write(&mut result);
+            result.to_vec()
+        }
+
+        #[allow(deprecated)]
+        impl Conformance for RandomV0SelectLeaderConformance {
             async fn commit(seed: u64) -> Vec<u8> {
-                let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                random_select_leader_commit(seed, Random::new(RandomVersion::V0))
+            }
+        }
 
-                // Generate deterministic BLS threshold fixture (4-10 participants)
-                let n = rng.random_range(4..=10);
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
-                let participants = Set::try_from_iter(participants).unwrap();
-                let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
-                let quorum = N3f1::quorum(schemes.len()) as usize;
-
-                // Generate deterministic round parameters
-                let epoch = rng.random_range(0..1000);
-                let view = rng.random_range(2..=101);
-
-                let round = Round::new(Epoch::new(epoch), View::new(view));
-
-                // Create a valid threshold certificate
-                let attestations: Vec<_> = schemes
-                    .iter()
-                    .take(quorum)
-                    .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
-                    .collect();
-                let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
-
-                // Elect leader using the certificate
-                let leader = elector.elect(round, Some(&cert));
-
-                // Also test view 1 fallback (no certificate, round-robin)
-                let round_v1 = Round::new(Epoch::new(epoch), View::new(1));
-                let leader_v1 = elector.elect(round_v1, None);
-
-                // Commit both results
-                let mut result = leader.encode_mut();
-                leader_v1.write(&mut result);
-                result.to_vec()
+        impl Conformance for RandomV1SelectLeaderConformance {
+            async fn commit(seed: u64) -> Vec<u8> {
+                random_select_leader_commit(seed, Random::new(RandomVersion::V1))
             }
         }
 
         commonware_conformance::conformance_tests! {
             RoundRobinShuffleConformance => 512,
-            RandomSelectLeaderConformance => 512,
+            RandomV0SelectLeaderConformance => 512,
+            RandomV1SelectLeaderConformance => 512,
         }
     }
 }
