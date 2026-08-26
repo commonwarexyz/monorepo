@@ -116,6 +116,63 @@ pub fn drop_page_cache(_root: &Path, _partition: &str, _name: &[u8]) -> std::io:
     ))
 }
 
+/// Verify that the benchmark filesystem accepts per-read cache bypass.
+#[cfg(target_os = "linux")]
+pub fn validate_dont_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
+    let path = root.join(partition).join(hex(name));
+    let file = OpenOptions::new().read(true).open(&path)?;
+    let mut byte = [0u8; 1];
+    let iovec = libc::iovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: byte.len(),
+    };
+
+    loop {
+        // SAFETY: The file descriptor and writable byte remain valid for the call.
+        let result = unsafe { libc::preadv2(file.as_raw_fd(), &iovec, 1, 0, libc::RWF_DONTCACHE) };
+        if result > 0 {
+            return Ok(());
+        }
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "cannot validate RWF_DONTCACHE on empty benchmark file: {}",
+                    path.display()
+                ),
+            ));
+        }
+
+        let source = io::Error::last_os_error();
+        if source.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        let unsupported = source.raw_os_error() == Some(libc::EOPNOTSUPP);
+        let kind = if unsupported {
+            io::ErrorKind::Unsupported
+        } else {
+            source.kind()
+        };
+        let action = if unsupported {
+            "RWF_DONTCACHE is not supported for"
+        } else {
+            "failed to validate RWF_DONTCACHE on"
+        };
+        return Err(io::Error::new(
+            kind,
+            format!("{action} benchmark file {}: {source}", path.display()),
+        ));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn validate_dont_cache(_root: &Path, _partition: &str, _name: &[u8]) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "RWF_DONTCACHE is only supported on Linux",
+    ))
+}
+
 /// Create a fixed-size, preallocated blob. Returns the open blob handle.
 pub async fn prepare_blob<S: Storage>(
     storage: &S,

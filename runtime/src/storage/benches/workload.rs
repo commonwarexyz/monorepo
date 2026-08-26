@@ -3,14 +3,17 @@
 use crate::{
     config::{CacheMode, Config, SyncMode, Workload},
     error::Result,
-    filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
+    filesystem::{
+        drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload,
+        validate_dont_cache,
+    },
     report::Report,
     runner::{
         random_blocks, run_read_loop, run_sync_write_loop, run_write_loop, sequential_blocks,
         warm_read_loop,
     },
 };
-use commonware_runtime::{Blob as _, Storage as _};
+use commonware_runtime::{Blob as _, ReadOptions, Storage as _};
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", feature = "iouring"))] {
         use commonware_runtime::iouring::Context;
@@ -70,6 +73,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
     // task with `FuturesUnordered`.
     let start = Instant::now();
     let deadline = start + cfg.duration();
+    let read_options = read_options(cfg);
 
     let workers = (0..cfg.inflight)
         .map(|worker| {
@@ -80,6 +84,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
                         blob,
                         deadline,
                         cfg.io_size,
+                        read_options,
                         sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
                     )
                     .await
@@ -88,6 +93,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
                         blob,
                         deadline,
                         cfg.io_size,
+                        read_options,
                         random_blocks(worker_seed(cfg.seed, worker), total_blocks),
                     )
                     .await
@@ -267,6 +273,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
     // Timed phase: one writer + concurrent readers.
     let start = Instant::now();
     let deadline = start + cfg.duration();
+    let read_options = read_options(cfg);
 
     // Writer appends blocks past the initial region, publishing the new
     // current length after each write so readers can expand their range.
@@ -298,7 +305,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
                     let total_blocks = current_len.load(Ordering::Relaxed) / io_size;
                     rng.random_range(0..total_blocks)
                 };
-                run_read_loop(blob, deadline, cfg.io_size, random_block).await
+                run_read_loop(blob, deadline, cfg.io_size, read_options, random_block).await
             }
         })
         .collect::<FuturesUnordered<_>>()
@@ -324,14 +331,22 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
 /// Prepare the page cache before the timed phase.
 ///
 /// In `Warm` mode, workers read through the file to pull pages into cache.
-/// In `Cold` mode, `posix_fadvise(DONTNEED)` evicts cached pages.
+/// In `Cold` and `DontCache` modes, cached pages are evicted before timing.
 async fn prepare_cache(cfg: &Config, blob: &RuntimeBlob, total_blocks: u64) -> Result<()> {
     let cache = cfg.cache.expect("validated");
 
-    // Evict cached pages so the timed phase starts from disk.
-    if cache == CacheMode::Cold {
-        drop_page_cache(&cfg.root, PARTITION, BLOB_NAME)?;
-        return Ok(());
+    match cache {
+        CacheMode::Cold => {
+            drop_page_cache(&cfg.root, PARTITION, BLOB_NAME)?;
+            return Ok(());
+        }
+        CacheMode::DontCache => {
+            // Probe before eviction so any page it touches is evicted before timing.
+            validate_dont_cache(&cfg.root, PARTITION, BLOB_NAME)?;
+            drop_page_cache(&cfg.root, PARTITION, BLOB_NAME)?;
+            return Ok(());
+        }
+        CacheMode::Warm => {}
     }
 
     // Warm: read through the file to pull pages into cache.
@@ -374,6 +389,13 @@ async fn prepare_cache(cfg: &Config, blob: &RuntimeBlob, total_blocks: u64) -> R
         .await?;
 
     Ok(())
+}
+
+fn read_options(cfg: &Config) -> ReadOptions {
+    match cfg.cache.expect("validated") {
+        CacheMode::DontCache => ReadOptions::DONT_CACHE,
+        CacheMode::Warm | CacheMode::Cold => ReadOptions::default(),
+    }
 }
 
 #[inline]

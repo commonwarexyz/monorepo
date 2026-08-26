@@ -69,6 +69,7 @@ pub async fn run_read_loop(
     blob: impl Blob,
     deadline: Instant,
     io_size: usize,
+    read_options: ReadOptions,
     mut next_block: impl FnMut() -> u64,
 ) -> Result<Stats> {
     let mut stats = Stats::default();
@@ -77,7 +78,7 @@ pub async fn run_read_loop(
         let offset = next_block() * io_size as u64;
         let started = should_sample_latency(stats.ops).then(Instant::now);
         buffer = blob
-            .read_at_buf(offset, io_size, buffer, ReadOptions::default())
+            .read_at_buf(offset, io_size, buffer, read_options)
             .await?;
         stats.record(io_size as u64, started.map(|s| s.elapsed()));
     }

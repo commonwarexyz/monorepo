@@ -60,6 +60,9 @@ pub enum CacheMode {
     /// the timed phase does not complete a full pass.
     #[value(name = "cold")]
     Cold,
+    /// Evict cached pages before timing and request cache bypass on every read.
+    #[value(name = "dont_cache")]
+    DontCache,
 }
 
 /// Write payload layout.
@@ -186,7 +189,7 @@ pub struct Config {
     #[arg(long, default_value_os_t = default_root())]
     pub root: PathBuf,
 
-    /// Best-effort cache preparation for read-heavy workloads.
+    /// Page-cache policy for read-heavy workloads.
     #[arg(long, value_enum)]
     pub cache: Option<CacheMode>,
 
@@ -334,8 +337,13 @@ impl Config {
         } else if self.cache.is_some() {
             return Err("--cache is only valid for read-heavy workloads".into());
         }
-        if matches!(self.cache, Some(CacheMode::Cold)) && !cfg!(target_os = "linux") {
-            return Err("--cache cold is only supported on Linux".into());
+        if matches!(self.cache, Some(CacheMode::Cold | CacheMode::DontCache))
+            && !cfg!(target_os = "linux")
+        {
+            return Err(format!(
+                "--cache {} is only supported on Linux",
+                self.cache.expect("matched cache mode")
+            ));
         }
 
         if !self.workload.has_writes() {
