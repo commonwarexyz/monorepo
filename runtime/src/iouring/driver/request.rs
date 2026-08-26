@@ -830,7 +830,7 @@ impl RawSocketAddr {
                 let sin6 = libc::sockaddr_in6 {
                     sin6_family: libc::AF_INET6 as libc::sa_family_t,
                     sin6_port: v6.port().to_be(),
-                    sin6_flowinfo: v6.flowinfo(),
+                    sin6_flowinfo: v6.flowinfo().to_be(),
                     sin6_addr: libc::in6_addr {
                         s6_addr: v6.ip().octets(),
                     },
@@ -872,7 +872,7 @@ impl RawSocketAddr {
                 Some(SocketAddr::V6(SocketAddrV6::new(
                     Ipv6Addr::from(sin6.sin6_addr.s6_addr),
                     u16::from_be(sin6.sin6_port),
-                    sin6.sin6_flowinfo,
+                    u32::from_be(sin6.sin6_flowinfo),
                     sin6.sin6_scope_id,
                 )))
             }
@@ -2168,6 +2168,45 @@ mod tests {
 
         // Zeroed scratch (family AF_UNSPEC) has no decodable address.
         assert_eq!(RawSocketAddr::new_zeroed().to_socket_addr(), None);
+    }
+
+    #[test]
+    fn test_raw_socket_addr_ipv6_flowinfo_encode_uses_network_order() {
+        const FLOWINFO: u32 = 0x0123_4567;
+        let addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 443, FLOWINFO, 9));
+
+        let raw = RawSocketAddr::from_socket_addr(&addr);
+        assert_eq!(raw.len() as usize, size_of::<libc::sockaddr_in6>());
+        // SAFETY: the encoder stored a full sockaddr_in6 for an IPv6 address.
+        let sin6 = unsafe { &*(&raw const raw.storage).cast::<libc::sockaddr_in6>() };
+        assert_eq!(sin6.sin6_flowinfo.to_ne_bytes(), FLOWINFO.to_be_bytes());
+    }
+
+    #[test]
+    fn test_raw_socket_addr_ipv6_flowinfo_decode_uses_network_order() {
+        const FLOWINFO: u32 = 0x0123_4567;
+        let mut raw = RawSocketAddr::new_zeroed();
+        let sin6 = libc::sockaddr_in6 {
+            sin6_family: libc::AF_INET6 as libc::sa_family_t,
+            sin6_port: 443u16.to_be(),
+            sin6_flowinfo: u32::from_ne_bytes(FLOWINFO.to_be_bytes()),
+            sin6_addr: libc::in6_addr {
+                s6_addr: Ipv6Addr::LOCALHOST.octets(),
+            },
+            sin6_scope_id: 9,
+        };
+        assert_eq!(sin6.sin6_flowinfo.to_ne_bytes(), FLOWINFO.to_be_bytes());
+        // SAFETY: sockaddr_in6 fits within sockaddr_storage and the destination
+        // is valid for writes.
+        unsafe {
+            std::ptr::write((&raw mut raw.storage).cast::<libc::sockaddr_in6>(), sin6);
+        }
+        *raw.len_mut() = size_of::<libc::sockaddr_in6>() as libc::socklen_t;
+
+        let Some(SocketAddr::V6(decoded)) = raw.to_socket_addr() else {
+            panic!("kernel-form IPv6 address did not decode");
+        };
+        assert_eq!(decoded.flowinfo(), FLOWINFO);
     }
 
     #[test]

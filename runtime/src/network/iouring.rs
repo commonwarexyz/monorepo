@@ -53,6 +53,14 @@ const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
 /// Default timeout for each network read, write, and in-flight accept.
 const DEFAULT_READ_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
+std::thread_local! {
+    /// Socket creations observed on the current test thread.
+    static SOCKET_CREATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Dial admission attempts observed on the current test thread.
+    static DIAL_ADMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Listen backlog requested for bound sockets.
 ///
 /// The kernel caps this at `net.core.somaxconn`.
@@ -105,6 +113,9 @@ impl Default for Config {
 
 /// Create a non-blocking TCP socket for the given address family.
 fn new_socket(addr: &SocketAddr) -> Result<OwnedFd, std::io::Error> {
+    #[cfg(test)]
+    SOCKET_CREATIONS.with(|count| count.set(count.get() + 1));
+
     let domain = match addr {
         SocketAddr::V4(_) => libc::AF_INET,
         SocketAddr::V6(_) => libc::AF_INET6,
@@ -253,6 +264,7 @@ impl crate::Network for Network {
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
+        self.handle.assert_owner();
         let fd = Arc::new(new_socket(&socket).map_err(|_| Error::ConnectionFailed)?);
 
         // Apply socket options before connecting.
@@ -261,6 +273,8 @@ impl crate::Network for Network {
         // Connect through the ring. Deadline expiry cancels the in-flight
         // connect and resolves the dial with [Error::Timeout].
         let deadline = Instant::now() + self.cfg.connect_timeout;
+        #[cfg(test)]
+        DIAL_ADMISSIONS.with(|count| count.set(count.get() + 1));
         self.handle.connect(fd.clone(), socket, deadline).await?;
 
         Ok((
@@ -719,6 +733,35 @@ mod tests {
         // the timed-out connect released its waiter slot.
         assert!(start.elapsed() >= connect_timeout);
         assert_eq!(harness.tracked(), 0, "connect timeout leaked waiter slots");
+    }
+
+    #[test]
+    fn test_foreign_worker_dial_panics_before_socket_creation_or_admission() {
+        let (harness, network) = test_network(Config::default());
+        let addr = "127.0.0.1:9".parse().unwrap();
+
+        let (panicked, socket_creations, dial_admissions) = std::thread::spawn(move || {
+            super::SOCKET_CREATIONS.set(0);
+            super::DIAL_ADMISSIONS.set(0);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                futures::executor::block_on(network.dial(addr))
+            }));
+            (
+                result.is_err(),
+                super::SOCKET_CREATIONS.get(),
+                super::DIAL_ADMISSIONS.get(),
+            )
+        })
+        .join()
+        .unwrap();
+
+        assert!(panicked, "foreign dial must panic on worker affinity");
+        assert_eq!(
+            socket_creations, 0,
+            "foreign dial created a socket before checking affinity"
+        );
+        assert_eq!(dial_admissions, 0, "foreign dial attempted admission");
+        assert_eq!(harness.tracked(), 0, "foreign dial admitted an operation");
     }
 
     #[test_group("slow")]
