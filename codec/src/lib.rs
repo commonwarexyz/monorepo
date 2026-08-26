@@ -222,7 +222,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod config;
     pub mod error;
     pub mod extensions;
-    pub mod modes;
+    pub mod mode;
     pub mod types;
     pub mod util;
     pub mod varint;
@@ -233,7 +233,7 @@ commonware_macros::stability_scope!(BETA {
     pub use config::RangeCfg;
     pub use error::Error;
     pub use extensions::*;
-    pub use modes::{InvalidMode, Mode, Modes};
+    pub use mode::{InvalidMode, Mode, Modes};
 });
 
 commonware_macros::stability_scope!(ALPHA {

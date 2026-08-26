@@ -237,12 +237,8 @@ mod tests {
     use super::*;
     use crate::{DecodeExt, Encode};
 
-    fn mode(value: u8) -> Mode {
-        Mode::new(value).unwrap()
-    }
-
     fn assert_encoding<const N: usize>(modes: [u8; N], expected: &[u8]) {
-        let modes = Modes::new(modes.map(mode)).unwrap();
+        let modes = Modes::new(modes.map(|value| mode!(value))).unwrap();
         assert_eq!(modes.encode_size(), expected.len());
         let encoded = modes.encode();
         assert_eq!(encoded.as_ref(), expected);
@@ -253,7 +249,7 @@ mod tests {
     fn encodes_continuations() {
         // Empty and all-default mode lists have no packet.
         assert!(Modes::<0>::new([]).is_none());
-        assert!(Modes::new([mode(0), mode(0)]).is_none());
+        assert!(Modes::new([mode!(0), mode!(0)]).is_none());
 
         // A trailing default is absent, preserving the shorter encoding.
         assert_encoding([1, 0], &[0x01]);
@@ -272,11 +268,11 @@ mod tests {
 
         impl From<Enabled> for Mode {
             fn from(_: Enabled) -> Self {
-                mode(1)
+                mode!(1)
             }
         }
 
-        let modes = modes![Enabled, mode(0), Enabled].unwrap();
+        let modes = modes![Enabled, mode!(0), Enabled].unwrap();
         assert_eq!(modes.encode().as_ref(), &[0x81, 0x80, 0x01]);
     }
 
@@ -300,7 +296,7 @@ mod tests {
         let value = 1u8;
 
         assert_eq!(u8::from(MAX), 0x7f);
-        assert_eq!(mode!(value), mode(1));
+        assert_eq!(mode!(value), mode!(1));
     }
 
     #[test]
