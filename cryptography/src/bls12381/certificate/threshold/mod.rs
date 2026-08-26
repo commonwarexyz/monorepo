@@ -19,7 +19,7 @@ use crate::{
         sharing::Sharing,
         variant::{PartialSignature, Variant},
     },
-    certificate::{Attestation, Namespace, Scheme, Subject, Verification},
+    certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
@@ -28,6 +28,8 @@ use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Faults, Participant,
+    iter::NonEmpty,
+    non_empty,
     ordered::{Quorum, Set},
 };
 use core::fmt::Debug;
@@ -308,14 +310,16 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             });
         let mut invalid: BTreeSet<_> = failures.into_iter().collect();
         let polynomial = self.polynomial();
-        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
-            rng,
-            polynomial,
-            subject.namespace(self.namespace()),
-            &subject.message(),
-            partials.iter(),
-            strategy,
-        ) {
+        if let Some(partials) = NonEmpty::try_new(partials.iter())
+            && let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
+                rng,
+                polynomial,
+                subject.namespace(self.namespace()),
+                &subject.message(),
+                partials,
+                strategy,
+            )
+        {
             for partial in errs {
                 invalid.insert(partial.index);
             }
@@ -334,34 +338,43 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Assembles a certificate from a collection of attestations.
-    pub fn assemble<S, I, T>(&self, attestations: I, strategy: &T) -> Option<Certificate<V>>
+    pub fn assemble<S, I, T>(
+        &self,
+        attestations: I,
+        strategy: &T,
+    ) -> Result<Certificate<V>, AssemblyError>
     where
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
         I::IntoIter: Send,
         T: Strategy,
     {
-        let (partials, failures) =
-            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
-                let index = attestation.signer;
-                let value = attestation
-                    .signature
-                    .get()
-                    .map(|&sig| PartialSignature::<V> { index, value: sig });
-                (index, value)
-            });
-        if !failures.is_empty() {
-            return None;
-        }
+        // Decode each partial signature under its attestation's claimed signer.
+        let partials = strategy.try_map_collect_vec(attestations.into_iter(), |attestation| {
+            let index = attestation.signer;
+            attestation
+                .signature
+                .get()
+                .map(|&value| PartialSignature::<V> { index, value })
+                .ok_or(AssemblyError::MalformedSignature(index))
+        })?;
 
+        // Enforce signer bounds, uniqueness, and quorum before recovering the certificate.
         let quorum = self.polynomial();
-        if partials.len() < quorum.required() as usize {
-            return None;
+        let signers = Signers::new(
+            quorum.total().get(),
+            partials.iter().map(|partial| partial.index),
+        )?;
+        let expected = quorum.required();
+        let found = u32::try_from(signers.count()).expect("signer count exceeds u32::MAX");
+        if found < expected {
+            return Err(AssemblyError::InsufficientAttestations(expected, found));
         }
 
-        threshold::recover(quorum, partials.iter(), strategy)
-            .ok()
-            .map(Certificate::new)
+        // Recover the certificate only after these structural preconditions hold.
+        let signature = threshold::recover(quorum, partials.iter(), strategy)
+            .map_err(|_| AssemblyError::RecoveryFailed)?;
+        Ok(Certificate::new(signature))
     }
 
     /// Verifies a certificate.
@@ -393,7 +406,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     pub fn verify_certificates<'a, S, R, D, I, T>(
         &self,
         rng: &mut R,
-        certificates: I,
+        certificates: NonEmpty<I>,
         strategy: &T,
     ) -> bool
     where
@@ -415,16 +428,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             entries.push((namespace.to_vec(), message.to_vec(), *signature));
         }
 
-        if entries.is_empty() {
-            return true;
-        }
-
-        let entries_refs: Vec<_> = entries
-            .iter()
-            .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))
-            .collect();
-
-        batch::verify_same_signer::<_, V, _>(rng, self.identity(), &entries_refs, strategy).is_ok()
+        batch::verify_same_signer::<_, V, _>(
+            rng,
+            self.identity(),
+            non_empty![@entries
+                .iter()
+                .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))],
+            strategy,
+        )
+        .is_ok()
     }
 
     pub const fn is_attributable() -> bool {
@@ -650,7 +662,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             fn verify_certificates<'a, R, D, I>(
                 &self,
                 rng: &mut R,
-                certificates: I,
+                certificates: commonware_utils::iter::NonEmpty<I>,
                 strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
@@ -735,7 +747,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 &self,
                 attestations: I,
                 strategy: &impl commonware_parallel::Strategy,
-            ) -> Option<Self::Certificate>
+            ) -> Result<Self::Certificate, $crate::certificate::AssemblyError>
             where
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 I::IntoIter: Send,
@@ -759,6 +771,7 @@ mod tests {
             dkg::feldman_desmedt as dkg,
             primitives::{
                 ops::threshold::sign_message,
+                sharing::Mode,
                 variant::{MinPk, MinSig, Variant},
             },
         },
@@ -767,10 +780,12 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{DecodeExt, Encode, types::lazy::Lazy};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, N5f1, NZU32, TryCollect, ordered::Set, test_rng};
+    use commonware_utils::{
+        Faults, N3f1, N5f1, NZU32, Participant, TryCollect, ordered::Set, test_rng,
+    };
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -817,7 +832,7 @@ mod tests {
 
         // Generate threshold polynomial and shares using DKG
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V, N3f1>(&mut *rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut *rng, Mode::NonZeroCounter, NZU32!(n));
 
         let signers = shares
             .into_iter()
@@ -1083,11 +1098,13 @@ mod tests {
     fn test_certificate_rejects_sub_quorum<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
-        let sub_quorum = 2; // Less than quorum (3)
+        let expected = N3f1::quorum(schemes.len());
+        let found = expected - 1;
+        let found_count = usize::try_from(found).expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
-            .take(sub_quorum)
+            .take(found_count)
             .map(|s| {
                 s.sign::<Sha256Digest>(TestSubject {
                     message: Bytes::from_static(MESSAGE),
@@ -1096,13 +1113,112 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble(attestations, &Sequential).is_none());
+        assert_eq!(
+            schemes[0].assemble(attestations, &Sequential),
+            Err(AssemblyError::InsufficientAttestations(expected, found))
+        );
     }
 
     #[test]
     fn test_certificate_rejects_sub_quorum_variants() {
         test_certificate_rejects_sub_quorum::<MinPk>();
         test_certificate_rejects_sub_quorum::<MinSig>();
+    }
+
+    fn test_certificate_rejects_duplicate_signers<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
+        let quorum =
+            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let mut attestations: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme
+                    .sign::<Sha256Digest>(TestSubject {
+                        message: Bytes::from_static(MESSAGE),
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let duplicate = attestations[0].signer;
+        attestations.push(attestations[0].clone());
+
+        assert_eq!(
+            schemes[0].assemble(attestations, &Sequential),
+            Err(AssemblyError::DuplicateSigner(duplicate))
+        );
+    }
+
+    #[test]
+    fn test_certificate_rejects_duplicate_signers_variants() {
+        test_certificate_rejects_duplicate_signers::<MinPk>();
+        test_certificate_rejects_duplicate_signers::<MinSig>();
+    }
+
+    fn test_certificate_rejects_unknown_signer<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
+        let quorum =
+            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let mut attestations: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme
+                    .sign::<Sha256Digest>(TestSubject {
+                        message: Bytes::from_static(MESSAGE),
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let unknown_signer = Participant::from_usize(schemes.len());
+        let mut unknown = attestations[0].clone();
+        unknown.signer = unknown_signer;
+        attestations.push(unknown);
+
+        assert_eq!(
+            schemes[0].assemble(attestations, &Sequential),
+            Err(AssemblyError::UnknownSigner(unknown_signer))
+        );
+    }
+
+    #[test]
+    fn test_certificate_rejects_unknown_signer_variants() {
+        test_certificate_rejects_unknown_signer::<MinPk>();
+        test_certificate_rejects_unknown_signer::<MinSig>();
+    }
+
+    fn test_certificate_rejects_malformed_signature<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
+        let quorum =
+            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let mut attestations: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| {
+                scheme
+                    .sign::<Sha256Digest>(TestSubject {
+                        message: Bytes::from_static(MESSAGE),
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let malformed_signer = attestations[0].signer;
+        let mut malformed = &[0u8][..];
+        attestations[0].signature = Lazy::deferred(&mut malformed, ());
+
+        assert_eq!(
+            schemes[0].assemble(attestations, &Sequential),
+            Err(AssemblyError::MalformedSignature(malformed_signer))
+        );
+    }
+
+    #[test]
+    fn test_certificate_rejects_malformed_signature_variants() {
+        test_certificate_rejects_malformed_signature::<MinPk>();
+        test_certificate_rejects_malformed_signature::<MinSig>();
     }
 
     fn test_verify_certificates_batch<V: Variant>() {
@@ -1142,7 +1258,7 @@ mod tests {
 
         assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
-            certs_iter,
+            non_empty![@certs_iter],
             &Sequential
         ));
     }
@@ -1189,7 +1305,7 @@ mod tests {
 
         assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
-            certs_iter,
+            non_empty![@certs_iter],
             &Sequential
         ));
     }
@@ -1373,7 +1489,7 @@ mod tests {
             .unwrap();
 
         let (polynomial, mut shares) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
         shares[0].index = Participant::new(999);
         Scheme::<ed25519::PublicKey, V>::signer(
             NAMESPACE,
@@ -1409,7 +1525,7 @@ mod tests {
         // For four participants, N5f1 produces a degree 3 polynomial while this
         // N3f1 scheme requires degree 2.
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
 
         Scheme::<ed25519::PublicKey, V>::signer(
             NAMESPACE,
@@ -1438,7 +1554,7 @@ mod tests {
         // For four participants, N5f1 produces a degree 3 polynomial while this
         // N3f1 scheme requires degree 2.
         let (polynomial, _) =
-            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
 
         Scheme::<ed25519::PublicKey, V>::verifier(NAMESPACE, participants, polynomial);
     }
@@ -1462,7 +1578,7 @@ mod tests {
         // so this should succeed. Let's use threshold 2 to make it fail.
         // quorum(5) = 4, but polynomial.required() = 2, so this should panic
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(2));
         Scheme::<ed25519::PublicKey, V>::signer(
             NAMESPACE,
             participants,
@@ -1489,7 +1605,7 @@ mod tests {
         // Create a polynomial with threshold 2, but quorum of 5 participants is 4
         // quorum(5) = 4, but polynomial.required() = 2, so this should panic
         let (polynomial, _) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(2));
         Scheme::<ed25519::PublicKey, V>::verifier(NAMESPACE, participants, polynomial);
     }
 

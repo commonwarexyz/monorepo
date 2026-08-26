@@ -19,7 +19,9 @@ use commonware_consensus::{
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
     bls12381::{
-        dkg::feldman_desmedt::{DealerLog, Info, Logs, Output, observe},
+        dkg::feldman_desmedt::{
+            DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
+        },
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
     certificate::Scheme,
@@ -455,8 +457,11 @@ where
                     output,
                     share: Some(share),
                 }),
-                Err(error) => {
-                    warn!(epoch = ?self.epoch, ?error, "failed to finalize player");
+                Err(DkgFinalizeError::Error(error)) => {
+                    panic!("invalid local state while finalizing reshare player: {error:?}")
+                }
+                Err(DkgFinalizeError::Failure(failure)) => {
+                    warn!(epoch = ?self.epoch, ?failure, "failed to finalize player");
                     None
                 }
             }
@@ -1539,7 +1544,7 @@ mod tests {
     use super::*;
     use crate::dkg::{
         fence::Fence,
-        reshare::actor::{Config, DkgConfig},
+        reshare::actor::{Config, DkgConfig, utils},
         state_sync::Plan as StateSyncPlan,
         tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant},
     };
@@ -1548,21 +1553,27 @@ mod tests {
     use commonware_cryptography::{
         Digestible as _, Signer,
         bls12381::{
-            dkg::feldman_desmedt::{Dealer as CryptoDealer, SignedDealerLog, Verdict},
+            dkg::feldman_desmedt::{
+                Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Player as CryptoPlayer,
+                Reveal, SignedDealerLog, Verdict, deal,
+            },
             primitives::sharing::Mode as SharingMode,
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
+        transcript::Summary,
     };
+    use commonware_math::algebra::Random as _;
     use commonware_p2p::simulated::{Config as NetworkConfig, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{ContextCell, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-        ordered::Set, sequence::Unit, sync::Mutex, test_rng,
+        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
+        channel::oneshot, ordered::Set, sequence::Unit, sync::Mutex, test_rng,
     };
     use futures::{FutureExt, stream};
     use std::{
+        collections::BTreeMap,
         marker::PhantomData,
         pin::Pin,
         sync::Arc,
@@ -1683,6 +1694,7 @@ mod tests {
             0,
             None,
             SharingMode::NonZeroCounter,
+            Reveal::V1,
             players(),
             players(),
         )
@@ -1729,6 +1741,7 @@ mod tests {
             0,
             None,
             SharingMode::NonZeroCounter,
+            Reveal::V1,
             participants.clone(),
             participants.clone(),
         )
@@ -1760,7 +1773,7 @@ mod tests {
         let (recipient, public, private) =
             dealer.shares_to_distribute().next().expect("self dealing");
         assert_eq!(recipient, public_key);
-        let Verdict::Valid(ack) = player
+        let Ok(ack) = player
             .handle(
                 &mut store,
                 Epoch::zero(),
@@ -1820,6 +1833,7 @@ mod tests {
                 fence,
                 namespace: TEST_NAMESPACE,
                 sharing_mode: SharingMode::NonZeroCounter,
+                reveal: Reveal::V1,
                 mailbox_size: NZUsize!(16),
                 partition_prefix: partition_prefix.into(),
                 max_participants: NZU32!(16),
@@ -2664,5 +2678,347 @@ mod tests {
             response_rx.now_or_never(),
             Some(Ok(EpochInfoResponse::Pending))
         ));
+    }
+
+    struct TaxonomyFixture {
+        info: Info<TestBlsVariant, PublicKey>,
+        current: EpochInfo<TestBlsVariant, PublicKey>,
+        share: Share,
+        logs: BTreeMap<PublicKey, DealerLog<TestBlsVariant, PublicKey>>,
+        dealings: BTreeMap<PublicKey, (DealerPubMsg<TestBlsVariant>, DealerPrivMsg)>,
+    }
+
+    fn taxonomy_fixture(seed: u64) -> TaxonomyFixture {
+        let signers = signers();
+        let participants = players();
+        let (previous, shares) = deal::<TestBlsVariant, _, N3f1>(
+            TestRng::new(0),
+            SharingMode::NonZeroCounter,
+            participants.clone(),
+        )
+        .expect("trusted previous sharing");
+        let info = Info::new::<N3f1>(
+            TEST_NAMESPACE,
+            0,
+            Some(previous.clone()),
+            SharingMode::NonZeroCounter,
+            Reveal::V1,
+            participants.clone(),
+            participants.clone(),
+        )
+        .expect("valid reshare info");
+        let mut logs = BTreeMap::new();
+        let mut dealings = BTreeMap::new();
+
+        for (dealer_index, dealer_signer) in signers.iter().take(3).enumerate() {
+            let dealer_key = dealer_signer.public_key();
+            let previous_share = shares
+                .get_value(&dealer_key)
+                .cloned()
+                .expect("dealer has previous share");
+            let (mut dealer, public, private) = CryptoDealer::<TestBlsVariant, _>::start::<N3f1>(
+                TestRng::new(seed + dealer_index as u64),
+                info.clone(),
+                dealer_signer.clone(),
+                Some(previous_share),
+            )
+            .expect("dealer should start");
+            let target_private = private
+                .iter()
+                .find_map(|(recipient, private)| {
+                    (recipient == &signers[0].public_key()).then(|| private.clone())
+                })
+                .expect("target dealing");
+            dealings.insert(dealer_key.clone(), (public.clone(), target_private));
+
+            for player_signer in signers.iter().take(3) {
+                let player_key = player_signer.public_key();
+                let private = private
+                    .iter()
+                    .find_map(|(recipient, private)| {
+                        (recipient == &player_key).then(|| private.clone())
+                    })
+                    .expect("player dealing");
+                let mut player =
+                    CryptoPlayer::new(info.clone(), player_signer.clone()).expect("player");
+                let ack = player
+                    .dealer_message::<N3f1>(dealer_key.clone(), public.clone(), private)
+                    .expect("valid dealing")
+                    .expect("new dealing");
+                dealer
+                    .receive_player_ack(player_key, ack)
+                    .expect("valid acknowledgement");
+            }
+
+            let signed = dealer.finalize::<N3f1>();
+            let (checked_dealer, log) = signed.check(&info).expect("valid dealer log");
+            logs.insert(checked_dealer, log);
+        }
+
+        let share = shares
+            .get_value(&signers[0].public_key())
+            .cloned()
+            .expect("target has previous share");
+        TaxonomyFixture {
+            info,
+            current: EpochInfo {
+                outcome: EpochOutcome::Success,
+                epoch: Epoch::zero(),
+                output: previous,
+                players: participants.clone(),
+                next_players: participants,
+                directory: Unit,
+            },
+            share,
+            logs,
+            dealings,
+        }
+    }
+
+    async fn taxonomy_actor(
+        context: deterministic::Context,
+        signer: PrivateKey,
+        participants: Set<PublicKey>,
+        partition: &str,
+    ) -> mocks::TestReshareActor {
+        let (_network, oracle) = Network::new_with_peers(
+            context.child("network"),
+            NetworkConfig {
+                max_size: 1024,
+                max_peers_per_set: NZUsize!(participants.len()),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            participants.iter().cloned(),
+        )
+        .await;
+        let (actor, _mailbox) = utils::new_actor(
+            context.child("actor_fixture"),
+            signer,
+            participants,
+            &oracle,
+            TEST_NAMESPACE,
+            partition,
+            NZU64!(8),
+        )
+        .await;
+        actor
+    }
+
+    /// Recovered public logs remain usable when their private dealing snapshot is absent.
+    #[test]
+    fn missing_dealing_recovery_produces_shareless_success_artifact() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let fixture = taxonomy_fixture(10);
+            let target = signers()[0].clone();
+            let mut store = TestInclusionStore::init(
+                context.child("store"),
+                "missing-dealing-artifact",
+                NZU32!(16),
+                MemorySecretStore::default(),
+            )
+            .await;
+            let mut player = store
+                .create_player::<PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    target.clone(),
+                    fixture.info.clone(),
+                )
+                .expect("target is a player");
+            for (dealer, (public, private)) in &fixture.dealings {
+                player
+                    .handle(
+                        &mut store,
+                        Epoch::zero(),
+                        dealer.clone(),
+                        public.clone(),
+                        private.clone(),
+                    )
+                    .await
+                    .expect("valid dealing");
+            }
+            for (dealer, log) in &fixture.logs {
+                store
+                    .append_log(Epoch::zero(), dealer.clone(), log.clone())
+                    .await;
+            }
+            drop(store);
+
+            let mut store = TestInclusionStore::init(
+                context.child("restart"),
+                "missing-dealing-artifact",
+                NZU32!(16),
+                MemorySecretStore::default(),
+            )
+            .await;
+            store
+                .commit_epoch(
+                    fixture.current,
+                    Summary::random(TestRng::new(1)),
+                    Some(fixture.share),
+                )
+                .await;
+            let mut actor = taxonomy_actor(
+                context.child("artifact_actor"),
+                target,
+                players(),
+                "missing-dealing-artifact-actor",
+            )
+            .await;
+            let log_map = Arc::new(store.logs(Epoch::zero()));
+            let task =
+                actor.verification_task(Epoch::zero(), &fixture.info, &store, log_map.as_ref());
+            let ceremony = task
+                .run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
+                    context.child("verification"),
+                )
+                .expect("observer should verify the public ceremony");
+            assert!(ceremony.share.is_none());
+            let expected = ceremony.output.clone();
+            let mut artifacts = ArtifactCache::default();
+
+            let artifact = actor
+                .artifact(
+                    Epoch::zero(),
+                    &mut store,
+                    log_map,
+                    Some(&ceremony),
+                    &mut artifacts,
+                )
+                .await
+                .expect("observer should produce a successful artifact");
+
+            assert_eq!(artifact.info.outcome, EpochOutcome::Success);
+            assert_eq!(artifact.info.output, expected);
+            assert!(artifact.share.is_none());
+        });
+    }
+
+    /// A protocol-level finalization failure carries the prior output and local share.
+    #[test]
+    fn finalization_failure_produces_failure_artifact() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let fixture = taxonomy_fixture(20);
+            let expected_output = fixture.current.output.clone();
+            let expected_share = fixture.share.clone();
+            let mut store = TestInclusionStore::init(
+                context.child("store"),
+                "finalization-failure-artifact",
+                NZU32!(16),
+                MemorySecretStore::default(),
+            )
+            .await;
+            store
+                .commit_epoch(
+                    fixture.current,
+                    Summary::random(TestRng::new(2)),
+                    Some(fixture.share),
+                )
+                .await;
+            let mut actor = taxonomy_actor(
+                context.child("artifact_actor"),
+                signers()[0].clone(),
+                players(),
+                "finalization-failure-artifact-actor",
+            )
+            .await;
+            let log_map = Arc::new(BTreeMap::new());
+            let task =
+                actor.verification_task(Epoch::zero(), &fixture.info, &store, log_map.as_ref());
+            let ceremony = task
+                .run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
+                    context.child("verification"),
+                );
+            assert!(ceremony.is_none());
+            let mut artifacts = ArtifactCache::default();
+
+            let artifact = actor
+                .artifact(
+                    Epoch::zero(),
+                    &mut store,
+                    log_map,
+                    ceremony.as_ref(),
+                    &mut artifacts,
+                )
+                .await
+                .expect("continuous reshare should carry forward a failed epoch");
+
+            assert_eq!(artifact.info.outcome, EpochOutcome::Failure);
+            assert_eq!(artifact.info.output, expected_output);
+            assert_eq!(artifact.share, Some(expected_share));
+        });
+    }
+
+    /// A selected dealing that conflicts with durable logs is invalid local state.
+    #[test]
+    #[should_panic(
+        expected = "invalid local state while finalizing reshare player: InvalidPersistedDealing"
+    )]
+    fn finalization_error_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let persisted = taxonomy_fixture(30);
+            let finalized = taxonomy_fixture(40);
+            let target = signers()[0].clone();
+            let mismatched_dealer = signers()[0].public_key();
+            let mut store = TestInclusionStore::init(
+                context.child("store"),
+                "finalization-error-artifact",
+                NZU32!(16),
+                MemorySecretStore::default(),
+            )
+            .await;
+            store
+                .commit_epoch(
+                    finalized.current,
+                    Summary::random(TestRng::new(3)),
+                    Some(finalized.share),
+                )
+                .await;
+            let mut player = store
+                .create_player::<PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    target.clone(),
+                    finalized.info.clone(),
+                )
+                .expect("target is a player");
+
+            for (dealer, (public, private)) in &finalized.dealings {
+                let (public, private) = if dealer == &mismatched_dealer {
+                    persisted
+                        .dealings
+                        .get(dealer)
+                        .cloned()
+                        .expect("alternate persisted dealing")
+                } else {
+                    (public.clone(), private.clone())
+                };
+                player
+                    .handle(&mut store, Epoch::zero(), dealer.clone(), public, private)
+                    .await
+                    .expect("persisted dealing is valid for the round");
+            }
+            for (dealer, log) in &finalized.logs {
+                store
+                    .append_log(Epoch::zero(), dealer.clone(), log.clone())
+                    .await;
+            }
+            let mut actor = taxonomy_actor(
+                context.child("artifact_actor"),
+                target,
+                players(),
+                "finalization-error-artifact-actor",
+            )
+            .await;
+            let log_map = Arc::new(store.logs(Epoch::zero()));
+            let task =
+                actor.verification_task(Epoch::zero(), &finalized.info, &store, log_map.as_ref());
+
+            task.run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
+                context.child("verification"),
+            );
+        });
     }
 }

@@ -304,12 +304,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 
     /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with an unconsumed
-    /// verified quorum. Call repeatedly to drain every constructible kind.
+    /// (notarization, then nullification, then finalization) with a verified
+    /// quorum. Call repeatedly to drain every constructible kind.
     ///
     /// Once recovery starts, it consumes the verified votes. Do not cancel unless
     /// the verifier will also be discarded.
-    pub async fn try_construct_certificate(
+    pub(super) async fn try_construct_certificate(
         &mut self,
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
@@ -664,12 +664,15 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 mod tests {
     use super::*;
     use crate::{
-        simplex::scheme::{
-            bls12381_multisig,
-            bls12381_threshold::{
-                standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
+        simplex::{
+            mocks::wrapped,
+            scheme::{
+                bls12381_multisig,
+                bls12381_threshold::{
+                    standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
+                },
+                ed25519, secp256r1,
             },
-            ed25519, secp256r1,
         },
         types::{Epoch, Round, View},
     };
@@ -2194,10 +2197,9 @@ mod tests {
         assert_eq!(batch, 2);
         assert!(invalid.is_empty());
         assert!(votes.pending().is_empty());
-        assert!(votes.try_complete().is_none());
+        assert_eq!(votes.try_complete(), None);
 
-        // At quorum, recovery surrenders the votes and completes. All later
-        // votes are dropped.
+        // At quorum, recovery completes the phase and consumes the votes.
         votes.add(3, true);
         assert_eq!(votes.try_complete(), Some(vec![1, 2, 3]));
         assert!(votes.is_complete());
@@ -2210,7 +2212,10 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(votes.try_complete().is_none());
+        assert_eq!(votes.try_complete(), None);
+
+        votes.complete();
+        assert!(votes.is_complete());
 
         // Network certificates complete without any votes.
         let mut votes = Certification::<u64>::new(3, true);
@@ -2258,8 +2263,32 @@ mod tests {
         late_leader_vote_after_certification(ed25519::fixture);
     }
 
-    /// Constructible kinds drain in certificate order, exercising local
-    /// assembly for every kind.
+    #[test_async]
+    #[should_panic(expected = "verified notarize quorum must assemble")]
+    async fn test_construct_panics_on_recovery_failure() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let schemes: Vec<_> = schemes
+            .into_iter()
+            .map(|scheme| wrapped::Scheme::new(scheme, wrapped::Behavior::RecoveryFailure))
+            .collect();
+        let quorum = N3f1::quorum(schemes.len());
+        let quorum_size = usize::try_from(quorum).expect("quorum exceeds usize::MAX");
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), quorum);
+
+        let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
+        verifier.set_leader(leader_notarize.signer(), Some(&leader_notarize));
+        for scheme in schemes.iter().take(quorum_size) {
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
+                true,
+            );
+        }
+
+        let _ = verifier.try_construct_certificate(&Sequential).await;
+    }
+
     #[test_async]
     async fn test_construct_drains_kinds_in_order() {
         let mut rng = test_rng();

@@ -14,12 +14,10 @@ fn bench_tle_encrypt(c: &mut Criterion) {
 
     c.bench_function(module_path!(), |b| {
         b.iter(|| {
-            black_box(encrypt::<_, MinSig>(
-                &mut rng,
-                master_public,
-                (b"_BENCH_TLE_", &target),
-                &message,
-            ));
+            black_box(
+                encrypt::<_, MinSig>(&mut rng, master_public, (b"_BENCH_TLE_", &target), &message)
+                    .expect("encryption should succeed"),
+            );
         });
     });
 }

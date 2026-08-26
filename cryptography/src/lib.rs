@@ -191,7 +191,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Verify all items added to the batch.
         ///
-        /// Returns `true` if all items are valid, `false` otherwise.
+        /// Returns `false` if no items were added or any item is invalid.
         ///
         /// # Why Randomness?
         ///

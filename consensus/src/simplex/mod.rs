@@ -7314,7 +7314,9 @@ mod tests {
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message
-            let ciphertext = schemes[0].encrypt(&mut context, target, *message);
+            let ciphertext = schemes[0]
+                .encrypt(&mut context, target, *message)
+                .expect("valid TLE encryption inputs");
 
             // Wait for consensus to reach the target view and then decrypt
             let reporter = monitor_reporter.lock().clone().unwrap();

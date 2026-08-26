@@ -9,11 +9,12 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{
     Digest, PublicKey,
-    certificate::{Attestation, Scheme},
+    certificate::{AssemblyError, Attestation, Scheme},
 };
 use commonware_parallel::Strategy;
+use commonware_utils::iter::NonEmpty;
 use rand_core::CryptoRng;
-use std::{collections::HashSet, fmt::Debug, hash::Hash, iter::once};
+use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -1364,27 +1365,28 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         scheme: &S,
         notarizes: I,
         strategy: &impl Strategy,
-    ) -> Option<Self>
+    ) -> Result<Self, AssemblyError>
     where
         I: IntoIterator<Item = Notarize<S, D>>,
         I::IntoIter: Send,
     {
-        let mut notarizes = notarizes.into_iter();
-        let Notarize {
-            proposal,
-            attestation,
-        } = notarizes.next()?;
-        let attestations = once(attestation).chain(notarizes.map(|n| n.attestation));
-        let certificate = scheme.assemble(attestations, strategy)?;
+        let mut notarizes = notarizes.into_iter().peekable();
+        let proposal = notarizes.peek().map(|notarize| notarize.proposal.clone());
+        let certificate =
+            scheme.assemble(notarizes.map(|notarize| notarize.attestation), strategy)?;
 
-        Some(Self {
-            proposal,
+        Ok(Self {
+            proposal: proposal.expect("notarization assembled without votes"),
             certificate,
         })
     }
 
     /// Builds a notarization certificate from notarize votes for the same proposal.
-    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    pub fn from_notarizes<'a, I>(
+        scheme: &S,
+        notarizes: I,
+        strategy: &impl Strategy,
+    ) -> Result<Self, AssemblyError>
     where
         I: IntoIterator<Item = &'a Notarize<S, D>>,
         I::IntoIter: Send,
@@ -1618,21 +1620,28 @@ impl<S: Scheme> Nullification<S> {
         scheme: &S,
         nullifies: I,
         strategy: &impl Strategy,
-    ) -> Option<Self>
+    ) -> Result<Self, AssemblyError>
     where
         I: IntoIterator<Item = Nullify<S>>,
         I::IntoIter: Send,
     {
-        let mut nullifies = nullifies.into_iter();
-        let Nullify { round, attestation } = nullifies.next()?;
-        let attestations = once(attestation).chain(nullifies.map(|n| n.attestation));
-        let certificate = scheme.assemble(attestations, strategy)?;
+        let mut nullifies = nullifies.into_iter().peekable();
+        let round = nullifies.peek().map(|nullify| nullify.round);
+        let certificate =
+            scheme.assemble(nullifies.map(|nullify| nullify.attestation), strategy)?;
 
-        Some(Self { round, certificate })
+        Ok(Self {
+            round: round.expect("nullification assembled without votes"),
+            certificate,
+        })
     }
 
     /// Builds a nullification certificate from nullify votes from the same round.
-    pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
+    pub fn from_nullifies<'a, I>(
+        scheme: &S,
+        nullifies: I,
+        strategy: &impl Strategy,
+    ) -> Result<Self, AssemblyError>
     where
         I: IntoIterator<Item = &'a Nullify<S>>,
         I::IntoIter: Send,
@@ -1874,27 +1883,28 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         scheme: &S,
         finalizes: I,
         strategy: &impl Strategy,
-    ) -> Option<Self>
+    ) -> Result<Self, AssemblyError>
     where
         I: IntoIterator<Item = Finalize<S, D>>,
         I::IntoIter: Send,
     {
-        let mut finalizes = finalizes.into_iter();
-        let Finalize {
-            proposal,
-            attestation,
-        } = finalizes.next()?;
-        let attestations = once(attestation).chain(finalizes.map(|f| f.attestation));
-        let certificate = scheme.assemble(attestations, strategy)?;
+        let mut finalizes = finalizes.into_iter().peekable();
+        let proposal = finalizes.peek().map(|finalize| finalize.proposal.clone());
+        let certificate =
+            scheme.assemble(finalizes.map(|finalize| finalize.attestation), strategy)?;
 
-        Some(Self {
-            proposal,
+        Ok(Self {
+            proposal: proposal.expect("finalization assembled without votes"),
             certificate,
         })
     }
 
     /// Builds a finalization certificate from finalize votes for the same proposal.
-    pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
+    pub fn from_finalizes<'a, I>(
+        scheme: &S,
+        finalizes: I,
+        strategy: &impl Strategy,
+    ) -> Result<Self, AssemblyError>
     where
         I: IntoIterator<Item = &'a Finalize<S, D>>,
         I::IntoIter: Send,
@@ -2177,15 +2187,11 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
+    /// A response with no certificates is invalid.
     pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         S: scheme::Scheme<D>,
     {
-        // Prepare to verify
-        if self.notarizations.is_empty() && self.nullifications.is_empty() {
-            return true;
-        }
-
         let notarizations = self.notarizations.iter().map(|notarization| {
             let context = Subject::Notarize {
                 proposal: &notarization.proposal,
@@ -2202,7 +2208,11 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        scheme.verify_certificates::<_, D, _>(rng, notarizations.chain(nullifications), strategy)
+        let Some(certificates) = NonEmpty::try_new(notarizations.chain(nullifications)) else {
+            return false;
+        };
+
+        scheme.verify_certificates::<_, D, _>(rng, certificates, strategy)
     }
 }
 
@@ -3107,7 +3117,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
+                .expect("quorum notarization");
         let encoded = notarization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Notarization::decode_cfg(encoded, &cfg).unwrap();
@@ -3278,7 +3289,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
+                .expect("quorum notarization");
 
         let nullifies: Vec<_> = fixture
             .schemes
@@ -3372,6 +3384,15 @@ mod tests {
         response_encode_decode(bls12381_threshold_vrf::fixture::<MinSig, _>);
         response_encode_decode(bls12381_threshold_std::fixture::<MinPk, _>);
         response_encode_decode(bls12381_threshold_std::fixture::<MinSig, _>);
+    }
+
+    #[test]
+    fn empty_response_is_invalid() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let response = Response::<ed25519::Scheme, Sha256>::new(1, Vec::new(), Vec::new());
+
+        assert!(!response.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     fn conflicting_notarize_encode_decode<S, F>(fixture: F)
@@ -3562,8 +3583,7 @@ mod tests {
             .collect();
 
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
-                .expect("quorum notarization");
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
         assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
         assert!(!notarization.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
@@ -3600,8 +3620,7 @@ mod tests {
             .collect();
 
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
-                .expect("quorum notarization");
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
         assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
         assert!(!notarization.verify(&mut rng, &wrong_fixture.schemes[0], &Sequential));
@@ -3626,19 +3645,26 @@ mod tests {
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
-        let quorum_size = quorum(fixture.schemes.len() as u32) as usize;
+        let participant_count =
+            u32::try_from(fixture.schemes.len()).expect("participant count exceeds u32::MAX");
+        let quorum_size = quorum(participant_count);
+        let subquorum = usize::try_from(quorum_size - 1).expect("quorum exceeds usize::MAX");
         assert!(quorum_size > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(5));
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
-            .take(quorum_size - 1)
+            .take(subquorum)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        assert!(
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).is_none(),
+        assert_eq!(
+            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential),
+            Err(AssemblyError::InsufficientAttestations(
+                quorum_size,
+                quorum_size - 1
+            )),
             "insufficient votes should not form a notarization"
         );
     }

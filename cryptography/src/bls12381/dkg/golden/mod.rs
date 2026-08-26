@@ -367,7 +367,7 @@ impl Info {
                 return Err(Error::NumDealers(dealers.len()));
             }
         }
-        let mode = Mode::default();
+        let mode = Mode::NonZeroCounter;
         let player_quorum =
             NonZeroU32::new(players.quorum::<M>()).expect("non-empty players have non-zero quorum");
         let dealer_quorum =

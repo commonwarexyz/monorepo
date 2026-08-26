@@ -9,7 +9,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest,
-    certificate::{Attestation, Namespace as CertificateNamespace, Scheme, Subject},
+    certificate::{AssemblyError, Attestation, Namespace as CertificateNamespace, Scheme, Subject},
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{channel::oneshot, union};
@@ -312,20 +312,28 @@ pub struct Certificate<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
-    pub fn from_acks<'a, I>(scheme: &S, acks: I, strategy: &impl Strategy) -> Option<Self>
+    /// Builds a certificate from acknowledgements for the first observed item.
+    pub fn from_acks<'a, I>(
+        scheme: &S,
+        acks: I,
+        strategy: &impl Strategy,
+    ) -> Result<Self, AssemblyError>
     where
         S: scheme::Scheme<D>,
         I: IntoIterator<Item = &'a Ack<S, D>>,
         I::IntoIter: Send,
     {
         let mut iter = acks.into_iter().peekable();
-        let item = iter.peek()?.item.clone();
+        let item = iter.peek().map(|ack| ack.item.clone());
         let attestations = iter
-            .filter(|ack| ack.item == item)
+            .filter(|ack| Some(&ack.item) == item.as_ref())
             .map(|ack| ack.attestation.clone());
         let certificate = scheme.assemble(attestations, strategy)?;
 
-        Some(Self { item, certificate })
+        Ok(Self {
+            item: item.expect("certificate assembled without acknowledgements"),
+            certificate,
+        })
     }
 
     /// Verifies the recovered certificate for the item.
@@ -532,11 +540,26 @@ mod tests {
 
         // Test Activity codec - Certified variant
         // Collect enough acks for a certificate
+        let expected = schemes[0].participants().quorum::<N3f1>();
+        let expected_count = usize::try_from(expected).expect("quorum exceeds usize::MAX");
         let acks: Vec<_> = schemes
             .iter()
-            .take(schemes[0].participants().quorum::<N3f1>() as usize)
+            .take(expected_count)
             .filter_map(|scheme| Ack::sign(scheme, Epoch::new(1), item.clone()))
             .collect();
+
+        // The assembly contract reports the exact quorum shortfall at both sub-quorum
+        // boundaries: an empty set and a set one acknowledgment below quorum.
+        for insufficient in [&acks[..0], &acks[..acks.len() - 1]] {
+            let found = u32::try_from(insufficient.len()).expect("ack count exceeds u32::MAX");
+            assert!(matches!(
+                Certificate::from_acks(&schemes[0], insufficient, &Sequential),
+                Err(AssemblyError::InsufficientAttestations(
+                    actual_expected,
+                    actual_found
+                )) if actual_expected == expected && actual_found == found
+            ));
+        }
 
         let certificate = Certificate::from_acks(&schemes[0], &acks, &Sequential).unwrap();
         assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));

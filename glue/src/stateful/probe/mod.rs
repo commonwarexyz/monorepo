@@ -170,7 +170,7 @@ mod test {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng,
-        channel::oneshot, probability, sync::Mutex, test_rng,
+        channel::oneshot, iter::NonEmpty, probability, sync::Mutex, test_rng,
     };
     use std::{
         collections::BTreeMap,
@@ -362,7 +362,7 @@ mod test {
         fn verify_certificates<'a, R, D, I>(
             &self,
             rng: &mut R,
-            certificates: I,
+            certificates: NonEmpty<I>,
             strategy: &impl ParallelStrategy,
         ) -> bool
         where
@@ -461,7 +461,7 @@ mod test {
             &self,
             attestations: I,
             strategy: &impl ParallelStrategy,
-        ) -> Option<Self::Certificate>
+        ) -> Result<Self::Certificate, certificate::AssemblyError>
         where
             I: IntoIterator<Item = Attestation<Self>>,
             I::IntoIter: Send,
