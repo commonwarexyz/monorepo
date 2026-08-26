@@ -37,10 +37,10 @@ pub(crate) struct Metrics {
     /// Wall-clock duration of a finalization.
     pub finalize_duration: Timed,
 
-    /// Wall-clock duration of lazy-recovery replays via `rebuild_pending`.
+    /// Wall-clock duration of rebuilding a missing parent state by replay.
     pub rebuild_pending_duration: Timed,
 
-    /// Number of blocks replayed during the most recent `rebuild_pending` call.
+    /// Number of blocks replayed during the most recent rebuild.
     pub rebuild_pending_depth: Registered<Gauge>,
 }
 
@@ -94,7 +94,7 @@ impl Metrics {
 
         let rebuild_pending_depth = context.register(
             "rebuild_pending_depth",
-            "Blocks replayed during the most recent rebuild_pending",
+            "Blocks replayed during the most recent rebuild",
             Gauge::default(),
         );
 

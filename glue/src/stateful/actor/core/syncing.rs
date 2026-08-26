@@ -12,18 +12,17 @@ use crate::stateful::{
     actor::{
         core::{mailbox::Message, processing::Processing},
         metrics::Metrics as StatefulMetrics,
-        processor::{PendingSyncTargets, Processor, Pruning, Request as VerificationRequest},
+        processor::{
+            PendingSyncTargets, Processor, Provider, Pruning, Request as VerificationRequest,
+        },
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, DatabaseSet, Publisher, SnapshotsOf},
+    db::{Anchor, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Epochable, Heightable, Viewable,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::{select, select_loop};
@@ -111,7 +110,7 @@ where
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<S, V>: Provider<Block = A::Block>,
 {
     pub async fn start(mut self) {
         select_loop! {
@@ -148,21 +147,11 @@ where
                         response.send_lossy(None);
                     });
                 }
-                Message::Verify {
-                    span,
-                    context,
-                    ancestry,
-                    verification,
-                } => {
-                    let process = info_span!(parent: &span, "stateful.actor.verify.defer");
+                Message::Verify(request) => {
+                    let process = info_span!(parent: &request.span, "stateful.actor.verify.defer");
                     self.deferred_verifications
                         .retain(|request| !request.verification.is_cancelled());
-                    self.deferred_verifications.push(VerificationRequest {
-                        span,
-                        context,
-                        ancestry,
-                        verification,
-                    });
+                    self.deferred_verifications.push(request);
                     process.in_scope(|| {
                         debug!(
                             deferred_verifications = self.deferred_verifications.len(),
@@ -340,9 +329,15 @@ where
         let mut completed_height = anchor.height;
 
         let _ = metrics.sync_done.try_set(1);
-        let mut processor = Processor::new(application, anchor, metrics, pruning);
-        let (mut databases, snapshots) = databases.snapshot().await;
-        snapshot_publisher.publish(processor.processed_height(), snapshots);
+        let mut processor = Processor::new(
+            application,
+            databases,
+            marshal.clone(),
+            anchor,
+            metrics,
+            pruning,
+        );
+        processor.publish_snapshot(&mut snapshot_publisher).await;
 
         let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
@@ -366,12 +361,7 @@ where
                             );
                             return;
                         },
-                        _ = Processor::notify_finalized(
-                            processor.app(),
-                            databases.readers(),
-                            context.as_present(),
-                            block.as_ref(),
-                        ) => {
+                        _ = processor.notify_finalized(context.as_present(), block.as_ref()) => {
                             acknowledgement.acknowledge();
                         },
                     }
@@ -380,11 +370,11 @@ where
                     // Exiting on stop leaves the block unacknowledged, and
                     // marshal redelivers it after a restart.
                     let Some(finalizing) =
-                        processor.begin_finalize(context.as_present(), block.as_ref())
+                        processor.begin_finalize(context.as_present(), Arc::clone(&block))
                     else {
                         panic!("sync handoff block cannot be a duplicate")
                     };
-                    let sync_targets = A::sync_targets(block.as_ref());
+                    let prune;
                     select! {
                         _ = &mut shutdown => {
                             warn!(
@@ -393,24 +383,14 @@ where
                             );
                             return;
                         },
-                        driven = Processor::apply_finalized(
-                            processor.app(),
-                            databases,
-                            context.as_present(),
-                            block.as_ref(),
-                            finalizing.batch(),
-                            &sync_targets,
-                            false,
-                        ) => {
-                            (databases, _, _) = driven;
+                        driven = async {
+                            let prune = processor.finalize(context.as_present(), finalizing).await;
+                            processor.notify_finalized(context.as_present(), block.as_ref()).await;
+                            prune
+                        } => {
+                            prune = driven;
                         },
                     }
-                    let prune = processor.finish_finalize(
-                        context.as_present(),
-                        block.as_ref(),
-                        sync_targets,
-                        finalizing,
-                    );
                     pending_acknowledgements.push(acknowledgement);
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
@@ -430,8 +410,8 @@ where
                     );
                     return;
                 },
-                driven = databases.finalize() => {
-                    (databases, snapshots, barrier) = driven;
+                driven = processor.sync() => {
+                    (snapshots, barrier) = driven;
                 },
             }
 
@@ -457,13 +437,11 @@ where
         // what the prune cadence needs, so this fires only in tests that feed
         // more handoffs than the window holds.
         if let Some(prune) = pending_prune {
-            databases = prune.run(databases, &marshal).await;
+            processor.prune(prune, &marshal).await;
             // The published snapshots were captured before this prune. Republish
             // so serving stops pinning the pruned state. Every handoff barrier
             // was awaited above, so the republished state is already durable.
-            let snapshots;
-            (databases, snapshots) = databases.snapshot().await;
-            snapshot_publisher.publish(processor.processed_height(), snapshots);
+            processor.publish_snapshot(&mut snapshot_publisher).await;
         }
 
         Processing {
@@ -474,7 +452,7 @@ where
             snapshot_publisher,
             skip_finalized_until: Some(completed_height),
         }
-        .start(processor, databases, deferred_verifications)
+        .start(processor, deferred_verifications)
         .await
     }
 }

@@ -1,10 +1,10 @@
 //! The stages a job runs through.
 //!
-//! Each stage is a future over owned inputs and a [`Carry`] it may advance
-//! (its ancestry cursor, its blocks) but never the processor's state, which
-//! only [`Processor::step`](super::Processor::step) touches between stages.
+//! Each stage is a future over owned inputs and a [`Job`] it may advance (its
+//! ancestry cursor, its blocks) but never the processor's state, which only the
+//! [`Processor`](super::Processor) touches between stages.
 
-use super::jobs::{Acquired, Caller, Carry, Failure, Fetched, Interrupted, Outcome, ReplayResult};
+use super::jobs::{Caller, Failure, Job, Outcome, Stale};
 use crate::stateful::{
     Application, ExecutionError,
     db::{DatabaseSet, UnmerkleizedOf},
@@ -16,17 +16,45 @@ use commonware_consensus::{
         ancestry::{self as marshal_ancestry, BlockProvider},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
+    types::Height,
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
-use commonware_utils::channel::oneshot;
 use futures::{Stream, StreamExt};
 use rand_core::Rng;
 use std::{collections::BTreeSet, future::Future, sync::Arc};
 use tracing::{debug, info_span, warn};
 
 type Unmerkleized<A, E> = UnmerkleizedOf<<A as Application<E>>::Databases, E>;
+
+/// What jobs need from marshal.
+pub(in crate::stateful::actor) trait Provider:
+    BlockProvider + Clone
+{
+    /// The digest of the canonical block at `height`, or `None` when marshal
+    /// does not have it.
+    fn canonical(
+        &self,
+        height: Height,
+    ) -> impl Future<Output = Option<<Self::Block as Digestible>::Digest>> + Send;
+}
+
+impl<S, V> Provider for MarshalMailbox<S, V>
+where
+    S: Scheme,
+    V: MarshalVariant,
+    Self: BlockProvider<Block = V::ApplicationBlock>,
+{
+    async fn canonical(
+        &self,
+        height: Height,
+    ) -> Option<<V::ApplicationBlock as Digestible>::Digest> {
+        self.get_block(Identifier::Height(height))
+            .await
+            .map(|block| block.digest())
+    }
+}
 
 /// Wait for `future` unless the caller drops its request.
 async fn await_or_cancel<B, I, P, T>(
@@ -48,123 +76,113 @@ pub(super) async fn fetch_ancestor<B, I, P, T>(
     await_or_cancel(caller, stream.next()).await
 }
 
-/// Fetch the block under verification from the ancestry stream.
-pub(super) async fn candidate<E, A>(carry: &mut Carry<E, A>) -> Outcome<E, A>
+/// Read the next block of the ancestry. `Err` ends the job: an exhausted
+/// stream declines a proposal, while a verification is not a verdict without
+/// its blocks and parks until its caller drops it.
+async fn fetch<E, A>(job: &mut Job<E, A>) -> Result<Arc<A::Block>, Outcome<E, A>>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    // Acquire the candidate independently for each request. Availability is
-    // round-scoped, so requests cannot safely share this part of the work.
-    let candidate = match fetch_ancestor(&mut carry.caller, &mut carry.ancestry).await {
-        Some(Some(block)) => block,
+    match fetch_ancestor(&mut job.caller, &mut job.ancestry).await {
+        Some(Some(block)) => Ok(block),
+        Some(None) if job.is_proposal() => Err(Outcome::Declined),
         Some(None) => {
-            debug!("verification request waiting on incomplete block ancestry");
-            carry.caller.cancelled().await;
-            return Outcome::Candidate(Fetched::Cancelled);
+            debug!("verification request waiting on incomplete ancestry");
+            job.caller.cancelled().await;
+            Err(Outcome::Cancelled)
         }
         None => {
-            debug!("verification request cancelled before initial block arrived");
-            return Outcome::Candidate(Fetched::Cancelled);
+            debug!("request cancelled before its ancestry arrived");
+            Err(Outcome::Cancelled)
         }
-    };
-    carry.candidate = Some(candidate);
-    Outcome::Candidate(Fetched::Ready)
+    }
+}
+
+/// Fetch the block under verification from the ancestry stream.
+pub(super) async fn candidate<E, A>(job: &mut Job<E, A>) -> Outcome<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    match fetch(job).await {
+        Ok(block) => {
+            job.candidate = Some(block);
+            Outcome::Candidate
+        }
+        Err(outcome) => outcome,
+    }
 }
 
 /// Fetch the block to fork from out of the ancestry stream, leaving the cursor
 /// after it.
-pub(super) async fn parent<E, A>(carry: &mut Carry<E, A>) -> Outcome<E, A>
+pub(super) async fn parent<E, A>(job: &mut Job<E, A>) -> Outcome<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    let parent = match fetch_ancestor(&mut carry.caller, &mut carry.ancestry).await {
-        Some(Some(block)) => block,
-        // An exhausted stream declines a proposal. A verification is not a
-        // verdict without its parent, so it parks until its caller drops it.
-        Some(None) => match carry.caller {
-            Caller::Verify(_) => {
-                debug!("verification request waiting on incomplete parent ancestry");
-                carry.caller.cancelled().await;
-                return Outcome::Parent(Acquired::Cancelled);
-            }
-            Caller::Propose { .. } => return Outcome::Parent(Acquired::Declined),
-        },
-        None => {
-            debug!("request cancelled before parent ancestry arrived");
-            return Outcome::Parent(Acquired::Cancelled);
+    match fetch(job).await {
+        Ok(block) => {
+            job.parent = Some(block);
+            Outcome::Parent
         }
-    };
-    carry.parent = Some(parent);
-    Outcome::Parent(Acquired::Ready)
+        Err(outcome) => outcome,
+    }
 }
 
 /// Decide a candidate below the applied height from the canonical block at its
 /// height, without re-executing it.
 #[tracing::instrument(
-    name = "stateful.processor.is_already_processed",
+    name = "stateful.processor.canonical",
     level = "info",
     skip_all,
-    fields(height = carry.candidate().height().traced(), digest = %carry.candidate().digest())
+    fields(height = job.candidate().height().traced(), digest = %job.candidate().digest())
 )]
-pub(super) async fn classify<E, A, S, V>(
-    carry: &mut Carry<E, A>,
-    marshal: MarshalMailbox<S, V>,
-) -> Outcome<E, A>
+pub(super) async fn canonical<E, A, P>(job: &mut Job<E, A>, provider: P) -> Outcome<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    S: Scheme,
-    V: MarshalVariant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    P: Provider<Block = A::Block>,
 {
-    let candidate = Arc::clone(carry.candidate());
+    let candidate = Arc::clone(job.candidate());
     let height = candidate.height();
-    let Some(canonical) = await_or_cancel(
-        &mut carry.caller,
-        marshal.get_block(Identifier::Height(height)),
-    )
-    .await
-    else {
+    let Some(canonical) = await_or_cancel(&mut job.caller, provider.canonical(height)).await else {
         debug!(
             block_digest = ?candidate.digest(),
-            "verification request cancelled during processed-block check"
+            "verification request cancelled during canonical-block check"
         );
-        return Outcome::Classified(None);
+        return Outcome::Cancelled;
     };
     let Some(canonical) = canonical else {
         warn!(
             target_height = height.get(),
-            processed_height = carry.anchor.height.get(),
-            "failed to fetch canonical processed block for stale-block check"
+            processed_height = job.anchor.height.get(),
+            "failed to fetch canonical block for a candidate below the processed height"
         );
-
-        // Incomplete ancestry is not an invalid verdict. Keep the job parked
-        // until its request future is dropped.
-        carry.caller.cancelled().await;
-        return Outcome::Classified(None);
+        // Incomplete ancestry is not a verdict. Park until the caller drops the request.
+        job.caller.cancelled().await;
+        return Outcome::Cancelled;
     };
-    Outcome::Classified(Some(canonical.digest() == candidate.digest()))
+    Outcome::Classified(canonical == candidate.digest())
 }
 
 /// Walk marshal backward from the parent to the nearest block in `known` or the
-/// anchor the carry was looked up under, returning the blocks to replay oldest
+/// anchor the job was looked up under, returning the blocks to replay oldest
 /// first.
 pub(super) async fn walk<E, A, P>(
-    carry: &mut Carry<E, A>,
+    job: &mut Job<E, A>,
     provider: P,
     known: BTreeSet<<A::Block as Digestible>::Digest>,
 ) -> Outcome<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    P: BlockProvider<Block = A::Block> + Clone,
+    P: BlockProvider<Block = A::Block>,
 {
-    let anchor = carry.anchor;
-    let target_digest = carry.parent().digest();
+    let anchor = job.anchor;
+    let target_digest = job.parent().digest();
     let mut path = Vec::new();
-    let mut cursor = Arc::clone(carry.parent());
+    let mut cursor = Arc::clone(job.parent());
     loop {
         let digest = cursor.digest();
         if digest == anchor.digest || known.contains(&digest) {
@@ -179,31 +197,25 @@ where
                 current_height = cursor_height.get(),
                 last_processed_height = anchor.height.get(),
                 last_processed = ?anchor.digest,
-                "rebuild_pending reached stale ancestry at or below processed height"
+                "walk reached stale ancestry at or below processed height"
             );
-            return Outcome::Walked(Err(Failure::Invalid));
+            return Outcome::Walked(None);
         }
 
-        let Some(parent) = await_or_cancel(
-            &mut carry.caller,
-            provider.clone().subscribe_parent(&cursor),
-        )
-        .await
+        let Some(parent) =
+            await_or_cancel(&mut job.caller, provider.subscribe_parent(&cursor)).await
         else {
-            return Outcome::Walked(Err(Failure::Cancelled));
+            return Outcome::Cancelled;
         };
-
         let Some(parent) = parent else {
             debug!(
                 ?target_digest,
                 cursor = ?digest,
                 "ancestor subscription ended before delivery"
             );
-
-            // Incomplete ancestry is not a verdict. Park until the caller drops
-            // the request.
-            carry.caller.cancelled().await;
-            return Outcome::Walked(Err(Failure::Cancelled));
+            // Incomplete ancestry is not a verdict. Park until the caller drops the request.
+            job.caller.cancelled().await;
+            return Outcome::Cancelled;
         };
 
         if parent.digest() != cursor.parent() || parent.height().next() != cursor_height {
@@ -214,21 +226,21 @@ where
                 cursor_height = cursor_height.get(),
                 parent_height = parent.height().get(),
                 expected_parent = ?cursor.parent(),
-                "rebuild_pending received non-contiguous ancestry"
+                "walk received non-contiguous ancestry"
             );
-            return Outcome::Walked(Err(Failure::Invalid));
+            return Outcome::Walked(None);
         }
 
         path.push(cursor);
         cursor = parent;
     }
     path.reverse();
-    Outcome::Walked(Ok(path))
+    Outcome::Walked(Some(path))
 }
 
 /// Execute the first block of the path on `batches`, forked from its parent.
 pub(super) async fn replay<E, A>(
-    carry: &mut Carry<E, A>,
+    job: &mut Job<E, A>,
     mut app: A,
     batches: Unmerkleized<A, E>,
 ) -> Outcome<E, A>
@@ -237,19 +249,15 @@ where
     A: Application<E>,
 {
     let block = Arc::clone(
-        carry
-            .path
+        job.path
             .front()
             .expect("a replay stage has a block to replay"),
     );
     let consensus_context = block.context();
     let Some(applied) = await_or_cancel(
-        &mut carry.caller,
+        &mut job.caller,
         app.apply(
-            (
-                carry.context.0.child("rebuild_pending_apply"),
-                consensus_context,
-            ),
+            (job.context.0.child("replay_apply"), consensus_context),
             &block,
             batches,
         ),
@@ -260,17 +268,15 @@ where
     };
     let merkleized = match applied {
         Ok(merkleized) => merkleized,
-        // A block finalized while this replay executed. The step re-checks
-        // canonical state, so this replay never panics on it.
         Err(ExecutionError::Stale) => return Outcome::Replayed(Err(Failure::Stale)),
         Err(err @ ExecutionError::Fatal(_)) => panic!("application replay failed: {err}"),
     };
 
     if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
         warn!(
-            target_digest = ?carry.parent().digest(),
+            target_digest = ?job.parent().digest(),
             block = ?block.digest(),
-            "rebuild replay state root must match block commitments"
+            "replayed state root must match block commitments"
         );
         return Outcome::Replayed(Err(Failure::Invalid));
     }
@@ -280,7 +286,7 @@ where
 /// Run the application's verification of the candidate on `batches`, forked
 /// from the parent.
 pub(super) async fn verify<E, A>(
-    carry: &mut Carry<E, A>,
+    job: &mut Job<E, A>,
     mut app: A,
     batches: Unmerkleized<A, E>,
 ) -> Outcome<E, A>
@@ -288,20 +294,20 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    let candidate = Arc::clone(carry.candidate());
-    let parent = Arc::clone(carry.parent());
+    let candidate = Arc::clone(job.candidate());
+    let parent = Arc::clone(job.parent());
     let (block_digest, parent_digest) = (candidate.digest(), parent.digest());
 
     // The application expects the full candidate-first ancestry even though
-    // the processor consumed those two entries while acquiring them.
+    // the stages consumed those two entries while fetching them.
     let ancestry =
-        marshal_ancestry::with_prefix([Arc::clone(&candidate), parent], carry.ancestry.clone());
+        marshal_ancestry::with_prefix([Arc::clone(&candidate), parent], job.ancestry.clone());
     let verified = match await_or_cancel(
-        &mut carry.caller,
+        &mut job.caller,
         app.verify(
             (
-                carry.context.0.child("application").child("verify_attempt"),
-                carry.context.1.clone(),
+                job.context.0.child("application").child("verify_attempt"),
+                job.context.1.clone(),
             ),
             ancestry,
             batches,
@@ -316,7 +322,7 @@ where
                 ?block_digest,
                 "verification went stale during application execution"
             );
-            return Outcome::Verified(Err(Interrupted::Stale));
+            return Outcome::Verified(Err(Stale));
         }
         Some(Err(err @ ExecutionError::Fatal(_))) => {
             panic!("application verification failed: {err}")
@@ -326,7 +332,7 @@ where
                 ?parent_digest,
                 "verification request cancelled during verify"
             );
-            return Outcome::Verified(Err(Interrupted::Cancelled));
+            return Outcome::Cancelled;
         }
     };
 
@@ -360,7 +366,7 @@ where
 
 /// Build a block on `batches`, forked from the parent.
 pub(super) async fn propose<E, A>(
-    carry: &mut Carry<E, A>,
+    job: &mut Job<E, A>,
     mut app: A,
     batches: Unmerkleized<A, E>,
 ) -> Outcome<E, A>
@@ -368,22 +374,22 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    let parent = Arc::clone(carry.parent());
+    let parent = Arc::clone(job.parent());
     let parent_digest = parent.digest();
-    let Caller::Propose { input, .. } = &mut carry.caller else {
+    let Caller::Propose { input, .. } = &mut job.caller else {
         unreachable!("only proposals reach the propose stage")
     };
     let input = input.take().expect("a proposal builds once");
-    let ancestry = marshal_ancestry::with_prefix([parent], carry.ancestry.clone());
+    let ancestry = marshal_ancestry::with_prefix([parent], job.ancestry.clone());
 
     // The application takes the caller's runtime context by value. Keep a
     // child as the clock for the proposal timer.
-    let clock = carry.context.0.child("propose_timer");
-    let runtime_context = std::mem::replace(&mut carry.context.0, clock);
+    let clock = job.context.0.child("propose_timer");
+    let runtime_context = std::mem::replace(&mut job.context.0, clock);
     match await_or_cancel(
-        &mut carry.caller,
+        &mut job.caller,
         app.propose(
-            (runtime_context, carry.context.1.clone()),
+            (runtime_context, job.context.1.clone()),
             ancestry,
             batches,
             input,
@@ -397,28 +403,11 @@ where
         }
         Some(Err(ExecutionError::Stale)) => {
             warn!(?parent_digest, "proposal went stale during propose");
-            Outcome::Proposed(Err(Interrupted::Stale))
+            Outcome::Proposed(Err(Stale))
         }
         None => {
             debug!(?parent_digest, "proposal request cancelled during propose");
-            Outcome::Proposed(Err(Interrupted::Cancelled))
+            Outcome::Cancelled
         }
-    }
-}
-
-/// Park until the replay this job waits on finishes.
-pub(super) async fn wait<E, A>(
-    carry: &mut Carry<E, A>,
-    completion: oneshot::Receiver<ReplayResult>,
-) -> Outcome<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    match await_or_cancel(&mut carry.caller, completion).await {
-        None => Outcome::Woken(None),
-        Some(Ok(result)) => Outcome::Woken(Some(result)),
-        // The owner is gone without a result. Claim the replay afresh.
-        Some(Err(_)) => Outcome::Woken(Some(Err(Failure::Cancelled))),
     }
 }

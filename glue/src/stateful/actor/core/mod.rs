@@ -275,13 +275,19 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(self.application, anchor, metrics, self.pruning);
+        let mut processor = Processor::new(
+            self.application,
+            databases,
+            marshal.clone(),
+            anchor,
+            metrics,
+            self.pruning,
+        );
 
         // The recovered state alone must publish before the loop starts, so
         // serving begins before the next finalization.
         let mut snapshot_publisher = self.snapshot_publisher;
-        let (databases, snapshots) = databases.snapshot().await;
-        snapshot_publisher.publish(processor.processed_height(), snapshots);
+        processor.publish_snapshot(&mut snapshot_publisher).await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -290,7 +296,7 @@ where
             snapshot_publisher,
             skip_finalized_until,
         }
-        .start(processor, databases, Vec::new())
+        .start(processor, Vec::new())
         .await
     }
 }
