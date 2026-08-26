@@ -188,7 +188,12 @@ fn calibrate(probe: impl Fn() -> bool) -> usize {
         core::hint::spin_loop();
     }
     let elapsed_us = start.elapsed().as_micros() as usize;
-    CALIBRATION_ITERATIONS / elapsed_us.max(1)
+    calibrated_iterations_per_us(elapsed_us)
+}
+
+fn calibrated_iterations_per_us(elapsed_us: usize) -> usize {
+    // A zero rate would silently disable every nonzero spin budget.
+    (CALIBRATION_ITERATIONS / elapsed_us.max(1)).max(1)
 }
 
 #[cfg(test)]
@@ -206,6 +211,14 @@ mod tests {
     #[test]
     fn test_calibration_returns_nonzero() {
         assert!(calibrate(|| false) > 0);
+    }
+
+    #[test]
+    fn test_calibrated_iterations_per_us_boundaries() {
+        assert_eq!(calibrated_iterations_per_us(0), CALIBRATION_ITERATIONS);
+        assert_eq!(calibrated_iterations_per_us(1), CALIBRATION_ITERATIONS);
+        assert_eq!(calibrated_iterations_per_us(CALIBRATION_ITERATIONS), 1);
+        assert_eq!(calibrated_iterations_per_us(CALIBRATION_ITERATIONS + 1), 1);
     }
 
     #[test]

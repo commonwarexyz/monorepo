@@ -479,7 +479,8 @@ impl Waker {
                 ret, -1,
                 "eventfd write returned unexpected byte count: {ret}"
             );
-            match std::io::Error::last_os_error().raw_os_error() {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
                 // Retry if interrupted by a signal before completion.
                 Some(libc::EINTR) => continue,
                 // Non-blocking write would block because the eventfd
@@ -487,8 +488,9 @@ impl Waker {
                 // retry is needed.
                 Some(libc::EAGAIN) => return,
                 _ => {
-                    warn!("eventfd write failed");
-                    return;
+                    // The wake latch prevents another signal in this epoch, so
+                    // returning could leave the armed loop blocked forever.
+                    panic!("eventfd write failed: {err}");
                 }
             }
         }
@@ -837,9 +839,8 @@ pub mod tests {
 
     #[cfg(not(feature = "loom"))]
     #[test]
-    fn test_eventfd_wake_and_acknowledge_error_branches() {
-        // Verify the explicit EAGAIN and generic error branches.
-        let mut waker = Waker::new().expect("eventfd creation should succeed");
+    fn test_eventfd_wake_eagain_is_nonfatal() {
+        let waker = Waker::new().expect("eventfd creation should succeed");
 
         // Saturate the eventfd counter near its maximum so `eventfd_wake` takes the
         // non-blocking EAGAIN path and `acknowledge` drains the queued wake.
@@ -856,28 +857,36 @@ pub mod tests {
         assert_eq!(wrote, size_of::<u64>() as isize);
         waker.eventfd_wake();
         waker.acknowledge();
+    }
 
-        // Then close the descriptor so both helpers exercise their generic
-        // error-logging paths.
+    #[cfg(not(feature = "loom"))]
+    #[test]
+    fn test_armed_eventfd_write_failure_panics() {
+        let mut waker = Waker::new().expect("eventfd creation should succeed");
+        let fd = waker.inner.wake_fd.as_raw_fd();
+        let arm = waker.arm();
+        assert!(!arm.wake_latched());
+
         // SAFETY: closing a valid fd is safe.
         let closed = unsafe { libc::close(fd) };
         assert_eq!(closed, 0);
-        waker.eventfd_wake();
-        waker.acknowledge();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()));
+        drop(arm);
 
-        // Replace with a known-good fd so drop doesn't accidentally close a reused
-        // descriptor number from the manually closed one.
-        // SAFETY: `dup` returns a new owned fd on success.
-        let replacement = unsafe { libc::dup(libc::STDIN_FILENO) };
+        // Replace the manually closed descriptor before dropping its owner.
+        // SAFETY: `eventfd` is called with valid flags.
+        let replacement = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         assert!(replacement >= 0);
         let old = {
             let inner = std::sync::Arc::get_mut(&mut waker.inner).expect("unique waker in test");
-            // SAFETY: `replacement` came from `dup` above and is uniquely owned here.
+            // SAFETY: `replacement` is a new uniquely owned descriptor.
             std::mem::replace(&mut inner.wake_fd, unsafe {
                 std::os::fd::OwnedFd::from_raw_fd(replacement)
             })
         };
         std::mem::forget(old);
+
+        assert!(result.is_err(), "invalid eventfd should fail closed");
     }
 }
 
