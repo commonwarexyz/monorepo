@@ -443,7 +443,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn next_timeout(&mut self) -> (SystemTime, TimeoutReason) {
         let now = self.context.current();
         let timeout_retry = self.timeout_retry;
-        let allow_latched_timeout = self.fast_skip_eligible();
+        let allow_latched_timeout = self.has_skip_budget();
         let round_timeout = {
             // The current round always has a pending timeout:
             // `Round::next_timeout` only returns `None` for rounds that are
@@ -476,8 +476,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .unwrap_or(round_timeout)
     }
 
-    /// Returns whether fast skips are available in the current term.
-    const fn fast_skip_eligible(&self) -> bool {
+    /// Returns whether the current term has skip budget remaining.
+    const fn has_skip_budget(&self) -> bool {
         let term_length = self.term_length();
         let first_unfinalized = self.last_finalized.next().term_index(term_length);
         let current = self.view.term_index(term_length);
@@ -863,15 +863,23 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .and_then(|round| round.elapsed_since_start(now))
     }
 
-    /// Latches the first event-driven timeout for `view`.
+    /// Immediately expires `view` on its first timeout when skip budget is
+    /// available, forcing a timeout to fire on the next tick. Otherwise, the
+    /// timeout remains latched until budget becomes available.
     ///
-    /// For the current view, [`Self::next_timeout`] returns the latch immediately
-    /// while fast skips are available. When the budget is exhausted,
-    /// [`Self::next_timeout`] returns an ordinary deadline and retains the latch.
-    /// An existing nullify keeps its retry schedule.
+    /// If the round has already been marked timed out, this preserves the existing
+    /// retry schedule.
     ///
-    /// Past and untracked views are ignored. A latch for a tracked future view
-    /// waits until that view becomes current.
+    /// This only latches the first timeout for the view (see
+    /// [`Round::latch_timeout`]); the latched reason is delivered back through
+    /// [`Self::next_timeout`] when the timeout fires.
+    ///
+    /// [`Self::next_timeout`] only polls the current round, so views already
+    /// advanced past are ignored: their latch would have no reader. Failures
+    /// for tracked optimistic future views latch on their round without
+    /// nullifying early. The buffered proposal suppresses the leader timeout
+    /// and its verification request is consumed, so a dropped latch would
+    /// stall the view until certification timeout once it becomes current.
     pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
         if view < self.view {
             return;
