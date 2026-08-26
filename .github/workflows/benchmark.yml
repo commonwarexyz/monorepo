@@ -74,6 +74,7 @@ jobs:
         env:
           RUSTFLAGS: "--cfg full_bench"
         run: |
+          set -o pipefail
           cargo bench ${{ matrix.cargo_flags }} \
             ${{ matrix.bench_target || '--benches' }} -p ${{ matrix.package }} \
             -- --output-format bencher \
