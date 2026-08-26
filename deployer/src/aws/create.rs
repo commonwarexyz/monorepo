@@ -56,6 +56,30 @@ pub struct RegionResources {
     pub monitoring_sg_id: Option<String>,
 }
 
+/// Validates that instance names are unique, non-empty, not reserved, and contain only ASCII
+/// letters, digits, `-`, or `_`.
+///
+/// Instance names are written unescaped into file paths, YAML, shell scripts, and AWS tags, so
+/// the character set is restricted rather than escaped per destination.
+fn validate_instance_names(config: &Config) -> Result<(), Error> {
+    let mut instance_names = HashSet::new();
+    for instance in &config.instances {
+        let name = &instance.name;
+        if name.is_empty()
+            || name == MONITORING_NAME
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(Error::InvalidInstanceName(name.clone()));
+        }
+        if !instance_names.insert(name) {
+            return Err(Error::DuplicateInstanceName(name.clone()));
+        }
+    }
+    Ok(())
+}
+
 /// Validates storage options before create allocates AWS resources.
 fn validate_storage_config(config: &Config) -> Result<(), Error> {
     // Treat monitoring and binary instances uniformly because both launch an EBS volume.
@@ -149,18 +173,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
-    // Ensure no instance is duplicated or named MONITORING_NAME
-    let mut instance_names = HashSet::new();
-    for instance in &config.instances {
-        if !instance_names.insert(&instance.name) {
-            return Err(Error::DuplicateInstanceName(instance.name.clone()));
-        }
-        if instance.name == MONITORING_NAME {
-            return Err(Error::InvalidInstanceName(instance.name.clone()));
-        }
-    }
-
-    // Validate storage settings before allocating any AWS resources.
+    // Validate the configuration before allocating any AWS resources.
+    validate_instance_names(&config)?;
     validate_storage_config(&config)?;
 
     // Determine unique regions
@@ -1508,7 +1522,7 @@ fn grouped_subnets(
 mod tests {
     use super::{
         RegionResources, grouped_subnets, run_launches, select_availability_zone_groups,
-        select_group_availability_zone, validate_storage_config,
+        select_group_availability_zone, validate_instance_names, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
     use std::{
@@ -1828,6 +1842,60 @@ mod tests {
                 storage_throughput,
             } if target == "monitoring" && storage_throughput == 124
         ));
+    }
+
+    #[test]
+    fn instance_names_accept_letters_digits_dash_underscore() {
+        let cfg = config(
+            monitoring("gp3", None),
+            vec![
+                instance("validator-0", "us-east-1", "c8g.4xlarge", None),
+                instance("Worker_1", "us-east-1", "c8g.4xlarge", None),
+            ],
+        );
+
+        validate_instance_names(&cfg).expect("names are valid");
+    }
+
+    #[test]
+    fn instance_names_reject_shell_and_path_characters() {
+        for name in [
+            "",
+            "monitoring",
+            "a b",
+            "a;b",
+            "$(id)",
+            "../x",
+            "a.b",
+            "\u{e9}",
+        ] {
+            let cfg = config(
+                monitoring("gp3", None),
+                vec![instance(name, "us-east-1", "c8g.4xlarge", None)],
+            );
+
+            let err = validate_instance_names(&cfg).expect_err(name);
+
+            assert!(
+                matches!(err, Error::InvalidInstanceName(n) if n == name),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn instance_names_reject_duplicates() {
+        let cfg = config(
+            monitoring("gp3", None),
+            vec![
+                instance("worker", "us-east-1", "c8g.4xlarge", None),
+                instance("worker", "us-west-2", "c8g.4xlarge", None),
+            ],
+        );
+
+        let err = validate_instance_names(&cfg).expect_err("duplicate name");
+
+        assert!(matches!(err, Error::DuplicateInstanceName(n) if n == "worker"));
     }
 
     #[test]

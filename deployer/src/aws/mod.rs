@@ -653,7 +653,10 @@ pub struct PortConfig {
 /// Instance configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InstanceConfig {
-    /// Name of the instance
+    /// Name of the instance.
+    ///
+    /// Must be unique, non-empty, not `monitoring`, and contain only ASCII letters, digits,
+    /// `-`, or `_`.
     pub name: String,
 
     /// AWS region where the instance is deployed
