@@ -28,7 +28,6 @@ use std::{
     collections::VecDeque,
     future::Future,
     marker::PhantomData,
-    mem::take,
     pin::Pin,
     rc::Rc,
     sync::{
@@ -188,17 +187,12 @@ impl ArcWake for RootWaker {
     }
 }
 
-/// The arena of running tasks, plus whether the executor has shut down.
+/// The arena of running tasks.
 struct Running {
     /// Task slots. Freed slots are recycled through `free`.
     slots: Vec<Option<Arc<dyn Erased>>>,
     /// Recycled slot indices.
     free: Vec<usize>,
-    /// Set once the executor clears the arena at teardown. Registrations that
-    /// race teardown are rejected (resolving their handles with
-    /// [Error::Closed]) instead of leaking into an arena nothing will ever
-    /// poll again.
-    closed: bool,
 }
 
 /// One of the two FIFO lanes for spawned-task ready tokens.
@@ -262,8 +256,8 @@ pub(super) struct Tasks {
     /// Whether the root task is ready to be polled. Starts true for the
     /// kickoff poll.
     root_ready: AtomicBool,
-    /// The arena owning all running tasks (for teardown enumeration).
-    running: Mutex<Running>,
+    /// The arena owning all running tasks. `None` after teardown begins.
+    running: Mutex<Option<Running>>,
     /// The worker thread that polls (and tears down) these tasks. Task cells
     /// are pinned to it so registration works from any thread.
     owner: ThreadId,
@@ -286,11 +280,10 @@ impl Tasks {
                 event: VecDeque::new(),
             }),
             root_ready: AtomicBool::new(true),
-            running: Mutex::new(Running {
+            running: Mutex::new(Some(Running {
                 slots: Vec::new(),
                 free: Vec::new(),
-                closed: false,
-            }),
+            })),
             owner: current_thread_id(),
             delivering_events: AtomicBool::new(false),
             unpark,
@@ -331,9 +324,9 @@ impl Tasks {
     {
         let cell = {
             let mut running = arc_self.running.lock();
-            if running.closed {
+            let Some(running) = running.as_mut() else {
                 return false;
-            }
+            };
             let slot = running.free.pop().unwrap_or_else(|| {
                 running.slots.push(None);
                 running.slots.len() - 1
@@ -462,15 +455,15 @@ impl Tasks {
     /// Free a completed task's arena slot.
     pub(super) fn remove(&self, slot: usize) {
         let mut running = self.running.lock();
-        if running.closed {
+        let Some(running) = running.as_mut() else {
             return;
-        }
+        };
         running.slots[slot] = None;
         running.free.push(slot);
     }
 
     /// Clear all tasks and reject future registrations.
-    pub(super) fn clear(&self) -> Vec<Arc<dyn Erased>> {
+    pub(super) fn clear(&self) {
         // Clear both ready lanes.
         let mut ready = self.ready.lock();
         ready.normal.clear();
@@ -479,13 +472,15 @@ impl Tasks {
 
         // Clear running tasks and close the arena so registrations racing
         // teardown are rejected rather than leaked.
-        let slots = {
-            let mut running = self.running.lock();
-            running.closed = true;
-            running.free.clear();
-            take(&mut running.slots)
-        };
-        slots.into_iter().flatten().collect()
+        let slots = self
+            .running
+            .lock()
+            .take()
+            .map(|running| running.slots)
+            .unwrap_or_default();
+        for task in slots.into_iter().flatten() {
+            task.clear();
+        }
     }
 }
 
@@ -858,7 +853,7 @@ mod tests {
         queue_token(&tasks, pending_cell(&tasks, 1, true), ReadyLane::Event);
         assert!(tasks.has_ready());
 
-        assert!(tasks.clear().is_empty());
+        tasks.clear();
         let ready = tasks.ready.lock();
         assert!(ready.normal.is_empty());
         assert!(ready.event.is_empty());
@@ -935,9 +930,7 @@ mod tests {
         assert!(!tasks.has_ready());
 
         scratch.clear();
-        for task in tasks.clear() {
-            task.clear();
-        }
+        tasks.clear();
     }
 
     /// A task can wake itself and then complete, leaving one stale token in
@@ -986,7 +979,7 @@ mod tests {
         assert!(replacement.poll());
         tasks.remove(slot);
         assert!(!tasks.has_ready());
-        assert!(tasks.clear().is_empty());
+        tasks.clear();
     }
 
     /// A task that wakes itself multiple times per poll (by ref and by
@@ -1220,7 +1213,7 @@ mod tests {
         }
 
         let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
-        assert!(tasks.clear().is_empty());
+        tasks.clear();
 
         let polled = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicBool::new(false));

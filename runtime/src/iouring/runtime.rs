@@ -182,11 +182,11 @@ pub struct Config {
     /// Network configuration.
     network_cfg: NetworkConfig,
 
-    /// Explicit buffer pool configuration for network I/O, if provided.
-    network_buffer_pool_cfg: Option<BufferPoolConfig>,
+    /// Buffer pool configuration for network I/O.
+    network_buffer_pool_cfg: BufferPoolConfig,
 
-    /// Explicit buffer pool configuration for storage I/O, if provided.
-    storage_buffer_pool_cfg: Option<BufferPoolConfig>,
+    /// Buffer pool configuration for storage I/O.
+    storage_buffer_pool_cfg: BufferPoolConfig,
 }
 
 impl Config {
@@ -203,8 +203,8 @@ impl Config {
             storage_directory,
             thread_stack_size: utils::thread::system_thread_stack_size(),
             network_cfg: NetworkConfig::default(),
-            network_buffer_pool_cfg: None,
-            storage_buffer_pool_cfg: None,
+            network_buffer_pool_cfg: BufferPoolConfig::for_network(),
+            storage_buffer_pool_cfg: BufferPoolConfig::for_storage(),
         }
     }
 
@@ -303,16 +303,16 @@ impl Config {
     }
     /// Sets an explicit buffer pool configuration for network I/O.
     ///
-    /// Defaults to [BufferPoolConfig::for_network] when unset.
+    /// Defaults to [BufferPoolConfig::for_network].
     pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.network_buffer_pool_cfg = Some(cfg);
+        self.network_buffer_pool_cfg = cfg;
         self
     }
     /// Sets an explicit buffer pool configuration for storage I/O.
     ///
-    /// Defaults to [BufferPoolConfig::for_storage] when unset.
+    /// Defaults to [BufferPoolConfig::for_storage].
     pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.storage_buffer_pool_cfg = Some(cfg);
+        self.storage_buffer_pool_cfg = cfg;
         self
     }
 
@@ -361,22 +361,6 @@ impl Config {
     /// [Self::with_read_buffer_size]).
     pub const fn read_buffer_size(&self) -> usize {
         self.network_cfg.read_buffer_size
-    }
-
-    /// Returns the network buffer pool config, using the network default when
-    /// not explicitly configured.
-    fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
-        self.network_buffer_pool_cfg
-            .clone()
-            .unwrap_or_else(BufferPoolConfig::for_network)
-    }
-
-    /// Returns the storage buffer pool config, using the storage default when
-    /// not explicitly configured.
-    fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
-        self.storage_buffer_pool_cfg
-            .clone()
-            .unwrap_or_else(BufferPoolConfig::for_storage)
     }
 
     /// Rejects configurations the runtime must not start with.
@@ -474,11 +458,11 @@ impl Shared {
 /// torn down so late interactions fail loudly instead of parking state
 /// nothing will ever drain.
 ///
-/// Lock order: this mutex first, then any [AlarmState] waker slot. Holding
+/// Lock order: this mutex first, then any [Alarm] waker slot. Holding
 /// the queue lock across a slot take and its tombstone accounting keeps
 /// `cancelled` exact relative to draining and compaction.
 struct Sleeping {
-    alarms: BinaryHeap<Alarm>,
+    alarms: BinaryHeap<Arc<Alarm>>,
     /// Alarms in the heap whose waker slot was emptied by cancellation.
     /// Tombstones hold no task resources and are dropped at their deadline
     /// or by compaction, whichever comes first.
@@ -493,21 +477,10 @@ impl Sleeping {
     /// twice the live sleeper count.
     fn compact_if_needed(&mut self) {
         if self.cancelled * 2 > self.alarms.len() {
-            self.alarms
-                .retain(|alarm| alarm.state.waker.lock().is_some());
+            self.alarms.retain(|alarm| alarm.waker.lock().is_some());
             self.cancelled = 0;
         }
     }
-}
-
-/// State shared between a heap [Alarm] and its [Sleeper].
-struct AlarmState {
-    /// The waker of the task most recently seen polling the sleeper.
-    ///
-    /// Emptied exactly once: by firing, by cancellation ([Sleeper::drop]), or
-    /// by worker teardown. Accessed only under the [Sleeping] queue lock (or
-    /// with the heap already moved out of it at teardown).
-    waker: Mutex<Option<Waker>>,
 }
 
 /// Runtime state shared by every [Context] on one worker thread.
@@ -528,7 +501,7 @@ impl Executor {
     /// Panics if this worker already tore down: an alarm registered after the
     /// queue closed would never fire, so the sleep fails loudly in the
     /// registering task instead of hanging it.
-    fn register_alarm(&self, alarm: Alarm) {
+    fn register_alarm(&self, alarm: Arc<Alarm>) {
         let earliest = {
             let mut sleeping = self.sleeping.lock();
             let sleeping = sleeping
@@ -557,10 +530,10 @@ impl Executor {
     ///
     /// Panics if this worker already tore down: the alarm was discarded, so
     /// the sleep fails loudly in the polling task instead of hanging it.
-    fn refresh_alarm(&self, state: &AlarmState, waker: &Waker) -> bool {
+    fn refresh_alarm(&self, alarm: &Alarm, waker: &Waker) -> bool {
         let sleeping = self.sleeping.lock();
         assert!(sleeping.is_some(), "sleep outlived its io_uring worker");
-        let mut slot = state.waker.lock();
+        let mut slot = alarm.waker.lock();
         let Some(current) = slot.as_mut() else {
             return true;
         };
@@ -574,14 +547,14 @@ impl Executor {
     /// Compaction rebuilds the heap once tombstones outnumber live alarms, so
     /// the heap's size stays proportional to live sleepers regardless of how
     /// many long-deadline sleeps are cancelled (e.g. by losing a `select!`).
-    fn cancel_alarm(&self, state: &AlarmState) {
+    fn cancel_alarm(&self, alarm: &Alarm) {
         let mut guard = self.sleeping.lock();
         // Worker already torn down: the heap (and this alarm) was discarded.
         let Some(sleeping) = guard.as_mut() else {
             return;
         };
         // An already-empty slot means the alarm fired and left the heap.
-        if state.waker.lock().take().is_none() {
+        if alarm.waker.lock().take().is_none() {
             return;
         }
         sleeping.cancelled += 1;
@@ -601,7 +574,7 @@ impl Executor {
                     break;
                 }
                 let alarm = sleeping.alarms.pop().unwrap();
-                match alarm.state.waker.lock().take() {
+                match alarm.waker.lock().take() {
                     Some(waker) => due.push(waker),
                     // A tombstone reached its deadline before compaction.
                     None => sleeping.cancelled -= 1,
@@ -850,13 +823,11 @@ impl Worker {
                 .take()
                 .expect("alarm queue closed twice");
             for alarm in sleeping.alarms {
-                if let Some(waker) = alarm.state.waker.lock().take() {
+                if let Some(waker) = alarm.waker.lock().take() {
                     waker.wake();
                 }
             }
-            for task in executor.tasks.clear() {
-                task.clear();
-            }
+            executor.tasks.clear();
 
             // Drop the root task (and the worker's own handles) to release
             // any Context references still held.
@@ -955,11 +926,11 @@ impl crate::Runner for Runner {
 
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
-            self.cfg.resolved_network_buffer_pool_config(),
+            self.cfg.network_buffer_pool_cfg.clone(),
             &mut runtime_registry.sub_registry("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
-            self.cfg.resolved_storage_buffer_pool_config(),
+            self.cfg.storage_buffer_pool_cfg.clone(),
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
@@ -1005,7 +976,7 @@ impl crate::Runner for Runner {
             Sleeper {
                 executor: process_executor.clone(),
                 time: Instant::now() + duration.min(MAX_TIMER_DURATION),
-                state: None,
+                alarm: None,
             }
         });
         let _ = Tasks::register(&worker.executor.tasks, collector);
@@ -1033,7 +1004,7 @@ impl crate::Runner for Runner {
         // Snapshot reap-stashed panics before triggering any further
         // teardown: a payload present at this point was captured while the
         // root still ran, so it predates (and usually causes) any root
-        // panic. Taking it after the abort below would let a worker panicked
+        // panic. Taking it after the joins below would let a worker panicked
         // BY that cascade (and reaped by a racing foreign-thread spawn)
         // outrank the root panic it resulted from. A cascade panic from
         // `run`'s own internal abort can still slip in through the same
@@ -1041,11 +1012,6 @@ impl crate::Runner for Runner {
         // stashes with a teardown epoch, which the diagnostic payoff does
         // not justify.
         let stashed = shared.worker_panic.lock().take();
-
-        // `run` aborts the tree before it returns or unwinds, but a panic in
-        // `f` itself never reaches `run`, so abort again (idempotent) so every
-        // worker observes its wind-down before being joined.
-        root_tree.abort();
 
         // Join dedicated worker threads: the tree abort cascaded to their
         // roots, so each worker winds down once it observes the abort.
@@ -1458,14 +1424,19 @@ impl crate::Metrics for Context {
 struct Sleeper {
     executor: Weak<Executor>,
     time: Instant,
-    /// Alarm state shared with the heap, allocated on the first pending poll
+    /// Alarm shared with the heap, allocated on the first pending poll
     /// (an unpolled or immediately-ready sleep registers nothing).
-    state: Option<Arc<AlarmState>>,
+    alarm: Option<Arc<Alarm>>,
 }
 
 struct Alarm {
     time: Instant,
-    state: Arc<AlarmState>,
+    /// The waker of the task most recently seen polling the sleeper.
+    ///
+    /// Emptied exactly once: by firing, by cancellation ([Sleeper::drop]), or
+    /// by worker teardown. Accessed only under the [Sleeping] queue lock (or
+    /// with the heap already moved out of it at teardown).
+    waker: Mutex<Option<Waker>>,
 }
 
 impl PartialEq for Alarm {
@@ -1497,27 +1468,25 @@ impl Future for Sleeper {
             return Poll::Ready(());
         }
         let executor = self.executor.upgrade().expect("executor already dropped");
-        match &self.state {
+        match &self.alarm {
             None => {
-                // First pending poll: share alarm state with the heap.
-                let state = Arc::new(AlarmState {
+                // First pending poll: share the alarm with the heap.
+                let alarm = Arc::new(Alarm {
+                    time: self.time,
                     waker: Mutex::new(Some(cx.waker().clone())),
                 });
-                executor.register_alarm(Alarm {
-                    time: self.time,
-                    state: Arc::clone(&state),
-                });
-                self.state = Some(state);
+                executor.register_alarm(Arc::clone(&alarm));
+                self.alarm = Some(alarm);
             }
             // A pending re-poll before the deadline: refresh the stored waker
             // so the alarm wakes whichever task holds the sleeper now. This
             // also fails loudly (instead of returning `Pending` with no alarm
             // left to fire) when the re-poll is the teardown wake of a worker
             // that discarded this sleeper's alarm.
-            Some(state) => {
+            Some(alarm) => {
                 // The alarm may fire between the deadline check above and the
                 // refresh: the sleep is complete.
-                if executor.refresh_alarm(state, cx.waker()) {
+                if executor.refresh_alarm(alarm, cx.waker()) {
                     return Poll::Ready(());
                 }
             }
@@ -1531,13 +1500,13 @@ impl Drop for Sleeper {
         // Cancelled before the deadline (e.g. by losing a `select!`): release
         // the registered waker so the heap does not retain the task's
         // resources until the deadline elapses.
-        let Some(state) = self.state.take() else {
+        let Some(alarm) = self.alarm.take() else {
             return;
         };
         let Some(executor) = self.executor.upgrade() else {
             return;
         };
-        executor.cancel_alarm(&state);
+        executor.cancel_alarm(&alarm);
     }
 }
 
@@ -1550,7 +1519,7 @@ impl Clock for Context {
         Sleeper {
             executor: self.executor.clone(),
             time: Instant::now() + duration.min(MAX_TIMER_DURATION),
-            state: None,
+            alarm: None,
         }
     }
 
@@ -1750,7 +1719,7 @@ mod tests {
 
     /// Property: every public Config builder round-trips through its getter
     /// (including the new connect_timeout getter and the buffer-pool
-    /// resolvers), so builder regressions are immediately diagnosable.
+    /// configs), so builder regressions are immediately diagnosable.
     /// Setup: set every builder to a nondefault value. Action: read every
     /// getter. Expected: each returns the value that was set, with no
     /// runtime constructed.
@@ -1787,14 +1756,8 @@ mod tests {
         assert_eq!(cfg.tcp_nodelay(), None);
         assert!(!cfg.zero_linger());
         assert_eq!(cfg.read_buffer_size(), 4096);
-        assert_eq!(
-            cfg.resolved_network_buffer_pool_config().pool_min_size(),
-            111
-        );
-        assert_eq!(
-            cfg.resolved_storage_buffer_pool_config().pool_min_size(),
-            222
-        );
+        assert_eq!(cfg.network_buffer_pool_cfg.pool_min_size(), 111);
+        assert_eq!(cfg.storage_buffer_pool_cfg.pool_min_size(), 222);
     }
 
     /// Root readiness is serviced once after one spawned-task batch. If the
@@ -1908,13 +1871,11 @@ mod tests {
                     "event service ran before in-turn refill poll {poll}"
                 );
                 if poll == 1 {
-                    let state = Arc::new(AlarmState {
+                    let alarm = Arc::new(Alarm {
+                        time: Instant::now(),
                         waker: Mutex::new(self.service_waker.take()),
                     });
-                    self.executor.register_alarm(Alarm {
-                        time: Instant::now(),
-                        state,
-                    });
+                    self.executor.register_alarm(alarm);
                 }
                 if poll == 4 {
                     return Poll::Ready(());
@@ -3375,9 +3336,7 @@ mod tests {
     fn test_inline_spawn_after_task_arena_close_resolves_closed() {
         Runner::default().start(|context| async move {
             let executor = context.executor.upgrade().unwrap();
-            for task in executor.tasks.clear() {
-                task.clear();
-            }
+            executor.tasks.clear();
 
             let invoked = Arc::new(AtomicBool::new(false));
             let task_invoked = Arc::clone(&invoked);
