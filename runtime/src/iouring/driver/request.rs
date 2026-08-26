@@ -16,7 +16,7 @@
 //!
 //! | Kind | SQE family | Partial progress | Zero CQE | Deadline | Orphan continuation | Retry | Cancellation |
 //! | --- | --- | --- | --- | --- | --- | --- | --- |
-//! | [`Request::Send`] | `Send` or `Writev` | Resubmit to empty | [`Error::SendFailed`] | Optional | No | Transient while active | Reason |
+//! | [`Request::Send`] | `Send` or `SendMsg` | Resubmit to empty | [`Error::SendFailed`] | Optional | No | Transient while active | Reason |
 //! | [`Request::Recv`] | `Recv` | Resubmit to target when exact | [`Error::RecvFailed`] | Optional | No | Transient while active | Reason |
 //! | [`Request::Accept`] | `Accept` | None | Accepted fd `0` | Optional | No | Transient while active | Reason |
 //! | [`Request::Connect`] | `Connect` | None | Success | Optional | No | Transient while active, `EALREADY` always | Reason |
@@ -41,6 +41,19 @@ use std::{
 /// Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum
 /// so storage writes span as few submissions as possible.
 pub(super) const IOVEC_BATCH_SIZE: usize = 1024;
+
+/// Return the largest single-buffer length representable by a CQE result.
+///
+/// A CQE reports progress as an `i32`, so larger buffers must be staged over
+/// multiple submissions even though an SQE length is an unsigned 32-bit value.
+#[inline]
+const fn single_buffer_sqe_len(len: usize) -> u32 {
+    if len > i32::MAX as usize {
+        i32::MAX as u32
+    } else {
+        len as u32
+    }
+}
 
 /// Page-cache policy for a positioned I/O request.
 pub(crate) enum Cache {
@@ -96,6 +109,7 @@ pub(super) enum WriteBuffers {
 pub(super) struct VectoredBuffers {
     bufs: IoBufs,
     iovecs: IovecScratch,
+    message: MessageHeader,
 }
 
 /// Reusable iovec scratch describing co-owned buffers to the kernel.
@@ -113,6 +127,28 @@ struct IovecScratch(Box<[libc::iovec]>);
 // observe them, so the pointers never outlive or alias the buffers they
 // describe on any thread.
 unsafe impl Send for IovecScratch {}
+
+/// Stable message header for a vectored socket send.
+///
+/// The containing [VectoredBuffers] is boxed, so this header remains at a
+/// stable address while an SQE refers to it.
+struct MessageHeader(libc::msghdr);
+
+// SAFETY: the header starts with only null pointers and zero lengths. Before
+// submission, `refresh_message` points it at iovec scratch owned by the same
+// boxed `VectoredBuffers`. Rust never dereferences the raw pointers, and the
+// co-owned buffers and scratch remain alive until the kernel completes the
+// SQE, including if the request moves between threads.
+unsafe impl Send for MessageHeader {}
+
+impl MessageHeader {
+    /// Return an empty message header with no name or ancillary data.
+    const fn new() -> Self {
+        // SAFETY: an all-zero `msghdr` represents an empty message with null
+        // optional pointers and zero lengths.
+        Self(unsafe { std::mem::zeroed() })
+    }
+}
 
 impl std::ops::Deref for IovecScratch {
     type Target = [libc::iovec];
@@ -147,6 +183,7 @@ impl From<IoBufs> for WriteBuffers {
                 Self::Vectored(Box::new(VectoredBuffers {
                     bufs,
                     iovecs: IovecScratch(iovecs),
+                    message: MessageHeader::new(),
                 }))
             }
         }
@@ -155,7 +192,7 @@ impl From<IoBufs> for WriteBuffers {
 
 impl VectoredBuffers {
     /// Refresh the iovec scratch from the current chunks and return the
-    /// pointer and entry count for the next `Writev` SQE.
+    /// pointer and entry count for the next vectored SQE.
     #[inline]
     fn refresh_iovecs(&mut self) -> (*const libc::iovec, u32) {
         let max_iovecs = self.bufs.chunk_count().min(self.iovecs.len());
@@ -172,6 +209,14 @@ impl VectoredBuffers {
             .try_into()
             .expect("iovecs_len exceeds u32");
         (self.iovecs.as_ptr(), iovecs_len)
+    }
+
+    /// Refresh and return the stable message header for a socket send.
+    fn refresh_message(&mut self) -> *const libc::msghdr {
+        let (iovecs, iovecs_len) = self.refresh_iovecs();
+        self.message.0.msg_iov = iovecs.cast_mut();
+        self.message.0.msg_iovlen = iovecs_len as usize;
+        &raw const self.message.0
     }
 }
 
@@ -452,22 +497,13 @@ impl SendRequest {
             WriteBuffers::Single { buf } => {
                 let ptr = buf.as_ptr();
                 let remaining = buf.remaining();
-                opcode::Send::new(
-                    fd,
-                    ptr,
-                    remaining
-                        .try_into()
-                        .expect("single-buffer SQE length exceeds u32"),
-                )
-                .build()
+                opcode::Send::new(fd, ptr, single_buffer_sqe_len(remaining)).build()
             }
             WriteBuffers::Vectored(v) => {
-                let (ptr, len) = v.refresh_iovecs();
-
-                // `Writev` is sufficient here because network sends only need
-                // ordered byte delivery. This layer does not need sendmsg
-                // ancillary data or zerocopy completion management.
-                opcode::Writev::new(fd, ptr, len).build()
+                let message = v.refresh_message();
+                opcode::SendMsg::new(fd, message)
+                    .flags(libc::MSG_NOSIGNAL as u32)
+                    .build()
             }
         }
     }
@@ -529,14 +565,7 @@ impl RecvRequest {
         // offset <= len <= capacity.
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.offset) };
         let remaining = self.len - self.offset;
-        opcode::Recv::new(
-            fd,
-            ptr,
-            remaining
-                .try_into()
-                .expect("single-buffer SQE length exceeds u32"),
-        )
-        .build()
+        opcode::Recv::new(fd, ptr, single_buffer_sqe_len(remaining)).build()
     }
 
     /// Classify one recv CQE and return the terminal result, or `None` when
@@ -604,16 +633,10 @@ impl ReadAtRequest {
         let remaining = self.len - self.read;
         let offset = self.offset + self.read as u64;
         let rw_flags = self.rw_flags();
-        opcode::Read::new(
-            fd,
-            ptr,
-            remaining
-                .try_into()
-                .expect("single-buffer SQE length exceeds u32"),
-        )
-        .offset(offset)
-        .rw_flags(rw_flags)
-        .build()
+        opcode::Read::new(fd, ptr, single_buffer_sqe_len(remaining))
+            .offset(offset)
+            .rw_flags(rw_flags)
+            .build()
     }
 
     /// Classify one read CQE and return the terminal result, or `None` when
@@ -722,16 +745,10 @@ impl WriteAtRequest {
             WriteBuffers::Single { buf } => {
                 let ptr = buf.as_ptr();
                 let remaining = buf.remaining();
-                opcode::Write::new(
-                    fd,
-                    ptr,
-                    remaining
-                        .try_into()
-                        .expect("single-buffer SQE length exceeds u32"),
-                )
-                .offset(offset)
-                .rw_flags(rw_flags)
-                .build()
+                opcode::Write::new(fd, ptr, single_buffer_sqe_len(remaining))
+                    .offset(offset)
+                    .rw_flags(rw_flags)
+                    .build()
             }
             WriteBuffers::Vectored(v) => {
                 let (ptr, len) = v.refresh_iovecs();
@@ -1051,12 +1068,16 @@ impl SyncRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iouring::{RingConfig, driver::testing::TestLoop};
     use std::{
+        env,
         os::{
             fd::{FromRawFd, IntoRawFd},
             unix::net::UnixStream,
         },
         panic::{AssertUnwindSafe, catch_unwind},
+        process::Command,
+        time::Duration,
     };
 
     fn make_socket_fd() -> Arc<OwnedFd> {
@@ -1157,6 +1178,15 @@ mod tests {
                 CqeResult::Retry
             ));
         }
+    }
+
+    #[test]
+    fn test_single_buffer_sqe_len_boundaries() {
+        let max = i32::MAX as usize;
+        assert_eq!(single_buffer_sqe_len(0), 0);
+        assert_eq!(single_buffer_sqe_len(max), i32::MAX as u32);
+        assert_eq!(single_buffer_sqe_len(max + 1), i32::MAX as u32);
+        assert_eq!(single_buffer_sqe_len(usize::MAX), i32::MAX as u32);
     }
 
     #[test]
@@ -2618,6 +2648,65 @@ mod tests {
             .on_cqe(WaiterState::Active { target_tick: None }, 5)
             .expect("terminal CQE");
         output.expect("vectored send should complete");
+    }
+
+    #[test]
+    fn test_vectored_send_builds_sendmsg() {
+        fn assert_send_static<T: Send + 'static>() {}
+        assert_send_static::<SendRequest>();
+
+        let mut vectored = IoBufs::default();
+        vectored.append(IoBuf::from(b"hello"));
+        vectored.append(IoBuf::from(b" world"));
+        let mut request = SendRequest {
+            fd: make_socket_fd(),
+            write: vectored.into(),
+            deadline: None,
+        };
+
+        let sqe = request.build_sqe();
+        assert_eq!(sqe.get_opcode(), u32::from(opcode::SendMsg::CODE));
+        let WriteBuffers::Vectored(v) = &request.write else {
+            panic!("expected vectored write buffers");
+        };
+        assert_eq!(v.message.0.msg_iov, v.iovecs.as_ptr().cast_mut());
+        assert_eq!(v.message.0.msg_iovlen, 2);
+    }
+
+    #[test]
+    fn test_vectored_send_to_closed_socket_does_not_raise_sigpipe() {
+        const CHILD_ENV: &str = "COMMONWARE_TEST_IOURING_VECTORED_SEND_SIGPIPE_CHILD";
+        if env::var_os(CHILD_ENV).is_some() {
+            // SAFETY: this child process runs only this test on one test thread,
+            // before creating the loop or any operation that can raise SIGPIPE.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+
+            let mut harness = TestLoop::new(RingConfig::default());
+            let handle = harness.handle.clone();
+            let (sender, receiver) = UnixStream::pair().expect("failed to create socket pair");
+            drop(receiver);
+
+            let mut vectored = IoBufs::default();
+            vectored.append(IoBuf::from(b"hello"));
+            vectored.append(IoBuf::from(b" world"));
+            let result = harness.block_on(handle.send(
+                Arc::new(sender.into()),
+                vectored,
+                Instant::now() + Duration::from_secs(5),
+            ));
+            assert!(matches!(result, Err(Error::SendFailed)));
+            return;
+        }
+
+        let status = Command::new(env::current_exe().expect("missing current test executable"))
+            .arg("test_vectored_send_to_closed_socket_does_not_raise_sigpipe")
+            .arg("--test-threads=1")
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("failed to run SIGPIPE child test");
+        assert!(status.success(), "SIGPIPE child failed with {status}");
     }
 
     #[test]
