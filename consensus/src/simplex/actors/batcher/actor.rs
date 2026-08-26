@@ -4,7 +4,7 @@ use crate::{
     simplex::{
         Lookahead, Plan, Viewport,
         actors::voter,
-        config::ForwardingPolicy,
+        config::{ForwardPolicy, SkipPolicy},
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
@@ -68,8 +68,8 @@ where
     strategy: T,
 
     view_retention: ViewDelta,
-    skip_timeout: Duration,
-    forwarding: ForwardingPolicy,
+    skip: SkipPolicy,
+    forward: ForwardPolicy,
     epoch: Epoch,
     lookahead: Lookahead,
     floor: View,
@@ -154,8 +154,8 @@ where
                 strategy: cfg.strategy,
 
                 view_retention: cfg.view_retention,
-                skip_timeout: cfg.skip_timeout,
-                forwarding: cfg.forwarding,
+                skip: cfg.skip,
+                forward: cfg.forward,
                 epoch: cfg.epoch,
                 lookahead: cfg.lookahead,
                 floor: cfg.floor,
@@ -200,14 +200,14 @@ where
 
     /// Returns true if the participant has sent a recent message, or if fewer
     /// than a quorum of participants have (fail-open).
-    fn is_active(&self, participant: Participant) -> bool {
+    fn is_active(&self, participant: Participant, skip_timeout: Duration) -> bool {
         // Track activity with wall-clock time rather than raw view deltas. Stable-leader terms can
         // skip many view numbers at once, so we only fast-timeout when a quorum has been active
         // within `skip_timeout`, and the selected leader has not.
         let min_time = self
             .context
             .current()
-            .checked_sub(self.skip_timeout)
+            .checked_sub(skip_timeout)
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let recent =
             |activity: &Option<SystemTime>| activity.is_some_and(|activity| activity >= min_time);
@@ -251,10 +251,10 @@ where
         proposal: &Proposal<D>,
         next_leader: Participant,
     ) -> Vec<Participant> {
-        match self.forwarding {
-            ForwardingPolicy::Disabled => Vec::new(),
-            ForwardingPolicy::SilentVoters => round.missing_voters(proposal),
-            ForwardingPolicy::SilentLeader => round
+        match self.forward {
+            ForwardPolicy::Disabled => Vec::new(),
+            ForwardPolicy::SilentVoters => round.missing_voters(proposal),
+            ForwardPolicy::SilentLeader => round
                 .is_missing_voter(proposal, next_leader)
                 .then_some(next_leader)
                 .into_iter()
@@ -459,27 +459,32 @@ where
                             }
                         }
 
-                        // If the leader nullified this view or has not been active
-                        // recently, tell the voter to reduce the leader timeout to now.
+                        // When skipping is enabled, tell the voter to expire its timeout
+                        // when the leader nullified this view or has not been active recently.
                         //
                         // Activity is a best-effort, wall-clock signal: leader messages
                         // still queued inbound are not yet recorded, so a spurious
                         // fast-timeout here is possible and tolerated. That is safe and
                         // bounded: safety is unaffected, and nodes that already observed
                         // the leader's activity will not time out.
-                        let timeout_reason = match Self::leader_nullified(&current, &work) {
-                            // Leader already buffered a nullify for this now-current view
-                            // (allowed because we accept votes at or below `current`, at
-                            // `current+1`, or at the next term start)
-                            true => Some(TimeoutReason::LeaderNullify),
-                            false => match am_leader {
-                                // If we are the leader, we should not timeout
-                                true => None,
-                                // If we are not the leader and the leader isn't
-                                // active, we should timeout.
-                                false => (!self.is_active(leader))
-                                    .then_some(TimeoutReason::Inactivity)
-                            },
+                        let timeout_reason = match self.skip {
+                            SkipPolicy::Disabled => None,
+                            SkipPolicy::Enabled { timeout, .. } => {
+                                match Self::leader_nullified(&current, &work) {
+                                    // Leader already buffered a nullify for this now-current view
+                                    // (allowed because we accept votes at or below `current`, at
+                                    // `current+1`, or at the next term start)
+                                    true => Some(TimeoutReason::LeaderNullify),
+                                    false => match am_leader {
+                                        // If we are the leader, we should not timeout
+                                        true => None,
+                                        // If we are not the leader and the leader isn't
+                                        // active, we should timeout.
+                                        false => (!self.is_active(leader, timeout))
+                                            .then_some(TimeoutReason::Inactivity),
+                                    },
+                                }
+                            }
                         };
                         if let Some(timeout_reason) = timeout_reason {
                             current.leader_nullify_hinted =
@@ -489,7 +494,7 @@ where
 
                         // Forward the proposal, if enabled and we have something to forward
                         if let Some((proposal, round)) = forwardable_proposal
-                            .filter(|_| self.forwarding.is_enabled())
+                            .filter(|_| self.forward.is_enabled())
                             .and_then(|proposal| {
                                 work.get(&proposal.view()).map(|round| (proposal, round))
                             })
@@ -630,10 +635,12 @@ where
                         .get_or_create_by(&sender)
                         .try_set_max(view.get());
 
-                    // If the current leader explicitly nullifies the current view, signal
-                    // the voter so it can fast-path timeout without waiting for its local
-                    // timer. We check after adding because duplicate votes are rejected.
-                    if Self::leader_nullified(&current, &work) {
+                    // When skipping is enabled, a nullify from the current leader expires
+                    // the voter's timeout. We check after adding because duplicate votes are
+                    // rejected.
+                    if matches!(self.skip, SkipPolicy::Enabled { .. })
+                        && Self::leader_nullified(&current, &work)
+                    {
                         current.leader_nullify_hinted = true;
                         let round = Rnd::new(self.epoch, current.view);
                         let _guard = work

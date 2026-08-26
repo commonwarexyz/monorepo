@@ -74,7 +74,7 @@ where
     Context: Clone + Send + 'static,
 {
     entries: HashMap<Con::Key, Entry<Context, Con::Value, State>>,
-    deliveries: AbortablePool<PooledCompletion<Con::Key, Con::Subscriber, Context>>,
+    deliveries: AbortablePool<'static, PooledCompletion<Con::Key, Con::Subscriber, Context>>,
     next_generation: u64,
     consumer: Con,
 }
