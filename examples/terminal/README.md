@@ -13,10 +13,11 @@ protobuf, or generated RPC layer.
 
 The example is educational rather than a production operator or asset adapter. Wallet,
 operator, and validator keys are deterministically derived. The settlement process is intentionally
-in-memory; the SQLite operator and its close queue survive restarts. Agent retry journals are
-process-local, so this example does not promise exactly-once custody operations across an agent
-restart. Settlement keeps a bounded in-memory acknowledgement window; older admission and claim
-retries fail closed instead of executing again.
+in-memory; the SQLite operator and its close queue survive restarts. Each wallet's cumulative
+debit, pending signed send, and authenticated receipts are SQLite-backed. Deposit, withdrawal, and
+claim retries remain process-local, so those workflows do not promise exactly-once behavior across
+an agent restart. Settlement keeps a bounded in-memory acknowledgement window; older admission and
+claim retries fail closed instead of executing again.
 
 ## Run
 
@@ -38,7 +39,8 @@ cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0
 Agent identities are `0=Alice`, `1=Bob`, `2=Carol`, `3=Dave`, and `4=Eve (external)`. The first
 four are registered operator accounts. Eve demonstrates an unregistered recipient claiming an
 external payout. Run more agent processes with different identities to exercise independently
-owned wallets.
+owned wallets. Each identity defaults to `terminal-agent-<identity>.sqlite`; pass `--database` to
+choose an explicit wallet database path.
 
 The UI supports payments, deposits, exact withdrawals, amountless account Close authorizations,
 withdrawal claims, and epoch closure. A deposit first becomes settlement custody and is then

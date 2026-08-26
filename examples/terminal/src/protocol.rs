@@ -6,7 +6,7 @@ use commonware_clearing::bajillion::{
     admission::{Committee, RetainedAssignment, Vote, assigned_slice_indices, bls12381, seal},
     boundary::{DepositBatch, WithdrawalBatch},
     credit::ShardSet,
-    settlement::{FinalizedBatch, SettlementChain, SettlementConfig},
+    settlement::{EpochDeadlinePolicy, FinalizedBatch, SettlementChain, SettlementConfig},
     state::{AccountRow, StateLeaf},
     transition::{
         Assignment, CloseContext, CloseLimits, EpochContext, ExternalPayoutClaim, Header,
@@ -295,12 +295,16 @@ pub(crate) fn assignment() -> Result<Assignment<Digest>> {
 pub(crate) const fn settlement_config() -> SettlementConfig {
     SettlementConfig::new(
         NonZeroUsize::new(4).expect("pipeline bound is nonzero"),
+        EpochDeadlinePolicy::new(
+            NonZeroU64::new(10).expect("admission delay is nonzero"),
+            NonZeroU64::new(1).expect("minimum challenge duration is nonzero"),
+            NonZeroU64::new(1).expect("maximum challenge duration is nonzero"),
+        ),
+        NonZeroU64::new(100).expect("deposit timeout is nonzero"),
         NonZeroU64::new(4).expect("notice is nonzero"),
         NonZeroU64::new(100).expect("notice is nonzero"),
-        NonZeroUsize::new(MAX_ACCOUNTS).expect("account bound is nonzero"),
         256,
         NonZeroUsize::new(MAX_DEPOSIT_EVENTS).expect("deposit bound is nonzero"),
-        NonZeroUsize::new(MAX_ACCOUNTS).expect("claim-batch bound is nonzero"),
     )
 }
 
@@ -634,6 +638,32 @@ fn deadlines(epoch: u64) -> Result<(u64, u64)> {
         base.checked_add(1).context("admission deadline overflow")?,
         base.checked_add(2).context("challenge deadline overflow")?,
     ))
+}
+
+fn openable_epoch_at_offset(epoch: u64, offset: u64) -> Result<u64> {
+    let candidate = epoch.checked_add(offset).context("epoch overflow")?;
+    deadlines(candidate).context("required epoch clock overflow")?;
+    Ok(candidate)
+}
+
+/// Returns the successor when its epoch context can be represented.
+pub(crate) fn openable_epoch_after(epoch: u64) -> Result<u64> {
+    openable_epoch_at_offset(epoch, 1)
+}
+
+/// Ensures work that can leave a balance has time to close and later exit.
+pub(crate) fn ensure_balance_intake_horizon(epoch: u64) -> Result<()> {
+    openable_epoch_at_offset(epoch, 3).map(drop)
+}
+
+/// Ensures a withdrawal can close while retaining one successor for residual state.
+pub(crate) fn ensure_amount_withdrawal_horizon(epoch: u64) -> Result<()> {
+    openable_epoch_at_offset(epoch, 2).map(drop)
+}
+
+/// Ensures an amountless close can reach finalization.
+pub(crate) fn ensure_close_horizon(epoch: u64) -> Result<()> {
+    openable_epoch_at_offset(epoch, 1).map(drop)
 }
 
 pub(crate) fn short_digest(digest: &Digest) -> String {

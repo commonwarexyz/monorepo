@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-08-23T00:00:00Z"
+modified-time: "2026-08-25T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,9 +11,9 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Updated (8/23/26): Clearing now rebuilds a compact BMT from the live accounts at every close, creates and removes accounts as their balances enter and leave the state, and nets sends to absent recipients into external payouts. Storage now provides a known-size streaming BMT builder for embeddings that need root-only construction. Finalization reserves only aggregate withdrawal and external-payout value; each recipient later claims with a bounded Merkle witness, so even a flood of outputs leaves the certified settlement constant-size. The 32-byte commitment and BLS12-381 multisignature certificate are unchanged.*
+*Updated (8/25/26): Bajillion now rebuilds a dynamic live-account tree at each close and settles payouts and recovery through independent claims.*
 
-*Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
+*Update (8/20/26): Bajillion now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
 \$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years.
 
@@ -25,7 +25,7 @@ For a given set of accounts, one payment or a bajillion costs the same to settle
 
 ## Payments as Fast as Browsing the Web
 
-A Bajillion deployment starts from an authenticated account vector, and each epoch uses an onchain anchor $\mathcal A_e$. A pipelined successor can begin serving from its projected opening vector while the preceding epoch closes, then bind that exact opening root before settlement. Deposits and user-signed withdrawals are fixed before online payments begin. Let's suppose account $a$ opens with 100 and wants to pay account $b$ 20.
+A Bajillion deployment starts from an authenticated account vector, and each epoch uses an onchain anchor $\mathcal A_e$. A pipelined successor can begin serving from its projected opening vector while the preceding epoch closes, then bind that exact opening root before settlement. The deployment fixes the maximum admission-delay increment and the minimum and maximum challenge duration before it accepts funds. Deposits and user-signed withdrawals are fixed before online payments begin. Let's suppose account $a$ opens with 100 and wants to pay account $b$ 20.
 
 $a$'s persistent state $X_a$ is a balance $B_a$, cumulative debit $D_a$, operator-promised credit $C_a$, a receipt count, and an activity flag. To send $x>0$ from $a$ to $b$, the payer signs the exact next debit, and the operator accepts by advancing the recipient's receive shard $\kappa$ from its current tip $(G,J)$ (which may or may not have been registered with the operator at the start of the epoch):
 
@@ -37,7 +37,7 @@ $$
 
 After authenticating $S$ and checking spendability, the operator atomically commits the debit, shard advance, close reservation, replay record, and receipt body. It then signs and returns $R$.
 
-The matching pair $(S,R)$ is the accepted payment and the preconfirmation. The payer verifies and retains it, then forwards it to the recipient (if not forwarded by the operator already). A rejection before the commit changes nothing. If the response is lost, retrying the same request returns the same pair without a second debit.
+The matching pair $(S,R)$ is the accepted payment and the preconfirmation. The payer verifies and durably retains it, advances its local $D_a$ in that atomic local receipt commit, then forwards the pair to any recipient that will rely on it. The wallet keeps at most one unacknowledged send for this payer: it does not sign the next cumulative endpoint until the prior pair is verified and committed. An operator-reported counter is never the payer's authority. A rejection before the operator's commit changes no balance; the wallet retains the exact staged request for retry. If the response is lost, retrying that request returns the same pair without a second debit. This ordering serializes one payer account, not independent payers or a recipient's receive shards.
 
 Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$.
 
@@ -70,14 +70,14 @@ Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$
     }
   </style>
 </noscript>
-<div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs request S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and receive shard kappa zero from (0,0) to (20,1), and then signs receipt R. The response returns to a, which retains the matching pair of S and R and forwards the same pair directly to recipient b with no operator hop. A dashed line shows the operator could instead relay the same pair to b directly, one hop sooner.">
-  <noscript>Account a sends one request to one operator and receives one signed response. Verification, atomic storage, and receipt signing are local operator steps, and the payment is accepted at the operator's commit while the response is still in flight. Afterward, a gives the same matching pair directly to b without another operator hop, and the operator could equally deliver the pair to b one hop sooner.</noscript>
+<div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs request S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and receive shard kappa zero from (0,0) to (20,1), and then signs receipt R. The response returns to a, which retains the matching pair of S and R and forwards the same pair directly to recipient b with no operator hop.">
+  <noscript>Account a sends one request to one operator and receives one signed response. Verification, atomic storage, and receipt signing are local operator steps, and the payment is accepted at the operator's commit while the response is still in flight. Afterward, a gives the same matching pair directly to b without another operator hop.</noscript>
 </div>
 <script type="module" src="clearing.loops.js"></script>
 ```
 
 ::: {.image-caption}
-Figure 1: The payer sends one request and receives one signed response. The operator verifies, commits, and signs locally, adding no network round trip. The commit moves $a$ from 100 to 80 and advances $b$'s receive shard $\kappa_0$ from $(0,0)$ to $(20,1)$ before $R$ exists. Once $R$ returns, $a$ sends the same matching $(S,R)$ directly to $b$ as transferable evidence, and the operator, holding the same pair, could deliver it to $b$ one hop sooner.
+Figure 1: The payer sends one request and receives one signed response. The operator verifies, commits, and signs locally, adding no network round trip. The commit moves $a$ from 100 to 80 and advances $b$'s receive shard $\kappa_0$ from $(0,0)$ to $(20,1)$ before $R$ exists. Once $R$ returns, $a$ sends the same matching $(S,R)$ directly to $b$ as transferable evidence.
 :::
 
 ## Optimizing for Hot Accounts
@@ -212,6 +212,18 @@ n&=100,\qquad f=33,\qquad q=2f+1=67,\\[0.3em]
 \end{aligned}
 $$
 
+## Fault and Availability Model
+
+The operator is Byzantine: it may halt, censor, equivocate, withhold messages, and propose arbitrary closes, but it cannot forge a payer signature. Bajillion assumes secure hashes and signatures, authenticated validator proofs of possession, at most $f$ Byzantine validators in the exact $n=3f+1$ committee above, and a correct and live settlement chain. Honest validators authenticate and durably retain their assigned dealings before voting. The embedding must keep the root bundle, public corpus, and required Merkle openings retrievable for as long as they can be challenged or claimed.
+
+Sealing is not a totals-only check. Each validator authenticates the exact layout and state ranges in its slices, every changed-account equation, terminal outgoing pair, terminal receive-shard head, boundary contribution, prefix transition, state update, and distinct payment signature in its dealing. The terminal prefix then binds the exact vector lengths, deposits, withdrawals, external payouts, payment conservation, and closing liability. What certification cannot establish is that the operator never signed an additional receipt outside the selected public corpus.
+
+Each payer account is one linear cumulative-debit sequence. A wallet using the base safety guarantee stages one exact send, retries those same bytes after response loss, verifies and durably commits the matching pair, advances its locally owned debit, and only then signs the next endpoint. A later endpoint authorizes the whole debit delta up to that value, while the public row carries only the terminal outgoing pair. If a wallet deliberately signs several cumulative endpoints before obtaining the earlier receipts, an intermediate receipt may be neither held privately nor selected as that terminal pair; that exposure is outside the base guarantee. This per-payer ordering does not limit parallel sends from independent accounts or parallel incoming receive shards.
+
+The linked pair is private, transferable evidence. Any holder may submit a challenge; the chain does not require the caller to be the payer or recipient. Neither role must remain continuously online, but the availability assumption is per receipt: at least one honest holder must obtain and retain the required pair or pairs and get the bounded challenge included by $\Delta_e$. A recipient that wants an independently enforceable preconfirmation obtains the pair before relying on it. Honest validators retain public proof slices, but they cannot reconstruct a private receipt that no independent holder received or retained. This is not a single global observer assumption: different receipts may depend on different holders.
+
+The configured challenge duration therefore trades clean-settlement latency for evidence-holder offline tolerance. A close finalizes only after its inclusive challenge window, and a withdrawal becomes claimable only after the close carrying it reaches the FIFO front and finalizes. Its absolute deadline is a permanent-fault trigger, not a promise of payout at that timestamp. Deposits use a different path: settlement already records the refund account and amount, so an expired unadmitted deposit is directly refundable without private evidence. Hard-fault recovery removes operator cooperation, but claimants still need the relevant authenticated openings and the settlement integration must atomically persist each claim with its custody effect.
+
 ## The Unavoidable Challenge
 
 Validation establishes that the bound corpus satisfies the public relation. However, it cannot establish that the corpus contains every receipt the operator signed and delivered privately.
@@ -222,7 +234,7 @@ $$
 \mathsf{View}(\Xi_0)=(\mathcal D_e,\zeta)=\mathsf{View}(\Xi_1).
 $$
 
-If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or SNARK/STARK) can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature. Through the inclusive deadline $t\le\Delta_e$, any holder or watchtower may submit one of four bounded contradictions:
+If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or SNARK/STARK) can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature. Through the inclusive deadline $t\le\Delta_e$, any holder may submit one of four bounded contradictions:
 
 1. **Payer debit contradiction.** A matching acknowledged pair carries a debit above the public debit marker, or the same debit with a different send or receipt body. A bare payer request is insufficient. The receipt proves operator acknowledgement.
 
@@ -246,7 +258,7 @@ Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;\omega,\;\tau\b
 \omega\in\bigl\{\mathsf{withdraw}(x)\mid x>0\bigr\}\cup\bigl\{\mathsf{close}\bigr\}.
 $$
 
-$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, a destination $v$, an operation $\omega$, and an absolute deadline $\tau$. An ordinary withdrawal authorizes exactly the positive amount $x$; a close carries no amount. The operator neither submits nor approves it, and its cooperation decides only whether the authorization settles through a clean close or through terminal unwind.
+$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, a destination $v$, an operation $\omega$, and an absolute deadline $\tau$. An ordinary withdrawal authorizes exactly the positive amount $x$; a close carries no amount. The operator neither submits nor approves it, and its cooperation decides only whether the authorization settles through a clean close or through hard-fault settlement.
 
 There is also a fast path for paying someone who is not registered with the operator. The operator accepts the sends normally and records one absent-recipient row whose account and credit delta identify the recipient and exact net amount. The terminal layout opening authenticates only the aggregate $P_e$. If the close survives its challenge window, each recipient presents that row and, unless it is first, the immediately preceding row under one shared $\mathsf{ChangeRoot}_e$ multiproof. Their cumulative-prefix difference proves that this row contributed the claimed payout. The chain keys replay protection by the finalized batch and row position, so no recipient list or all-payout multiproof enters settlement and no post-deadline crank must fan payments out. From custody's perspective, this is a netted withdrawal; from the sender's perspective, it is an ordinary preconfirmed payment.
 
@@ -258,7 +270,7 @@ $$
 \boxed{w_a=B_a^0+f_a+c_a-d_a,\qquad B_a^1=0.}
 $$
 
-After clean finalization, any positive payout is claimed with the authorization's withdrawal-boundary opening and one change-root multiproof over its row and, unless it is first, the immediately preceding row. The difference between adjacent cumulative prefixes gives the exact withdrawal value without retaining a recipient list: an ordinary withdrawal must equal its authorized amount, while a close must equal the authenticated tail above. A zero tail is a valid close and needs no payout claim. No later descendant can outlive that close, so whichever root survives can pay it. Deposits need no deadline at all: an unconsumed deposit simply returns in the terminal payout.
+After clean finalization, any positive payout is claimed with the authorization's withdrawal-boundary opening and one change-root multiproof over its row and, unless it is first, the immediately preceding row. The difference between adjacent cumulative prefixes gives the exact withdrawal value without retaining a recipient list: an ordinary withdrawal must equal its authorized amount, while a close must equal the authenticated tail above. A zero tail is a valid close and needs no payout claim. No later descendant can outlive that close, so whichever root survives can pay it. Every accepted deposit must enter an admitted close before its settlement-policy deadline. Admission discharges that obligation; expiry permanently tombstones the operator. The settlement queue already fixes the refund account and amount, so anyone can trigger that refund without an operator or state opening.
 
 What makes the exit credible is that custody never leaves the chain early. Let $R_z$ be the reserve for finalized but unclaimed withdrawals and external payouts. With finalized liability $L_z$, pending slots $z+1,\ldots,\ell$ carrying boundary flows $(F_i,W_i,P_i)$, and deposits not yet included in a pending close $F_\star$:
 
@@ -271,7 +283,7 @@ $$
 
 Withdrawals and external payouts stay in active custody until their slot finalizes at the queue front, then their aggregate value moves into $R_z$. Individual claims reduce that reserve and the chain's assets together. This finalization step touches only totals and roots; its work does not grow with the number of recipients. A challenged or invalidated suffix creates no reserve. The operator can stop serving payments, but it cannot take funds or send them without authorization.
 
-If $Q$ is still unfinalized at $t\ge\tau$, the first time-aware onchain call to observe the deadline permanently freezes new work. The pending slots then resolve from the front, each finalizing once its challenge window closes or falling to a challenge, and terminal unwind opens against the last root standing. Already-finalized claim reserves remain claimable and are excluded from unwind. Outstanding queued authorizations pay any amount due to their signed destinations, while terminal unwind authenticates and scans the complete surviving state and returns every residual balance and unconsumed deposit in one exceptional custody-exhausting payout list.
+If $Q$ is still unfinalized at $t\ge\tau$, or an accepted deposit remains outside an admitted close through its inclusion deadline, the first time-aware onchain call to observe the deadline permanently freezes new work. Pending deposit refunds remain independently claimable from the settlement queue. The pending slots resolve from the front, each finalizing once its challenge window closes or falling to a challenge, then hard-fault settlement freezes the last finalized state root. Already-finalized claim reserves remain claimable and stay separate. Each survivor consumes one retained state opening against the frozen root: an outstanding authorization routes its amount to the signed destination, and the account receives the residual. These replay-protected claims are independent, so recovery needs neither an all-account scan nor a global payout crank. An opening against the root ultimately frozen must remain available until its position is claimed; the protocol supplies neither a historical witness store nor a terminal-claim deadline.
 
 ## Streamlined Epoch Transitions
 

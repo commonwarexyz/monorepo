@@ -6,6 +6,7 @@
 )]
 
 mod agent;
+mod agent_store;
 mod operator;
 mod operator_rpc;
 mod protocol;
@@ -41,8 +42,9 @@ pub fn run_operator(
 pub fn run_agent(
     operator: SocketAddr,
     settlement: SocketAddr,
+    database: PathBuf,
     identity: usize,
     scripted: bool,
 ) -> Result<()> {
-    service::run_agent(operator, settlement, identity, scripted)
+    service::run_agent(operator, settlement, database, identity, scripted)
 }

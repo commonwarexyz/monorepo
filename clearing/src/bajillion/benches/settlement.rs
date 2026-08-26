@@ -5,7 +5,7 @@ use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::StateOpening,
     credit::ShardSet,
-    settlement::{SettlementChain, SettlementConfig},
+    settlement::{EpochDeadlinePolicy, SettlementChain, SettlementConfig},
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
         Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, RootBundle, StateCache,
@@ -140,11 +140,17 @@ const fn nonzero_usize(value: usize) -> NonZeroUsize {
 fn settlement_config(max_pending_epochs: usize, live_accounts: usize) -> SettlementConfig {
     SettlementConfig::new(
         nonzero_usize(max_pending_epochs.max(1)),
+        EpochDeadlinePolicy::new(
+            NonZeroU64::new(ADMISSION_DEADLINE).expect("benchmark admission delay is positive"),
+            NonZeroU64::new(CHALLENGE_DEADLINE - ADMISSION_DEADLINE)
+                .expect("benchmark challenge duration is positive"),
+            NonZeroU64::new(CHALLENGE_DEADLINE - ADMISSION_DEADLINE)
+                .expect("benchmark challenge duration is positive"),
+        ),
+        NonZeroU64::new(MAXIMUM_WITHDRAWAL_NOTICE).expect("benchmark deposit timeout is positive"),
         NonZeroU64::new(1).expect("benchmark notice is positive"),
         NonZeroU64::new(MAXIMUM_WITHDRAWAL_NOTICE).expect("benchmark maximum notice is positive"),
-        nonzero_usize(live_accounts),
         64,
-        nonzero_usize(live_accounts),
         nonzero_usize(live_accounts),
     )
 }
@@ -431,7 +437,7 @@ fn hard_fault_input(live_accounts: usize, claims: usize) -> (TestChain, TestCach
             .expect("benchmark withdrawal can be queued");
     }
     chain
-        .fault_expired_withdrawal(FAULT_DEADLINE)
+        .fault_expired(FAULT_DEADLINE)
         .expect("benchmark withdrawal deadline creates a hard fault");
     (chain, cache)
 }
@@ -522,17 +528,17 @@ fn bench_hard_fault(c: &mut Criterion) {
     for &(live_accounts, claims) in HARD_FAULT_PROFILES {
         c.bench_function(
             &format!(
-                "{}/op=unwind live_accounts={live_accounts} claims={claims}",
+                "{}/op=begin-hard-fault live_accounts={live_accounts} withdrawals={claims}",
                 module_path!()
             ),
             |b| {
                 b.iter_batched(
                     || hard_fault_input(live_accounts, claims),
-                    |(mut chain, cache)| {
+                    |(mut chain, _cache)| {
                         black_box(
                             chain
-                                .settle_hard_fault(black_box(&cache))
-                                .expect("benchmark hard fault can be settled"),
+                                .begin_hard_fault_settlement()
+                                .expect("benchmark hard-fault claims can begin"),
                         )
                     },
                     BatchSize::LargeInput,

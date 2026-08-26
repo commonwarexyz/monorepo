@@ -15,12 +15,12 @@ The `bajillion` module provides the runtime-agnostic objects and verification ru
 signed payments and receipts, receive-shard commitments, fresh live-state transitions,
 deterministic proof slices for authenticated dissemination, exact-quorum commitment certificates and
 retained dealings, bounded receipt challenges, and a bounded in-memory settlement state machine
-for registration, admission, FIFO finalization, custody accounting, hard-fault fencing, and terminal
-unwind. Deposits can create accounts, zero balances leave the committed state, and sends to absent
-recipients become certified external payouts. Admission binds a 32-byte context-bound root-of-roots
-Header to an ordered opening, change, closing, and slice-layout root bundle. The 128-byte
-RootBundle is public witness data. It is retained by validators and the data-availability layer and
-must be supplied or cached by external settlement operations.
+for registration, admission, FIFO finalization, custody accounting, hard-fault fencing, and
+incremental hard-fault claims. Deposits can create accounts, zero balances leave the committed
+state, and sends to absent recipients become certified external payouts. Admission binds a 32-byte
+context-bound root-of-roots Header to an ordered opening, change, closing, and slice-layout root
+bundle. The 128-byte RootBundle is public witness data. It is retained by validators and the
+data-availability layer and must be supplied or cached by external settlement operations.
 
 `seal` authenticates and takes ownership of a validator's dealing before signing the Header. A
 dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator.

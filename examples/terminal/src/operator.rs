@@ -3,8 +3,9 @@
 use crate::{
     protocol::{
         AccountCache, AccountIdentity, DepositEvent, EpochRegistration, INITIAL_BALANCE, Key,
-        Payment, PreparedEpoch, Protocol, SettlementResult, external_identity, identities,
-        short_digest,
+        Payment, PreparedEpoch, Protocol, SettlementResult, ensure_amount_withdrawal_horizon,
+        ensure_balance_intake_horizon, ensure_close_horizon, external_identity, identities,
+        openable_epoch_after, short_digest,
     },
     settlement::SettlementSubmission,
     settlement_rpc,
@@ -275,6 +276,7 @@ impl Operator {
 
     pub(crate) fn payment_quote(&self, account: &Key) -> Result<PaymentQuote> {
         self.ensure_operating()?;
+        self.ensure_balance_intake_horizon()?;
         let account = self
             .store
             .current_account(account)?
@@ -288,6 +290,13 @@ impl Operator {
     pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedPayment> {
         self.ensure_operating()?;
         self.validate_recipient(send.body().recipient())?;
+        if self.store.payment_requires_boundary_freeze(
+            self.registration.context.payment(),
+            &send,
+            0,
+        )? {
+            self.ensure_balance_intake_horizon()?;
+        }
         let result = self.store.accept_send(
             self.registration.context.payment(),
             self.protocol.operator(),
@@ -303,8 +312,15 @@ impl Operator {
     ) -> Result<bool> {
         self.ensure_operating()?;
         self.validate_recipient(send.body().recipient())?;
-        self.store
-            .payment_requires_boundary_freeze(self.registration.context.payment(), send, 0)
+        let required = self.store.payment_requires_boundary_freeze(
+            self.registration.context.payment(),
+            send,
+            0,
+        )?;
+        if required {
+            self.ensure_balance_intake_horizon()?;
+        }
+        Ok(required)
     }
 
     #[cfg(test)]
@@ -344,6 +360,7 @@ impl Operator {
             );
             return Ok(staged);
         }
+        self.ensure_balance_intake_horizon()?;
         let identity = self
             .identities
             .iter()
@@ -406,6 +423,7 @@ impl Operator {
 
     pub(crate) fn withdrawal_opening(&self, account: &Key) -> Result<WithdrawalQuote> {
         self.ensure_operating()?;
+        self.ensure_close_horizon()?;
         let current = self.store.load_current()?;
         let assembled = assemble_epoch(&self.protocol, &current, &self.registration)?;
         let opening =
@@ -427,6 +445,7 @@ impl Operator {
         if let Some(staged) = self.staged_withdrawal(&request)? {
             return Ok(staged);
         }
+        self.ensure_withdrawal_intake_horizon(request.body().action())?;
         let quote = self.withdrawal_opening(request.account())?;
         request
             .verify_context(&self.protocol.deployment(), &quote.root.digest)
@@ -492,7 +511,7 @@ impl Operator {
         self.validate_close_start(expected_epoch)?;
         let epoch = expected_epoch;
         let payment_context = self.registration.context.payment().clone();
-        let next_epoch = epoch.checked_add(1).context("epoch overflow")?;
+        let next_epoch = self.next_openable_epoch()?;
         let successor = self.protocol.registration(
             next_epoch,
             DepositBatch::empty(),
@@ -550,6 +569,7 @@ impl Operator {
             self.registration.context.payment().epoch() == expected_epoch,
             "close request does not match the active epoch"
         );
+        self.next_openable_epoch()?;
         ensure!(self.store.has_current_work()?, "there is nothing to close");
         ensure!(
             self.store.pending_close_count()? < MAX_PENDING_CLOSES,
@@ -677,6 +697,7 @@ impl Operator {
 
     pub(crate) fn settlement_boundary(&self) -> Result<SettlementBoundary> {
         self.ensure_operating()?;
+        self.next_openable_epoch()?;
         let epoch = self.registration.context.payment().epoch();
         let deposits = self.registration.deposits.clone();
         let withdrawals = self.registration.withdrawals.clone();
@@ -687,6 +708,29 @@ impl Operator {
             withdrawals,
             signature,
         })
+    }
+
+    fn next_openable_epoch(&self) -> Result<u64> {
+        openable_epoch_after(self.registration.context.payment().epoch())
+    }
+
+    fn ensure_balance_intake_horizon(&self) -> Result<()> {
+        ensure_balance_intake_horizon(self.registration.context.payment().epoch())
+    }
+
+    fn ensure_withdrawal_intake_horizon(&self, action: &WithdrawalAction) -> Result<()> {
+        match action {
+            WithdrawalAction::Amount(_) => {
+                ensure_amount_withdrawal_horizon(self.registration.context.payment().epoch())
+            }
+            WithdrawalAction::Close => {
+                ensure_close_horizon(self.registration.context.payment().epoch())
+            }
+        }
+    }
+
+    fn ensure_close_horizon(&self) -> Result<()> {
+        ensure_close_horizon(self.registration.context.payment().epoch())
     }
 
     fn validate_recipient(&self, recipient: &Key) -> Result<()> {
@@ -788,7 +832,7 @@ impl Operator {
                             return Ok(result);
                         };
                         let submission = SettlementSubmission::from(&result);
-                        let finalized = admit_with_retry(
+                        let finalized = admit_until_known(
                             || settlement_rpc::admit_blocking(address, &submission),
                             Duration::from_millis(100),
                         )?;
@@ -953,7 +997,7 @@ impl Operator {
     }
 }
 
-fn admit_with_retry<T>(
+fn admit_until_known<T>(
     mut attempt: impl FnMut() -> std::result::Result<T, settlement_rpc::AdmitError>,
     retry_delay: Duration,
 ) -> Result<T> {
@@ -963,10 +1007,7 @@ fn admit_with_retry<T>(
             Err(settlement_rpc::AdmitError::Rejected(error)) => {
                 anyhow::bail!("settlement rejected admission: {error}")
             }
-            Err(
-                settlement_rpc::AdmitError::AwaitingClaimCapacity
-                | settlement_rpc::AdmitError::Unknown(_),
-            ) => thread::sleep(retry_delay),
+            Err(settlement_rpc::AdmitError::Unknown(_)) => thread::sleep(retry_delay),
         }
     }
 }
@@ -1522,17 +1563,6 @@ mod tests {
         operator.start_close(epoch)
     }
 
-    fn expect_finalized(
-        outcome: crate::settlement::AdmissionOutcome,
-    ) -> commonware_clearing::bajillion::settlement::FinalizedBatch<Digest> {
-        match outcome {
-            crate::settlement::AdmissionOutcome::Finalized(finalized) => finalized,
-            crate::settlement::AdmissionOutcome::AwaitingClaimCapacity => {
-                panic!("settlement unexpectedly retained an admitted close")
-            }
-        }
-    }
-
     fn rotate_epoch(operator: &mut Operator, epoch: u64) {
         let successor = operator
             .protocol
@@ -1762,14 +1792,91 @@ mod tests {
     }
 
     #[test]
-    fn retryable_settlement_admission_is_retried() {
+    fn intake_stops_before_the_terminal_clock_exhausts() {
+        let mut operator = operator();
+        operator.pay(0, 1, 1).unwrap();
+        let terminal_epoch = (u64::MAX - 2) / 10;
+        operator.registration = operator
+            .protocol
+            .registration(
+                terminal_epoch,
+                DepositBatch::empty(),
+                WithdrawalBatch::empty(),
+                operator.store.current_liability().unwrap(),
+            )
+            .unwrap();
+
+        assert!(
+            operator
+                .payment_quote(&operator.wallets[0].public_key())
+                .is_err()
+        );
+        assert!(operator.validate_close_start(terminal_epoch).is_err());
+        assert!(operator.settlement_boundary().is_err());
+        assert_eq!(operator.snapshot().unwrap().payments.len(), 1);
+    }
+
+    #[test]
+    fn balance_intake_stops_while_the_current_epoch_can_still_close() {
+        let mut operator = operator();
+        operator.pay(0, 1, 1).unwrap();
+        let terminal_epoch = (u64::MAX - 2) / 10;
+        let epoch = terminal_epoch - 2;
+        operator.registration = operator
+            .protocol
+            .registration(
+                epoch,
+                DepositBatch::empty(),
+                WithdrawalBatch::empty(),
+                operator.store.current_liability().unwrap(),
+            )
+            .unwrap();
+
+        assert!(
+            operator
+                .payment_quote(&operator.wallets[0].public_key())
+                .is_err()
+        );
+        operator.validate_close_start(epoch).unwrap();
+        assert_eq!(operator.settlement_boundary().unwrap().epoch, epoch);
+        assert_eq!(operator.snapshot().unwrap().payments.len(), 1);
+    }
+
+    #[test]
+    fn amountless_close_outlives_amount_intake_at_the_clock_horizon() {
+        let mut operator = operator();
+        operator.pay(0, 1, 1).unwrap();
+        let terminal_epoch = (u64::MAX - 2) / 10;
+        let epoch = terminal_epoch - 1;
+        operator.registration = operator
+            .protocol
+            .registration(
+                epoch,
+                DepositBatch::empty(),
+                WithdrawalBatch::empty(),
+                operator.store.current_liability().unwrap(),
+            )
+            .unwrap();
+
+        assert!(
+            operator
+                .ensure_withdrawal_intake_horizon(&amount(1))
+                .is_err()
+        );
+        operator
+            .ensure_withdrawal_intake_horizon(&WithdrawalAction::Close)
+            .unwrap();
+        operator.validate_close_start(epoch).unwrap();
+        assert_eq!(operator.settlement_boundary().unwrap().epoch, epoch);
+    }
+
+    #[test]
+    fn unknown_settlement_admission_is_retried() {
         let mut attempts = 0;
-        let value = admit_with_retry(
+        let value = admit_until_known(
             || {
                 attempts += 1;
                 if attempts == 1 {
-                    Err(settlement_rpc::AdmitError::AwaitingClaimCapacity)
-                } else if attempts == 2 {
                     Err(settlement_rpc::AdmitError::Unknown(anyhow::anyhow!(
                         "response was lost"
                     )))
@@ -1782,10 +1889,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(value, 7);
-        assert_eq!(attempts, 3);
+        assert_eq!(attempts, 2);
 
         attempts = 0;
-        let error = admit_with_retry::<u8>(
+        let error = admit_until_known::<u8>(
             || {
                 attempts += 1;
                 Err(settlement_rpc::AdmitError::Rejected(
@@ -2842,11 +2949,9 @@ mod tests {
             .complete(prepared, &mut TestRng::new(8))
             .unwrap();
         assert_eq!(result.finalized.payout_total, 100);
-        let finalized = expect_finalized(
-            settlement
-                .admit(SettlementSubmission::from(&result))
-                .unwrap(),
-        );
+        let finalized = settlement
+            .admit(SettlementSubmission::from(&result))
+            .unwrap();
         let claim = result.external_claims.first().unwrap();
         let payout = settlement
             .claim_external_payout(finalized.batch_id, claim)
@@ -2887,11 +2992,9 @@ mod tests {
     }
 
     #[test]
-    fn admitted_close_retries_finalization_after_claim_capacity_frees() {
+    fn unclaimed_batch_does_not_block_later_finalization() {
         let mut operator = operator();
-        let mut settlement =
-            crate::settlement::Settlement::new_with_claim_capacity(NonZeroUsize::new(1).unwrap())
-                .unwrap();
+        let mut settlement = crate::settlement::Settlement::new().unwrap();
         settlement.set_claim_replay_capacity(NonZeroUsize::new(1).unwrap());
 
         operator.pay(0, operator.wallet_count(), 100).unwrap();
@@ -2911,11 +3014,9 @@ mod tests {
             .protocol
             .complete(prepared, &mut TestRng::new(31))
             .unwrap();
-        let first_finalized = expect_finalized(
-            settlement
-                .admit(SettlementSubmission::from(&first))
-                .unwrap(),
-        );
+        let first_finalized = settlement
+            .admit(SettlementSubmission::from(&first))
+            .unwrap();
         operator
             .store
             .finish_close(&first, operator.genesis_root)
@@ -2939,10 +3040,9 @@ mod tests {
             .complete(prepared, &mut TestRng::new(32))
             .unwrap();
         let submission = SettlementSubmission::from(&second);
-        assert!(matches!(
-            settlement.admit(submission.clone()).unwrap(),
-            crate::settlement::AdmissionOutcome::AwaitingClaimCapacity
-        ));
+        let second_finalized = settlement.admit(submission).unwrap();
+        assert_eq!(second_finalized.batch_id, second.finalized.batch_id);
+        assert_eq!(settlement.status().claimable_balance, 200);
 
         settlement
             .claim_external_payout(
@@ -2950,8 +3050,6 @@ mod tests {
                 first.external_claims.first().unwrap(),
             )
             .unwrap();
-        let second_finalized = expect_finalized(settlement.admit(submission).unwrap());
-        assert_eq!(second_finalized.batch_id, second.finalized.batch_id);
         let second_claim = second.external_claims.first().unwrap();
         let second_payout = settlement
             .claim_external_payout(second_finalized.batch_id, second_claim)
@@ -3085,11 +3183,9 @@ mod tests {
             &operator.wallets[0].public_key()
         );
         assert_eq!(evidence.batch_id, batch_id);
-        let finalized = expect_finalized(
-            settlement
-                .admit(SettlementSubmission::from(&result))
-                .unwrap(),
-        );
+        let finalized = settlement
+            .admit(SettlementSubmission::from(&result))
+            .unwrap();
         assert_eq!(finalized.batch_id, batch_id);
         let release = settlement
             .claim_withdrawal(evidence.batch_id, &evidence.claim)
@@ -3235,7 +3331,7 @@ mod tests {
 
         assert!(settlement.admit(malformed).is_err());
         assert_eq!(
-            expect_finalized(settlement.admit(valid).unwrap()).batch_id,
+            settlement.admit(valid).unwrap().batch_id,
             result.finalized.batch_id
         );
     }

@@ -2,8 +2,10 @@
 
 use crate::{
     protocol::{
-        DepositEvent, INITIAL_BALANCE, Key, SQLITE_U64_MAX, SettlementResult, committee,
-        deployment, epoch_context, identities, operator_key, settlement_config,
+        DepositEvent, INITIAL_BALANCE, Key, MAX_WITHDRAWALS, SQLITE_U64_MAX, SettlementResult,
+        committee, deployment, ensure_amount_withdrawal_horizon, ensure_balance_intake_horizon,
+        ensure_close_horizon, epoch_context, identities, openable_epoch_after, operator_key,
+        settlement_config,
     },
     store::MAX_DESTINATION_BYTES,
 };
@@ -29,14 +31,6 @@ type WithdrawalClaimKey = (BatchId<Digest>, u32);
 type ClaimedWithdrawal = (WithdrawalClaim<Key, Digest>, WithdrawalRelease<Key, Digest>);
 type PayoutClaimKey = (BatchId<Digest>, u32);
 type ClaimedPayout = (ExternalPayoutClaim<Key, Digest>, ExternalPayout<Key>);
-
-/// Result of applying a certified close to settlement.
-pub(crate) enum AdmissionOutcome {
-    /// The close finalized and advanced the settlement head.
-    Finalized(FinalizedBatch<Digest>),
-    /// The close is admitted but must wait for an older claim reserve to drain.
-    AwaitingClaimCapacity,
-}
 
 /// Bounded response-loss replay state. The map and insertion order are updated together so
 /// evicting an acknowledgement can never evict authoritative settlement state.
@@ -135,13 +129,6 @@ impl Settlement {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_claim_capacity(capacity: NonZeroUsize) -> Result<Self> {
-        let mut config = settlement_config();
-        config.max_claimable_batches = capacity;
-        Self::with_config(config)
-    }
-
-    #[cfg(test)]
     pub(crate) fn set_claim_replay_capacity(&mut self, capacity: NonZeroUsize) {
         debug_assert!(self.withdrawal_replays.entries.is_empty());
         debug_assert!(self.payout_replays.entries.is_empty());
@@ -153,7 +140,8 @@ impl Settlement {
         config: commonware_clearing::bajillion::settlement::SettlementConfig,
     ) -> Result<Self> {
         let finalized_replays = config.max_pending_epochs;
-        let claim_replays = config.max_state_accounts;
+        let claim_replays =
+            NonZeroUsize::new(MAX_WITHDRAWALS).expect("claim replay bound is nonzero");
         let mut leaves = identities()
             .into_iter()
             .map(|identity| StateLeaf {
@@ -216,6 +204,7 @@ impl Settlement {
             self.frozen.is_empty(),
             "the next settlement boundary is already frozen"
         );
+        ensure_balance_intake_horizon(self.next_boundary_epoch()?)?;
 
         // The example operator persists monetary values in SQLite INTEGER columns. Apply that
         // deployment-wide domain before settlement takes custody so operator credit cannot fail.
@@ -291,6 +280,11 @@ impl Settlement {
             self.frozen.is_empty(),
             "the next settlement boundary is already frozen"
         );
+        let epoch = self.next_boundary_epoch()?;
+        match request.body().action() {
+            WithdrawalAction::Amount(_) => ensure_amount_withdrawal_horizon(epoch)?,
+            WithdrawalAction::Close => ensure_close_horizon(epoch)?,
+        }
         let deposited = self.chain.pending_deposits().amount_for(request.account());
         if let WithdrawalAction::Amount(amount) = request.body().action() {
             ensure!(
@@ -318,17 +312,12 @@ impl Settlement {
             );
             return Ok(());
         }
-        let expected = match self.frozen.back() {
-            Some(tail) => tail.epoch.checked_add(1),
-            None => self
-                .last_finalized_epoch
-                .map_or(Some(0), |epoch| epoch.checked_add(1)),
-        }
-        .context("settlement epoch overflow")?;
+        let expected = self.next_boundary_epoch()?;
         ensure!(
             epoch == expected,
             "settlement boundary epoch is not consecutive"
         );
+        openable_epoch_after(epoch)?;
         ensure!(
             self.frozen.len() < self.chain.config().max_pending_epochs.get(),
             "settlement boundary pipeline reached its configured capacity"
@@ -356,14 +345,30 @@ impl Settlement {
         Ok(())
     }
 
-    pub(crate) fn admit(&mut self, submission: SettlementSubmission) -> Result<AdmissionOutcome> {
+    fn next_boundary_epoch(&self) -> Result<u64> {
+        self.frozen
+            .back()
+            .map_or_else(
+                || {
+                    self.last_finalized_epoch
+                        .map_or(Some(0), |epoch| epoch.checked_add(1))
+                },
+                |tail| tail.epoch.checked_add(1),
+            )
+            .context("settlement epoch overflow")
+    }
+
+    pub(crate) fn admit(
+        &mut self,
+        submission: SettlementSubmission,
+    ) -> Result<FinalizedBatch<Digest>> {
         let batch_id = submission.header.batch_id::<Sha256>();
         if let Some(finalized) = self.finalized_replays.get(&submission.epoch) {
             ensure!(
                 finalized.batch_id == batch_id,
                 "another close already finalized for this epoch"
             );
-            return Ok(AdmissionOutcome::Finalized(*finalized));
+            return Ok(*finalized);
         }
         ensure!(
             self.last_finalized_epoch
@@ -429,18 +434,15 @@ impl Settlement {
             .challenge_deadline()
             .checked_add(1)
             .context("settlement deadline overflow")?;
-        let finalized = match self.chain.finalize(finalize_at) {
-            Ok(finalized) => finalized,
-            Err(SettlementError::ClaimableBatchCapacity) => {
-                return Ok(AdmissionOutcome::AwaitingClaimCapacity);
-            }
-            Err(error) => return Err(error).context("finalize close on settlement"),
-        };
+        let finalized = self
+            .chain
+            .finalize(finalize_at)
+            .context("finalize close on settlement")?;
         self.now = finalize_at;
         self.frozen.pop_front();
         self.last_finalized_epoch = Some(submission.epoch);
         self.finalized_replays.insert(submission.epoch, finalized);
-        Ok(AdmissionOutcome::Finalized(finalized))
+        Ok(finalized)
     }
 
     pub(crate) fn claim_withdrawal(
@@ -572,5 +574,62 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn intake_stops_before_the_terminal_clock_exhausts() {
+        let terminal_epoch = (u64::MAX - 2) / 10;
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"terminal-clock-deposit"]),
+            account: identities()[0].key.clone(),
+            amount: 1,
+        };
+
+        let mut deposit = Settlement::new().unwrap();
+        deposit.last_finalized_epoch = Some(terminal_epoch - 1);
+        let before = deposit.status();
+        assert!(deposit.deposit(event.clone()).is_err());
+        assert!(deposit.confirm_deposit(&event).is_err());
+        assert_eq!(deposit.status().custody_balance, before.custody_balance);
+
+        let mut replay = Settlement::new().unwrap();
+        replay.deposit(event.clone()).unwrap();
+        replay.last_finalized_epoch = Some(terminal_epoch - 1);
+        replay.deposit(event).unwrap();
+
+        let mut freeze = Settlement::new().unwrap();
+        freeze.last_finalized_epoch = Some(terminal_epoch - 1);
+        assert!(
+            freeze
+                .freeze(
+                    terminal_epoch,
+                    DepositBatch::empty(),
+                    WithdrawalBatch::empty(),
+                )
+                .is_err()
+        );
+        assert!(freeze.frozen.is_empty());
+    }
+
+    #[test]
+    fn deposit_intake_stops_while_the_boundary_can_still_freeze() {
+        let terminal_epoch = (u64::MAX - 2) / 10;
+        let epoch = terminal_epoch - 2;
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"post-inclusion-exit-clock-deposit"]),
+            account: identities()[0].key.clone(),
+            amount: 1,
+        };
+        let mut settlement = Settlement::new().unwrap();
+        settlement.last_finalized_epoch = Some(epoch - 1);
+
+        let before = settlement.status();
+        assert!(settlement.deposit(event.clone()).is_err());
+        assert!(settlement.confirm_deposit(&event).is_err());
+        assert_eq!(settlement.status().custody_balance, before.custody_balance);
+        settlement
+            .freeze(epoch, DepositBatch::empty(), WithdrawalBatch::empty())
+            .unwrap();
+        assert_eq!(settlement.frozen.front().unwrap().epoch, epoch);
     }
 }

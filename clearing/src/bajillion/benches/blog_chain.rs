@@ -12,7 +12,9 @@ use commonware_clearing::bajillion::{
         AccountLookup, Challenge, ChallengeKind, Verdict, adjudicate_with_strategy, decode_bounded,
     },
     credit::{ShardLookup, ShardSet},
-    settlement::{BatchStatus, HardFaultReason, SettlementChain, SettlementConfig},
+    settlement::{
+        BatchStatus, EpochDeadlinePolicy, HardFaultReason, SettlementChain, SettlementConfig,
+    },
     state::AccountRow,
     transition::{
         BatchId, Header, PreparedClose, ProofSlice, RootBundle, TerminalProof,
@@ -301,11 +303,15 @@ fn chain(close: &CloseFixture, validators: &Validators) -> TestChain {
         close.context.payment().epoch(),
         SettlementConfig::new(
             NonZeroUsize::new(1).expect("benchmark pipeline bound is nonzero"),
+            EpochDeadlinePolicy::new(
+                NonZeroU64::new(100).expect("benchmark admission delay is nonzero"),
+                notice,
+                notice,
+            ),
             notice,
             notice,
-            live_accounts,
+            notice,
             0,
-            live_accounts,
             live_accounts,
         ),
     )

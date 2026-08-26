@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Parser)]
 #[command(about = "Run one Commonware Clearing wallet agent")]
@@ -17,6 +17,10 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     identity: usize,
 
+    /// SQLite wallet database path. Defaults to terminal-agent-<identity>.sqlite.
+    #[arg(long)]
+    database: Option<PathBuf>,
+
     /// Run a terminal-free walkthrough.
     #[arg(long)]
     scripted: bool,
@@ -24,5 +28,14 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    commonware_terminal::run_agent(args.operator, args.settlement, args.identity, args.scripted)
+    let database = args
+        .database
+        .unwrap_or_else(|| PathBuf::from(format!("terminal-agent-{}.sqlite", args.identity)));
+    commonware_terminal::run_agent(
+        args.operator,
+        args.settlement,
+        database,
+        args.identity,
+        args.scripted,
+    )
 }

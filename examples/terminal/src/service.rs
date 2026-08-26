@@ -81,11 +81,12 @@ pub(crate) fn run_operator(
 pub(crate) fn run_agent(
     operator: SocketAddr,
     settlement: SocketAddr,
+    database: PathBuf,
     identity: usize,
     scripted: bool,
 ) -> Result<()> {
     runtime().start(move |context| async move {
-        let agent = Agent::new(identity)?;
+        let agent = Agent::open(&database, identity).context("initialize SQLite agent")?;
         if scripted {
             Box::pin(ui::scripted(&context, operator, settlement, agent)).await
         } else {

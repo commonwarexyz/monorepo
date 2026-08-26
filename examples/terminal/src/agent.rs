@@ -1,10 +1,11 @@
 //! One-wallet client workflows for the clearing terminal.
 
 use crate::{
+    agent_store::{AgentState, AgentStore},
     operator_rpc,
     protocol::{
-        AccountIdentity, DepositEvent, Key, Payment, Wallet, external_identity, external_wallet,
-        identities, wallets,
+        AccountIdentity, DepositEvent, Key, Wallet, deployment, external_identity, external_wallet,
+        identities, operator_key, wallets,
     },
     settlement_rpc,
 };
@@ -18,17 +19,9 @@ use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::Network;
 #[cfg(not(test))]
 use rand::RngExt as _;
-use std::{collections::VecDeque, net::SocketAddr};
+use std::{net::SocketAddr, path::Path};
 
 const DEPOSIT_ID_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_AGENT_DEPOSIT";
-const MAX_RETAINED_RECEIPTS: usize = 256;
-
-struct PendingPayment {
-    recipient: Key,
-    amount: u64,
-    context: PaymentContext<Key, Digest>,
-    send: SignedSend<Key, Digest>,
-}
 
 struct PendingWithdrawal {
     queue: settlement_rpc::QueueWithdrawalRequest,
@@ -38,19 +31,61 @@ struct PendingWithdrawal {
 /// An agent owns one payer key and retains the receipts returned by the operator.
 pub(crate) struct Agent {
     wallet: Wallet,
+    store: AgentStore,
     recipients: Vec<AccountIdentity>,
     deposit_nonce: u64,
-    pending_payment: Option<PendingPayment>,
+    pending_payment: Option<SignedSend<Key, Digest>>,
     pending_deposit: Option<DepositEvent>,
     pending_withdrawal: Option<PendingWithdrawal>,
     pending_claim: Option<operator_rpc::WithdrawalEvidenceResponse>,
     pending_payout: Option<operator_rpc::ExternalPayoutEvidenceResponse>,
     pending_close_epoch: Option<u64>,
-    receipts: VecDeque<Payment>,
+    cumulative_debit: u64,
+    receipt_count: u64,
+}
+
+const fn withdrawal_deadline(now: u64) -> u64 {
+    now.saturating_add(50)
+}
+
+#[cfg(test)]
+const fn initial_deposit_nonce() -> u64 {
+    0
+}
+
+#[cfg(not(test))]
+fn initial_deposit_nonce() -> u64 {
+    rand::rng().random()
 }
 
 impl Agent {
     pub(crate) fn new(identity: usize) -> Result<Self> {
+        let (wallet, recipients) = Self::identity(identity)?;
+        let account = wallet.public_key();
+        let (store, state) = AgentStore::in_memory(&account, &deployment(), &operator_key())?;
+        Ok(Self::from_state(
+            wallet,
+            recipients,
+            store,
+            state,
+            initial_deposit_nonce(),
+        ))
+    }
+
+    pub(crate) fn open(path: &Path, identity: usize) -> Result<Self> {
+        let (wallet, recipients) = Self::identity(identity)?;
+        let account = wallet.public_key();
+        let (store, state) = AgentStore::open(path, &account, &deployment(), &operator_key())?;
+        Ok(Self::from_state(
+            wallet,
+            recipients,
+            store,
+            state,
+            initial_deposit_nonce(),
+        ))
+    }
+
+    fn identity(identity: usize) -> Result<(Wallet, Vec<AccountIdentity>)> {
         let mut wallets = wallets();
         ensure!(identity <= wallets.len(), "agent identity is out of range");
         let wallet = if identity == wallets.len() {
@@ -60,22 +95,30 @@ impl Agent {
         };
         let mut recipients = identities();
         recipients.push(external_identity());
-        #[cfg(test)]
-        let deposit_nonce = 0;
-        #[cfg(not(test))]
-        let deposit_nonce = rand::rng().random();
-        Ok(Self {
+        Ok((wallet, recipients))
+    }
+
+    const fn from_state(
+        wallet: Wallet,
+        recipients: Vec<AccountIdentity>,
+        store: AgentStore,
+        state: AgentState,
+        deposit_nonce: u64,
+    ) -> Self {
+        Self {
             wallet,
+            store,
             recipients,
             deposit_nonce,
-            pending_payment: None,
+            pending_payment: state.pending_send,
             pending_deposit: None,
             pending_withdrawal: None,
             pending_claim: None,
             pending_payout: None,
             pending_close_epoch: None,
-            receipts: VecDeque::new(),
-        })
+            cumulative_debit: state.cumulative_debit,
+            receipt_count: state.receipt_count,
+        }
     }
 
     pub(crate) const fn name(&self) -> &'static str {
@@ -94,8 +137,8 @@ impl Agent {
         self.recipients[index % self.recipients.len()].name
     }
 
-    pub(crate) fn receipt_count(&self) -> usize {
-        self.receipts.len()
+    pub(crate) const fn receipt_count(&self) -> u64 {
+        self.receipt_count
     }
 
     pub(crate) async fn operator_status<E: Network>(
@@ -143,12 +186,15 @@ impl Agent {
             .key
             .clone();
         let (context, send) = match &self.pending_payment {
-            Some(pending) => {
+            Some(send) => {
                 ensure!(
-                    pending.recipient == recipient && pending.amount == amount,
+                    send.body().recipient() == &recipient && send.body().amount() == amount,
                     "another payment retry is pending"
                 );
-                (pending.context.clone(), pending.send.clone())
+                (
+                    PaymentContext::new(*send.body().anchor(), send.body().epoch(), operator_key()),
+                    send.clone(),
+                )
             }
             None => {
                 let quote = operator_rpc::payment_quote(
@@ -160,23 +206,29 @@ impl Agent {
                 )
                 .await
                 .context("read payer state")?;
+                ensure!(
+                    quote.context.operator() == &operator_key(),
+                    "payment context has an unexpected operator"
+                );
                 let send = SignedSend::sign_next(
                     &quote.context,
                     self.wallet.signer(),
                     recipient.clone(),
                     amount,
-                    quote.state.cumulative_debit,
+                    self.cumulative_debit,
                 )
                 .context("sign payment")?;
-                self.pending_payment = Some(PendingPayment {
-                    recipient,
-                    amount,
-                    context: quote.context.clone(),
-                    send: send.clone(),
-                });
+                self.store
+                    .stage_payment(&send, self.cumulative_debit)
+                    .context("durably stage payment")?;
+                self.pending_payment = Some(send.clone());
                 (quote.context, send)
             }
         };
+        ensure!(
+            context.operator() == &operator_key(),
+            "payment context has an unexpected operator"
+        );
         let accepted = operator_rpc::accept_send(
             network,
             operator,
@@ -194,11 +246,13 @@ impl Agent {
             .payment
             .verify_linked::<Sha256>(&context)
             .context("verify operator receipt")?;
+        let receipt_count = self
+            .store
+            .commit_payment(&accepted.payment, self.cumulative_debit, self.receipt_count)
+            .context("commit accepted receipt")?;
+        self.cumulative_debit = send.body().cumulative_debit();
         self.pending_payment = None;
-        self.receipts.push_back(accepted.payment.clone());
-        while self.receipts.len() > MAX_RETAINED_RECEIPTS {
-            self.receipts.pop_front();
-        }
+        self.receipt_count = receipt_count;
         Ok(accepted)
     }
 
@@ -291,10 +345,7 @@ impl Agent {
                     settlement_status.state_root == opening.root,
                     "operator opening is not the settlement head"
                 );
-                let deadline = settlement_status
-                    .now
-                    .checked_add(50)
-                    .context("withdrawal deadline overflow")?;
+                let deadline = withdrawal_deadline(settlement_status.now);
                 let request = SignedWithdrawal::sign(
                     settlement_status.deployment,
                     opening.root.digest,
@@ -467,5 +518,515 @@ impl Agent {
         epoch: u64,
     ) -> Result<operator_rpc::PollCloseResponse> {
         operator_rpc::poll_close(network, operator, epoch).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc;
+    use commonware_clearing::bajillion::{
+        payment::{Payment, SignedReceipt},
+        state::AccountState,
+    };
+    use commonware_codec::Encode;
+    use commonware_runtime::{
+        Listener as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
+    };
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static TEMP_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDatabase {
+        directory: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TempDatabase {
+        fn new() -> Self {
+            let id = TEMP_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
+            let directory = std::env::temp_dir().join(format!(
+                "commonware-terminal-agent-{}-{id}",
+                std::process::id()
+            ));
+            fs::create_dir(&directory).unwrap();
+            let path = directory.join("agent.sqlite");
+            Self { directory, path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDatabase {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    async fn respond<L: commonware_runtime::Listener>(
+        listener: &mut L,
+        handle: impl FnOnce(operator_rpc::OperatorRequest) -> rpc::Response,
+    ) {
+        let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+        let request = rpc::recv_request(&mut stream).await.unwrap();
+        let response = handle(operator_rpc::decode_request(request).unwrap());
+        rpc::send_response(&mut sink, &response).await.unwrap();
+    }
+
+    #[test]
+    fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
+        deterministic::Runner::default().start(|context| async move {
+            let operator = Wallet::from_seed("operator", 1);
+            let impostor = Wallet::from_seed("impostor", 1_001);
+            let payment_context = PaymentContext::new(
+                Sha256::hash(&[b"agent-payment-counter"]),
+                7,
+                operator.public_key(),
+            );
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: operator_rpc::PaymentQuoteResponse {
+                            context: payment_context.clone(),
+                            state: AccountState {
+                                balance: 100,
+                                cumulative_debit: 10_000,
+                                ..AccountState::default()
+                            },
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+
+                let mut first_payment = None;
+                respond(&mut listener, |request| {
+                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                        panic!("payment retry unexpectedly requested another quote");
+                    };
+                    assert_eq!(request.send.body().cumulative_debit(), 7);
+                    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                        &payment_context,
+                        &request.send,
+                        0,
+                        0,
+                        0,
+                        operator.signer(),
+                    )
+                    .unwrap();
+                    first_payment = Some(
+                        Payment::new::<Sha256>(
+                            &payment_context,
+                            request.send.clone(),
+                            receipt.clone(),
+                        )
+                        .unwrap(),
+                    );
+                    let forged = SignedReceipt::sign_body_by_authority(
+                        receipt.body().clone(),
+                        impostor.signer(),
+                    );
+                    rpc::Response::Success {
+                        body: operator_rpc::AcceptedPaymentResponse {
+                            epoch: payment_context.epoch(),
+                            sequence: 0,
+                            amount: 7,
+                            payment: Payment::from_parts_unchecked(request.send, forged),
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+                let first_payment = first_payment.unwrap();
+
+                respond(&mut listener, |request| {
+                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                        panic!("payment retry unexpectedly requested another quote");
+                    };
+                    assert_eq!(request.send, *first_payment.send());
+                    rpc::Response::Success {
+                        body: operator_rpc::AcceptedPaymentResponse {
+                            epoch: payment_context.epoch(),
+                            sequence: 0,
+                            amount: 7,
+                            payment: first_payment.clone(),
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: operator_rpc::PaymentQuoteResponse {
+                            context: payment_context.clone(),
+                            state: AccountState {
+                                balance: 93,
+                                cumulative_debit: 20_000,
+                                ..AccountState::default()
+                            },
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+
+                respond(&mut listener, |request| {
+                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                        panic!("expected the second signed send");
+                    };
+                    assert_eq!(request.send.body().cumulative_debit(), 10);
+                    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                        &payment_context,
+                        &request.send,
+                        0,
+                        7,
+                        1,
+                        operator.signer(),
+                    )
+                    .unwrap();
+                    let payment =
+                        Payment::new::<Sha256>(&payment_context, request.send, receipt).unwrap();
+                    rpc::Response::Success {
+                        body: operator_rpc::AcceptedPaymentResponse {
+                            epoch: payment_context.epoch(),
+                            sequence: 1,
+                            amount: 3,
+                            payment,
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut agent = Agent::new(0).unwrap();
+            let rejected = agent
+                .pay(&context, operator_address, 1, 7)
+                .await
+                .unwrap_err();
+            assert!(format!("{rejected:#}").contains("verify operator receipt"));
+            assert_eq!(agent.receipt_count(), 0);
+
+            let accepted = agent.pay(&context, operator_address, 1, 7).await.unwrap();
+            assert_eq!(accepted.payment.amount(), 7);
+            assert_eq!(agent.receipt_count(), 1);
+
+            let accepted = agent.pay(&context, operator_address, 1, 3).await.unwrap();
+            assert_eq!(accepted.payment.amount(), 3);
+            assert_eq!(agent.receipt_count(), 2);
+            operator_server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn withdrawal_deadline_caps_at_the_clock_horizon() {
+        assert_eq!(withdrawal_deadline(7), 57);
+        assert_eq!(withdrawal_deadline(u64::MAX - 20), u64::MAX);
+    }
+
+    #[test]
+    fn forged_quote_operator_is_rejected_before_staging() {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let impostor = Wallet::from_seed("impostor", 1_001);
+            let payment_context = PaymentContext::new(
+                Sha256::hash(&[b"forged-quote-operator"]),
+                7,
+                impostor.public_key(),
+            );
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: operator_rpc::PaymentQuoteResponse {
+                            context: payment_context,
+                            state: AccountState {
+                                balance: 100,
+                                cumulative_debit: 50_000,
+                                ..AccountState::default()
+                            },
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            let error = agent
+                .pay(&context, operator_address, 1, 7)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("unexpected operator"));
+            drop(agent);
+
+            let recovered = Agent::open(database.path(), 0).unwrap();
+            assert_eq!(recovered.cumulative_debit, 0);
+            assert!(recovered.pending_payment.is_none());
+            operator_server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn response_loss_restart_retries_byte_identical_pending_send() {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let operator = Wallet::from_seed("operator", 1);
+            let payment_context = PaymentContext::new(
+                Sha256::hash(&[b"response-loss-restart"]),
+                7,
+                operator.public_key(),
+            );
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: operator_rpc::PaymentQuoteResponse {
+                            context: payment_context.clone(),
+                            state: AccountState {
+                                balance: 100,
+                                cumulative_debit: 50_000,
+                                ..AccountState::default()
+                            },
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+
+                let accepted;
+                let first_send;
+                {
+                    let (_, _sink, mut stream) = listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    let operator_rpc::OperatorRequest::AcceptSend(request) =
+                        operator_rpc::decode_request(request).unwrap()
+                    else {
+                        panic!("expected the initially staged send");
+                    };
+                    assert_eq!(request.send.body().cumulative_debit(), 7);
+                    first_send = request.send;
+                    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                        &payment_context,
+                        &first_send,
+                        0,
+                        0,
+                        0,
+                        operator.signer(),
+                    )
+                    .unwrap();
+                    accepted =
+                        Payment::new::<Sha256>(&payment_context, first_send.clone(), receipt)
+                            .unwrap();
+                }
+
+                respond(&mut listener, |request| {
+                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                        panic!("restart unexpectedly requested another quote");
+                    };
+                    assert_eq!(request.send.encode(), first_send.encode());
+                    rpc::Response::Success {
+                        body: operator_rpc::AcceptedPaymentResponse {
+                            epoch: payment_context.epoch(),
+                            sequence: 0,
+                            amount: 7,
+                            payment: accepted,
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            let error = agent
+                .pay(&context, operator_address, 1, 7)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("submit payment"));
+            assert!(agent.pending_payment.is_some());
+            drop(agent);
+
+            let mut recovered = Agent::open(database.path(), 0).unwrap();
+            assert!(recovered.pending_payment.is_some());
+            let accepted = recovered
+                .pay(&context, operator_address, 1, 7)
+                .await
+                .unwrap();
+            assert_eq!(accepted.payment.amount(), 7);
+            assert_eq!(recovered.cumulative_debit, 7);
+            assert_eq!(recovered.receipt_count(), 1);
+            assert!(recovered.pending_payment.is_none());
+            drop(recovered);
+
+            let recovered = Agent::open(database.path(), 0).unwrap();
+            assert!(recovered.pending_payment.is_none());
+            assert_eq!(recovered.receipt_count(), 1);
+            operator_server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let operator = Wallet::from_seed("operator", 1);
+            let payment_context = PaymentContext::new(
+                Sha256::hash(&[b"successful-payment-restart"]),
+                7,
+                operator.public_key(),
+            );
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: operator_rpc::PaymentQuoteResponse {
+                            context: payment_context.clone(),
+                            state: AccountState {
+                                balance: 100,
+                                cumulative_debit: 10_000,
+                                ..AccountState::default()
+                            },
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+                respond(&mut listener, |request| {
+                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                        panic!("expected the first signed send");
+                    };
+                    assert_eq!(request.send.body().cumulative_debit(), 7);
+                    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                        &payment_context,
+                        &request.send,
+                        0,
+                        0,
+                        0,
+                        operator.signer(),
+                    )
+                    .unwrap();
+                    let payment =
+                        Payment::new::<Sha256>(&payment_context, request.send, receipt).unwrap();
+                    rpc::Response::Success {
+                        body: operator_rpc::AcceptedPaymentResponse {
+                            epoch: payment_context.epoch(),
+                            sequence: 0,
+                            amount: 7,
+                            payment,
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: operator_rpc::PaymentQuoteResponse {
+                            context: payment_context.clone(),
+                            state: AccountState {
+                                balance: 93,
+                                cumulative_debit: 20_000,
+                                ..AccountState::default()
+                            },
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+                respond(&mut listener, |request| {
+                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                        panic!("expected the second signed send");
+                    };
+                    assert_eq!(request.send.body().cumulative_debit(), 10);
+                    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                        &payment_context,
+                        &request.send,
+                        0,
+                        7,
+                        1,
+                        operator.signer(),
+                    )
+                    .unwrap();
+                    let payment =
+                        Payment::new::<Sha256>(&payment_context, request.send, receipt).unwrap();
+                    rpc::Response::Success {
+                        body: operator_rpc::AcceptedPaymentResponse {
+                            epoch: payment_context.epoch(),
+                            sequence: 1,
+                            amount: 3,
+                            payment,
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            agent.pay(&context, operator_address, 1, 7).await.unwrap();
+            drop(agent);
+
+            let mut recovered = Agent::open(database.path(), 0).unwrap();
+            assert_eq!(recovered.cumulative_debit, 7);
+            assert_eq!(recovered.receipt_count(), 1);
+            recovered
+                .pay(&context, operator_address, 1, 3)
+                .await
+                .unwrap();
+            drop(recovered);
+
+            let recovered = Agent::open(database.path(), 0).unwrap();
+            assert_eq!(recovered.cumulative_debit, 10);
+            assert_eq!(recovered.receipt_count(), 2);
+            operator_server.await.unwrap();
+        });
     }
 }

@@ -3,7 +3,7 @@
 use crate::{
     protocol::{DepositEvent, Key, verify_freeze_signature},
     rpc,
-    settlement::{AdmissionOutcome, Settlement, SettlementStatus, SettlementSubmission},
+    settlement::{Settlement, SettlementStatus, SettlementSubmission},
 };
 use anyhow::{Context, Result, bail, ensure};
 use bytes::{Buf, BufMut, Bytes};
@@ -45,8 +45,6 @@ const MAX_ERROR_BYTES: usize = 1_024;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AdmitError {
-    #[error("settlement admission is waiting for claim capacity")]
-    AwaitingClaimCapacity,
     #[error("settlement admission outcome is unknown: {0}")]
     Unknown(anyhow::Error),
     #[error("settlement rejected admission: {0}")]
@@ -427,48 +425,6 @@ impl Read for FinalizedBatchResponse {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AdmitResponse {
-    AwaitingClaimCapacity,
-    Finalized(FinalizedBatchResponse),
-}
-
-impl Write for AdmitResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::AwaitingClaimCapacity => 0u8.write(buf),
-            Self::Finalized(finalized) => {
-                1u8.write(buf);
-                finalized.write(buf);
-            }
-        }
-    }
-}
-
-impl EncodeSize for AdmitResponse {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::AwaitingClaimCapacity => 0,
-            Self::Finalized(finalized) => finalized.encode_size(),
-        }
-    }
-}
-
-impl Read for AdmitResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            0 => Ok(Self::AwaitingClaimCapacity),
-            1 => Ok(Self::Finalized(FinalizedBatchResponse::read(buf)?)),
-            _ => Err(CodecError::Invalid(
-                "terminal::AdmitResponse",
-                "invalid admission response tag",
-            )),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalResponse {
     pub(crate) amount: u64,
@@ -586,16 +542,10 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
         }
         METHOD_ADMIT => {
             let request = AdmitRequest::decode(request.body).context("decode admit request")?;
-            let outcome = settlement
+            let finalized = settlement
                 .admit(request.into())
                 .context("apply admit request")?;
-            let response = match outcome {
-                AdmissionOutcome::Finalized(finalized) => {
-                    AdmitResponse::Finalized(finalized.into())
-                }
-                AdmissionOutcome::AwaitingClaimCapacity => AdmitResponse::AwaitingClaimCapacity,
-            };
-            Ok(response.encode())
+            Ok(FinalizedBatchResponse::from(finalized).encode())
         }
         METHOD_CLAIM_WITHDRAWAL => {
             let request = WithdrawalClaimRequest::decode(request.body)
@@ -758,13 +708,9 @@ async fn admit_once<E: Network>(
     .context("call settlement admission")
     .map_err(AdmitError::Unknown)?;
     match response {
-        rpc::Response::Success { body } => match AdmitResponse::decode(body)
+        rpc::Response::Success { body } => FinalizedBatchResponse::decode(body)
             .context("decode admission response")
-            .map_err(AdmitError::Unknown)?
-        {
-            AdmitResponse::Finalized(finalized) => Ok(finalized),
-            AdmitResponse::AwaitingClaimCapacity => Err(AdmitError::AwaitingClaimCapacity),
-        },
+            .map_err(AdmitError::Unknown),
         rpc::Response::Error { error } => Err(AdmitError::Rejected(
             String::from_utf8_lossy(&error).into_owned(),
         )),
@@ -864,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_response_distinguishes_retryable_capacity() {
+    fn admission_response_round_trips_finalization() {
         let digest = Sha256::hash(&[b"admission-response"]);
         let finalized = FinalizedBatchResponse {
             batch_id: BatchId::new(digest),
@@ -874,13 +820,11 @@ mod tests {
             payout_total: 13,
             custody_balance: 17,
         };
-        for response in [
-            AdmitResponse::AwaitingClaimCapacity,
-            AdmitResponse::Finalized(finalized),
-        ] {
-            assert_eq!(AdmitResponse::decode(response.encode()).unwrap(), response);
-        }
-        assert!(AdmitResponse::decode(Bytes::from_static(&[2])).is_err());
+        assert_eq!(
+            FinalizedBatchResponse::decode(finalized.encode()).unwrap(),
+            finalized
+        );
+        assert!(FinalizedBatchResponse::decode(Bytes::from_static(&[2])).is_err());
     }
 
     #[test]

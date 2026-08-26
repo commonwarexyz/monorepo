@@ -16,8 +16,8 @@ use commonware_clearing::bajillion::{
     credit::{ShardHead, ShardSet},
     payment::{Payment, ReceiptBody, SignedReceipt, SignedSend},
     settlement::{
-        BatchStatus, FaultPayout, HardFaultReason, PendingBatch, SettlementChain, SettlementConfig,
-        WithdrawalRelease,
+        BatchStatus, EpochDeadlinePolicy, HardFaultReason, HardFaultSettlement, PendingBatch,
+        SettlementChain, SettlementConfig, WithdrawalRelease,
     },
     state::{AccountRow, AccountState, Prefix, StateLeaf},
     transition::{
@@ -52,6 +52,9 @@ const MAX_ACCOUNTS: usize = 4;
 const MAX_ACTIONS: usize = 24;
 const MAX_PENDING_EPOCHS: usize = 3;
 const MAX_DESTINATION_BYTES: usize = 16;
+const MAX_EPOCH_ADMISSION_DELAY: u64 = 6;
+const CHALLENGE_DURATION: u64 = 2;
+const DEPOSIT_INCLUSION_TIMEOUT: u64 = 6;
 const MINIMUM_WITHDRAWAL_NOTICE: u64 = 2;
 const MAXIMUM_WITHDRAWAL_NOTICE: u64 = 1_000;
 const MAX_DEPOSIT_IDS: usize = 4;
@@ -127,8 +130,14 @@ enum Action {
         encoded: bool,
         mutation: u8,
     },
-    SettleHardFault {
-        mutated_survivor: bool,
+    ClaimPendingDeposit {
+        tick: u8,
+        account: u8,
+    },
+    BeginHardFaultSettlement,
+    ClaimHardFault {
+        account: u8,
+        mutation: u8,
     },
 }
 
@@ -169,6 +178,7 @@ impl Slot {
 struct Snapshot {
     state_root: VectorRoot<Digest>,
     custody: u64,
+    claimable: u64,
     deposits: TestDeposits,
     withdrawals: TestWithdrawals,
     safety_roots: Vec<VectorRoot<Digest>>,
@@ -236,15 +246,19 @@ struct Harness {
     slots: VecDeque<Slot>,
     registered: Option<Prepared>,
     staged_deposits: BTreeMap<VerifyingKey, u64>,
+    staged_deposit_deadlines: BTreeMap<VerifyingKey, u64>,
     staged_withdrawals: BTreeMap<VerifyingKey, SignedWithdrawal<VerifyingKey, Digest>>,
     outstanding: BTreeMap<VerifyingKey, SignedWithdrawal<VerifyingKey, Digest>>,
     consumed_deposit_ids: BTreeSet<Digest>,
     withdrawal_replays: BTreeMap<WithdrawalId<Digest>, u64>,
     authorization_history: Vec<SignedWithdrawal<VerifyingKey, Digest>>,
     custody: u64,
+    claimable: u64,
     hard_fault: Option<HardFaultReason<VerifyingKey, Digest>>,
     fence: Option<u64>,
     invalid_from: Option<BatchId<Digest>>,
+    hard_fault_settlement: Option<HardFaultSettlement<VerifyingKey, Digest>>,
+    claimed_hard_fault_accounts: BTreeSet<VerifyingKey>,
     settled: bool,
 }
 
@@ -283,11 +297,15 @@ impl Harness {
             .expect("deterministic validator belongs to its committee");
         let config = SettlementConfig::new(
             NonZeroUsize::new(MAX_PENDING_EPOCHS).unwrap(),
+            EpochDeadlinePolicy::new(
+                NonZeroU64::new(MAX_EPOCH_ADMISSION_DELAY).unwrap(),
+                NonZeroU64::new(CHALLENGE_DURATION).unwrap(),
+                NonZeroU64::new(CHALLENGE_DURATION).unwrap(),
+            ),
+            NonZeroU64::new(DEPOSIT_INCLUSION_TIMEOUT).unwrap(),
             NonZeroU64::new(MINIMUM_WITHDRAWAL_NOTICE).unwrap(),
             NonZeroU64::new(MAXIMUM_WITHDRAWAL_NOTICE).unwrap(),
-            NonZeroUsize::new(MAX_ACCOUNTS).unwrap(),
             MAX_DESTINATION_BYTES,
-            NonZeroUsize::new(MAX_DEPOSIT_IDS).unwrap(),
             NonZeroUsize::new(MAX_DEPOSIT_IDS).unwrap(),
         );
         let chain = SettlementChain::new(
@@ -314,15 +332,19 @@ impl Harness {
             slots: VecDeque::new(),
             registered: None,
             staged_deposits: BTreeMap::new(),
+            staged_deposit_deadlines: BTreeMap::new(),
             staged_withdrawals: BTreeMap::new(),
             outstanding: BTreeMap::new(),
             consumed_deposit_ids: BTreeSet::new(),
             withdrawal_replays: BTreeMap::new(),
             authorization_history: Vec::new(),
             custody,
+            claimable: 0,
             hard_fault: None,
             fence: None,
             invalid_from: None,
+            hard_fault_settlement: None,
+            claimed_hard_fault_accounts: BTreeSet::new(),
             settled: false,
         }
     }
@@ -394,8 +416,12 @@ impl Harness {
                 encoded,
                 mutation,
             } => self.challenge(step, *tick, *slot, *encoded, *mutation),
-            Action::SettleHardFault { mutated_survivor } => {
-                self.settle_hard_fault(*mutated_survivor)
+            Action::ClaimPendingDeposit { tick, account } => {
+                self.claim_pending_deposit(*tick, *account)
+            }
+            Action::BeginHardFaultSettlement => self.begin_hard_fault_settlement(),
+            Action::ClaimHardFault { account, mutation } => {
+                self.claim_hard_fault(*account, *mutation)
             }
         };
 
@@ -433,6 +459,7 @@ impl Harness {
         Snapshot {
             state_root: self.chain.current_state_root(),
             custody: self.chain.custody_balance(),
+            claimable: self.chain.claimable_balance(),
             deposits: self.chain.pending_deposits(),
             withdrawals: self.chain.pending_withdrawals(),
             safety_roots: self.chain.withdrawal_safety_roots(),
@@ -470,8 +497,17 @@ impl Harness {
     fn assert_invariants(&self) {
         assert!(self.slots.len() <= MAX_PENDING_EPOCHS);
         assert_eq!(self.chain.pending_epoch_count(), self.slots.len());
-        assert_eq!(self.chain.current_state_root(), self.finalized.root());
+        let expected_state_root = if self.settled {
+            commitment::empty_root::<Sha256>(VectorKind::State)
+        } else {
+            self.finalized.root()
+        };
+        assert_eq!(self.chain.current_state_root(), expected_state_root);
         assert_eq!(self.chain.custody_balance(), self.custody);
+        assert_eq!(self.chain.claimable_balance(), self.claimable);
+        self.custody
+            .checked_add(self.claimable)
+            .expect("active and claimable custody fit the accounting domain");
         assert_eq!(self.chain.pending_deposits(), self.deposit_batch());
         assert_eq!(self.chain.pending_withdrawals(), self.withdrawal_batch());
         assert_eq!(self.chain.hard_fault(), self.hard_fault.as_ref());
@@ -501,7 +537,7 @@ impl Harness {
             expected_batches
         );
 
-        let mut roots = vec![self.finalized.root()];
+        let mut roots = vec![expected_state_root];
         roots.extend(self.slots.iter().map(|slot| slot.closing.root()));
         assert_eq!(self.chain.withdrawal_safety_roots(), roots);
 
@@ -532,33 +568,64 @@ impl Harness {
             opening_liability = slot.closing.liability();
         }
 
-        let staged_deposit_total = self
-            .staged_deposits
-            .values()
-            .try_fold(0_u64, |total, amount| total.checked_add(*amount))
-            .expect("bounded staged deposits cannot overflow the model");
-        let unfinalized_deposits = self
-            .slots
-            .iter()
-            .try_fold(staged_deposit_total, |total, slot| {
-                total.checked_add(slot.deposits.total())
-            })
-            .expect("bounded deposits cannot overflow the model");
+        if self.hard_fault_settlement.is_some() {
+            assert!(self.staged_deposit_deadlines.is_empty());
+        } else {
+            assert!(
+                self.staged_deposits
+                    .keys()
+                    .eq(self.staged_deposit_deadlines.keys())
+            );
+        }
+        let unfinalized_deposits = self.unfinalized_deposit_total();
         assert_eq!(
-            self.finalized
-                .liability()
+            self.remaining_state_liability()
                 .checked_add(unfinalized_deposits)
                 .expect("bounded custody equation cannot overflow"),
             self.custody
         );
 
+        if let Some(settlement) = &self.hard_fault_settlement {
+            assert_eq!(Some(&settlement.reason), self.hard_fault.as_ref());
+            assert_eq!(Some(settlement.admission_fence_epoch), self.fence);
+            assert_eq!(settlement.invalid_from, self.invalid_from);
+            assert_eq!(settlement.frozen_state_root, self.finalized.root());
+            assert_eq!(settlement.state_liability, self.finalized.liability());
+            assert!(unfinalized_deposits <= settlement.unfinalized_deposit_total);
+            assert_eq!(
+                settlement
+                    .state_liability
+                    .checked_add(settlement.unfinalized_deposit_total)
+                    .expect("the frozen settlement fits active custody"),
+                settlement.custody_balance
+            );
+            assert!(self.slots.is_empty());
+            assert!(self.registered.is_none());
+            assert!(self.staged_withdrawals.is_empty());
+        } else {
+            assert!(self.claimed_hard_fault_accounts.is_empty());
+        }
+        assert!(self.claimed_hard_fault_accounts.iter().all(|account| {
+            self.finalized
+                .leaves()
+                .iter()
+                .any(|leaf| &leaf.account == account)
+        }));
+
         for account in &self.accounts {
             let public = account.public_key();
+            let expected_deadline = self
+                .hard_fault_settlement
+                .is_none()
+                .then(|| {
+                    self.outstanding
+                        .get(&public)
+                        .map(|request| request.body().deadline())
+                })
+                .flatten();
             assert_eq!(
                 self.chain.pending_withdrawal_deadline(&public),
-                self.outstanding
-                    .get(&public)
-                    .map(|request| request.body().deadline())
+                expected_deadline
             );
         }
         for (account, request) in &self.staged_withdrawals {
@@ -580,9 +647,10 @@ impl Harness {
             assert_eq!(self.custody, 0);
             assert!(self.slots.is_empty());
             assert!(self.staged_deposits.is_empty());
+            assert!(self.staged_deposit_deadlines.is_empty());
             assert!(self.staged_withdrawals.is_empty());
             assert!(self.outstanding.is_empty());
-            assert!(self.finalized.is_empty());
+            assert!(self.hard_fault_settlement.is_some());
         }
     }
 
@@ -612,13 +680,10 @@ impl Harness {
 
     fn predict_observation(&self, now: u64) -> TimeObservation {
         let fault = if self.hard_fault.is_none() {
-            self.earliest_outstanding()
+            self.earliest_fault()
                 .filter(|(deadline, _)| now >= *deadline)
-                .map(|(deadline, account)| ObservedFault {
-                    reason: HardFaultReason::ExpiredWithdrawal {
-                        account,
-                        expired_at: deadline,
-                    },
+                .map(|(_, reason)| ObservedFault {
+                    reason,
                     fence: self.next_epoch(),
                 })
         } else {
@@ -647,6 +712,43 @@ impl Harness {
             .min()
     }
 
+    fn earliest_fault(&self) -> Option<(u64, HardFaultReason<VerifyingKey, Digest>)> {
+        let deposit = self
+            .staged_deposit_deadlines
+            .iter()
+            .map(|(account, deadline)| (*deadline, account.clone()))
+            .min();
+        let withdrawal = self.earliest_outstanding();
+        match (deposit, withdrawal) {
+            (Some((deposit_deadline, _)), Some((withdrawal_deadline, account)))
+                if withdrawal_deadline <= deposit_deadline =>
+            {
+                Some((
+                    withdrawal_deadline,
+                    HardFaultReason::ExpiredWithdrawal {
+                        account,
+                        expired_at: withdrawal_deadline,
+                    },
+                ))
+            }
+            (Some((deadline, account)), _) => Some((
+                deadline,
+                HardFaultReason::ExpiredDeposit {
+                    account,
+                    expired_at: deadline,
+                },
+            )),
+            (None, Some((deadline, account))) => Some((
+                deadline,
+                HardFaultReason::ExpiredWithdrawal {
+                    account,
+                    expired_at: deadline,
+                },
+            )),
+            (None, None) => None,
+        }
+    }
+
     fn batch_epoch(&self, batch: BatchId<Digest>) -> Option<u64> {
         self.slots
             .iter()
@@ -665,6 +767,9 @@ impl Harness {
     }
 
     fn deposit_batch(&self) -> TestDeposits {
+        if self.hard_fault_settlement.is_some() {
+            return DepositBatch::empty();
+        }
         DepositBatch::new(
             self.staged_deposits
                 .iter()
@@ -683,6 +788,44 @@ impl Harness {
                 .collect(),
         )
         .expect("model deposits remain canonical")
+    }
+
+    fn unfinalized_deposit_total(&self) -> u64 {
+        let staged = self
+            .staged_deposits
+            .values()
+            .try_fold(0_u64, |total, amount| total.checked_add(*amount))
+            .expect("bounded staged deposits cannot overflow the model");
+        if self.hard_fault_settlement.is_some() {
+            return staged;
+        }
+        self.slots
+            .iter()
+            .try_fold(staged, |total, slot| {
+                total.checked_add(slot.deposits.total())
+            })
+            .expect("bounded admitted deposits cannot overflow the model")
+    }
+
+    fn remaining_state_liability(&self) -> u64 {
+        if self.hard_fault_settlement.is_none() {
+            return self.finalized.liability();
+        }
+        self.finalized
+            .leaves()
+            .iter()
+            .filter(|leaf| !self.claimed_hard_fault_accounts.contains(&leaf.account))
+            .try_fold(0_u64, |total, leaf| total.checked_add(leaf.state.balance))
+            .expect("authenticated state liability fits active custody")
+    }
+
+    fn finish_hard_fault_if_drained(&mut self) {
+        if self.hard_fault_settlement.is_some()
+            && self.staged_deposits.is_empty()
+            && self.remaining_state_liability() == 0
+        {
+            self.settled = true;
+        }
     }
 
     fn withdrawal_batch(&self) -> TestWithdrawals {
@@ -1101,13 +1244,34 @@ impl Harness {
             .copied()
             .unwrap_or(0)
             .checked_add(amount);
+        let deadline = now.checked_add(DEPOSIT_INCLUSION_TIMEOUT);
+        let custody = self.custody.checked_add(amount);
+        let deferred = aggregate.is_some_and(|aggregate| {
+            self.staged_withdrawals
+                .get(&account)
+                .is_some_and(|request| {
+                    matches!(
+                        request.body().action(),
+                        WithdrawalAction::Amount(withdrawal) if withdrawal.get() == aggregate
+                    )
+                })
+        });
+        let epoch_available = self
+            .next_epoch()
+            .checked_add(if deferred { 4 } else { 3 })
+            .is_some();
         let expected = if self.operates_after(&observation)
             && self.registered.is_none()
+            && epoch_available
             && amount != 0
             && !self.consumed_deposit_ids.contains(&id)
             && self.consumed_deposit_ids.len() < MAX_DEPOSIT_IDS
             && aggregate.is_some()
-            && self.custody.checked_add(amount).is_some()
+            && deadline.is_some()
+            && custody.is_some()
+            && custody
+                .and_then(|custody| self.claimable.checked_add(custody))
+                .is_some()
         {
             OutcomeClass::Success
         } else {
@@ -1117,6 +1281,11 @@ impl Harness {
         assert_eq!(OutcomeClass::of(&result), expected);
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
+            let deadline = deadline.expect("the oracle checked deposit deadline arithmetic");
+            self.staged_deposit_deadlines
+                .entry(account.clone())
+                .and_modify(|current| *current = (*current).min(deadline))
+                .or_insert(deadline);
             self.staged_deposits.insert(
                 account,
                 aggregate.expect("the oracle checked accepted deposit aggregation"),
@@ -1316,6 +1485,26 @@ impl Harness {
         }
         let body = request.body();
         let request_id = request.id::<Sha256>();
+        let deferred = self
+            .staged_deposits
+            .get(request.account())
+            .is_some_and(|deposit| {
+                matches!(
+                    body.action(),
+                    WithdrawalAction::Amount(withdrawal) if withdrawal.get() == *deposit
+                )
+            });
+        let epoch_offset = if deferred {
+            4
+        } else {
+            match body.action() {
+                WithdrawalAction::Amount(_) => 2,
+                WithdrawalAction::Close => 1,
+            }
+        };
+        if self.next_epoch().checked_add(epoch_offset).is_none() {
+            return false;
+        }
         let Some(minimum_deadline) = now.checked_add(MINIMUM_WITHDRAWAL_NOTICE) else {
             return false;
         };
@@ -1453,6 +1642,11 @@ impl Harness {
                     self.staged_deposits.remove(record.account()),
                     Some(record.amount())
                 );
+                assert!(
+                    self.staged_deposit_deadlines
+                        .remove(record.account())
+                        .is_some()
+                );
             }
             self.slots.push_back(Slot {
                 opening: registered.opening,
@@ -1483,13 +1677,25 @@ impl Harness {
             self.advance(tick)
         };
         let observation = self.predict_observation(now);
+        let reserve = self.slots.front().map(|front| {
+            release_total(&front.withdrawal_releases)
+                .checked_add(payout_total(&front.external_payouts))
+                .expect("authenticated reserve fits custody")
+        });
         let expected = if !self.settled
             && self.slots.front().is_some_and(|front| {
                 matches!(front.status, BatchStatus::Pending)
                     && now > front.context.challenge_deadline()
                     && front.context.payment().epoch() == self.expected_epoch
             }) {
-            OutcomeClass::Success
+            if reserve
+                .and_then(|reserve| self.claimable.checked_add(reserve))
+                .is_some()
+            {
+                OutcomeClass::Success
+            } else {
+                OutcomeClass::Error
+            }
         } else {
             OutcomeClass::Error
         };
@@ -1534,6 +1740,11 @@ impl Harness {
                 .checked_sub(release_total(&slot.withdrawal_releases))
                 .and_then(|custody| custody.checked_sub(payout_total(&slot.external_payouts)))
                 .expect("admitted withdrawals and payouts are held in custody");
+            self.claimable = self
+                .claimable
+                .checked_add(release_total(&slot.withdrawal_releases))
+                .and_then(|claimable| claimable.checked_add(payout_total(&slot.external_payouts)))
+                .expect("finalization preserves the combined custody domain");
             for release in &slot.withdrawal_releases {
                 assert_eq!(
                     self.outstanding.remove(release.request.account()),
@@ -1580,7 +1791,7 @@ impl Harness {
     }
 
     fn explicit_timeout(&mut self, tick: u8, before_deadline: bool) -> ActionOutcome {
-        let now = if let Some((deadline, _)) = self.earliest_outstanding() {
+        let now = if let Some((deadline, _)) = self.earliest_fault() {
             let target = if before_deadline {
                 deadline.saturating_sub(1)
             } else {
@@ -1591,7 +1802,7 @@ impl Harness {
             self.advance(tick)
         };
         let expected_reason = if self.hard_fault.is_none() {
-            self.earliest_outstanding()
+            self.earliest_fault()
                 .filter(|(deadline, _)| now >= *deadline)
         } else {
             None
@@ -1601,18 +1812,14 @@ impl Harness {
         } else {
             OutcomeClass::Error
         };
-        let result = self.chain.fault_expired_withdrawal(now);
+        let result = self.chain.fault_expired(now);
         assert_eq!(OutcomeClass::of(&result), expected);
         if expected == OutcomeClass::Success {
             let reason = result
                 .as_ref()
                 .expect("the oracle predicted an explicit timeout");
-            let (deadline, account) =
-                expected_reason.expect("timeout requires an expired withdrawal");
-            let expected_reason = HardFaultReason::ExpiredWithdrawal {
-                account,
-                expired_at: deadline,
-            };
+            let (_, expected_reason) =
+                expected_reason.expect("timeout requires an expired intake obligation");
             assert_eq!(reason, &expected_reason);
             self.enter_fault(expected_reason);
         }
@@ -1620,7 +1827,7 @@ impl Harness {
     }
 
     fn implicit_timeout(&mut self, step: u64, tick: u8, before_deadline: bool) -> ActionOutcome {
-        let now = if let Some((deadline, _)) = self.earliest_outstanding() {
+        let now = if let Some((deadline, _)) = self.earliest_fault() {
             let target = if before_deadline {
                 deadline.saturating_sub(1)
             } else {
@@ -1868,131 +2075,207 @@ impl Harness {
         });
     }
 
-    fn settle_hard_fault(&mut self, mutated_survivor: bool) -> ActionOutcome {
-        let survivor = if mutated_survivor {
-            wrong_cache(&self.finalized)
+    fn claim_pending_deposit(&mut self, tick: u8, account_selector: u8) -> ActionOutcome {
+        let now = self.advance(tick);
+        let observation = self.predict_observation(now);
+        let terminal_started = self.hard_fault_settlement.is_some();
+        let account =
+            self.accounts[usize::from(account_selector) % self.accounts.len()].public_key();
+        let amount = self.staged_deposits.get(&account).copied();
+        let expected = if (self.hard_fault.is_some() || observation.fault.is_some())
+            && !self.settled
+            && amount.is_some()
+        {
+            OutcomeClass::Success
         } else {
-            self.finalized.clone()
+            OutcomeClass::Error
         };
+        let result = self.chain.claim_pending_deposit(now, &account);
+        assert_eq!(OutcomeClass::of(&result), expected);
+        self.apply_observation(now, &observation);
+        if expected == OutcomeClass::Success {
+            let amount = amount.expect("the oracle required a queued deposit");
+            let refund = result.expect("the oracle predicted a deposit refund");
+            assert_eq!(refund.account, account);
+            assert_eq!(refund.amount, amount);
+            assert_eq!(self.staged_deposits.remove(&refund.account), Some(amount));
+            if terminal_started {
+                assert!(!self.staged_deposit_deadlines.contains_key(&refund.account));
+            } else {
+                assert!(
+                    self.staged_deposit_deadlines
+                        .remove(&refund.account)
+                        .is_some()
+                );
+            }
+            self.custody = self
+                .custody
+                .checked_sub(amount)
+                .expect("queued deposits are held in custody");
+            self.finish_hard_fault_if_drained();
+        }
+        ActionOutcome::new(expected, Some(&observation))
+    }
+
+    fn begin_hard_fault_settlement(&mut self) -> ActionOutcome {
+        let replay = self.hard_fault_settlement.clone();
         let expected = if self.hard_fault.is_some()
             && !self.settled
             && !self
                 .slots
                 .front()
                 .is_some_and(|slot| matches!(slot.status, BatchStatus::Pending))
-            && survivor.len() <= MAX_ACCOUNTS
-            && Self::same_cache(&survivor, &self.finalized)
         {
             OutcomeClass::Success
         } else {
             OutcomeClass::Error
         };
-        let expected_terminal = (expected == OutcomeClass::Success).then(|| self.terminal_state());
-        let custody = self.custody;
-        let result = self.chain.settle_hard_fault(&survivor);
+        let before = self.snapshot();
+        let unfinalized_deposit_total = self.unfinalized_deposit_total();
+        let result = self.chain.begin_hard_fault_settlement();
         assert_eq!(OutcomeClass::of(&result), expected);
         if expected == OutcomeClass::Success {
             let settlement = result
                 .as_ref()
-                .expect("the oracle predicted terminal settlement");
+                .expect("the oracle predicted a frozen settlement boundary");
             assert_eq!(settlement.reason, self.hard_fault.clone().unwrap());
             assert_eq!(settlement.admission_fence_epoch, self.fence.unwrap());
             assert_eq!(settlement.invalid_from, self.invalid_from);
-            assert_eq!(settlement.released_custody, custody);
-            self.assert_payouts(&settlement.payouts, settlement.released_custody);
-            let terminal = expected_terminal
-                .as_ref()
-                .expect("successful settlement has a reference terminal state");
-            assert!(
-                Self::same_cache(&settlement.terminal_state, terminal),
-                "terminal settlement state disagreed with the reference transition"
+            assert_eq!(settlement.frozen_state_root, self.finalized.root());
+            assert_eq!(settlement.state_liability, self.finalized.liability());
+            assert_eq!(
+                settlement.unfinalized_deposit_total,
+                unfinalized_deposit_total
             );
-        }
-        if expected == OutcomeClass::Success {
-            self.finalized =
-                expected_terminal.expect("successful settlement has a reference terminal state");
-            self.custody = 0;
-            self.slots.clear();
-            self.registered = None;
-            self.staged_deposits.clear();
-            self.staged_withdrawals.clear();
-            self.outstanding.clear();
-            self.withdrawal_replays.clear();
-            self.settled = true;
+            assert_eq!(settlement.custody_balance, self.custody);
+
+            if let Some(replay) = replay {
+                assert_eq!(settlement, &replay);
+                assert_eq!(before, self.snapshot());
+            } else {
+                for slot in &self.slots {
+                    for record in slot.deposits.records() {
+                        let aggregate = self
+                            .staged_deposits
+                            .get(record.account())
+                            .copied()
+                            .unwrap_or(0)
+                            .checked_add(record.amount())
+                            .expect("bounded terminal deposits cannot overflow");
+                        self.staged_deposits
+                            .insert(record.account().clone(), aggregate);
+                    }
+                }
+                self.slots.clear();
+                self.registered = None;
+                self.staged_deposit_deadlines.clear();
+                self.staged_withdrawals.clear();
+                self.withdrawal_replays.clear();
+                self.hard_fault_settlement = Some(settlement.clone());
+                assert_eq!(self.unfinalized_deposit_total(), unfinalized_deposit_total);
+                self.finish_hard_fault_if_drained();
+            }
         }
         ActionOutcome::new(expected, None)
     }
 
-    fn same_cache(left: &TestCache, right: &TestCache) -> bool {
-        left.root() == right.root()
-            && left.liability() == right.liability()
-            && left.leaves() == right.leaves()
-    }
-
-    fn terminal_state(&self) -> TestCache {
-        StateCache::new::<Sha256>(Vec::new())
-            .expect("the canonical terminal state is the empty live vector")
-    }
-
-    fn assert_payouts(&self, payouts: &[FaultPayout<VerifyingKey, Digest>], released: u64) {
-        let mut deposits = self.staged_deposits.clone();
-        for slot in &self.slots {
-            for record in slot.deposits.records() {
-                let aggregate = deposits
-                    .get(record.account())
-                    .copied()
-                    .unwrap_or(0)
-                    .checked_add(record.amount())
-                    .expect("bounded terminal deposits");
-                deposits.insert(record.account().clone(), aggregate);
-            }
-        }
-
-        let mut expected = Vec::new();
-        let mut total = 0_u64;
-        for leaf in self.finalized.leaves() {
-            let withdrawal = self.outstanding.get(&leaf.account);
-            let withdrawal_amount = withdrawal.map_or(0, |request| match request.body().action() {
-                WithdrawalAction::Amount(amount) => amount.get(),
-                WithdrawalAction::Close => leaf.state.balance,
+    fn claim_hard_fault(&mut self, account_selector: u8, mutation: u8) -> ActionOutcome {
+        let (opening, selected) = self.hard_fault_opening(account_selector, mutation);
+        let canonical = mutation % 4 == 0;
+        let expected = if self.hard_fault.is_some()
+            && self.hard_fault_settlement.is_some()
+            && !self.settled
+            && canonical
+            && selected
+                .as_ref()
+                .is_some_and(|leaf| !self.claimed_hard_fault_accounts.contains(&leaf.account))
+        {
+            OutcomeClass::Success
+        } else {
+            OutcomeClass::Error
+        };
+        let result = self.chain.claim_hard_fault(&opening);
+        assert_eq!(OutcomeClass::of(&result), expected);
+        if expected == OutcomeClass::Success {
+            let leaf = selected.expect("a canonical terminal claim selects one live leaf");
+            let request = self.outstanding.get(&leaf.account).cloned();
+            let withdrawal_amount =
+                request
+                    .as_ref()
+                    .map_or(0, |request| match request.body().action() {
+                        WithdrawalAction::Amount(amount) => amount.get(),
+                        WithdrawalAction::Close => leaf.state.balance,
+                    });
+            let expected_withdrawal = request.clone().map(|request| WithdrawalRelease {
+                request,
+                amount: withdrawal_amount,
             });
-            if let Some(request) = withdrawal {
-                assert!(leaf.state.active);
-                if let WithdrawalAction::Amount(amount) = request.body().action() {
-                    assert!(amount.get() <= leaf.state.balance);
-                }
-                expected.push(FaultPayout::QueuedWithdrawal(WithdrawalRelease {
-                    request: request.clone(),
-                    amount: withdrawal_amount,
-                }));
+            let release = result.expect("the oracle predicted a terminal state release");
+            assert_eq!(release.account, leaf.account);
+            assert_eq!(release.withdrawal, expected_withdrawal);
+            assert_eq!(release.residual, leaf.state.balance - withdrawal_amount);
+            assert_eq!(release.released_custody, leaf.state.balance);
+
+            assert!(
+                self.claimed_hard_fault_accounts
+                    .insert(leaf.account.clone())
+            );
+            if let Some(request) = request {
+                assert_eq!(self.outstanding.remove(&leaf.account), Some(request));
             }
-            let residual = leaf
-                .state
-                .balance
-                .checked_sub(withdrawal_amount)
-                .and_then(|balance| {
-                    balance.checked_add(deposits.remove(&leaf.account).unwrap_or(0))
-                })
-                .expect("authenticated survivor pays every request");
-            if residual > 0 {
-                expected.push(FaultPayout::ResidualSettlement {
-                    account: leaf.account.clone(),
-                    amount: residual,
-                });
+            self.custody = self
+                .custody
+                .checked_sub(leaf.state.balance)
+                .expect("authenticated state claims are held in active custody");
+            self.finish_hard_fault_if_drained();
+        }
+        ActionOutcome::new(expected, None)
+    }
+
+    fn hard_fault_opening(
+        &self,
+        account_selector: u8,
+        mutation: u8,
+    ) -> (
+        StateOpening<VerifyingKey, Digest>,
+        Option<StateLeaf<VerifyingKey>>,
+    ) {
+        let selected = (!self.finalized.is_empty()).then(|| {
+            self.finalized.leaves()[usize::from(account_selector) % self.finalized.len()].clone()
+        });
+        let mut opening = if let Some(leaf) = &selected {
+            self.finalized
+                .opening(&leaf.account)
+                .expect("a selected finalized leaf has an opening")
+        } else {
+            let fallback = wrong_cache(&self.finalized);
+            fallback
+                .opening(&fallback.leaves()[0].account)
+                .expect("the fallback cache has one live leaf")
+        };
+
+        match mutation % 4 {
+            0 => {}
+            1 => {
+                opening.leaf.state.balance = if opening.leaf.state.balance == u64::MAX {
+                    u64::MAX - 1
+                } else {
+                    opening.leaf.state.balance + 1
+                };
             }
-            total = total
-                .checked_add(withdrawal_amount)
-                .and_then(|value| value.checked_add(residual))
-                .expect("bounded payout sum");
+            2 => opening.leaf.state.active = false,
+            _ => {
+                let malformed = wrong_cache(&self.finalized);
+                let account = selected.as_ref().map_or_else(
+                    || malformed.leaves()[0].account.clone(),
+                    |leaf| leaf.account.clone(),
+                );
+                opening = malformed
+                    .opening(&account)
+                    .expect("a root-mutated cache retains the selected account");
+            }
         }
-        for (account, amount) in deposits {
-            expected.push(FaultPayout::ResidualSettlement { account, amount });
-            total = total
-                .checked_add(amount)
-                .expect("bounded fresh-account deposit payout");
-        }
-        assert_eq!(payouts, expected);
-        assert_eq!(total, released);
+        (opening, selected)
     }
 }
 
