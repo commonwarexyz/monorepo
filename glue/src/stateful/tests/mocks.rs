@@ -14,7 +14,13 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
-use std::{convert::Infallible, sync::Arc};
+use std::{
+    convert::Infallible,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -63,6 +69,7 @@ struct PruneGate {
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+    pub(crate) applied: Arc<AtomicUsize>,
     prune_gate: Arc<Mutex<Option<PruneGate>>>,
 }
 
@@ -88,22 +95,21 @@ impl FlushControl {
 
 #[derive(Default)]
 pub(crate) struct TestDb {
-    finalize: Mutex<Option<Handle<()>>>,
+    sync: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
 }
 
 impl TestDb {
-    pub(crate) fn with_finalize(handle: Handle<()>) -> Self {
+    pub(crate) fn with_sync(handle: Handle<()>) -> Self {
         Self {
-            finalize: Mutex::new(Some(handle)),
+            sync: Mutex::new(Some(handle)),
             control: None,
         }
     }
 
-    /// A database with test-controlled finalize flushes and pruning.
     pub(crate) fn gated(control: FlushControl) -> Self {
         Self {
-            finalize: Mutex::new(None),
+            sync: Mutex::new(None),
             control: Some(control),
         }
     }
@@ -132,14 +138,21 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+    async fn apply(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+        if let Some(control) = &self.control {
+            control.applied.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(self)
+    }
+
+    async fn finalize(self) -> Result<(Self, Handle<()>), Self::Error> {
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
             return Ok((self, Handle::from_receiver(released)));
         }
         let handle = self
-            .finalize
+            .sync
             .lock()
             .take()
             .unwrap_or_else(|| Handle::ready(Ok(())));

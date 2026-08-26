@@ -496,7 +496,7 @@ mod tests {
         },
         telemetry::metrics::Registry,
     };
-    use commonware_utils::{Probability, ScriptedRng};
+    use commonware_utils::{ScriptedRng, probability};
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -672,8 +672,8 @@ mod tests {
         // Select whether the subset is retained by a failed write or by a later crash, and script
         // alternating per-byte retention decisions for an exact expected image.
         let failure_rate = match cut {
-            SubsetWriteCut::FailedWrite => Probability!(1.0),
-            SubsetWriteCut::Crash => Probability!(0.0),
+            SubsetWriteCut::FailedWrite => probability!(1.0),
+            SubsetWriteCut::Crash => probability!(0.0),
         };
         let rng: BoxDynRng = Box::new(ScriptedRng::new(
             (0..REPLACEMENT.len()).map(|index| if index % 2 == 0 { 0 } else { u64::MAX }),
@@ -683,7 +683,7 @@ mod tests {
             Arc::new(Mutex::new(rng)),
             Arc::new(RwLock::new(FaultConfig::default().write(WriteConfig {
                 failure_rate,
-                retention_rate: Probability!(0.5),
+                retention_rate: probability!(0.5),
                 mode: PartialWriteMode::Subset,
             }))),
         );

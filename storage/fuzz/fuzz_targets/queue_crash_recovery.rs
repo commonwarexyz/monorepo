@@ -11,7 +11,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
-use commonware_utils::Probability;
+use commonware_utils::{Probability, probability};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -42,7 +42,7 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
 
 fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
     let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(Probability!(u64::from(percent), 100))
+    Ok(probability!(u64::from(percent), 100))
 }
 
 /// Operations that can be performed on the queue.

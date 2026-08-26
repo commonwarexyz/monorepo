@@ -898,7 +898,7 @@ mod tests {
             release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZUsize, Probability};
+    use commonware_utils::{NZU16, NZUsize, probability};
     use core::num::NonZeroU16;
     use std::sync::{
         Arc,
@@ -1978,8 +1978,8 @@ mod tests {
             // must still scan forward, truncate to page 0's 16-byte prefix, and discard items 2-5.
             *fault_config.write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: Probability!(0.0),
-                    retention_rate: Probability!(0.99),
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(0.99),
                     mode: deterministic::PartialWriteMode::Subset,
                 }),
                 ..Default::default()

@@ -899,7 +899,7 @@ mod tests {
         Blob, BufMut, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, RecordingContext, release_pending_syncs},
     };
-    use commonware_utils::{NZU16, NZUsize, Probability};
+    use commonware_utils::{NZU16, NZUsize, probability};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -1592,8 +1592,8 @@ mod tests {
                 .expect("Failed to re-initialize journal");
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 resize_rate: Some(deterministic::ResizeConfig {
-                    failure_rate: Probability!(1.0),
-                    partial_rate: Probability!(0.0),
+                    failure_rate: probability!(1.0),
+                    partial_rate: probability!(0.0),
                 }),
                 ..Default::default()
             };
@@ -1657,8 +1657,8 @@ mod tests {
                 .expect("Failed to re-initialize journal");
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 resize_rate: Some(deterministic::ResizeConfig {
-                    failure_rate: Probability!(1.0),
-                    partial_rate: Probability!(0.0),
+                    failure_rate: probability!(1.0),
+                    partial_rate: probability!(0.0),
                 }),
                 ..Default::default()
             };
@@ -2069,8 +2069,8 @@ mod tests {
             .await;
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 resize_rate: Some(deterministic::ResizeConfig {
-                    failure_rate: Probability!(1.0),
-                    partial_rate: Probability!(0.0),
+                    failure_rate: probability!(1.0),
+                    partial_rate: probability!(0.0),
                 }),
                 ..Default::default()
             };
@@ -2111,8 +2111,8 @@ mod tests {
 
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: Probability!(1.0),
-                    retention_rate: Probability!(1.0),
+                    failure_rate: probability!(1.0),
+                    retention_rate: probability!(1.0),
                     mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()

@@ -17,7 +17,9 @@ fn make_setup(len: usize) -> Setup<G1> {
     Setup::new(
         generators[0],
         generators[1..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| (chunk[0], chunk[1])),
     )
 }

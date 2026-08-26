@@ -1466,6 +1466,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .map(|group_hits| group_hits as u64)
             .sum();
 
+        #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
         for slice in reusable_buf.chunks_exact(A::SIZE) {
             result.push(A::decode(slice).map_err(Error::Codec)?);
         }
@@ -1540,6 +1541,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let misses =
                 blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
             let mut misses = misses.into_iter().peekable();
+            #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
             for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
                 if misses.peek() == Some(&idx) {
                     misses.next();
@@ -1762,7 +1764,7 @@ mod tests {
             drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, Probability};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
@@ -2113,8 +2115,8 @@ mod tests {
             journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: Probability!(1.0),
-                    retention_rate: Probability!(0.0),
+                    failure_rate: probability!(1.0),
+                    retention_rate: probability!(0.0),
                     mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()
@@ -2240,7 +2242,7 @@ mod tests {
             // Regression: commit() must force a data sync before callers can rely on recovered
             // bytes beyond the persisted recovery watermark.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(Probability!(1.0)),
+                sync_rate: Some(probability!(1.0)),
                 ..Default::default()
             };
             assert!(
@@ -3397,7 +3399,7 @@ mod tests {
             // Inject sync faults. If commit skipped the recovered tail sync, it would succeed
             // despite the fault.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(Probability!(1.0)),
+                sync_rate: Some(probability!(1.0)),
                 ..Default::default()
             };
             assert!(

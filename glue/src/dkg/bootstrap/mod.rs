@@ -25,7 +25,12 @@ use commonware_consensus::{
         self, Start, ancestry::Ancestry, core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver, standard::Deferred,
     },
-    simplex::{self, Floor, config::ForwardingPolicy, elector::RoundRobin, types::Context},
+    simplex::{
+        self, Floor,
+        config::{ForwardPolicy, SkipBudget, SkipPolicy},
+        elector::RoundRobin,
+        types::Context,
+    },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -516,9 +521,12 @@ where
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_millis(500),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(5),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(5),
+                    budget: SkipBudget::Participants,
+                },
                 fetch_timeout: Duration::from_secs(2),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
         );

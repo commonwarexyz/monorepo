@@ -52,7 +52,7 @@ use commonware_storage::journal::{
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
 };
-use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
+use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -102,7 +102,7 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
 /// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
 fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
     let percent: u8 = u.int_in_range(0..=100)?;
-    Ok(Probability!(u64::from(percent), 100))
+    Ok(probability!(u64::from(percent), 100))
 }
 
 /// Op sequence capped at `MAX_OPERATIONS`; a derived `Vec` would instead grow with input length.
