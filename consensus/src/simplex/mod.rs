@@ -698,8 +698,8 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, probability, sync::Mutex,
-        test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, non_empty, ordered::Set, probability,
+        sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -4492,7 +4492,7 @@ mod tests {
                     .take(quorum)
                     .map(|scheme| TNotarize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
                     .expect("notarization requires quorum")
             };
             let finalization = |view: View, parent: View, payload: &[u8]| {
@@ -4503,7 +4503,7 @@ mod tests {
                     .take(quorum)
                     .map(|scheme| TFinalize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
                     .expect("finalization requires quorum")
             };
 
@@ -6013,7 +6013,7 @@ mod tests {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("finalization quorum")
             };
             // Helper: assemble notarization from explicit signer indices
@@ -6021,14 +6021,14 @@ mod tests {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("notarization quorum")
             };
             let build_nullification = |round: Round| -> TNullification<_> {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
@@ -6365,14 +6365,14 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("notarization quorum")
             };
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("finalization quorum")
             };
             let build_nullification = |view: u64| -> TNullification<_> {
@@ -6380,7 +6380,7 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
             let payload_b2 = Sha256::hash(&[b"B_2"]);
@@ -6655,14 +6655,14 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("notarization quorum")
             };
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("finalization quorum")
             };
             let build_nullification = |view: u64| -> TNullification<_> {
@@ -6670,7 +6670,7 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
             let payload_b2 = Sha256::hash(&[b"B_2"]);
@@ -6950,14 +6950,14 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("notarization quorum")
             };
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("finalization quorum")
             };
             let build_nullification = |view: u64| -> TNullification<_> {
@@ -6965,7 +6965,7 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
             let payload_b2 = Sha256::hash(&[b"B_2"]);
@@ -7314,7 +7314,9 @@ mod tests {
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message
-            let ciphertext = schemes[0].encrypt(&mut context, target, *message);
+            let ciphertext = schemes[0]
+                .encrypt(&mut context, target, *message)
+                .expect("valid TLE encryption inputs");
 
             // Wait for consensus to reach the target view and then decrypt
             let reporter = monitor_reporter.lock().clone().unwrap();

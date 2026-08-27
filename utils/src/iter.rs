@@ -29,6 +29,11 @@ impl<I: Iterator> NonEmpty<I> {
         let first = items.next()?;
         Some(Self::new(first, items))
     }
+
+    /// Consumes this source, returning its first item and remaining iterator.
+    pub fn into_parts(self) -> (I::Item, I) {
+        (self.first, self.rest)
+    }
 }
 
 impl<I: Iterator> IntoIterator for NonEmpty<I> {
@@ -96,6 +101,15 @@ mod tests {
     fn iteration_preserves_every_item() {
         let items = NonEmpty::try_new([1, 2, 3].into_iter()).expect("items are non-empty");
         assert_eq!(items.into_iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn into_parts_separates_first_from_rest() {
+        let items = NonEmpty::new(1, [2, 3].into_iter());
+        let (first, rest) = items.into_parts();
+
+        assert_eq!(first, 1);
+        assert_eq!(rest.collect::<Vec<_>>(), vec![2, 3]);
     }
 
     #[test]

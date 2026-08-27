@@ -9,10 +9,10 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest,
-    certificate::{Attestation, Namespace as CertificateNamespace, Scheme, Subject},
+    certificate::{AssemblyError, Attestation, Namespace as CertificateNamespace, Scheme, Subject},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{channel::oneshot, union};
+use commonware_utils::{channel::oneshot, iter::NonEmpty, union};
 use rand_core::CryptoRng;
 use std::hash::Hash;
 
@@ -312,20 +312,26 @@ pub struct Certificate<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
-    pub fn from_acks<'a, I>(scheme: &S, acks: I, strategy: &impl Strategy) -> Option<Self>
+    /// Builds a certificate from non-empty acknowledgements for the first observed item.
+    pub fn from_acks<'a, I>(
+        scheme: &S,
+        acks: NonEmpty<I>,
+        strategy: &impl Strategy,
+    ) -> Result<Self, AssemblyError>
     where
         S: scheme::Scheme<D>,
-        I: IntoIterator<Item = &'a Ack<S, D>>,
-        I::IntoIter: Send,
+        I: Iterator<Item = &'a Ack<S, D>> + Send,
     {
-        let mut iter = acks.into_iter().peekable();
-        let item = iter.peek()?.item.clone();
-        let attestations = iter
-            .filter(|ack| ack.item == item)
-            .map(|ack| ack.attestation.clone());
+        let (first, acks) = acks.into_parts();
+        let item = first.item.clone();
+        let attestations = NonEmpty::new(
+            first.attestation.clone(),
+            acks.filter(|ack| ack.item == item)
+                .map(|ack| ack.attestation.clone()),
+        );
         let certificate = scheme.assemble(attestations, strategy)?;
 
-        Some(Self { item, certificate })
+        Ok(Self { item, certificate })
     }
 
     /// Verifies the recovered certificate for the item.
@@ -466,7 +472,7 @@ mod tests {
         certificate::mocks::Fixture,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, TestRng, ordered::Quorum, test_rng};
+    use commonware_utils::{N3f1, TestRng, non_empty, ordered::Quorum, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -532,13 +538,31 @@ mod tests {
 
         // Test Activity codec - Certified variant
         // Collect enough acks for a certificate
+        let expected = schemes[0].participants().quorum::<N3f1>();
+        let expected_count = usize::try_from(expected).expect("quorum exceeds usize::MAX");
         let acks: Vec<_> = schemes
             .iter()
-            .take(schemes[0].participants().quorum::<N3f1>() as usize)
+            .take(expected_count)
             .filter_map(|scheme| Ack::sign(scheme, Epoch::new(1), item.clone()))
             .collect();
 
-        let certificate = Certificate::from_acks(&schemes[0], &acks, &Sequential).unwrap();
+        // A non-empty sub-quorum still reports the exact shortfall.
+        let insufficient = &acks[..acks.len() - 1];
+        let found = u32::try_from(insufficient.len()).expect("ack count exceeds u32::MAX");
+        assert!(matches!(
+            Certificate::from_acks(
+                &schemes[0],
+                non_empty![@insufficient],
+                &Sequential,
+            ),
+            Err(AssemblyError::InsufficientAttestations(
+                actual_expected,
+                actual_found
+            )) if actual_expected == expected && actual_found == found
+        ));
+
+        let certificate =
+            Certificate::from_acks(&schemes[0], non_empty![@acks.iter()], &Sequential).unwrap();
         assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
 
         let activity_certified = Activity::Certified(certificate.clone());

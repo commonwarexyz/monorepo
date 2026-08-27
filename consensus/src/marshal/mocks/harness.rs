@@ -49,7 +49,9 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability, test_rng, vec::NonEmptyVec};
+use commonware_utils::{
+    NZU16, NZU64, NZUsize, TestRng, non_empty, probability, test_rng, vec::NonEmptyVec,
+};
 use futures::StreamExt;
 use rand::{
     RngExt as _,
@@ -1998,7 +2000,7 @@ impl TestHarness for StandardHarness {
             .take(quorum as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+        Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential).unwrap()
     }
 
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
@@ -2007,7 +2009,7 @@ impl TestHarness for StandardHarness {
             .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential).unwrap()
     }
 
     async fn report_finalization(
@@ -2823,7 +2825,7 @@ impl TestHarness for CodingHarness {
             .take(quorum as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+        Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential).unwrap()
     }
 
     fn make_notarization(
@@ -2836,7 +2838,7 @@ impl TestHarness for CodingHarness {
             .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential).unwrap()
     }
 
     async fn report_finalization(
