@@ -16,8 +16,9 @@ pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<(
     // `manual()` disables the spawn policy, and the assert rejects the remaining inline path
     // (spawn always inlines on a single-worker pool; the parallelism plan mirrors the pool
     // size for strategies built with `Rayon::new`).
+    let manual = strategy.manual();
     assert!(
-        strategy.manual().parallelism() >= 2,
+        manual.parallelism() >= 2,
         "block_strategy requires a multi-worker pool"
     );
     let (started_tx, started_rx) = mpsc::channel();
@@ -26,7 +27,7 @@ pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<(
     for _ in 0..workers {
         let started_tx = started_tx.clone();
         let release_rx = Arc::clone(&release_rx);
-        drop(strategy.manual().spawn(1, move |_| {
+        drop(manual.spawn(1, move |_| {
             started_tx.send(()).unwrap();
             let _ = release_rx.lock().recv();
         }));
