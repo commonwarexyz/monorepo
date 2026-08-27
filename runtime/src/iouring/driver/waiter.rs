@@ -165,45 +165,23 @@ impl WaiterId {
     }
 }
 
-/// Stable identity for a detached ticket's completion entry.
+/// Identity for a detached ticket's completion entry.
 ///
-/// Completion generations are independent from waiter generations. A ticket
-/// keeps this ID after admission and never observes the waiter ID that carries
-/// its request through the kernel.
+/// A ticket keeps this ID after admission and never observes the waiter ID
+/// that carries its request through the kernel. Completion IDs remain
+/// userspace-only and are recycled only when their sole ticket polls or drops.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CompletionId {
-    /// Completion-arena slot index.
-    index: u32,
-    /// Generation of the completion-arena slot at allocation time.
-    ///
-    /// Recycled slots advance this value so a stale ticket cannot address a
-    /// later completion that uses the same index.
-    generation: u32,
-}
+pub struct CompletionId(u32);
 
 impl CompletionId {
-    /// Build a completion ID from its slot index and generation.
-    const fn new(index: u32, generation: u32) -> Self {
-        Self { index, generation }
+    /// Build a completion ID from its slot index.
+    const fn new(index: u32) -> Self {
+        Self(index)
     }
 
     /// Return the completion-arena slot index.
     const fn index(self) -> u32 {
-        self.index
-    }
-
-    /// Return the generation captured by this ID.
-    #[cfg(test)]
-    const fn generation(self) -> u32 {
-        self.generation
-    }
-
-    /// Advance the generation for a recycled completion slot.
-    ///
-    /// The index remains reusable, but the old ID no longer validates against
-    /// the replacement entry. Generation arithmetic wraps at `u32::MAX`.
-    const fn next_generation(self) -> Self {
-        Self::new(self.index, self.generation.wrapping_add(1))
+        self.0
     }
 }
 
@@ -420,15 +398,7 @@ enum Completion {
     Ready(Output),
 }
 
-/// One detached ticket completion entry.
-struct TicketCompletion {
-    /// Generation-stamped identity used to reject stale ticket operations.
-    id: CompletionId,
-    /// Pending or ready lifecycle state for this completion.
-    completion: Completion,
-}
-
-/// Independently generational arena for detached ticket completions.
+/// Arena for detached ticket completions, separate from waiter storage.
 ///
 /// The arena grows only to its high-water mark. Dropped or consumed entries
 /// return to a free list and reuse their existing vector storage.
@@ -436,9 +406,8 @@ pub struct TicketCompletions {
     /// Completion entries indexed by [`CompletionId::index`]. A live entry is
     /// `Pending` while its waiter owns the request, then `Ready` while this
     /// arena owns the terminal output.
-    entries: Vec<Option<TicketCompletion>>,
-    /// Stack of generation-advanced IDs for recycled completion slots. Full-ID
-    /// validation rejects tickets from an older generation of the same slot.
+    entries: Vec<Option<Completion>>,
+    /// Stack of IDs for recycled completion slots.
     free: Vec<CompletionId>,
     /// Number of entries in the `Ready` state. Pending entries are represented
     /// by their waiter and therefore are not counted here.
@@ -457,13 +426,12 @@ impl TicketCompletions {
 
     /// Allocate a pending completion and admit its associated waiter.
     ///
-    /// `insert_waiter` receives the generation-stamped completion ID before
-    /// the completion entry is installed. It must insert a waiter that stores
-    /// that ID as its reverse link. The waiter owns the request while the
-    /// completion entry owns the ticket waker until publication or drop.
+    /// `insert_waiter` receives the completion ID before the completion entry
+    /// is installed. It must insert a waiter that stores that ID as its reverse
+    /// link. The waiter owns the request while the completion entry owns the
+    /// ticket waker until publication or drop.
     ///
-    /// A recycled slot keeps its vector allocation and receives its next
-    /// generation. A fresh slot starts at generation zero.
+    /// A recycled slot keeps its vector allocation.
     pub fn insert_pending_deferred(
         &mut self,
         incoming_waker: &mut Option<Waker>,
@@ -471,7 +439,7 @@ impl TicketCompletions {
     ) -> (CompletionId, WaiterId) {
         let id = self.free.last().copied().unwrap_or_else(|| {
             let index = u32::try_from(self.entries.len()).expect("completion slot index overflow");
-            CompletionId::new(index, 0)
+            CompletionId::new(index)
         });
         let index = id.index() as usize;
         if index == self.entries.len() {
@@ -488,22 +456,19 @@ impl TicketCompletions {
             );
         }
         let waiter_id = insert_waiter(id);
-        let entry = TicketCompletion {
-            id,
-            completion: Completion::Pending {
-                waiter_id,
-                waker: Some(
-                    incoming_waker
-                        .take()
-                        .expect("completion waker consumed twice"),
-                ),
-            },
+        let completion = Completion::Pending {
+            waiter_id,
+            waker: Some(
+                incoming_waker
+                    .take()
+                    .expect("completion waker consumed twice"),
+            ),
         };
         if index == self.entries.len() {
-            self.entries.push(Some(entry));
+            self.entries.push(Some(completion));
         } else {
             self.free.pop();
-            self.entries[index] = Some(entry);
+            self.entries[index] = Some(completion);
         }
         (id, waiter_id)
     }
@@ -526,19 +491,19 @@ impl TicketCompletions {
     /// tracked until the caller removes deadline accounting and recycles it
     /// before invoking the returned waker.
     ///
-    /// Panics if `completion_id` is stale or untracked, if the entry is already
-    /// ready, or if its linked waiter does not equal `waiter_id`.
+    /// Panics if `completion_id` is untracked, if the entry is already ready,
+    /// or if its linked waiter does not equal `waiter_id`.
     pub fn publish_ready(
         &mut self,
         completion_id: CompletionId,
         waiter_id: WaiterId,
         output: Output,
     ) -> Option<Waker> {
-        let entry = self.entry_mut(completion_id, "publish_ready");
+        let completion = self.entry_mut(completion_id, "publish_ready");
         let Completion::Pending {
             waiter_id: pending_waiter,
             ..
-        } = &entry.completion
+        } = &completion
         else {
             panic!("publish_ready called for ready completion");
         };
@@ -547,7 +512,7 @@ impl TicketCompletions {
             "publish_ready called with wrong waiter id"
         );
         let Completion::Pending { waker, .. } =
-            std::mem::replace(&mut entry.completion, Completion::Ready(output))
+            std::mem::replace(completion, Completion::Ready(output))
         else {
             unreachable!("completion verified pending above");
         };
@@ -561,9 +526,8 @@ impl TicketCompletions {
     /// identity, allowing the caller to avoid a clone when the stored waker is
     /// already current.
     pub fn poll_state(&mut self, completion_id: CompletionId, waker: &Waker) -> PollState {
-        let index = completion_id.index() as usize;
-        let entry = self.entry_mut(completion_id, "poll_state");
-        match &entry.completion {
+        let completion = self.entry_mut(completion_id, "poll_state");
+        match completion {
             Completion::Pending { waker: stored, .. } => {
                 if stored
                     .as_ref()
@@ -575,7 +539,7 @@ impl TicketCompletions {
                 }
             }
             Completion::Ready(_) => {
-                let Completion::Ready(output) = self.take(index) else {
+                let Completion::Ready(output) = self.take(completion_id) else {
                     unreachable!("completion verified ready above");
                 };
                 PollState::Ready(output)
@@ -585,25 +549,24 @@ impl TicketCompletions {
 
     /// Take a ready output, or refresh the pending ticket waker.
     ///
-    /// Taking a ready output recycles its completion slot and advances its
-    /// generation. A pending entry remains linked to its waiter and stores the
-    /// latest task waker. Returns `None` while pending.
+    /// Taking a ready output recycles its completion slot. A pending entry
+    /// remains linked to its waiter and stores the latest task waker. Returns
+    /// `None` while pending.
     ///
-    /// Panics if `completion_id` is stale or untracked.
+    /// Panics if `completion_id` is untracked.
     pub fn poll_take_deferred(
         &mut self,
         completion_id: CompletionId,
         incoming_waker: &mut Option<Waker>,
     ) -> (Option<Output>, Option<Waker>) {
-        let index = completion_id.index() as usize;
-        let entry = self.entry_mut(completion_id, "poll_take");
-        match &mut entry.completion {
+        let completion = self.entry_mut(completion_id, "poll_take");
+        match completion {
             Completion::Pending { waker: stored, .. } => {
                 let detached = replace_waker(stored, incoming_waker);
                 (None, detached)
             }
             Completion::Ready(_) => {
-                let Completion::Ready(output) = self.take(index) else {
+                let Completion::Ready(output) = self.take(completion_id) else {
                     unreachable!("completion verified ready above");
                 };
                 (Some(output), None)
@@ -628,11 +591,10 @@ impl TicketCompletions {
     /// outside the owner-state borrow. A Ready entry drops its output and
     /// returns `Ready`.
     ///
-    /// Panics if `completion_id` is stale or untracked.
+    /// Panics if `completion_id` is untracked.
     pub fn mark_orphaned(&mut self, completion_id: CompletionId) -> CompletionDropOutcome {
-        let index = completion_id.index() as usize;
         let _ = self.entry(completion_id, "mark_orphaned");
-        match self.take(index) {
+        match self.take(completion_id) {
             Completion::Pending { waiter_id, waker } => {
                 CompletionDropOutcome::Pending { waiter_id, waker }
             }
@@ -643,9 +605,9 @@ impl TicketCompletions {
     /// Return the waiter linked from a pending completion, or `None` when its
     /// output is already ready.
     ///
-    /// Panics if `completion_id` is stale or untracked.
+    /// Panics if `completion_id` is untracked.
     pub fn pending_waiter(&self, completion_id: CompletionId) -> Option<WaiterId> {
-        match &self.entry(completion_id, "pending_waiter").completion {
+        match self.entry(completion_id, "pending_waiter") {
             Completion::Pending { waiter_id, .. } => Some(*waiter_id),
             Completion::Ready(_) => None,
         }
@@ -668,48 +630,42 @@ impl TicketCompletions {
         self.entries.len() == self.free.len()
     }
 
-    /// Look up a live completion after validating its full generation-stamped ID.
+    /// Look up a live completion by slot ID.
     ///
     /// `operation` is included in invariant-failure messages. Panics when the
-    /// slot is empty, out of bounds, or belongs to another generation.
-    fn entry(&self, id: CompletionId, operation: &str) -> &TicketCompletion {
-        let entry = self
-            .entries
+    /// slot is empty or out of bounds.
+    fn entry(&self, id: CompletionId, operation: &str) -> &Completion {
+        self.entries
             .get(id.index() as usize)
             .and_then(Option::as_ref)
-            .unwrap_or_else(|| panic!("{operation} called for untracked completion"));
-        assert_eq!(entry.id, id, "{operation} called with stale completion id");
-        entry
+            .unwrap_or_else(|| panic!("{operation} called for untracked completion"))
     }
 
-    /// Mutably look up a live completion after validating its full ID.
+    /// Mutably look up a live completion by slot ID.
     ///
     /// `operation` is included in invariant-failure messages. Panics when the
-    /// slot is empty, out of bounds, or belongs to another generation.
-    fn entry_mut(&mut self, id: CompletionId, operation: &str) -> &mut TicketCompletion {
-        let entry = self
-            .entries
+    /// slot is empty or out of bounds.
+    fn entry_mut(&mut self, id: CompletionId, operation: &str) -> &mut Completion {
+        self.entries
             .get_mut(id.index() as usize)
             .and_then(Option::as_mut)
-            .unwrap_or_else(|| panic!("{operation} called for untracked completion"));
-        assert_eq!(entry.id, id, "{operation} called with stale completion id");
-        entry
+            .unwrap_or_else(|| panic!("{operation} called for untracked completion"))
     }
 
-    /// Remove a live entry by arena index and recycle its next-generation ID.
+    /// Remove a live entry and recycle its slot ID.
     ///
-    /// The caller must validate the generation with [`Self::entry`] or
+    /// The caller must validate the slot with [`Self::entry`] or
     /// [`Self::entry_mut`] first. This helper decrements the ready count when
-    /// needed and panics if `index` is out of bounds or empty.
-    fn take(&mut self, index: usize) -> Completion {
-        let entry = self.entries[index]
+    /// needed and panics if the slot is out of bounds or empty.
+    fn take(&mut self, id: CompletionId) -> Completion {
+        let completion = self.entries[id.index() as usize]
             .take()
             .expect("tracked completion missing");
-        if matches!(entry.completion, Completion::Ready(_)) {
+        if matches!(completion, Completion::Ready(_)) {
             self.ready -= 1;
         }
-        self.free.push(entry.id.next_generation());
-        entry.completion
+        self.free.push(id);
+        completion
     }
 }
 
@@ -1610,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn test_completion_generation_reuse_rejects_stale_id() {
+    fn test_completion_slot_reuses_after_ticket_drop() {
         let mut waiters = Waiters::new(1);
         let mut completions = TicketCompletions::new();
         let (first, first_waiter) =
@@ -1623,14 +1579,9 @@ mod tests {
 
         let (reused, reused_waiter) =
             insert_ticket(&mut completions, &mut waiters, make_sync_request());
-        assert_eq!(reused.index(), first.index());
-        assert_eq!(reused.generation(), first.generation().wrapping_add(1));
+        assert_eq!(reused, first);
         assert_eq!(completions.arena_len(), 1);
 
-        let stale = catch_unwind(AssertUnwindSafe(|| {
-            let _ = completions.poll_take(first, &noop_waker());
-        }));
-        assert!(stale.is_err());
         assert!(matches!(
             completions.mark_orphaned(reused),
             CompletionDropOutcome::Pending { waiter_id, .. } if waiter_id == reused_waiter

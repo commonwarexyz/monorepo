@@ -1015,7 +1015,7 @@ pub(super) enum Orphan {
     /// An admitted waiter whose future or ticket was dropped.
     Waiter(WaiterId),
     /// A detached ticket dropped after admission. The completion entry owns
-    /// the waiter link while Pending and generation-validates foreign drops.
+    /// the waiter link while Pending and identifies foreign drops.
     Completion(CompletionId),
     /// A capacity registration whose admission attempt was dropped while
     /// parked on a full slab (before any waiter existed).
@@ -1488,10 +1488,10 @@ pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl C
     wind_down_orphan_prepared(ops, id, outcome, None, actions);
 }
 
-/// Apply detached-ticket wind-down after generation-validating its completion
-/// ID. Pending entries yield their active waiter for request-kind-specific
-/// cancellation or detach. Ready entries drop only their output because the
-/// waiter was already recycled at terminal completion.
+/// Apply detached-ticket wind-down through its completion ID. Pending entries
+/// yield their active waiter for request-kind-specific cancellation or detach.
+/// Ready entries drop only their output because the waiter was already
+/// recycled at terminal completion.
 pub(super) fn wind_down_ticket(
     ops: &mut Ops,
     id: CompletionId,
