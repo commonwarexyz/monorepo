@@ -215,10 +215,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             // Earlier sections end at their retained terminal page. The checkpoint supplies the
             // current section's exact logical boundary, which may precede an uncommitted suffix.
             let (blob, physical_size) = context.open(&cfg.partition, name).await?;
-            let is_current = candidate == section;
-            let (boundary_size, entry) = if is_current {
+            let entry = if candidate == section {
                 if size == 0 {
-                    (0, None)
+                    None
                 } else {
                     let entry = Writer::<E::Blob>::read_validated_from_blob(
                         &blob,
@@ -229,46 +228,27 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                     )
                     .await
                     .map_err(|err| Self::boundary_error(section, size, err))?;
-                    (
-                        size,
-                        Some(A::decode(entry.coalesce()).map_err(Error::Codec)?),
-                    )
+                    Some(A::decode(entry.coalesce()).map_err(Error::Codec)?)
                 }
+            } else if physical_size == 0 {
+                None
             } else {
-                if physical_size == 0 {
-                    (0, None)
-                } else {
-                    let (logical_size, entry) =
-                        Writer::<E::Blob>::read_validated_tail_from_blob(
-                            &blob,
-                            physical_size,
-                            page_size,
-                            Self::CHUNK_SIZE,
-                            ReadOptions::default(),
-                        )
-                        .await
-                        .map_err(|err| Self::boundary_error(candidate, physical_size, err))?;
-                    if !logical_size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-                        return Err(Error::Corruption(format!(
-                            "section {candidate} is not a complete checkpoint-covered index"
-                        )));
-                    }
-                    (
-                        logical_size,
-                        Some(A::decode(entry.coalesce()).map_err(Error::Codec)?),
-                    )
-                }
-            };
-            if is_current && boundary_size != size {
-                return Err(Error::Corruption(format!(
-                    "section {section} does not retain its {size}-byte checkpoint"
-                )));
-            }
-            if !is_current && !boundary_size.is_multiple_of(Self::CHUNK_SIZE_U64) {
+                let (logical_size, entry) = Writer::<E::Blob>::read_validated_tail_from_blob(
+                    &blob,
+                    physical_size,
+                    page_size,
+                    Self::CHUNK_SIZE,
+                    ReadOptions::default(),
+                )
+                .await
+                .map_err(|err| Self::boundary_error(candidate, physical_size, err))?;
+                if !logical_size.is_multiple_of(Self::CHUNK_SIZE_U64) {
                     return Err(Error::Corruption(format!(
                         "section {candidate} is not a complete checkpoint-covered index"
                     )));
-            }
+                }
+                Some(A::decode(entry.coalesce()).map_err(Error::Codec)?)
+            };
             boundaries.insert(candidate, entry);
         }
         boundaries.entry(section).or_insert(None);
@@ -291,11 +271,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::init].
-    async fn init(
-        context: E,
-        cfg: Config,
-        mode: Option<PreflightMode>,
-    ) -> Result<Self, Error> {
+    async fn init(context: E, cfg: Config, mode: Option<PreflightMode>) -> Result<Self, Error> {
         let (floors, restore) = match mode {
             None => (BTreeMap::new(), None),
             Some(PreflightMode::Floors(floors)) => (floors, None),
@@ -855,17 +831,25 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         let section = current.section;
         let position = current.position;
         let size = current.reader.blob_size();
-        let valid_size = position
-            .checked_mul(Inner::<E, A>::CHUNK_SIZE_U64)
-            .ok_or(Error::OffsetOverflow)?;
-        let recoverable = self
+        let Some(valid_size) = position.checked_mul(Inner::<E, A>::CHUNK_SIZE_U64) else {
+            self.sections.pop_front();
+            return Err(Error::OffsetOverflow);
+        };
+        let recoverable = match self
             .journal
             .0
             .manager
             .get_mut(section)
             .expect("replayed section is present")
             .recoverable_prefix_len(self.buffer, self.read_options)
-            .await?;
+            .await
+        {
+            Ok(recoverable) => recoverable,
+            Err(err) => {
+                self.sections.pop_front();
+                return Err(err.into());
+            }
+        };
         if recoverable >= size {
             self.sections.pop_front();
             return Err(source.into());
@@ -875,7 +859,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             self.sections.pop_front();
             return Err(Error::ItemOutOfRange(position));
         }
-        self.ensure_above_floor(section, target)?;
+        if let Err(err) = self.ensure_above_floor(section, target) {
+            self.sections.pop_front();
+            return Err(err);
+        }
 
         warn!(
             section,
@@ -941,13 +928,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             match current.reader.ensure(Inner::<E, A>::CHUNK_SIZE).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    let valid_size = match current
-                        .position
-                        .checked_mul(Inner::<E, A>::CHUNK_SIZE_U64)
-                    {
-                        Some(size) => size,
-                        None => return self.fail(Error::OffsetOverflow),
-                    };
+                    let valid_size =
+                        match current.position.checked_mul(Inner::<E, A>::CHUNK_SIZE_U64) {
+                            Some(size) => size,
+                            None => return self.fail(Error::OffsetOverflow),
+                        };
                     let blob_size = current.reader.blob_size();
                     if valid_size < blob_size {
                         let section = current.section;
@@ -962,7 +947,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                             "incomplete item detected: truncating"
                         );
                         self.repairing = true;
-                        if let Err(err) = repair_blob(&mut self.journal, section, valid_size).await {
+                        if let Err(err) = repair_blob(&mut self.journal, section, valid_size).await
+                        {
                             self.sections.pop_front();
                             return self.fail(err);
                         }
@@ -1246,10 +1232,7 @@ mod tests {
                 .await
                 .expect("failed to init");
             for value in 0..16u64 {
-                (journal, _) = journal
-                    .append(1, &value)
-                    .await
-                    .expect("failed to append");
+                (journal, _) = journal.append(1, &value).await.expect("failed to append");
             }
             journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
@@ -1316,10 +1299,7 @@ mod tests {
                 .await
                 .expect("failed to init");
             for value in 0..16u64 {
-                (journal, _) = journal
-                    .append(1, &value)
-                    .await
-                    .expect("failed to append");
+                (journal, _) = journal.append(1, &value).await.expect("failed to append");
             }
             journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
@@ -1328,13 +1308,10 @@ mod tests {
             // terminal entry and leaves the ordinary replay pass to inspect the suffix.
             recordings.clear();
             let floors = BTreeMap::from([(1, 16)]);
-            let preflight = Journal::<_, u64>::preflight_floors(
-                context.child("preflight"),
-                cfg,
-                &floors,
-            )
-            .await
-            .expect("failed to preflight");
+            let preflight =
+                Journal::<_, u64>::preflight_floors(context.child("preflight"), cfg, &floors)
+                    .await
+                    .expect("failed to preflight");
             assert_eq!(recordings.snapshot().reads.len(), 1);
             preflight
                 .finish()

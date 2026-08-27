@@ -44,6 +44,13 @@ impl Barrier {
         self.pending = None;
     }
 
+    /// Whether no recorded sync remains unobserved.
+    ///
+    /// Call [Self::boundary] first to observe a completion that already resolved.
+    pub(crate) const fn settled(&self) -> bool {
+        self.pending.is_none()
+    }
+
     /// Record that everything below `boundary` was proven durable.
     pub(crate) fn mark_durable(&mut self, boundary: u64) {
         self.boundary = self.boundary.max(boundary);

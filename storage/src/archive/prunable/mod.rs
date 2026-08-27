@@ -1760,13 +1760,78 @@ mod tests {
 
             // Moving to section 4 publishes section 0's completed boundary alongside the two data
             // operations for section 4. An explicit empty sync then flushes the final partial
-            // section once; another empty sync has no durability work.
+            // section once. Another empty sync has no durability work.
             let archive = archive.put_sync(4, test_key("four"), 40).await.unwrap();
             assert_eq!(pending.starts() - initial_starts, 7);
             let archive = archive.sync().await.unwrap();
             assert_eq!(pending.starts() - initial_starts, 8);
             let archive = archive.sync().await.unwrap();
             assert_eq!(pending.starts() - initial_starts, 8);
+            archive.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_withholds_marker_for_unproven_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, "marker-unproven-boundary", NZU64!(4));
+
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let archive = Archive::init(delayed.child("archive"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Prove section 0's single item so it owns publishable marker debt.
+            let (archive, first) = archive
+                .put_start_sync(0, test_key("zero"), 10)
+                .await
+                .unwrap();
+            release_pending_syncs(&pending);
+            first.await.unwrap();
+
+            // Moving to section 4 starts its data syncs and publishes section 0's boundary.
+            let archive = archive.put(4, test_key("four"), 40).await.unwrap();
+            let (archive, second) = archive.start_sync().await.unwrap();
+            assert_eq!(pending.lock().len(), 3);
+
+            // Complete only the marker generation, which parked last. Section 4's data syncs
+            // stay in flight, so nothing beyond its published floor is proven. Sync futures
+            // are lazy, so the released marker resolves when the next request polls it.
+            let marker = pending.lock().pop().expect("marker sync parked");
+            marker
+                .release
+                .send(Ok(()))
+                .expect("marker sync receiver dropped");
+
+            // The next request observes the completed marker generation and retires caught-up
+            // barriers. It must not manufacture a durability proof for section 4: publishing
+            // its unproven length as a marker would let a crash that keeps the marker but
+            // loses the in-flight items make every reopen fail.
+            let archive = archive.put(8, test_key("eight"), 80).await.unwrap();
+            let before = pending.starts();
+            let (archive, third) = archive.start_sync().await.unwrap();
+            assert_eq!(pending.starts() - before, 2);
+
+            release_pending_syncs(&pending);
+            second.await.unwrap();
+            third.await.unwrap();
+
+            // Every boundary publishes once proven. A blocking sync flushes the remaining
+            // debt and a reopen sees all three sections.
+            let archive = drive_pending_syncs(&pending, archive.sync()).await.unwrap();
+            drop(archive);
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(
+                archive.ranges().collect::<Vec<_>>(),
+                vec![(0, 0), (4, 4), (8, 8)]
+            );
             archive.destroy().await.unwrap();
         });
     }

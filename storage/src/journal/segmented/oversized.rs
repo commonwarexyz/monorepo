@@ -45,18 +45,18 @@
 //! crash once later appends may reuse the freed offsets.
 //!
 //! When a checkpoint is provided at init, recovery restores exactly the checkpointed
-//! state instead of inferring one: sections below the checkpoint are verified complete
-//! (their last entry must end exactly at the glob's size, without reading values) and
-//! adopted unchanged, the checkpointed section is durably truncated to the committed
-//! size, and everything after it is removed. Committed damage the checkpoint covers
-//! fails init rather than being repaired, and value checksums below the checkpoint are
-//! still verified lazily at read.
+//! state instead of inferring one: each section below the checkpoint is adopted at its
+//! validated terminal boundary (without reading values), the checkpointed section is
+//! durably truncated to the committed size, and everything after it is removed. A
+//! missing or damaged durable boundary fails init rather than being repaired. Other
+//! committed damage the checkpoint covers surfaces lazily as read errors.
 //!
 //! Tracked recovery maintains a per-section committed item count for owners that must validate
 //! every newly recovered value. The covered index/value prefix is proven before repair, replay
 //! verifies values above it in order, and the first invalid value truncates the rest of that
-//! section. Marker publication follows successful joint index/value syncs and may conservatively
-//! trail them by one sync request.
+//! section. Marker publication conservatively trails proven data syncs: a section's boundary
+//! is published once it is proven durable and the section is no longer receiving writes, or on
+//! an empty flush.
 
 use super::{
     fixed::{
@@ -158,6 +158,21 @@ impl<E: Context> Tracking<E> {
         }
     }
 
+    /// Return the section's barrier, seeding a replacement at its staged floor.
+    ///
+    /// A staged floor never exceeds durably synced data, so it is the newest boundary a
+    /// replacement barrier may claim without observing a completed sync.
+    fn barrier(&mut self, section: u64) -> &mut Barrier {
+        let floor = self
+            .metadata
+            .get(&SectionKey::new(section))
+            .copied()
+            .unwrap_or(0);
+        self.barriers
+            .entry(section)
+            .or_insert_with(|| Barrier::new(floor))
+    }
+
     /// Observe an in-flight marker without blocking and discard proofs it published.
     fn observe_marker_sync(&mut self) -> Result<Option<SyncCompletion>, Error> {
         let Some(completion) = self.marker_sync_pending.clone() else {
@@ -169,13 +184,15 @@ impl<E: Context> Tracking<E> {
         result.map_err(|err| Error::Metadata(crate::metadata::Error::Runtime(err)))?;
         self.marker_sync_pending = None;
 
+        // Retire only barriers whose proof is fully published. A barrier still awaiting a
+        // sync outcome protects a boundary beyond its marker and must survive to observe it.
         let metadata = &self.metadata;
         self.barriers.retain(|section, barrier| {
             let published = metadata
                 .get(&SectionKey::new(*section))
                 .copied()
                 .unwrap_or(0);
-            barrier.boundary() > published
+            barrier.boundary() > published || !barrier.settled()
         });
         Ok(None)
     }
@@ -236,11 +253,12 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Initialize with crash recovery.
     ///
     /// `checkpoint` is the durable state recovery restores, as `(section, index size)`.
-    /// When set, recovery keeps exactly this state: sections below `section` are
-    /// verified complete and adopted unchanged, `section` is truncated to `index size`,
-    /// and everything after it is removed. Anything the checkpoint covers that is
-    /// missing or inconsistent fails init with [Error::Corruption]. Callers must only
-    /// provide a checkpoint that was durably synced before it was published (see
+    /// When set, recovery keeps exactly this state: each section below `section` is
+    /// adopted at its validated terminal boundary, `section` is truncated to `index
+    /// size`, and everything after it is removed. A missing or damaged boundary the
+    /// checkpoint covers fails init with [Error::Corruption], while interior damage
+    /// below a boundary surfaces lazily as read errors. Callers must only provide a
+    /// checkpoint that was durably synced before it was published (see
     /// [crate::freezer::Freezer]).
     ///
     /// When `None`, recovery infers the durable state instead: it finds each section's
@@ -279,6 +297,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         read_options: ReadOptions,
     ) -> Result<Replay<E, I, V>, Error> {
         let buffer = cfg.replay_buffer;
+
         // Open the commit markers before the data they constrain.
         let metadata = Metadata::init(
             context.child("metadata"),
@@ -765,13 +784,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let position;
         (self.index, position) = self.index.append(section, &entry_with_location).await?;
 
-        // The pre-append prefix is the newest boundary that a later marker may publish without
-        // first observing another joint index/value sync.
+        // Track this section so a later sync can prove and publish its new length. A fresh
+        // barrier claims only the staged floor, never the unproven pre-append prefix.
         if let Some(tracking) = &mut self.tracking {
-            tracking
-                .barriers
-                .entry(section)
-                .or_insert_with(|| Barrier::new(position));
+            tracking.barrier(section);
         }
 
         Ok((self, position, offset, size))
@@ -847,8 +863,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             .map(|&section| Ok((section, self.index.section_len(section)?)))
             .collect::<Result<Vec<_>, Error>>()?;
         let ((index, index_handle), (values, values_handle)) = try_join(
-            self.index.start_sync(&sections),
-            self.values.start_sync(&sections),
+            self.index.start_sync(sections),
+            self.values.start_sync(sections),
         )
         .await?;
         self.index = index;
@@ -858,14 +874,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 .boxed()
                 .shared();
 
-        // Bind every selected target to the new joint completion. A section with no tracked append
-        // consists entirely of startup-durable data, so its current length is already proven.
+        // Bind every selected target to the new joint completion. The recorded length becomes
+        // publishable only once this completion is observed to have succeeded.
         for (section, length) in lengths {
-            let barrier = tracking
-                .barriers
-                .entry(section)
-                .or_insert_with(|| Barrier::new(length));
-            barrier.record(length, completion.clone());
+            tracking.barrier(section).record(length, completion.clone());
         }
 
         // Do not mutate Metadata while its prior generation is in flight. Completed barriers stay
@@ -898,9 +910,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 
         self.tracking = Some(tracking);
         let marker = marker.expect("checked above");
-        let handle = Handle::from_future(async move {
-            try_join(completion, marker).await.map(|_| ())
-        });
+        let handle =
+            Handle::from_future(async move { try_join(completion, marker).await.map(|_| ()) });
         Ok((self, handle))
     }
 
@@ -1230,7 +1241,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
             let index_size = items.checked_mul(chunk_size).ok_or(Error::OffsetOverflow)?;
             journal = journal.rewind_section(section, index_size).await?;
         }
-        journal.align_values_to_index().await?.reconcile_markers().await
+        journal
+            .align_values_to_index()
+            .await?
+            .reconcile_markers()
+            .await
     }
 }
 
@@ -2002,6 +2017,7 @@ mod tests {
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(4096),
                 compression: None,
                 codec_config: (),
             };
@@ -2265,13 +2281,10 @@ mod tests {
                     .coalesce();
                 drop(blob);
 
-                let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
-                    context.child(restore_child),
-                    cfg.clone(),
-                    Some(checkpoint),
-                )
-                .await
-                .expect("checkpoint restore should adopt the covered prefix");
+                let oversized: Oversized<_, TestEntry, TestValue> =
+                    Oversized::init(context.child(restore_child), cfg.clone(), Some(checkpoint))
+                        .await
+                        .expect("checkpoint restore should adopt the covered prefix");
                 assert!(matches!(
                     oversized.get(1, 1).await,
                     Err(Error::Runtime(RError::InvalidChecksum))
@@ -2702,6 +2715,7 @@ mod tests {
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(4096),
                 compression: None,
                 codec_config: (),
             };
@@ -3246,6 +3260,7 @@ mod tests {
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(4096),
                 compression: None,
                 codec_config: (),
             };
@@ -3535,6 +3550,7 @@ mod tests {
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(4096),
                 compression: None,
                 codec_config: (),
             };
@@ -4379,6 +4395,7 @@ mod tests {
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(4096),
                 compression: None,
                 codec_config: (),
             };

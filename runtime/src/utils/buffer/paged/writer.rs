@@ -54,40 +54,6 @@ use commonware_cryptography::Crc32;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
 
-/// Copy the intersection of one validated logical page into an optional capture range.
-fn capture_logical_page(
-    capture: &mut Option<(u64, &mut [u8])>,
-    page_offset: u64,
-    logical: &[u8],
-) -> Result<(), Error> {
-    // Locate the overlap without assuming either range fits in the host address width.
-    let Some((capture_offset, capture_buf)) = capture.as_mut() else {
-        return Ok(());
-    };
-    let capture_offset = *capture_offset;
-    let capture_len = u64::try_from(capture_buf.len()).map_err(|_| Error::OffsetOverflow)?;
-    let capture_end = capture_offset
-        .checked_add(capture_len)
-        .ok_or(Error::OffsetOverflow)?;
-    let logical_len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
-    let page_end = page_offset
-        .checked_add(logical_len)
-        .ok_or(Error::OffsetOverflow)?;
-    let overlap_start = capture_offset.max(page_offset);
-    let overlap_end = capture_end.min(page_end);
-    if overlap_start >= overlap_end {
-        return Ok(());
-    }
-
-    // Both slices are bounded by their source lengths, so the offsets now fit in `usize`.
-    let source_start = (overlap_start - page_offset) as usize;
-    let target_start = (overlap_start - capture_offset) as usize;
-    let len = (overlap_end - overlap_start) as usize;
-    capture_buf[target_start..target_start + len]
-        .copy_from_slice(&logical[source_start..source_start + len]);
-    Ok(())
-}
-
 /// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
 /// applying two upward adjustments:
 ///
@@ -929,7 +895,6 @@ impl<B: Blob> Writer<B> {
             &self.blob,
             logical_page_size,
             total_pages,
-            None,
             buffer_size,
             read_options,
         )
@@ -1043,16 +1008,9 @@ impl<B: Blob> Writer<B> {
 
         // The checksum length on the terminal page determines the blob's logical end.
         let page = physical_size / physical_page_size - 1;
-        let (tail, _) = super::get_page_with_checksum_from_blob(
-            blob,
-            page,
-            page_size,
-            read_options,
-        )
-        .await?;
-        let page_start = page
-            .checked_mul(page_size)
-            .ok_or(Error::OffsetOverflow)?;
+        let (tail, _) =
+            super::get_page_with_checksum_from_blob(blob, page, page_size, read_options).await?;
+        let page_start = page.checked_mul(page_size).ok_or(Error::OffsetOverflow)?;
         let logical_size = page_start
             .checked_add(u64::try_from(tail.len()).map_err(|_| Error::OffsetOverflow)?)
             .ok_or(Error::OffsetOverflow)?;
@@ -1064,8 +1022,8 @@ impl<B: Blob> Writer<B> {
         // Read only the portion preceding the terminal page, then append its already-validated
         // suffix. This keeps a terminal item wholly within the last page to one blob read.
         let mut out = if offset < page_start {
-            let prefix_len = usize::try_from(page_start - offset)
-                .map_err(|_| Error::OffsetOverflow)?;
+            let prefix_len =
+                usize::try_from(page_start - offset).map_err(|_| Error::OffsetOverflow)?;
             Self::read_validated_from_blob(
                 blob,
                 logical_page_size,
@@ -1091,14 +1049,12 @@ impl<B: Blob> Writer<B> {
     ///
     /// The boolean is true only when every physical byte belongs to a valid page in that prefix.
     /// It is false when the scan stops at a short or invalid page, at a partial physical page, or
-    /// before a later physical page. When `capture` is set, bytes from its logical range are copied
-    /// as valid pages are scanned. Callers must check that the returned prefix covers the range
-    /// before using them. `buffer_size` bounds each read with the same one-page minimum as replay.
+    /// before a later physical page. `buffer_size` bounds each read with the same one-page minimum
+    /// as replay.
     pub async fn recoverable_prefix_len_from_blob(
         blob: &B,
         physical_size: u64,
         logical_page_size: NonZeroU16,
-        capture: Option<(u64, &mut [u8])>,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<(u64, bool), Error> {
@@ -1111,7 +1067,6 @@ impl<B: Blob> Writer<B> {
             blob,
             logical_page_size,
             total_pages,
-            capture,
             buffer_size,
             read_options,
         )
@@ -1130,7 +1085,6 @@ impl<B: Blob> Writer<B> {
         blob: &B,
         logical_page_size: u64,
         total_pages: u64,
-        mut capture: Option<(u64, &mut [u8])>,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<(u64, bool), Error> {
@@ -1171,13 +1125,6 @@ impl<B: Blob> Writer<B> {
                     return Ok((valid_len, false));
                 };
                 let len = u64::from(checksum.len);
-                let page_number = page
-                    .checked_add(batch_page as u64)
-                    .ok_or(Error::OffsetOverflow)?;
-                let page_offset = page_number
-                    .checked_mul(logical_page_size)
-                    .ok_or(Error::OffsetOverflow)?;
-                capture_logical_page(&mut capture, page_offset, &physical_page[..len as usize])?;
                 valid_len = valid_len.checked_add(len).ok_or(Error::OffsetOverflow)?;
 
                 // A valid partial logical page is terminal only when it ends the scanned blob.
@@ -1619,7 +1566,6 @@ mod tests {
                 &blob,
                 physical_size,
                 PAGE_SIZE,
-                None,
                 NZUsize!(1),
                 ReadOptions::default(),
             )
@@ -1631,14 +1577,11 @@ mod tests {
 
             // A three-page budget coalesces the same scan into three reads.
             recordings.clear();
-            let capture_offset = PAGE_SIZE.get() as u64 * 3 - 5;
-            let mut captured = [0u8; 10];
             let scan_buffer = NonZeroUsize::new(physical_page_size * 3).unwrap();
             let (recoverable, complete) = Writer::<_>::recoverable_prefix_len_from_blob(
                 &blob,
                 physical_size,
                 PAGE_SIZE,
-                Some((capture_offset, &mut captured)),
                 scan_buffer,
                 ReadOptions::default(),
             )
@@ -1646,10 +1589,6 @@ mod tests {
             .unwrap();
             assert_eq!(recoverable, total as u64);
             assert!(complete);
-            assert_eq!(
-                captured,
-                data[capture_offset as usize..capture_offset as usize + 10]
-            );
             assert_eq!(recordings.snapshot().reads.len(), 3);
         });
     }
@@ -3640,7 +3579,6 @@ mod tests {
                 &blob,
                 physical_page_size as u64,
                 PAGE_SIZE,
-                None,
                 NZUsize!(BUFFER_SIZE),
                 ReadOptions::default(),
             )
