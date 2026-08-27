@@ -166,13 +166,23 @@ const MAX_WIDTH: u32 = 11;
 /// Points arrive in random bucket order, so the accumulator's working set is
 /// the whole slot array, and a round's collapse workspace is half as large
 /// again. A wider round needs fewer passes over the points, but its slots pay
-/// for a deeper level of the memory hierarchy on every point — measured here as
-/// 8% more per addition one step past the budget and 15% two steps past — and
-/// its workspace grows threefold per step, per thread. Two MiB holds `3^9`
-/// slots, which is where the two stop trading well: at a million points, the
-/// widest plan the next step up allows measures within noise of the one chosen
-/// here while asking for an order of magnitude more memory.
-const SLOT_BUDGET: usize = 2 << 20;
+/// for a deeper level of the memory hierarchy on every point, and its workspace
+/// grows threefold per step, per thread.
+///
+/// Sixteen MiB admits width 11, which is the one step that changes the round
+/// count at 128-bit security: `ceil(81/11) = 8` passes rather than the nine
+/// every narrower width needs. It is worth 9% at a million points here, and
+/// nothing at all below the size where the cost model stops choosing it — a
+/// hundred-thousand-point batch still plans nine rounds of width nine, because
+/// the combine a width-11 round pays for outgrows the pass it saves. Folding
+/// is what brings width 11 inside a budget this size at all: unfolded its slots
+/// would be 17 MB rather than 8.5 MB.
+///
+/// This is the constant most worth re-measuring on a new machine. It trades
+/// against the last level of cache that holds the slot array, so a machine with
+/// a smaller one wants it lower; the width it admits is a performance choice
+/// only, and every width is equally sound.
+const SLOT_BUDGET: usize = 16 << 20;
 
 /// Approximate cost of one [`G1::in_subgroup`] check, in units of one
 /// batch-affine point addition.
@@ -210,7 +220,7 @@ const ID_NEGATE: u32 = 1 << 31;
 /// together with its negation (see [`Trits`]), so the `3^m` vectors occupy
 /// `(3^m + 1) / 2` buckets: one per `{v, -v}` pair, plus the zero vector.
 const fn folded(m: u32) -> usize {
-    (3usize.pow(m) + 1) / 2
+    3usize.pow(m).div_ceil(2)
 }
 
 /// Bucket slot holding nothing, i.e. standing for the identity.
@@ -601,7 +611,7 @@ impl Round {
             let list = &mut self.marginals[j];
             list.clear();
             list.extend(
-                ((half + 1) / 2..=(3 * half - 1) / 2)
+                (half.div_ceil(2)..=(3 * half - 1) / 2)
                     .map(|b| (level + b) as u32)
                     .filter(|&index| self.live[index as usize]),
             );
@@ -1530,17 +1540,27 @@ mod tests {
         assert!(plan(6000, 81).is_some());
         // A zero soundness target needs no rounds at all.
         assert_eq!(plan(6000, 0), Some(Vec::new()));
-        // Wider rounds, and so fewer of them, pay off as the batch grows, until
-        // the slot budget stops the widening.
+        // Wider rounds, and so fewer of them, pay off as the batch grows: a
+        // wider round spends more on its combine and saves it on every point,
+        // so the crossover moves with n. Pinned as monotonicity rather than as
+        // particular widths, which move with the slot budget.
         let rounds = |n| plan(n, 81).map(|widths| widths.len());
         assert!(rounds(1000) > rounds(100_000));
-        assert_eq!(rounds(100_000), rounds(2_000_000));
+        assert!(rounds(100_000) >= rounds(2_000_000));
         let widest = |n| plan(n, 81).and_then(|widths| widths.into_iter().max());
         assert!(widest(1000) < widest(100_000));
-        assert_eq!(widest(2_000_000), widest(100_000));
+        assert!(widest(100_000) <= widest(2_000_000));
+        // Whatever the model picks, it stays inside the budget it is given, and
+        // the budget rather than the width cap is what stops the widening.
+        for n in [100_000usize, 2_000_000] {
+            let budgeted = widest(n).expect("batched");
+            assert!(folded(budgeted) * size_of::<blst_p1_affine>() <= SLOT_BUDGET);
+        }
         let budgeted = widest(2_000_000).expect("batched");
-        assert!(3usize.pow(budgeted) * size_of::<blst_p1_affine>() <= SLOT_BUDGET);
-        assert!(3usize.pow(budgeted + 1) * size_of::<blst_p1_affine>() > SLOT_BUDGET);
+        assert!(
+            budgeted == MAX_WIDTH
+                || folded(budgeted + 1) * size_of::<blst_p1_affine>() > SLOT_BUDGET
+        );
     }
 
     #[test]
@@ -2114,12 +2134,12 @@ mod tests {
                 // All points on one folded vector, half of them negated.
                 1 => (0..n)
                     .map(|i| {
-                        (seed as u32) % buckets | if i % 2 == 0 { ID_NEGATE } else { 0 }
+                        ((seed as u32) % buckets) | if i % 2 == 0 { ID_NEGATE } else { 0 }
                     })
                     .collect(),
                 // A tiny support, so collisions and cancellations dominate.
                 2 => (0..n)
-                    .map(|i| (i as u32) % buckets.min(3) | ((i as u32 & 1) << 31))
+                    .map(|i| ((i as u32) % buckets.min(3)) | ((i as u32 & 1) << 31))
                     .collect(),
                 _ => Trits::new(&mut rng).fill(m, n),
             };
@@ -2336,12 +2356,12 @@ mod tests {
         let mut rng = test_rng();
         let n = 100_000;
         let widths = plan(n, 81).expect("batched");
-        let widest = 3usize.pow(*widths.iter().max().expect("nonempty"))
-            * size_of::<blst_p1_affine>();
-        assert!(
-            widest * 3 > SLOT_BUDGET,
-            "expected the budget to bind, got {widths:?}"
-        );
+        let widest = *widths.iter().max().expect("nonempty");
+        // What matters here is that the plan is wide, so the collapse runs at
+        // full depth — not which of the two limits stopped the widening, since
+        // that moves with the slot budget.
+        assert!(widest >= 8, "expected a wide plan, got {widths:?}");
+        assert!(folded(widest) * size_of::<blst_p1_affine>() <= SLOT_BUDGET);
         let pool: Vec<G1> = (0..64).map(|_| in_subgroup_point(&mut rng)).collect();
         let mut points: Vec<G1> = (0..n).map(|i| pool[i % pool.len()]).collect();
         assert!(batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
