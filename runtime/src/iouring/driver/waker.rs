@@ -1,6 +1,6 @@
 //! Hybrid futex/eventfd wake coordination for the io_uring loop.
 //!
-//! This module implements the wake protocol used by [`super::IoUringLoop`].
+//! This module implements the wake protocol used by [`super::Driver`].
 //! The active protocol is the out-of-band wake latch:
 //! - Producers publish work through their own synchronized containers and
 //!   then call [`Waker::wake`], which latches a dedicated "wake signalled"

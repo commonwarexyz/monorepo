@@ -23,15 +23,15 @@ use std::{
 };
 
 #[test]
-fn test_iouring_loop_rounds_ring_size_up_to_power_of_two() {
+fn test_driver_rounds_ring_size_up_to_power_of_two() {
     let cfg = RingConfig {
         size: 100,
         ..Default::default()
     };
     let mut registry = Registry::default();
-    let (mut ring, handle, _ioloop) = IoUringLoop::new(cfg, Duration::from_secs(60), &mut registry)
+    let (mut driver, handle) = Driver::new(cfg, Duration::from_secs(60), &mut registry)
         .expect("io_uring creation should succeed");
-    assert_eq!(ring.submission().capacity(), 128);
+    assert_eq!(driver.ring.submission().capacity(), 128);
     handle.with(|ops| assert_eq!(ops.waiters.free_len(), 128));
 }
 
@@ -66,7 +66,7 @@ fn test_submit_and_wait_non_etime_error_is_not_misclassified() {
         libc::close(std::os::fd::AsRawFd::as_raw_fd(&driver.ring));
     }
     let err = driver
-        .inner
+        .state
         .submit_and_wait(&mut driver.ring, 1, Some(Duration::from_millis(1)))
         .expect_err("enter on a closed ring must fail");
     assert_eq!(err.raw_os_error(), Some(libc::EBADF));
@@ -1392,9 +1392,9 @@ fn test_pending_sync_foreign_drop_detaches_until_terminal_completion() {
     // capacity release.
     {
         let driver = harness.driver();
-        let owner = driver.inner.handle.clone();
-        owner.with(|ops| driver.inner.process_orphans(ops));
-        driver.inner.flush_wakers();
+        let owner = driver.state.handle.clone();
+        owner.with(|ops| driver.state.process_orphans(ops));
+        driver.state.flush_wakers();
     }
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 1);
@@ -1449,7 +1449,7 @@ fn test_accept_ticket_timeout_releases_deadline_before_poll() {
         harness.driver().turn();
         harness.driver().park(Some(Duration::from_millis(10)));
     }
-    assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+    assert_eq!(harness.driver().state.timeout_wheel.next_deadline(), None);
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
         assert_eq!(ops.completions.ready(), 1);
@@ -1632,9 +1632,9 @@ fn test_foreign_op_waker_drop_panics_after_mailbox_orphan_commit() {
     });
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let driver = harness.driver();
-        let owner = driver.inner.handle.clone();
-        owner.with(|ops| driver.inner.process_orphans(ops));
-        driver.inner.flush_wakers();
+        let owner = driver.state.handle.clone();
+        owner.with(|ops| driver.state.process_orphans(ops));
+        driver.state.flush_wakers();
     }))
     .expect_err("mailbox orphan waker drop should panic");
     assert_eq!(
@@ -1666,7 +1666,7 @@ fn test_foreign_op_waker_drop_panics_after_mailbox_orphan_commit() {
         );
     }
     assert!(flag.0.load(Ordering::Acquire));
-    assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+    assert_eq!(harness.driver().state.timeout_wheel.next_deadline(), None);
     harness.handle.with(|ops| {
         assert!(ops.pending_cancels.is_empty());
         assert!(ops.released_deadlines.is_empty());
@@ -2051,7 +2051,7 @@ fn test_capacity_waker_reentrant_admission_is_staged_in_same_turn() {
     assert!(
         harness
             .driver()
-            .inner
+            .state
             .timeout_wheel
             .next_deadline()
             .is_some()
@@ -2077,9 +2077,8 @@ fn test_turn_refreshes_deadlines_after_waker_callback() {
         ..RingConfig::default()
     };
     let mut registry = Registry::default();
-    let (mut ring, handle, mut ioloop) =
-        IoUringLoop::new(cfg, Duration::from_secs(1), &mut registry)
-            .expect("io_uring creation should succeed");
+    let (mut driver, handle) = Driver::new(cfg, Duration::from_secs(1), &mut registry)
+        .expect("io_uring creation should succeed");
     let (left, _right) = UnixStream::pair().unwrap();
     let deadline = Instant::now() + Duration::from_millis(50);
     let mut recv = Box::pin(handle.recv(
@@ -2093,22 +2092,23 @@ fn test_turn_refreshes_deadlines_after_waker_callback() {
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(recv.as_mut().poll(&mut cx).is_pending());
-    ioloop.turn(&mut ring);
-    assert!(ioloop.timeout_wheel.next_deadline().is_some());
+    driver.state.turn(&mut driver.ring);
+    assert!(driver.state.timeout_wheel.next_deadline().is_some());
 
     // The callback consumes the entire remaining timeout without
     // publishing any driver work. The turn must refresh deadlines before
     // it can return control to a blocking park.
     let sleepy = arc_waker(Arc::new(SleepPast(deadline + Duration::from_millis(5))));
-    ioloop
+    driver
+        .state
         .pending_waker_actions
         .push(WakerAction::Wake(sleepy));
-    ioloop.turn(&mut ring);
-    assert_eq!(ioloop.timeout_wheel.next_deadline(), None);
+    driver.state.turn(&mut driver.ring);
+    assert_eq!(driver.state.timeout_wheel.next_deadline(), None);
 
     drop(recv);
     wake_batch(handle.close().into_iter().map(WakerAction::Wake));
-    ioloop.drain(&mut ring);
+    driver.state.drain(&mut driver.ring);
 }
 
 #[test]
@@ -2399,7 +2399,7 @@ fn test_dropped_op_releases_wheel_deadline() {
     std::thread::sleep(Duration::from_millis(100));
     harness.driver().turn();
     assert_eq!(
-        harness.driver().inner.timeout_wheel.next_deadline(),
+        harness.driver().state.timeout_wheel.next_deadline(),
         None,
         "dropped op leaked its timeout-wheel deadline"
     );
@@ -2486,14 +2486,14 @@ fn test_fill_requires_flush_only_for_sq_pressure() {
     let driver_state = harness.handle.clone();
     let driver = harness.driver();
     let needs_flush =
-        driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
     assert!(needs_flush);
 
     // After flushing, the second op stages without filling the SQ, so no
     // further flush is needed even though the slab remains full.
-    driver.inner.submit(&mut driver.ring).unwrap();
+    driver.state.submit(&mut driver.ring).unwrap();
     let needs_flush =
-        driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
     assert!(!needs_flush);
 
     drop(recv_a);
@@ -2525,18 +2525,18 @@ fn test_fill_retries_wake_rearm_when_sq_is_full() {
     let driver = harness.driver();
     driver_state.with(|ops| {
         let mut submission_queue = driver.ring.submission();
-        assert!(!driver.inner.stage_backlog(ops, &mut submission_queue));
+        assert!(!driver.state.stage_backlog(ops, &mut submission_queue));
         assert!(submission_queue.is_full());
     });
 
     let needs_flush =
-        driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
     assert!(needs_flush);
-    assert!(driver.inner.wake_rearm_needed);
+    assert!(driver.state.wake_rearm_needed);
 
-    driver.inner.submit(&mut driver.ring).unwrap();
+    driver.state.submit(&mut driver.ring).unwrap();
     let needs_flush = driver_state.with(|ops| {
-        let needs_flush = driver.inner.fill_submission_queue(ops, &mut driver.ring);
+        let needs_flush = driver.state.fill_submission_queue(ops, &mut driver.ring);
         assert!(ops.waiters.is_full());
         assert!(ops.backlog.is_empty());
         needs_flush
@@ -2544,7 +2544,7 @@ fn test_fill_retries_wake_rearm_when_sq_is_full() {
     // The wake poll exactly fills the SQ while the only waiter is in
     // flight. The turn can flush and reap it in one submit-and-wait call.
     assert!(!needs_flush);
-    assert!(!driver.inner.wake_rearm_needed);
+    assert!(!driver.state.wake_rearm_needed);
 
     drop(recv);
 }
@@ -2573,7 +2573,7 @@ fn test_fill_reports_exact_sq_saturation() {
     let driver_state = harness.handle.clone();
     let driver = harness.driver();
     let needs_flush = driver_state.with(|ops| {
-        let needs_flush = driver.inner.fill_submission_queue(ops, &mut driver.ring);
+        let needs_flush = driver.state.fill_submission_queue(ops, &mut driver.ring);
         assert!(ops.backlog.is_empty());
         assert!(!ops.waiters.is_full());
         needs_flush
@@ -2621,23 +2621,23 @@ fn test_cancel_staging_batches_across_sq_submissions() {
     let driver = harness.driver();
     driver_state.with(|ops| {
         let mut submission_queue = driver.ring.submission();
-        assert!(!driver.inner.stage_backlog(ops, &mut submission_queue));
+        assert!(!driver.state.stage_backlog(ops, &mut submission_queue));
         assert!(submission_queue.is_full());
     });
-    driver.inner.submit(&mut driver.ring).unwrap();
-    driver_state.with(|ops| driver.inner.cancel_all(ops));
+    driver.state.submit(&mut driver.ring).unwrap();
+    driver_state.with(|ops| driver.state.cancel_all(ops));
 
     let needs_flush =
-        driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
     assert!(needs_flush);
     driver_state.with(|ops| assert_eq!(ops.pending_cancels.len(), 1));
 
-    driver.inner.submit(&mut driver.ring).unwrap();
+    driver.state.submit(&mut driver.ring).unwrap();
     let needs_flush =
-        driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
+        driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
     assert!(!needs_flush);
     driver_state.with(|ops| assert!(ops.pending_cancels.is_empty()));
-    driver.inner.submit(&mut driver.ring).unwrap();
+    driver.state.submit(&mut driver.ring).unwrap();
 
     let results = harness.block_on(futures::future::join_all(recvs));
     for result in results {
@@ -2660,11 +2660,11 @@ fn test_cancel_all_retires_local_ticket_without_cancel_sqe() {
     let driver_state = harness.handle.clone();
     let driver = harness.driver();
     driver_state.with(|ops| {
-        driver.inner.cancel_all(ops);
+        driver.state.cancel_all(ops);
         assert!(ops.pending_cancels.is_empty());
 
         let mut submission_queue = driver.ring.submission();
-        assert!(!driver.inner.stage_backlog(ops, &mut submission_queue));
+        assert!(!driver.state.stage_backlog(ops, &mut submission_queue));
         assert!(submission_queue.is_empty());
     });
 
@@ -2698,7 +2698,7 @@ fn test_cancel_staging_skips_op_retired_by_original_completion() {
             ops.waiters.stage(waiter_id),
             StageOutcome::Submit(_)
         ));
-        driver.inner.cancel_all(ops);
+        driver.state.cancel_all(ops);
         assert_eq!(ops.pending_cancels.front(), Some(&waiter_id));
 
         let CompletionOutcome::Ready { waker, target_tick } =
@@ -2707,11 +2707,11 @@ fn test_cancel_staging_skips_op_retired_by_original_completion() {
             panic!("original completion did not retire cancelled recv");
         };
         if let Some(tick) = target_tick {
-            driver.inner.timeout_wheel.remove(tick);
+            driver.state.timeout_wheel.remove(tick);
         }
 
         let mut submission_queue = driver.ring.submission();
-        assert!(!driver.inner.stage_cancellations(ops, &mut submission_queue));
+        assert!(!driver.state.stage_cancellations(ops, &mut submission_queue));
         assert!(ops.pending_cancels.is_empty());
         assert!(submission_queue.is_empty());
         waker
@@ -2983,26 +2983,26 @@ fn test_completion_before_timeout_expiry_wins() {
     (&right).write_all(&[7]).unwrap();
     let driver = harness.driver();
     driver
-        .inner
+        .state
         .submit_and_wait(&mut driver.ring, 1, None)
         .expect("recv completion should enter the CQ");
-    let owner = driver.inner.handle.clone();
+    let owner = driver.state.handle.clone();
     owner.with(|ops| {
         for cqe in driver.ring.completion() {
-            driver.inner.handle_cqe(ops, cqe);
+            driver.state.handle_cqe(ops, cqe);
         }
-        driver.inner.advance_timeouts_at(
+        driver.state.advance_timeouts_at(
             ops,
             deadline
                 .checked_add(Duration::from_millis(1))
                 .expect("test deadline should be representable"),
         );
     });
-    driver.inner.flush_wakers();
+    driver.state.flush_wakers();
 
     assert_eq!(harness.pending(), 0);
     assert_eq!(harness.tracked(), 1);
-    assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+    assert_eq!(harness.driver().state.timeout_wheel.next_deadline(), None);
     let (mut buf, read) = match poll_once(&harness, &mut recv) {
         Poll::Ready(Ok(result)) => result,
         other => panic!("completion-first recv should succeed, got {other:?}"),
@@ -3041,9 +3041,9 @@ fn test_timeout_expiry_before_completion_wins() {
     harness.driver().turn();
 
     let driver = harness.driver();
-    let owner = driver.inner.handle.clone();
+    let owner = driver.state.handle.clone();
     owner.with(|ops| {
-        driver.inner.advance_timeouts_at(
+        driver.state.advance_timeouts_at(
             ops,
             deadline
                 .checked_add(Duration::from_millis(1))
@@ -3052,7 +3052,7 @@ fn test_timeout_expiry_before_completion_wins() {
         assert_eq!(ops.pending_cancels.len(), 1);
         assert_eq!(ops.waiters.pending(), 1);
     });
-    assert_eq!(driver.inner.timeout_wheel.next_deadline(), None);
+    assert_eq!(driver.state.timeout_wheel.next_deadline(), None);
 
     match harness.block_on(recv) {
         Err((_, Error::Timeout)) => {}
@@ -3061,7 +3061,7 @@ fn test_timeout_expiry_before_completion_wins() {
     assert_eq!(harness.pending(), 0);
     assert_eq!(harness.tracked(), 0);
 
-    assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+    assert_eq!(harness.driver().state.timeout_wheel.next_deadline(), None);
     harness
         .handle
         .with(|ops| assert!(ops.pending_cancels.is_empty()));
@@ -3101,22 +3101,22 @@ fn test_backlogged_request_expires_before_first_staging_without_sqe() {
     let driver = harness.driver();
     assert!(
         !driver
-            .inner
+            .state
             .timeout_wheel
-            .advance_into(expired_at, &mut driver.inner.expired_timeouts)
+            .advance_into(expired_at, &mut driver.state.expired_timeouts)
     );
     driver_state.with(|ops| {
         let mut submission_queue = driver.ring.submission();
         assert!(submission_queue.is_empty());
-        assert!(!driver.inner.stage_backlog(ops, &mut submission_queue));
+        assert!(!driver.state.stage_backlog(ops, &mut submission_queue));
         assert!(submission_queue.is_empty());
         assert!(ops.backlog.is_empty());
         assert!(ops.pending_cancels.is_empty());
         assert_eq!(ops.waiters.len(), 1);
         assert_eq!(ops.waiters.pending(), 0);
     });
-    assert_eq!(driver.inner.timeout_wheel.next_deadline(), None);
-    driver.inner.flush_wakers();
+    assert_eq!(driver.state.timeout_wheel.next_deadline(), None);
+    driver.state.flush_wakers();
 
     assert!(matches!(
         poll_once(&harness, &mut recv),
@@ -3192,8 +3192,8 @@ fn test_drop_after_timeout_before_cancel_resolves() {
     // with its op still in flight.
     std::thread::sleep(Duration::from_millis(50));
     let driver = harness.driver();
-    handle.with(|ops| driver.inner.advance_timeouts(ops));
-    assert!(driver.inner.timeout_wheel.next_deadline().is_none());
+    handle.with(|ops| driver.state.advance_timeouts(ops));
+    assert!(driver.state.timeout_wheel.next_deadline().is_none());
 
     // Drop the future in the cancel-requested window.
     drop(recv);
@@ -3209,7 +3209,7 @@ fn test_drop_after_timeout_before_cancel_resolves() {
         harness.driver().turn();
         harness.driver().park(Some(Duration::from_millis(10)));
     }
-    assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+    assert_eq!(harness.driver().state.timeout_wheel.next_deadline(), None);
 }
 
 #[test]

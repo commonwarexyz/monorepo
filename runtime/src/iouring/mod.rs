@@ -79,8 +79,8 @@
 //!
 //! ```text
 //! Data path:
-//!   Op future poll -> Driver (slab insert + backlog FIFO) -> IoUringLoop -> SQE -> io_uring
-//!   Op future poll <- parked Output in slot <- IoUringLoop <- CQE <- io_uring
+//!   Op future poll -> Driver (slab insert + backlog FIFO) -> SQE -> io_uring
+//!   Op future poll <- parked Output in slot <- Driver <- CQE <- io_uring
 //!
 //! Detached ticket path:
 //!   Ticket admission -> Completion::Pending { waiter_id, waker }
@@ -94,8 +94,8 @@
 //!                -> Ready(Output)      -> drop Output, no waiter access
 //!
 //! Wake paths (cross-thread task wakes only):
-//!   Foreign thread --futex wake--> packed wake state --> IoUringLoop
-//!   Foreign thread --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> IoUringLoop
+//!   Foreign thread --futex wake--> packed wake state --> Driver
+//!   Foreign thread --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> Driver
 //!
 //! Loop behavior:
 //!   1) Drain CQEs.

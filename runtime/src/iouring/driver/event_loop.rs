@@ -102,20 +102,20 @@ impl Drop for PendingOperations {
 
 /// State owned by one io_uring event loop.
 ///
-/// [`IoUringLoop`] and its ring remain on one runtime worker. Front-end
+/// [`DriverState`] and its ring remain on one runtime worker. Front-end
 /// futures share [`Handle`], whose affinity cell exposes [`Ops`] only on that
 /// worker.
 ///
 /// ```text
 /// owner runtime thread
-/// +-- IoUringLoop: shutdown, metrics, timeouts, idle/wake, scratch
+/// +-- DriverState: shutdown, metrics, timeouts, idle/wake, scratch
 /// `-- Handle -> Ops (thread-affine): waiters, completions, queues, capacity
 /// foreign-thread drops -> Handle orphan mailbox -> owner loop
 /// ```
 ///
 /// The three `Vec` fields are scratch, not logical state. Each is empty at its
 /// stated reuse boundary and draining it preserves capacity for the next batch.
-pub(crate) struct IoUringLoop {
+struct DriverState {
     /// Optional cancellation grace measured from shutdown drain entry.
     ///
     /// `None` lets requests finish or reach their own deadlines. Once a grace
@@ -178,62 +178,7 @@ pub(crate) struct IoUringLoop {
     expired_timeouts: Vec<timeout::TimeoutEntry>,
 }
 
-impl IoUringLoop {
-    /// Create a new io_uring loop and its shared submission handle.
-    ///
-    /// The loop allocates its own metrics and internal `eventfd` wake source.
-    /// The calling thread becomes the handle's owning (runtime) thread.
-    /// Ring creation completes before the waiter table and queues whose
-    /// capacities are proportional to the effective ring size are allocated.
-    /// `max_request_timeout` sets the timeout wheel horizon and must cover
-    /// every request deadline.
-    ///
-    /// # Errors
-    ///
-    /// Returns the kernel error if the io_uring instance cannot be created.
-    /// In that case, no ring-sized waiter or queue state is allocated.
-    ///
-    /// # Panics
-    ///
-    /// Panics if either timeout duration is zero, the requested ring size
-    /// overflows when rounded or rounds above [`MAX_RING_SIZE`], the timeout
-    /// wheel exceeds its slot limit, the wake `eventfd` cannot be created, or
-    /// the spinner budget exceeds its configured maximum.
-    pub(crate) fn new(
-        cfg: RingConfig,
-        max_request_timeout: Duration,
-        registry: &mut impl Register,
-    ) -> Result<(IoUring, Handle, Self), std::io::Error> {
-        let size = validate_ring_config(&cfg, max_request_timeout);
-
-        // Ask the kernel to construct the ring before allocating the waiter
-        // table whose capacity is proportional to the effective ring size.
-        let ring = new_ring(size)?;
-        let pending_operations = PendingOperations::new(registry);
-        let waker = Waker::new().expect("unable to create wake eventfd");
-        let timeout_wheel =
-            TimeoutWheel::new(max_request_timeout, cfg.timeout_wheel_tick, Instant::now());
-        let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.signalled());
-        let handle = Handle::new(size as usize, waker.clone());
-
-        Ok((
-            ring,
-            handle.clone(),
-            Self {
-                shutdown_timeout: cfg.shutdown_timeout,
-                pending_operations,
-                handle,
-                timeout_wheel,
-                idle_spinner,
-                waker,
-                wake_rearm_needed: true,
-                pending_waker_actions: Vec::new(),
-                pending_orphans: Vec::new(),
-                expired_timeouts: Vec::new(),
-            },
-        ))
-    }
-
+impl DriverState {
     /// Invoke every collected task waker.
     ///
     /// Must be called outside any borrow of the driver state: wakers reenter
@@ -941,7 +886,7 @@ pub(crate) fn new_ring(size: u32) -> Result<IoUring, std::io::Error> {
 /// delegating methods below can borrow them disjointly.
 pub(crate) struct Driver {
     ring: IoUring,
-    inner: IoUringLoop,
+    state: DriverState,
 }
 
 impl Driver {
@@ -955,25 +900,48 @@ impl Driver {
         max_request_timeout: Duration,
         registry: &mut impl Register,
     ) -> Result<(Self, Handle), std::io::Error> {
-        let (ring, handle, inner) = IoUringLoop::new(cfg, max_request_timeout, registry)?;
-        Ok((Self { ring, inner }, handle))
+        let size = validate_ring_config(&cfg, max_request_timeout);
+
+        // Ask the kernel to construct the ring before allocating the waiter
+        // table whose capacity is proportional to the effective ring size.
+        let ring = new_ring(size)?;
+        let pending_operations = PendingOperations::new(registry);
+        let waker = Waker::new().expect("unable to create wake eventfd");
+        let timeout_wheel =
+            TimeoutWheel::new(max_request_timeout, cfg.timeout_wheel_tick, Instant::now());
+        let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.signalled());
+        let handle = Handle::new(size as usize, waker.clone());
+        let state = DriverState {
+            shutdown_timeout: cfg.shutdown_timeout,
+            pending_operations,
+            handle: handle.clone(),
+            timeout_wheel,
+            idle_spinner,
+            waker,
+            wake_rearm_needed: true,
+            pending_waker_actions: Vec::new(),
+            pending_orphans: Vec::new(),
+            expired_timeouts: Vec::new(),
+        };
+
+        Ok((Self { ring, state }, handle))
     }
 
     /// Clone the driver's cross-thread wake source.
     pub(crate) fn waker(&self) -> Waker {
-        self.inner.waker.clone()
+        self.state.waker.clone()
     }
 
     /// Service the ring: build and submit staged SQEs, then reap CQEs and
     /// wake the tasks whose results parked.
     pub(crate) fn turn(&mut self) {
-        self.inner.turn(&mut self.ring);
+        self.state.turn(&mut self.ring);
     }
 
     /// Park until a completion arrives, a wake is published, or the next
     /// timer (ring timeout wheel or `limit`) is due.
     pub(crate) fn park(&mut self, limit: Option<Duration>) {
-        self.inner.park(&mut self.ring, limit);
+        self.state.park(&mut self.ring, limit);
     }
 
     /// Close the shared op state and wake every parked admission.
@@ -981,7 +949,7 @@ impl Driver {
     /// The state is invalidated before callbacks run. All callbacks are
     /// attempted even if one panics, then the earliest panic is resumed.
     pub(crate) fn close(&self) {
-        let wakers = self.inner.handle.close();
+        let wakers = self.state.handle.close();
         wake_batch(wakers.into_iter().map(WakerAction::Wake));
     }
 
@@ -998,7 +966,7 @@ impl Driver {
         // call site would run only after unwinding out of this frame had
         // already dropped them.
         let guard = AbortOnUnwind;
-        self.inner.drain(&mut self.ring);
+        self.state.drain(&mut self.ring);
         std::mem::forget(guard);
     }
 }
