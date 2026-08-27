@@ -340,6 +340,15 @@ impl crate::Blob for Blob {
         // SAFETY: `len` bytes are filled via io_uring read loop below.
         unsafe { input_bufs.set_len(len) };
 
+        let offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Zero-length reads succeed trivially without submitting to the ring.
+        if len == 0 {
+            return Ok(input_bufs);
+        }
+
         // For single buffers, read directly into them (zero-copy).
         // For multi-chunk buffers, use a temporary and copy to preserve the input structure.
         let (io_buf, original_bufs) = if input_bufs.is_single() {
@@ -349,15 +358,6 @@ impl crate::Blob for Blob {
             let tmp = unsafe { self.pool.alloc_len(len) };
             (tmp, Some(input_bufs))
         };
-
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // Zero-length reads succeed trivially without submitting to the ring.
-        if len == 0 {
-            return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
-        }
 
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             iouring::Cache::Disabled(self.dont_cache_supported.clone())
