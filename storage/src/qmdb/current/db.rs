@@ -21,7 +21,6 @@ use crate::{
             operation::{Operation, update::Update},
         },
         current::{
-            batch::BitmapBatch,
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
@@ -39,10 +38,7 @@ use commonware_runtime::{
         histogram::{ScopedTimer, Timed},
     },
 };
-use commonware_utils::{
-    bitmap::{self, Readable as _},
-    sequence::prefixed_u64::U64,
-};
+use commonware_utils::{bitmap, sequence::prefixed_u64::U64};
 use core::{num::NonZeroU64, ops::Range};
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
@@ -233,7 +229,7 @@ where
     /// that contain a bit below `len()` are readable. Calling `get_chunk()` or `get_bit()` for a
     /// pruned or out-of-bounds location panics.
     pub fn bitmap(&self) -> &impl bitmap::Readable<N> {
-        self.any.bitmap.as_ref()
+        &self.any.bitmap
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
@@ -294,23 +290,20 @@ where
         let ops_size = storage.size();
         let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
-            self.any.bitmap.as_ref(),
+            &self.any.bitmap,
             &storage,
             ops_leaves,
             self.any.inactivity_floor_loc,
         )
         .await?;
         let hasher = qmdb::hasher::<H>();
-        let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
+        let partial_chunk = partial_chunk::<_, N>(&self.any.bitmap)
             .map(|(chunk, next_bit)| (next_bit, hasher.digest(chunk.as_slice())));
-        let pending_chunk_digest: F::PendingChunk<H::Digest> = pending_chunk::<F, _, N>(
-            self.any.bitmap.as_ref(),
-            ops_leaves,
-            grafting::height::<N>(),
-        )?
-        .map(|chunk| hasher.digest(chunk.as_slice()))
-        .try_into()
-        .expect("pending_chunk must be consistent with family");
+        let pending_chunk_digest: F::PendingChunk<H::Digest> =
+            pending_chunk::<F, _, N>(&self.any.bitmap, ops_leaves, grafting::height::<N>())?
+                .map(|chunk| hasher.digest(chunk.as_slice()))
+                .try_into()
+                .expect("pending_chunk must be consistent with family");
         Ok(OpsRootWitness {
             grafted_root,
             pending_chunk_digest,
@@ -331,7 +324,7 @@ where
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
             self.grafted_snapshot(),
-            BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
+            Vec::new(),
         )
     }
 
@@ -343,7 +336,7 @@ where
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
         OperationProof::new::<H, _>(
-            self.any.bitmap.as_ref(),
+            &self.any.bitmap,
             &storage,
             self.any.inactivity_floor_loc,
             loc,
@@ -381,7 +374,7 @@ where
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
         RangeProof::new_with_ops::<H, _, _, N>(
-            self.any.bitmap.as_ref(),
+            &self.any.bitmap,
             &storage,
             &self.any.log,
             RangeProofSpec {
@@ -668,14 +661,16 @@ where
             Vec::new()
         };
 
-        // `any.rewind` rewinds the log and patches the shared bitmap (truncate + restore active
+        // `any.rewind` rewinds the log and patches the committed bitmap (truncate + restore active
         // bits + set the rewound tail's CommitFloor). Live pre-rewind batches must be dropped by
-        // the caller; reads through them now return inconsistent data.
+        // the caller. The batch-chain gate refuses their reads once the database leaves their
+        // chain, but a rewind back onto one of their ancestor states does not, and their bitmap
+        // overlays were built on the later committed bitmap.
         self.any = self.any.rewind(size).await?;
 
         // Rebuild the grafted tree and canonical root from the rewound `any` state.
         let (grafted_tree, root) = rebuild_grafted_tree::<F, H, S, N>(
-            self.any.bitmap.as_ref(),
+            &self.any.bitmap,
             &pinned_nodes,
             &self.any.log.merkle,
             self.any.inactivity_floor_loc,
@@ -695,7 +690,6 @@ where
     pub(crate) async fn sync_metadata(mut self) -> Result<Self, Error<F>> {
         self.metadata.clear();
 
-        // Snapshot the pruning boundary under the read lock; the guard drops before any await.
         let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
 
         // Write the number of pruned chunks.
@@ -1871,7 +1865,7 @@ mod tests {
             let mut next_idx = 0;
             db = populate_fixed_db::<mmr::Family, _>(db, next_idx, 256).await;
             next_idx += 256;
-            while partial_chunk::<_, 32>(db.any.bitmap.as_ref()).is_some() {
+            while partial_chunk::<_, 32>(&db.any.bitmap).is_some() {
                 db = populate_fixed_db::<mmr::Family, _>(db, next_idx, 1).await;
                 next_idx += 1;
             }

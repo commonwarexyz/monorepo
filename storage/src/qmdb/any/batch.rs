@@ -16,7 +16,6 @@ use crate::{
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
         },
         batch_chain::{self, Bounds, Commitment, OnChain},
-        bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -44,11 +43,11 @@ type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
 /// One contiguous chunk of floor-raise candidates paired with their resolved operations.
 type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
-/// Floor-raise candidates prefetched from the committed prefix of the raise's candidate
-/// source, with their resolved operations. The candidate sequence depends only on the base
-/// floor and that source, so a staged merkleize reads it before its serial bookkeeping
-/// runs. `finish` drains this buffer, then resumes the live scan at `next_scan`, producing
-/// exactly the sequence the live scan alone would have.
+/// Floor-raise candidates prefetched from the committed prefix of the bitmap the raise scans,
+/// with their resolved operations. The candidate sequence depends only on the base floor and
+/// that bitmap, so a staged merkleize reads it before its serial bookkeeping runs. `finish`
+/// drains this buffer, then resumes the live scan at `next_scan`, producing exactly the
+/// sequence the live scan alone would have.
 pub(crate) struct PrefetchedCandidates<F: Family, U: update::Update>
 where
     Operation<F, U>: Codec,
@@ -666,16 +665,45 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
     }
 }
 
-/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` under a single bitmap
-/// read guard, returning the next `floor`.
-fn fill_candidates<F: Family, const N: usize>(
-    bitmap: &Shared<N>,
+/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)`, returning the next
+/// `floor`.
+pub(crate) fn fill_candidates<F: Family, B: bitmap::Readable<N>, const N: usize>(
+    bitmap: &B,
     floor: Location<F>,
     tip: u64,
     limit: usize,
     out: &mut Vec<Location<F>>,
 ) -> Location<F> {
-    Location::new(bitmap.fill_candidates(*floor, tip, limit, out))
+    let bitmap_len = bitmap.len();
+    let committed_end = bitmap_len.min(tip);
+
+    let mut scan = *floor;
+    if scan < committed_end {
+        let mut ones = bitmap.ones_iter_from(scan);
+        while out.len() < limit {
+            match ones.next() {
+                Some(idx) if idx < committed_end => {
+                    out.push(Location::new(idx));
+                    scan = idx + 1;
+                }
+                _ => break,
+            }
+        }
+    }
+    while out.len() < limit {
+        let candidate = scan.max(bitmap_len);
+        if candidate >= tip {
+            // Advance only through the span the ones scan verified clear. When `tip < len`
+            // (a layered bitmap scanned with a committed-boundary tip), bits in
+            // `[committed_end, len)` were never examined and a later call with a larger
+            // `tip` must still see them.
+            scan = scan.max(committed_end);
+            break;
+        }
+        out.push(Location::new(candidate));
+        scan = candidate + 1;
+    }
+    Location::new(scan)
 }
 
 /// Resolve `loc` to an op within the in-memory ancestor region
@@ -947,7 +975,7 @@ where
     /// first floor-raise candidate read. `superseded_locs` holds the committed locations
     /// superseded by `diff` (every `Some` `base_old_loc`), in any order. The floor raise
     /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
-    /// caller gathered and read ahead of time, consumed by the raise before scanning live.
+    /// caller gathered and read ahead of time, consumed by the raise before scanning `bitmap` live.
     #[allow(clippy::too_many_arguments)]
     async fn finish<E, C, I, const N: usize>(
         self,
@@ -958,7 +986,7 @@ where
         user_steps: u64,
         metadata: Option<U::Value>,
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
-        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        bitmap: &impl bitmap::Readable<N>,
         db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
     where
@@ -1035,6 +1063,7 @@ where
                 };
                 if candidates.len() < limit {
                     scan_from = fill_candidates(
+                        bitmap,
                         scan_from,
                         fixed_tip,
                         limit - candidates.len(),
@@ -1584,18 +1613,10 @@ where
     {
         let db = self.batch.on_chain(db)?;
         let (batch, staged_updates, prefetched) = self
-            .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
-            })
+            .resolve_updates_prefetched(updates, upserts, db, &db.bitmap)
             .await?;
         batch
-            .merkleize_with_floor_scan(
-                db,
-                metadata,
-                staged_updates,
-                Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(db, metadata, staged_updates, Some(prefetched), &db.bitmap)
             .await
     }
 
@@ -1604,24 +1625,18 @@ where
     /// resolved batch, the staged updates, and the prefetched candidates to seed
     /// [`merkleize_with_floor_scan`](UnmerkleizedBatch::merkleize_with_floor_scan) with.
     ///
-    /// `fill_candidates` must be the same candidate source the subsequent floor raise
-    /// scans, so the prefetched prefix continues seamlessly into the live scan (see
-    /// [`PrefetchedCandidates`]). The gather is clamped to the committed boundary: a
-    /// speculative source (e.g. the current variant's parent bitmap) extends past it, but
-    /// its candidate sequence below the boundary is identical and only committed locations
-    /// are servable by the log read.
-    ///
-    /// On early exhaustion of the committed set bits, sources may hand back either one past
-    /// the last emitted candidate or the committed boundary as the continuation point. Both
-    /// are correct: the skipped span holds no set bits, and the source cannot change during
-    /// the call (commits and prunes take `&mut` on the database).
+    /// `bitmap` must be the same bitmap the subsequent floor raise scans, so the prefetched
+    /// prefix continues seamlessly into the live scan (see [`PrefetchedCandidates`]). The
+    /// gather is clamped to the committed boundary: a speculative bitmap (the current
+    /// variant's layered parent) extends past it, but its candidate sequence below the
+    /// boundary is identical and only committed locations are servable by the log read.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn resolve_updates_prefetched<E, C, I, const N: usize>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: OnChain<'_, Db<F, E, C, I, H, update::Unordered<K, V>, N, S>>,
-        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        bitmap: &impl bitmap::Readable<N>,
     ) -> Result<
         (
             UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>,
@@ -1658,9 +1673,9 @@ where
         let steps_bound = resolved_updates + existing_writes + 1;
 
         // Overlap the serial update resolution with the candidate prefetch: the
-        // committed-prefix candidate set depends only on the base floor, the candidate
-        // source, and the step bound, none of which depend on the resolution. The batch
-        // moves into the job, so its floor is captured first.
+        // committed-prefix candidate set depends only on the base floor, the bitmap, and the
+        // step bound, none of which depend on the resolution. The batch moves into the job,
+        // so its floor is captured first.
         let scan_from = self.batch.base.inactivity_floor_loc();
         let resolve = db
             .strategy()
@@ -1668,9 +1683,9 @@ where
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
         // the resolution job runs.
-        let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
+        let committed_tip = db.bitmap.len();
         let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
-        let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
+        let next_scan = fill_candidates(bitmap, scan_from, committed_tip, steps_bound, &mut locs);
         let raw: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let read = db.log.read_many_sharded(&raw).await;
 
@@ -1726,9 +1741,7 @@ where
         let db = self.batch.on_chain(db)?;
         let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(db, metadata, staged_updates, &db.bitmap)
             .await
     }
 }
@@ -1986,23 +1999,22 @@ where
             metadata,
             StagedUpdates::<F, update::Unordered<K, V>>::new(),
             None,
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            &db.bitmap,
         )
         .await
     }
 
     /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would
-    /// otherwise require) and accepts the floor-raise candidate source, optionally seeded
+    /// otherwise require) and scans `bitmap` for floor-raise candidates, optionally seeded
     /// with prefetched committed-prefix candidates that must come from the same floor and
-    /// the same candidate source the callback scans (see [`PrefetchedCandidates`]).
+    /// the same bitmap (see [`PrefetchedCandidates`]).
     ///
-    /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls (the floor raise asserts this). It may skip locations only
-    /// when it knows they are inactive. The floor-raise loop revalidates each returned
-    /// candidate against the batch diff, ancestor diffs, and index because the bitmap
-    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
-    /// be set for locations superseded by an overlay in this chain.
+    /// `bitmap` is the committed bitmap or, for the current variant, a speculative view layered
+    /// over it. Either way it is a hint: a clear bit proves a location inactive, but a set bit
+    /// does not prove it active, and locations at or past `bitmap.len()` carry no bit. The
+    /// floor-raise loop therefore revalidates every candidate against the batch diff, the
+    /// ancestor diffs, and the index.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
@@ -2010,7 +2022,7 @@ where
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        bitmap: &impl bitmap::Readable<N>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2167,7 +2179,7 @@ where
             user_steps,
             metadata,
             prefetched,
-            fill_candidates,
+            bitmap,
             db,
         )
         .await
@@ -2205,7 +2217,7 @@ where
             db,
             metadata,
             StagedUpdates::<F, update::Ordered<K, V>>::new(),
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            &db.bitmap,
         )
         .await
     }
@@ -2213,21 +2225,20 @@ where
     /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the index probe and journal re-read their
     /// resolution would otherwise require: the caller's new value and the cached next key feed
-    /// op generation directly) and accepts the floor-raise candidate source.
+    /// op generation directly) and scans `bitmap` for floor-raise candidates.
     ///
-    /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls (the floor raise asserts this). It may skip locations only
-    /// when it knows they are inactive. The floor-raise loop revalidates each returned
-    /// candidate against the batch diff, ancestor diffs, and index because the bitmap
-    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
-    /// be set for locations superseded by an overlay in this chain.
+    /// `bitmap` is the committed bitmap or, for the current variant, a speculative view layered
+    /// over it. Either way it is a hint: a clear bit proves a location inactive, but a set bit
+    /// does not prove it active, and locations at or past `bitmap.len()` carry no bit. The
+    /// floor-raise loop therefore revalidates every candidate against the batch diff, the
+    /// ancestor diffs, and the index.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: OnChain<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        bitmap: &impl bitmap::Readable<N>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2593,7 +2604,7 @@ where
             user_steps,
             metadata,
             None,
-            fill_candidates,
+            bitmap,
             db,
         )
         .await
@@ -2814,82 +2825,78 @@ where
         // Apply journal (handles its own partial ancestor skipping).
         self.log = self.log.apply_batch(&batch.journal_batch).await?;
 
-        // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
-        {
-            let mut bitmap = self.bitmap.write();
-            bitmap.extend_to(*batch.bounds.tip.size);
+        self.bitmap.extend_to(*batch.bounds.tip.size);
 
-            if batch.ancestor_diffs.is_empty() {
-                // Fast path: no ancestors to merge, no fixups to look up.
-                for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.index,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
-                }
-            } else {
-                // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
-                // and pending (still to be applied; merged with the child).
-                let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
-                let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
-                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                    if batch.bounds.ancestors[i].state.size <= db_size {
-                        applied.push(ancestor_diff.as_slice());
-                    } else {
-                        pending.push(ancestor_diff.as_slice());
-                    }
-                }
-                let mut resolver = DiffCursors::new(applied);
-                if batch.ancestor_base_locs.is_empty() {
-                    let merge = DiffMerge::new(
-                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                    );
-                    for (key, entry) in merge {
-                        let old = resolver
-                            .resolve(key)
-                            .map(DiffEntry::loc)
-                            .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
-                    }
+        if batch.ancestor_diffs.is_empty() {
+            // Fast path: no ancestors to merge, no fixups to look up.
+            for (key, entry) in batch.diff.iter() {
+                apply_diff(
+                    &mut self.index,
+                    &mut self.bitmap,
+                    key,
+                    entry,
+                    entry.base_old_loc(),
+                );
+            }
+        } else {
+            // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
+            // and pending (still to be applied; merged with the child).
+            let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
+            let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
+            for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+                if batch.bounds.ancestors[i].state.size <= db_size {
+                    applied.push(ancestor_diff.as_slice());
                 } else {
-                    let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
-                    let merge = DiffMerge::new(
-                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                    );
-                    for (key, entry) in merge {
-                        let old = resolver.resolve(key).map_or_else(
-                            || {
-                                while ancestor_base_locs
-                                    .peek()
-                                    .is_some_and(|(candidate, _)| candidate < key)
-                                {
-                                    ancestor_base_locs.next();
-                                }
-                                if ancestor_base_locs
-                                    .peek()
-                                    .is_some_and(|(candidate, _)| candidate == key)
-                                {
-                                    ancestor_base_locs.next().expect("peeked entry exists").1
-                                } else {
-                                    entry.base_old_loc()
-                                }
-                            },
-                            DiffEntry::loc,
-                        );
-                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
-                    }
+                    pending.push(ancestor_diff.as_slice());
                 }
             }
-
-            // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
-            // set the new; earlier ancestor commits between them are already 0 from
-            // `extend_to`.
-            bitmap.set_bit(*self.last_commit_loc, false);
-            bitmap.set_bit(*batch.bounds.tip.size - 1, true);
+            let mut resolver = DiffCursors::new(applied);
+            if batch.ancestor_base_locs.is_empty() {
+                let merge = DiffMerge::new(
+                    iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
+                );
+                for (key, entry) in merge {
+                    let old = resolver
+                        .resolve(key)
+                        .map(DiffEntry::loc)
+                        .unwrap_or_else(|| entry.base_old_loc());
+                    apply_diff(&mut self.index, &mut self.bitmap, key, entry, old);
+                }
+            } else {
+                let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
+                let merge = DiffMerge::new(
+                    iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
+                );
+                for (key, entry) in merge {
+                    let old = resolver.resolve(key).map_or_else(
+                        || {
+                            while ancestor_base_locs
+                                .peek()
+                                .is_some_and(|(candidate, _)| candidate < key)
+                            {
+                                ancestor_base_locs.next();
+                            }
+                            if ancestor_base_locs
+                                .peek()
+                                .is_some_and(|(candidate, _)| candidate == key)
+                            {
+                                ancestor_base_locs.next().expect("peeked entry exists").1
+                            } else {
+                                entry.base_old_loc()
+                            }
+                        },
+                        DiffEntry::loc,
+                    );
+                    apply_diff(&mut self.index, &mut self.bitmap, key, entry, old);
+                }
+            }
         }
+
+        // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
+        // set the new; earlier ancestor commits between them are already 0 from
+        // `extend_to`.
+        self.bitmap.set_bit(*self.last_commit_loc, false);
+        self.bitmap.set_bit(*batch.bounds.tip.size - 1, true);
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
@@ -3120,10 +3127,11 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::test_rng;
+    use commonware_utils::{bitmap::Readable as _, test_rng};
     use rand::RngExt as _;
 
-    const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+    type Bm = bitmap::Prunable<BITMAP_CHUNK_BYTES>;
+    const BITMAP_CHUNK_BITS: u64 = Bm::CHUNK_SIZE_BITS;
 
     fn loc(n: u64) -> Location<mmr::Family> {
         Location::new(n)
@@ -3131,15 +3139,6 @@ mod tests {
 
     fn committed(n: u64) -> StagedLoc<mmr::Family> {
         StagedLoc::Committed(loc(n))
-    }
-
-    fn shared_with<F>(build: F) -> Shared<BITMAP_CHUNK_BYTES>
-    where
-        F: FnOnce(&mut bitmap::Prunable<BITMAP_CHUNK_BYTES>),
-    {
-        let mut bm = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::new();
-        build(&mut bm);
-        Shared::new(bm)
     }
 
     /// [`DiffCursors`] must resolve exactly like per-key `lookup_sorted` over the same diffs
@@ -3277,15 +3276,15 @@ mod tests {
     /// `[floor, tip)`. `bitmap_fill_candidates_matches_oracle` proves the production batch
     /// fill produces this exact sequence.
     fn next_candidate<F: Family, const N: usize>(
-        bitmap: &Shared<N>,
+        bitmap: &bitmap::Prunable<N>,
         floor: Location<F>,
         tip: u64,
     ) -> Option<Location<F>> {
         let floor = *floor;
-        let bitmap_len = bitmap::Readable::<N>::len(bitmap);
+        let bitmap_len = bitmap.len();
         let committed_end = bitmap_len.min(tip);
         if floor < committed_end
-            && let Some(idx) = bitmap.next_one_from(floor)
+            && let Some(idx) = bitmap.ones_iter_from(floor).next()
             && idx < committed_end
         {
             return Some(Location::new(idx));
@@ -3406,13 +3405,13 @@ mod tests {
 
     #[test]
     fn bitmap_scan_empty() {
-        let bitmap = shared_with(|_| {});
+        let bitmap = Bm::new();
         assert_eq!(next_candidate(&bitmap, loc(0), 0), None);
     }
 
     #[test]
     fn bitmap_scan_uncommitted_tail() {
-        let bitmap = shared_with(|_| {});
+        let bitmap = Bm::new();
         assert_eq!(next_candidate(&bitmap, loc(0), 3), Some(loc(0)));
         assert_eq!(next_candidate(&bitmap, loc(1), 3), Some(loc(1)));
         assert_eq!(next_candidate(&bitmap, loc(2), 3), Some(loc(2)));
@@ -3421,11 +3420,10 @@ mod tests {
 
     #[test]
     fn bitmap_scan_committed_region() {
-        let bitmap = shared_with(|bm| {
-            bm.extend_to(10);
-            bm.set_bit(*loc(3), true);
-            bm.set_bit(*loc(7), true);
-        });
+        let mut bitmap = Bm::new();
+        bitmap.extend_to(10);
+        bitmap.set_bit(*loc(3), true);
+        bitmap.set_bit(*loc(7), true);
 
         assert_eq!(next_candidate(&bitmap, loc(0), 10), Some(loc(3)));
         assert_eq!(next_candidate(&bitmap, loc(4), 10), Some(loc(7)));
@@ -3436,10 +3434,9 @@ mod tests {
 
     #[test]
     fn bitmap_scan_transitions_into_tail() {
-        let bitmap = shared_with(|bm| {
-            bm.extend_to(5);
-            bm.set_bit(*loc(2), true);
-        });
+        let mut bitmap = Bm::new();
+        bitmap.extend_to(5);
+        bitmap.set_bit(*loc(2), true);
 
         assert_eq!(next_candidate(&bitmap, loc(0), 8), Some(loc(2)));
         assert_eq!(next_candidate(&bitmap, loc(3), 8), Some(loc(5)));
@@ -3449,11 +3446,10 @@ mod tests {
 
     #[test]
     fn bitmap_scan_after_prune() {
-        let bitmap = shared_with(|bm| {
-            bm.extend_to(BITMAP_CHUNK_BITS * 3);
-            bm.set_bit(*loc(BITMAP_CHUNK_BITS * 2 + 5), true);
-            bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
-        });
+        let mut bitmap = Bm::new();
+        bitmap.extend_to(BITMAP_CHUNK_BITS * 3);
+        bitmap.set_bit(*loc(BITMAP_CHUNK_BITS * 2 + 5), true);
+        bitmap.prune_to_bit(BITMAP_CHUNK_BITS * 2);
 
         assert_eq!(
             commonware_utils::bitmap::Readable::pruned_chunks(&bitmap),
@@ -3467,11 +3463,10 @@ mod tests {
 
     #[test]
     fn bitmap_scan_after_truncate() {
-        let bitmap = shared_with(|bm| {
-            bm.extend_to(BITMAP_CHUNK_BITS * 2);
-            bm.set_bit(*loc(BITMAP_CHUNK_BITS + 3), true);
-            bm.truncate(BITMAP_CHUNK_BITS);
-        });
+        let mut bitmap = Bm::new();
+        bitmap.extend_to(BITMAP_CHUNK_BITS * 2);
+        bitmap.set_bit(*loc(BITMAP_CHUNK_BITS + 3), true);
+        bitmap.truncate(BITMAP_CHUNK_BITS);
 
         assert_eq!(
             commonware_utils::bitmap::Readable::<BITMAP_CHUNK_BYTES>::len(&bitmap),
@@ -3485,39 +3480,27 @@ mod tests {
     /// and truncated bitmaps, every batch limit, and tips below the bitmap length.
     #[test]
     fn bitmap_fill_candidates_matches_oracle() {
-        let shapes: Vec<(&str, Shared<BITMAP_CHUNK_BYTES>)> = vec![
-            ("empty", shared_with(|_| {})),
-            (
-                "committed_bits",
-                shared_with(|bm| {
-                    bm.extend_to(10);
-                    bm.set_bit(3, true);
-                    bm.set_bit(7, true);
-                }),
-            ),
-            (
-                "transition_into_tail",
-                shared_with(|bm| {
-                    bm.extend_to(5);
-                    bm.set_bit(2, true);
-                }),
-            ),
-            (
-                "pruned",
-                shared_with(|bm| {
-                    bm.extend_to(BITMAP_CHUNK_BITS * 3);
-                    bm.set_bit(BITMAP_CHUNK_BITS * 2 + 5, true);
-                    bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
-                }),
-            ),
-            (
-                "truncated",
-                shared_with(|bm| {
-                    bm.extend_to(BITMAP_CHUNK_BITS * 2);
-                    bm.set_bit(BITMAP_CHUNK_BITS + 3, true);
-                    bm.truncate(BITMAP_CHUNK_BITS);
-                }),
-            ),
+        let mut committed_bits = Bm::new();
+        committed_bits.extend_to(10);
+        committed_bits.set_bit(3, true);
+        committed_bits.set_bit(7, true);
+        let mut transition_into_tail = Bm::new();
+        transition_into_tail.extend_to(5);
+        transition_into_tail.set_bit(2, true);
+        let mut pruned = Bm::new();
+        pruned.extend_to(BITMAP_CHUNK_BITS * 3);
+        pruned.set_bit(BITMAP_CHUNK_BITS * 2 + 5, true);
+        pruned.prune_to_bit(BITMAP_CHUNK_BITS * 2);
+        let mut truncated = Bm::new();
+        truncated.extend_to(BITMAP_CHUNK_BITS * 2);
+        truncated.set_bit(BITMAP_CHUNK_BITS + 3, true);
+        truncated.truncate(BITMAP_CHUNK_BITS);
+        let shapes = [
+            ("empty", Bm::new()),
+            ("committed_bits", committed_bits),
+            ("transition_into_tail", transition_into_tail),
+            ("pruned", pruned),
+            ("truncated", truncated),
         ];
 
         for (name, bitmap) in shapes {

@@ -87,7 +87,6 @@ use thiserror::Error;
 
 pub mod any;
 pub mod batch_chain;
-pub(crate) mod bitmap;
 pub mod compact;
 #[cfg(test)]
 mod conformance;
