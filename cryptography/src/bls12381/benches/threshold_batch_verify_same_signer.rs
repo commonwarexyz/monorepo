@@ -7,7 +7,7 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, test_rng};
+use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
@@ -70,7 +70,11 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                                                 MinSig,
                                                 _,
                                             >(
-                                                &mut rng, &polynomial, index, &refs, &strategy
+                                                &mut rng,
+                                                &polynomial,
+                                                index,
+                                                non_empty![@refs.iter()],
+                                                &strategy,
                                             ),
                                         )
                                     } else {
@@ -80,7 +84,11 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                                                 MinSig,
                                                 _,
                                             >(
-                                                &mut rng, &polynomial, index, &refs, &Sequential
+                                                &mut rng,
+                                                &polynomial,
+                                                index,
+                                                non_empty![@refs.iter()],
+                                                &Sequential,
                                             ),
                                         )
                                     };

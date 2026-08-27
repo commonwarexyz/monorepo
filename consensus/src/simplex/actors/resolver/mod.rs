@@ -121,6 +121,7 @@ mod test_helpers {
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_parallel::Sequential;
+    use commonware_utils::non_empty;
 
     type TestScheme = ed25519::Scheme;
 
@@ -135,7 +136,8 @@ mod test_helpers {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
-        Nullification::from_nullifies(verifier, &votes, &Sequential).expect("nullification quorum")
+        Nullification::from_nullifies(verifier, non_empty![@&votes], &Sequential)
+            .expect("nullification quorum")
     }
 
     pub(super) fn build_notarization(
@@ -153,7 +155,8 @@ mod test_helpers {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(verifier, &votes, &Sequential).expect("notarization quorum")
+        Notarization::from_notarizes(verifier, non_empty![@&votes], &Sequential)
+            .expect("notarization quorum")
     }
 
     pub(super) fn build_finalization(
@@ -171,6 +174,7 @@ mod test_helpers {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(verifier, &votes, &Sequential).expect("finalization quorum")
+        Finalization::from_finalizes(verifier, non_empty![@&votes], &Sequential)
+            .expect("finalization quorum")
     }
 }
