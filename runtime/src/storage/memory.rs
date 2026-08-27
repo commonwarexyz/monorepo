@@ -1,6 +1,6 @@
 use super::{Header, Layout};
 use crate::{
-    Buf, BufferPool, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Buf, BufferPool, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     deterministic::AuditHasher,
 };
 use commonware_formatting::hex;
@@ -10,10 +10,10 @@ use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 /// Resolves a blob's header from its full contents (see [super::header::resolve]).
 fn resolve_header(
     content: &[u8],
-    versions: &RangeInclusive<u16>,
+    versions: &RangeInclusive<BlobVersion>,
     partition: &str,
     name: &[u8],
-) -> Result<Option<(u64, u16, u64)>, crate::Error> {
+) -> Result<Option<(u64, BlobVersion, u64)>, crate::Error> {
     let raw = &content[..Header::resolve_len(content.len() as u64)];
     super::header::resolve(
         raw,
@@ -122,8 +122,8 @@ impl crate::Storage for Storage {
         &self,
         partition: &str,
         name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), crate::Error> {
+        versions: RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), crate::Error> {
         super::validate_partition_name(partition)?;
 
         let key = (partition.to_string(), name.to_vec());
@@ -636,7 +636,11 @@ mod tests {
             partition.insert(b"v0".to_vec(), raw);
         }
         let (blob, size, _) = storage
-            .open_versioned("partition", b"v0", 0..=0)
+            .open_versioned(
+                "partition",
+                b"v0",
+                BlobVersion::new(0)..=BlobVersion::new(0),
+            )
             .await
             .unwrap();
         assert_eq!(size, data.len() as u64);
@@ -729,7 +733,8 @@ mod tests {
         // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
         // region (the full state enumeration lives in the Layout::interrupted_creation
         // unit tables)
-        let (region, _) = Header::create(&Layout::ALL, &(0..=0));
+        let (region, _) =
+            Header::create(&Layout::ALL, &(BlobVersion::new(0)..=BlobVersion::new(0)));
         let states = [region[..10].to_vec()];
         for (i, state) in states.into_iter().enumerate() {
             let name = format!("torn_{i}").into_bytes();
@@ -741,7 +746,11 @@ mod tests {
 
             // Opening recreates the blob as new
             let (blob, size, _) = storage
-                .open_versioned("partition", &name, 0..=0)
+                .open_versioned(
+                    "partition",
+                    &name,
+                    BlobVersion::new(0)..=BlobVersion::new(0),
+                )
                 .await
                 .unwrap();
             assert_eq!(size, 0);
@@ -753,7 +762,11 @@ mod tests {
 
             // The healed blob round-trips through a reopen with its data intact.
             let (blob, size, _) = storage
-                .open_versioned("partition", &name, 0..=0)
+                .open_versioned(
+                    "partition",
+                    &name,
+                    BlobVersion::new(0)..=BlobVersion::new(0),
+                )
                 .await
                 .unwrap();
             assert_eq!(size, 4);

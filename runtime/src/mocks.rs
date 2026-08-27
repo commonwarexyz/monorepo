@@ -1,8 +1,8 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
-    Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
+    Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
+    Metrics, Name, ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -606,8 +606,8 @@ impl<E: Storage> Storage for RecordingContext<E> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             RecordingBlob {
@@ -728,8 +728,8 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             DelayedSyncBlob {
@@ -1064,8 +1064,8 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             WriteFaultBlob {
@@ -1154,8 +1154,8 @@ impl<E: Storage> Storage for SyncFaultContext<E> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             SyncFaultBlob {

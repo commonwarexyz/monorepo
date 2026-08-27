@@ -45,10 +45,8 @@
 pub use crate::storage::faulty::{
     Config as FaultConfig, PartialWriteMode, ResizeConfig, WriteConfig,
 };
-#[cfg(feature = "external")]
-use crate::{Blocker, Pacer};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
+    BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
     METRICS_PREFIX, Name, Panicked, child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
@@ -71,6 +69,8 @@ use crate::{
         supervision::Tree,
     },
 };
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -1613,8 +1613,8 @@ impl crate::Storage for Context {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         self.storage.open_versioned(partition, name, versions).await
     }
 

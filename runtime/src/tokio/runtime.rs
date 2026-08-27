@@ -7,8 +7,8 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
-    BlobLayout, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX,
-    Name, SinkOf, StreamOf, child_label,
+    BlobLayout, BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle,
+    METRICS_PREFIX, Name, SinkOf, StreamOf, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
@@ -171,9 +171,10 @@ pub struct Config {
 
     /// Blob layouts accepted by storage.
     ///
-    /// Defaults to all supported layouts through [crate::DEFAULT_BLOB_LAYOUT]. New blobs use the
-    /// latest layout in the configured range. This is separate from the application-owned blob
-    /// versions passed to [crate::Storage::open_versioned].
+    /// Defaults to [BlobLayout::ALL]. New blobs use the latest layout in the configured range.
+    /// This is separate from the application-owned blob versions passed to
+    /// [crate::Storage::open_versioned]. The configured range must be non-empty and fully
+    /// supported by the runtime.
     storage_blob_layout: RangeInclusive<BlobLayout>,
 
     /// Maximum buffer size for operations on blobs.
@@ -203,7 +204,7 @@ impl Config {
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
-            storage_blob_layout: crate::storage::Layout::ALL,
+            storage_blob_layout: BlobLayout::ALL,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
@@ -262,16 +263,12 @@ impl Config {
         self.storage_directory = p.into();
         self
     }
-    /// Restricts the blob layouts storage may open.
-    ///
-    /// New blobs use the latest layout in `layout`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `layout` is empty or contains an unsupported layout.
+    /// See [Config]
     pub fn with_storage_blob_layout(mut self, layout: RangeInclusive<BlobLayout>) -> Self {
         assert!(
-            crate::storage::Layout::valid_range(&layout),
+            !layout.is_empty()
+                && BlobLayout::ALL.contains(layout.start())
+                && BlobLayout::ALL.contains(layout.end()),
             "storage blob layout must be non-empty and fully supported"
         );
         self.storage_blob_layout = layout;
@@ -509,10 +506,10 @@ impl crate::Runner for Runner {
                     IoUringStorage::start(
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
-                            blob_layout: self.cfg.storage_blob_layout.clone(),
                             iouring_config: Default::default(),
                             thread_stack_size: self.cfg.thread_stack_size,
                         },
+                        self.cfg.storage_blob_layout.clone(),
                         &mut iouring_registry,
                         storage_buffer_pool.clone(),
                     ),
@@ -520,12 +517,12 @@ impl crate::Runner for Runner {
                 );
             } else {
                 let storage = MeteredStorage::new(
-                    TokioStorage::new(
+                    TokioStorage::new_with_blob_layout(
                         TokioStorageConfig::new(
                             self.cfg.storage_directory.clone(),
                             self.cfg.maximum_buffer_size,
-                            self.cfg.storage_blob_layout.clone(),
                         ),
+                        self.cfg.storage_blob_layout.clone(),
                         storage_buffer_pool.clone(),
                     ),
                     &mut runtime_registry,
@@ -918,8 +915,8 @@ impl crate::Storage for Context {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         self.storage.open_versioned(partition, name, versions).await
     }
 
@@ -1084,12 +1081,10 @@ mod tests {
 
     #[test]
     fn test_storage_blob_layout_restriction() {
+        // The default policy accepts legacy V0 blobs while selecting V1 for new blobs.
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
-        assert_eq!(
-            cfg.storage_blob_layout(),
-            &(BlobLayout::V0..=crate::DEFAULT_BLOB_LAYOUT)
-        );
+        assert_eq!(cfg.storage_blob_layout(), &BlobLayout::ALL);
 
         let partition = "layout_restriction";
         let v0_name = b"v0";
@@ -1109,6 +1104,7 @@ mod tests {
             assert_eq!(payload.coalesce(), b"payload".as_slice());
         });
 
+        // A V1-only policy rejects V0 without modifying it and creates new blobs as V1.
         let cfg = Config::new()
             .with_storage_directory(storage_directory.clone())
             .with_storage_blob_layout(BlobLayout::V1..=BlobLayout::V1);
@@ -1129,6 +1125,7 @@ mod tests {
         let v1 = std::fs::read(v1_path).unwrap();
         assert_eq!(&v1[..4], &BlobLayout::V1.magic());
 
+        // A V0-only policy keeps newly created blobs readable by the rollback target.
         let cfg = Config::new()
             .with_storage_directory(storage_directory.clone())
             .with_storage_blob_layout(BlobLayout::V0..=BlobLayout::V0);

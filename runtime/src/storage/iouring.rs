@@ -22,7 +22,7 @@
 
 use super::{Header, Layout};
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
@@ -42,10 +42,10 @@ fn resolve_header(
     file: &mut File,
     raw_len: u64,
     layouts: &RangeInclusive<Layout>,
-    versions: &RangeInclusive<u16>,
+    versions: &RangeInclusive<BlobVersion>,
     partition: &str,
     name: &[u8],
-) -> Result<Option<(u64, u16, u64)>, Error> {
+) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
     let mut raw = vec![0u8; Header::resolve_len(raw_len)];
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
@@ -77,8 +77,6 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
-    /// Blob layouts accepted by storage.
-    pub blob_layout: RangeInclusive<Layout>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated io_uring worker thread.
@@ -96,10 +94,14 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
+    pub(crate) fn start(
+        cfg: Config,
+        blob_layout: RangeInclusive<Layout>,
+        registry: &mut impl Register,
+        pool: BufferPool,
+    ) -> Self {
         let Config {
             storage_directory,
-            blob_layout,
             mut iouring_config,
             thread_stack_size,
         } = cfg;
@@ -132,8 +134,8 @@ impl crate::Storage for Storage {
         &self,
         partition: &str,
         name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Blob, u64, u16), Error> {
+        versions: RangeInclusive<BlobVersion>,
+    ) -> Result<(Blob, u64, BlobVersion), Error> {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
@@ -485,10 +487,10 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
-                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
+            Layout::ALL,
             &mut registry.sub_registry("storage"),
             pool,
         );
@@ -606,7 +608,7 @@ mod tests {
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[4..6],
-            &Layout::V1.runtime_version().to_be_bytes()
+            &Layout::V1.layout_version().to_be_bytes()
         );
         // Data should start at the data offset
         assert_eq!(&raw_content[data_offset as usize..], data);
@@ -978,10 +980,10 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_root.clone(),
-                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
+            Layout::ALL,
             &mut registry.sub_registry("storage"),
             pool,
         );
@@ -1014,10 +1016,10 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
-                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
+            Layout::ALL,
             &mut registry.sub_registry("storage"),
             pool,
         );

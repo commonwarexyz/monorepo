@@ -83,9 +83,14 @@ stability_scope!(BETA {
 pub(crate) mod tests {
     pub(crate) use super::header::tests::v0_blob_bytes;
     use crate::{
-        Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Storage, WriteOptions,
+        Blob, BlobVersion, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Storage,
+        WriteOptions,
     };
     use futures::FutureExt;
+
+    const fn version(value: u16) -> BlobVersion {
+        BlobVersion::new(value)
+    }
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(storage: S)
@@ -1113,29 +1118,29 @@ pub(crate) mod tests {
     {
         // Create a blob with version 1
         let (blob, _, blob_version) = storage
-            .open_versioned("test_version_mismatch", b"blob", 1..=1)
+            .open_versioned("test_version_mismatch", b"blob", version(1)..=version(1))
             .await
             .unwrap();
-        assert_eq!(blob_version, 1);
+        assert_eq!(blob_version, version(1));
         blob.sync().await.unwrap();
         drop(blob);
 
         // Reopen with a range that includes version 1
         let (_, _, blob_version) = storage
-            .open_versioned("test_version_mismatch", b"blob", 0..=2)
+            .open_versioned("test_version_mismatch", b"blob", version(0)..=version(2))
             .await
             .unwrap();
-        assert_eq!(blob_version, 1);
+        assert_eq!(blob_version, version(1));
 
         // Try to open with version range that excludes version 1
         let result = storage
-            .open_versioned("test_version_mismatch", b"blob", 2..=3)
+            .open_versioned("test_version_mismatch", b"blob", version(2)..=version(3))
             .await;
         assert!(
             matches!(
                 result,
                 Err(crate::Error::BlobVersionMismatch { expected, found })
-                if expected == (2..=3) && found == 1
+                if expected == (version(2)..=version(3)) && found == version(1)
             ),
             "Expected BlobVersionMismatch error"
         );
@@ -1149,7 +1154,7 @@ pub(crate) mod tests {
     {
         // Create an aligned blob and write/read through logical offsets.
         let (blob, size, _) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .open_versioned("test_aligned_layout", b"blob", version(0)..=version(0))
             .await
             .unwrap();
         assert_eq!(size, 0);
@@ -1167,7 +1172,7 @@ pub(crate) mod tests {
 
         // Reopen honors the recorded layout and logical size.
         let (blob, size, _) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .open_versioned("test_aligned_layout", b"blob", version(0)..=version(0))
             .await
             .unwrap();
         assert_eq!(size, 11);
@@ -1183,7 +1188,7 @@ pub(crate) mod tests {
         blob.sync().await.unwrap();
         drop(blob);
         let (blob, size, _) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .open_versioned("test_aligned_layout", b"blob", version(0)..=version(0))
             .await
             .unwrap();
         assert_eq!(size, 5);

@@ -75,10 +75,10 @@ stability_scope!(BETA {
 
     pub mod telemetry;
 
-    /// Runtime layout of a [`Blob`].
+    /// Runtime-owned layout of a [`Blob`].
     ///
-    /// This versions the runtime-owned container, including its header and data offset, not the
-    /// application-owned blob contents version passed to [`Storage::open_versioned`].
+    /// This determines the container format, including its header and data offset, not the
+    /// application-owned contents version passed to [`Storage::open_versioned`].
     ///
     /// This can be used to orchestrate rollback-safe upgrades.
     #[repr(u16)]
@@ -94,8 +94,39 @@ stability_scope!(BETA {
     /// Default runtime layout used when creating a [`Blob`].
     pub const DEFAULT_BLOB_LAYOUT: BlobLayout = BlobLayout::V1;
 
+    impl BlobLayout {
+        /// All blob layouts supported by this runtime.
+        #[allow(deprecated)]
+        pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
+    }
+
+    /// Application-owned version of a [`Blob`]'s contents.
+    ///
+    /// This is independent of the runtime-owned [`BlobLayout`].
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+    pub struct BlobVersion(u16);
+
+    impl BlobVersion {
+        /// Creates a blob version from a `u16`.
+        pub const fn new(version: u16) -> Self {
+            Self(version)
+        }
+
+        /// Returns the underlying `u16`.
+        pub const fn get(self) -> u16 {
+            self.0
+        }
+    }
+
+    impl std::fmt::Display for BlobVersion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
     /// Default application-owned [`Blob`] contents version used by [`Storage::open`].
-    pub const DEFAULT_BLOB_VERSION: u16 = 0;
+    pub const DEFAULT_BLOB_VERSION: BlobVersion = BlobVersion::new(0);
 
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
@@ -151,8 +182,8 @@ stability_scope!(BETA {
         },
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
         BlobVersionMismatch {
-            expected: std::ops::RangeInclusive<u16>,
-            found: u16,
+            expected: std::ops::RangeInclusive<BlobVersion>,
+            found: BlobVersion,
         },
         #[error("invalid or missing checksum")]
         InvalidChecksum,
@@ -672,8 +703,8 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: &[u8],
-            versions: std::ops::RangeInclusive<u16>,
-        ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
+            versions: std::ops::RangeInclusive<BlobVersion>,
+        ) -> impl Future<Output = Result<(Self::Blob, u64, BlobVersion), Error>> + Send;
 
         /// Remove a blob from a given partition.
         ///
@@ -955,6 +986,15 @@ mod tests {
         task::{Context as TContext, Poll, Waker},
     };
     use utils::reschedule;
+
+    #[test]
+    fn test_blob_version() {
+        let version = BlobVersion::new(7);
+        assert_eq!(version.get(), 7);
+        assert_eq!(version.to_string(), "7");
+        assert_eq!(BlobVersion::default(), DEFAULT_BLOB_VERSION);
+        assert!((BlobVersion::new(3)..=BlobVersion::new(7)).contains(&version));
+    }
 
     #[test]
     fn test_read_options_compose() {
