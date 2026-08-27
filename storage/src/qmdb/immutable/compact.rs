@@ -465,6 +465,7 @@ where
                 Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
             })
             .await?;
+        debug_assert_eq!(self.commitment(), batch.bounds.tip);
         Ok((self, start_loc..batch.bounds.tip.size))
     }
 
