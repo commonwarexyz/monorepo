@@ -1075,10 +1075,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     Either::Left(future::ready(result))
                 }
                 policy::SpawnExecution::Offload => {
-                    // Offload: hand the job to the pool. The worker records the job wall before
-                    // sending the result (so job estimates survive a dropped future), and the
-                    // awaiting future records the round-trip overhead when it observes the
-                    // result.
+                    // Offload: hand the job to the pool. The worker records the job wall (so
+                    // job estimates survive a dropped future), and the awaiting future records
+                    // the round-trip overhead when it observes the result.
                     let spawn_start = measure.then(Instant::now);
                     let (tx, mut rx) = oneshot::channel();
                     let s = self.clone();
@@ -1097,16 +1096,18 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         // a spawned job).
                         let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
                         let job = job_start.map(|start| start.elapsed());
+                        let ok = result.is_ok();
+                        let _ = tx.send((result, job));
 
                         // Record successful runs only, matching the inline arm: a panicked job's
-                        // wall time says nothing about the job size.
-                        if result.is_ok()
+                        // wall time says nothing about the job size. Recording after the send
+                        // keeps the bookkeeping off the caller's wake path.
+                        if ok
                             && let (Some((policy, caller, len, threads)), Some(job)) =
                                 (worker_recorder, job)
                         {
                             policy.record_spawn_job(caller, len, threads, job);
                         }
-                        let _ = tx.send((result, job));
                     });
                     Either::Right(async move {
                         // When the polling thread is itself a member of the pool, waiting on the
