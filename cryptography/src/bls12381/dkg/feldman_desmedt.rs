@@ -212,9 +212,9 @@
 //! `n - f = d + 1` valid scalar evaluations, enough to determine the dealer's polynomial and the
 //! scalar behind every coefficient commitment.
 //!
-//! Selected commitments are summed during initial key generation and combined with non-zero
-//! Lagrange weights during resharing. In either case, the leading coefficient includes an
-//! independently sampled contribution from at least one honest dealer. Although
+//! Whether selected commitments are summed during initial key generation or combined with non-zero
+//! Lagrange weights during resharing, the leading coefficient includes an independently sampled
+//! contribution from at least one honest dealer. Although
 //! [a rushing adversary](https://decentralizedthoughts.github.io/2019-06-07-modeling-the-adversary/#rushing)
 //! may observe the honest commitments before choosing its own, it must know every Byzantine
 //! coefficient scalar before those commitments can be selected. Choosing those scalars so their
@@ -1928,6 +1928,9 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
             let public = weights
                 .interpolate(&commitments, strategy)
                 .expect("select checks that enough points have been provided");
+
+            // Public-message validation binds each commitment's constant term to the dealer's
+            // previous public share, so interpolating a valid subset must preserve the public key.
             assert_eq!(
                 previous.public().public(),
                 public.constant(),
