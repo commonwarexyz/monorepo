@@ -135,13 +135,11 @@ commonware_macros::stability_scope!(BETA {
         /// it is measured cheaper than the pool hand-off itself and offloading it to the pool
         /// otherwise.
         ///
-        /// `len` groups calls into per-callsite size classes for those measurements: calls from
-        /// one call site with similar `len` must have comparable cost, or the learned inline
-        /// bound weakens. It has no ordering meaning. An inline job runs to completion before
-        /// `spawn` returns, and inline placement is reserved for jobs whose measured cost sits
-        /// under a small time budget, so big jobs always offload. To force a hand-off on a pool
-        /// with more than one worker, submit through [`manual`](Self::manual) (a single-worker
-        /// pool always runs jobs inline).
+        /// `len` groups calls at a call site into size classes for those measurements, so similar
+        /// `len` must mean comparable cost. An inline job runs to completion before `spawn`
+        /// returns and is capped by a small time budget, so big jobs always offload. To force a
+        /// hand-off, submit through [`manual`](Self::manual) (a single-worker pool always runs
+        /// jobs inline).
         ///
         /// The returned future resolves when the job completes. Blocking on external
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
