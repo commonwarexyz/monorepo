@@ -36,16 +36,22 @@ below `2^-security`.
 
 ## The soundness building block (shared by A and C)
 
-A single combination `Q = Σ c_i·P_i` with `c_i` uniform iid over `{0,1,2}`:
-`h` is odd, so every nonzero cofactor part `T` has order ≥ 3, making `0·T`,
-`1·T`, `2·T` distinct. Fix any bad `P_j` and condition on all other
-coefficients: `c_j·T_j` must hit one fixed value, and it ranges over three
-distinct values — at most one works, so the combination vanishes with
-probability ≤ 1/3, for any number of bad points and any cofactor group
-structure. The bound is tight (a lone bad point escapes exactly when
-`c_j = 0`), so a *single* combination cannot beat `log₂3 ≈ 1.58` bits per
-evaluation; only more combinations can. `t = ⌈security/log₂3⌉ = 81`
-combinations give 128-bit soundness.
+A single combination `Q = Σ c_i·P_i` with `c_i` uniform iid over a three-element
+set — `{0,1,2}` as first implemented, `{-1,0,1}` as shipped: `h` is odd, so
+every nonzero cofactor part `T` has order ≥ 3 and never 2, so `c·T` takes three
+distinct values as `c` ranges over either set (two coinciding would need the
+order to divide a difference, and the differences are 1 and 2). Fix any bad
+`P_j` and condition on all other coefficients: `c_j·T_j` must hit one fixed
+value out of three, so the combination vanishes with probability ≤ 1/3, for any
+number of bad points and any cofactor group structure. The bound is tight (a
+lone bad point escapes exactly when `c_j = 0`), so a *single* combination cannot
+beat `log₂3 ≈ 1.58` bits per evaluation; only more combinations can.
+`t = ⌈security/log₂3⌉ = 81` combinations give 128-bit soundness.
+
+Three values is also the most a coefficient can be worth. Any coefficient acts
+on an order-3 component through its residue mod 3, so a larger alphabet buys no
+more than these three residues do — which is why signed trits, and not some
+wider digit, are what the shipped scheme draws.
 
 Verified footguns:
 
@@ -77,19 +83,26 @@ reference.
 
 ## Strategy C — m parallel combinations per round (shipping)
 
-Per round, draw for every point a coefficient *vector* in `{0,1,2}^m` (m iid
-trits = a base-3 bucket id in `[0, 3^m)`), and evaluate all m combinations
-`Q_j = Σ_i c_{j,i}·P_i` from one shared accumulation:
+Per round, draw for every point a coefficient *vector* in `{-1,0,1}^m` (m iid
+signed trits, read as a balanced-ternary value in `[-(3^m-1)/2, (3^m-1)/2]`),
+and evaluate all m combinations `Q_j = Σ_i c_{j,i}·P_i` from one shared
+accumulation:
 
-1. **Bucket by vector.** Points with the same coefficient vector are summed
-   together — `3^m` buckets, but still only `n` point additions total (each
-   point lands in exactly one bucket). This is the key: *one accumulation pass
-   serves m combinations.*
-2. **Combine deterministically.** `Q_j = Σ_{v_j=1} S_v + 2·Σ_{v_j=2} S_v`,
-   where `v_j` is the j-th base-3 digit of the bucket index. The weights are
-   deterministic digits — all randomness is in the vector assignment — so this
-   evaluates exactly the m combinations (it is *not* the unsound re-randomized
-   sum over bucket sums, which would collapse back to one combination).
+1. **Bucket by vector, folded onto its negation.** Points with the same
+   coefficient vector are summed together, and a vector shares a bucket with
+   its negation — negating an affine point is the sign of its `y`, so the point
+   is stored negated. That leaves `(3^m+1)/2` buckets, and still only `n` point
+   additions total (each point lands in exactly one bucket). This is the key:
+   *one accumulation pass serves m combinations.* The canonical bucket is the
+   absolute value of the balanced-ternary value, so it falls straight out of the
+   residue the sampler draws.
+2. **Combine deterministically.** `Q_j = Σ_{v_j=1} S_v - Σ_{v_j=-1} S_v`, where
+   `v_j` is the j-th balanced-ternary digit. The weights are deterministic
+   digits — all randomness is in the vector assignment — so this evaluates
+   exactly the m combinations (it is *not* the unsound re-randomized sum over
+   bucket sums, which would collapse back to one combination). Folding carries
+   the `-1` side across as it goes, so each `Q_j` ends up a plain sum with
+   nothing to negate or double.
 3. **Check the m outputs.** Soundness per round = `3^-m` (product of m
    independent 1/3 bounds); `r ≈ 81/m` rounds at 128-bit.
 
@@ -111,20 +124,26 @@ coefficient vector is the zero vector, which has probability `3^-m`. So the
 additions per point are
 
 ```
-adds/point ≈ (128 / log₂B) · (1 + B/n),     B = 3^m
+adds/point ≈ passes + Σ_rounds K_r/n,     K = (3^m+1)/2 buckets, passes = ⌈81/m⌉
 ```
 
-— one addition per point per pass for the accumulation, plus about two per
-occupied bucket for the combine. Minimizing over `B` gives ~10.8 additions per
-point at n = 100 000 and ~9.2 at n = 10⁶; the floor is 9 passes, because
-`⌈81/m⌉ = 9` for every width the cost model will accept. At six field
-multiplications per batch-affine addition, that is 55–65 multiplications per
-point against ~1200 for an exact check — a ceiling of 18–21×, which the
-implementation reaches to within about 15%.
+— one addition per point per pass for the accumulation, less one per bucket for
+the point that lands there first, plus about two per bucket for the combine.
+The two terms pull against each other: a wider round costs `3^m` in the combine
+to save one pass over `n`, so the width worth choosing rises with the batch and
+the cost model picks it per batch. At a hundred thousand points that is nine
+rounds of width nine (9.1 additions per point); at a million, eight rounds of
+width 11 and 10 (8.3); at three million, seven rounds of width 12 and 11 (7.4).
 
-This is why the speedup grows with the batch and then flattens: the `B/n` term
+Below about seven passes there is nothing left: six would need width 14, whose
+buckets alone outweigh three million points. At six field multiplications per
+batch-affine addition, seven passes is ~45 multiplications per point against
+~1200 for an exact check — a ceiling around 22×, which the implementation now
+reaches to within about 6%.
+
+This is why the speedup grows with the batch and then flattens: the `K/n` term
 and the fixed costs (converting to affine, drawing coefficients) amortize away,
-but nine passes do not.
+and the pass count steps down only twice more after nine.
 
 ## The engine
 
@@ -230,7 +249,8 @@ exactly linear:
 | 1 000     | 22.3 ms   | 6.81 ms (3.3×)  | 4.90 ms (4.6×)      |
 | 6 000     | 133 ms    | 24.0 ms (5.6×)  | 14.3 ms (9.3×)      |
 | 100 000   | 2.22 s    | 299 ms (7.5×)   | 141 ms (15.7×)      |
-| 1 000 000 | 22.1 s    | 3.19 s (7.0×)   | **1.17 s (18.9×)**  |
+| 1 000 000 | 21.3 s    | 3.19 s (7.0×)   | 1.13 s (18.8×)      |
+| 3 000 000 | 64.0 s    | —               | **3.08 s (20.8×)**  |
 
 "Previous engine" is the single-combination-per-round implementation this
 strategy replaced, measured on the same batches in the same session. Run-to-run
@@ -239,8 +259,8 @@ spread here is ±2%, tighter than the virtualized Xeon's ±5%.
 Every row is above the Xeon's, and the last two by more than the ratio of
 addition to check cost explains. Two of the choices above are worth more on a
 machine with this much cache: folding halves a round's slots, and the budget
-that bounds them is set here to admit width 11, which is the one step that buys
-a pass — eight rather than nine at a million points. On the Xeon both were left
+that bounds them is set here to admit widths 11 and 12, the two steps that buy
+a pass — eight rather than nine at a million points, seven at three million. On the Xeon both were left
 where its smaller L2 wants them. The shape is the same on both: flat below a
 thousand points, still climbing at a hundred thousand, flattening toward the
 pass floor after a million.
@@ -277,8 +297,9 @@ against per-point checking.
   the width stops being bounded by cache. It is a real fix for a real problem,
   but not one this machine has: raising the slot budget straight to 16 MiB —
   an 8.5 MB slot array, four times what the old budget allowed — costs nothing
-  measurable per addition and buys 9% at a million points, so cache was not
-  what bounded the width. What bounds it is the combine, which grows as `3^m`
+  measurable per addition and buys 9% at a million points; a 25 MB one at width
+  12 buys a further 8% at three million. Cache was not what bounded the
+  width. What bounds it is the combine, which grows as `3^m`
   and which partitioning does not touch. The premise is worth re-testing on a
   machine with a smaller last-level cache, where the Xeon's own numbers (8% per
   addition one step past its 2 MiB, 15% two steps) suggest it would bind.
@@ -336,7 +357,7 @@ round) reach the target. Points of comparison, from the paper itself:
 Strategy C therefore fills exactly the gap their cost model assumes away: it
 makes the no-prefilter multi-combination route cost `≈81/m` passes instead of
 81 MSMs, which is what turns batch SMT on **unmodified BLS12-381** from "slower
-than naive" (their result) into 8–15× serial and 19–37× parallel (ours, at a
+than naive" (their result) into 8–21× serial and 19–37× parallel (ours, at a
 stronger 2⁻¹²⁸ target). Their binary-coefficient variant also shows how C
 extends to even-cofactor curves (e.g. BLS12-377): use `{0,1}` coefficient
 vectors (2^m buckets, 1 bit per combination, 128 total) instead of trits.
@@ -344,7 +365,7 @@ vectors (2^m buckets, 1 bit per combination, 128 total) instead of trits.
 Note that a faster field multiplication would *lower* these ratios, not raise
 them: the exact check is almost pure multiplication while the batched path is
 part multiplication and part memory traffic. The multiplication-count ceiling
-above (18–21×) is the machine-independent statement.
+above (~22×) is the machine-independent statement.
 
 ## Status
 
