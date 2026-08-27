@@ -1733,9 +1733,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-macros-grammar"
+version = "2026.7.0"
+dependencies = [
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "commonware-macros-impl"
 version = "2026.7.0"
 dependencies = [
+ "commonware-macros-grammar",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
