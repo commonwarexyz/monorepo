@@ -327,6 +327,101 @@
 //! advance the in-memory object by itself: an embedding presents the authenticated monotonic time,
 //! then atomically persists the observation even if the requested operation returns an error.
 //!
+//! ## User-visible money paths
+//!
+//! The diagrams below follow value rather than internal objects. Every edge labeled `HARD FAULT`
+//! is permanent: the operator cannot resume, re-register, or admit another epoch afterward.
+//!
+//! ```text
+//! DEPOSIT
+//! -------
+//! user records (deposit id, account, amount, inclusion deadline)
+//!        |
+//!        +-- included by an admitted close --> Pending
+//!        |                                        |
+//!        |                                        v
+//!        |                              clean FIFO finalization
+//!        |                                        |
+//!        |                                        v
+//!        |                              authenticated epoch tail
+//!        |                                 |                 |
+//!        |                  positive and no Close            +--> zero or Close:
+//!        |                                 |                      account absent;
+//!        |                                 v                      positive withdrawal
+//!        |                             live state                 output, if any,
+//!        |                                                        enters its reserve
+//!        |
+//!        +-- still pending at its deadline --> HARD FAULT --> exact aggregate account refund
+//!                                                          (no state opening needed)
+//!
+//! ACCEPTED PAYMENT
+//! ----------------
+//! payer signs one cumulative send
+//!        |
+//!        v
+//! operator verifies and atomically records both endpoints
+//!        |
+//!        v
+//! operator signs the exact linked receipt
+//!        |
+//!        +-- selected in a clean close --> FIFO finalization
+//!        |                                  |              |
+//!        |                                  |              +--> absent predecessor
+//!        |                                  |                   with no deposit:
+//!        |                                  |                   external-payout reserve
+//!        |                                  +--> active predecessor or deposit:
+//!        |                                       canonical row determines successor
+//!        |                                       state and any withdrawal output
+//!        |
+//!        +-- omitted or contradicted --> holder submits both signatures
+//!                                           + typed Merkle evidence
+//!                                                   |
+//!                                                   v
+//!                                             target Challenged
+//!                                             descendants Invalidated
+//!                                                   |
+//!                                                   v
+//!                                        drain only the earlier clean FIFO prefix
+//!                                                   |
+//!                                                   v
+//!                                        freeze the last finalized StateRoot
+//!                                                   |
+//!                                                   v
+//!                                 frozen payer balance is released exactly once
+//!                                 (to the payer or its signed withdrawal route)
+//!
+//! SIGNED WITHDRAWAL
+//! -----------------
+//! account signs destination + Amount(n) or amountless Close + absolute deadline
+//!        |
+//!        +-- admitted and finalized in the clean FIFO prefix
+//!        |         |
+//!        |         v
+//!        |   withdrawal-output reserve
+//!        |         |
+//!        |         v
+//!        |   claim (BatchId, position) once with one typed opening
+//!        |
+//!        +-- still outstanding at deadline --> HARD FAULT
+//!                                                   |
+//!                         +-------------------------+-------------------------+
+//!                         |                                                   |
+//!              an earlier clean close finalizes it                 it remains in frozen state
+//!                         |                                                   |
+//!                         v                                                   v
+//!                 ordinary output claim                       Amount(n): n to destination,
+//!                                                             residual to account
+//!                                                             Close: entire tail to destination
+//! ```
+//!
+//! A missed registered admission window takes the same permanent-fault path. The unadmitted close
+//! contributes no debit, credit, withdrawal reserve, or payout reserve; recovery therefore starts
+//! from the last root finalized by the clean FIFO prefix. Finalized reserves are outside active
+//! state custody, so each remains independently claimable even if a later epoch faults. These
+//! disjoint buckets ensure that a sender's value is either represented by a finalized transition,
+//! a finalized claim reserve, the frozen survivor state, or a direct pending-deposit refund, never
+//! silently discarded by an operator fault.
+//!
 //! ## Accounts, custody, and claims
 //!
 //! ```text
@@ -386,6 +481,13 @@
 //! finalized balance exactly once. Hard-fault survivor claims and deposit refunds instead drain
 //! active custody. The embedding must atomically and idempotently persist every returned payout
 //! together with its state-machine mutation.
+//!
+//! The crate's executable Stateright model checks finite proof-profile/certification, challenge,
+//! claim-ledger, and settlement machines to completion. Deterministic traces cover the accepted and
+//! rejected user flows shown above, including malicious-operator recovery, exact deadline
+//! boundaries, strict epoch order, and independent finalized reserves. The model uses ideal
+//! cryptography and representative proof/challenge classes; implementation and crash-consistency
+//! obligations remain with the Rust tests, fuzz targets, and embedding.
 
 pub mod admission;
 pub mod boundary;

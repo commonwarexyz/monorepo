@@ -1,0 +1,197 @@
+# Bajillion Stateright model
+
+This directory contains Bajillion's executable Rust model. Stateright explores every reachable
+state in each declared finite instance to a fixed point; there is no depth cutoff, randomized
+sampling, or hand-seeded terminal state in the exhaustive checks. Deterministic traces separately
+exercise the longer user journeys and rejected calls against the same transition functions.
+
+The complete protocol diagrams live in the
+[Bajillion module documentation](../src/bajillion/mod.rs). The checked composition is:
+
+```text
+REGISTERED PROOF CONTEXT
+        |
+        | prepare -> deal -> missing / incomplete / exact delivery
+        v
+  honest validator seal
+  - every assigned slice
+  - every distinct payer/operator signature
+  - typed openings, rows, outputs, and coverage
+        |
+        +-- reject malformed/incomplete attempt
+        |        |
+        |        +--> reset attempt-local state and retry
+        |             under the same live registration
+        |
+        +-- exact 2f+1 certificate --> sound CertifiedClose capability
+
+OPEN SETTLEMENT SLOT
+        | register exact next epoch and predecessor
+        v
+REGISTERED -- missed admission deadline ------------------------------+
+        | certified admission (CertifiedClose)
+        v
+OPEN + [Pending e, Pending e+1, ...]
+        |
+        +-- front now > challenge deadline --> finalize front
+        |                                      create reserves
+        |                                      advance head
+        |                                            |
+        +<---------------- next operating FIFO state +
+        |
+        +-- proven challenge --> challenge target; invalidate suffix --+
+        |                                                               |
+        +-- pending deposit or withdrawal expires ----------------------+
+                                                                        |
+                                                                        v
+                                                               PERMANENT FAULT
+                                                                        |
+                                                    drain every earlier clean
+                                                    Pending prefix in FIFO order
+                                                                        |
+                                                                        v
+                                                       freeze last finalized root
+                                                           +------------+-----------+
+                                                           |                        |
+                                                    claim each state       refund each account's
+                                                    position once          aggregate deposit once
+                                                           |                        |
+                                                           +------------+-----------+
+                                                                        v
+                                                                     SETTLED
+
+Finalized withdrawal and external-payout reserves remain independently claimable before,
+during, and after terminal recovery.
+```
+
+An empty registration slot has no heartbeat. A registration activates one immutable payment
+context. Missing its inclusive admission window is therefore a permanent fault, not a retry that
+reopens the slot. Failed construction or certification can retry under the same still-live
+registration.
+
+## Model decomposition
+
+| File | Exhaustive responsibility |
+| --- | --- |
+| `certification.rs` | A four-validator, two-slice `n = 3f + 1`, `q = 2f + 1` instance. It explores the valid verifier result plus 26 distinct local failure classes on either slice, missing/incomplete/exact delivery, every exact quorum, durable retention, rejection, and same-registration retry. The failure classes abstract outcomes of the production verifier; they do not reimplement cryptography or Merkle proofs. |
+| `challenge.rs` | All five settlement targets and every payer-signature, operator-signature, exact-link, and context-authentication bit combination over representative semantic endpoints. It separately checks structural validity, semantic contradiction, `NoContradiction`, and the canonical `SameSend`, `SameIndex`, and lossless `Full` receipt-fork encodings. |
+| `claims.rs` | Eight exact replay identities: two typed namespaces, two batches, and two positions. It explores every claim ordering while checking typed root identity, output value and position, destination routing, atomic mutation, reserve conservation, and independence across kind, batch, and position. |
+| `settlement.rs` | A three-account, five-candidate, three-pending-slot, bounded-time instance. It explores intake, immutable registration, deadline ties, certified admission, strict ancestry and FIFO finalization, challenge suffix cuts, clean-prefix drain, finalized reserve creation, claim routing, replay expiry, custody conservation, and terminal recovery. |
+| `scenarios.rs` | Twenty-one deterministic end-to-end traces using the same settlement transition function. They cover accepted and rejected boundaries, every challenge relation, front/middle/tail operator faults, registration and intake expiry, every sender-value bucket, Amount and Close, exact claim routing, replay, and finalized reserves that survive a later fault. |
+
+The models compose through two opaque capabilities. A `CertifiedClose` is emitted for one exact
+candidate and registration only after the certification transition function reaches exact valid
+delivery, quorum formation, a sound certificate, and capability issuance; a merely matching
+registered pair cannot issue it. A `ProvenChallenge` is emitted only after the challenge model adjudicates
+authenticated evidence for one exact target. The settlement model accepts those capabilities
+instead of manufacturing raw certificates or contradictions. The claim model separately owns the
+finalized-output ledger. This is an assume-guarantee decomposition: it checks each finite component
+to completion without taking the impractical Cartesian product of every proof delivery, challenge
+witness, and settlement ordering.
+
+The checked state counts are part of the tests so an accidental state-space reduction is visible:
+
+- 148,374 certification states, including all 26 invalid-proof profiles on either slice and every
+  exact quorum and delivery ordering;
+- 15,782 challenge states, including every authentication-bit combination for every target and the
+  representative one- and two-payment endpoint classes;
+- 1,025 claim-ledger states covering every ordering of eight typed batch-position identities;
+- 3,929,740 settlement states from the ordinary initial state; and
+- 21 deterministic end-to-end scenarios using the same settlement transition function.
+
+The reachability properties require examples for all four challenge families and all three fork
+relations, every liveness-fault class and exact tie priority, a full three-close pipeline, four
+ordered finalizations, front/middle/tail suffix cuts, exact admission and challenge boundaries,
+Amount and Close claims, external payouts, batch-position replay, reserve survival after a later
+fault, and exact front/middle/tail and registration-expiry recovery outcomes. Each safety predicate
+also has a deliberately corrupted negative-control state so a disconnected or vacuous property
+fails its ordinary Rust test.
+
+## Evidence matrix
+
+| Obligation | Exhaustive finite graph | Deterministic trace | Production refinement |
+| --- | --- | --- | --- |
+| Exact dealing, quorum intersection, retention, and retry | `certification.rs` | Certification unit traces | `seal`, typed proof-slice verification, and admission tests |
+| Both signatures, exact linkage, typed lookups, and challenge relation | `challenge.rs` | Every challenge edge in `scenarios.rs` | Production challenge tests and fuzz targets |
+| Consecutive admission and FIFO finalization | `settlement.rs` | Skip and out-of-order rejection | `SettlementChain` tests |
+| Front, middle, tail, registration, deposit, and withdrawal faults | `settlement.rs` | Exact recovery traces in `scenarios.rs` | Malicious-operator settlement tests |
+| Typed `(kind, batch, position)` replay and reserve accounting | `claims.rs` | Clean claims and later-fault reserve survival | Withdrawal and external-payout claim tests |
+| Codec, hash framing, Merkle verification, and signature batching | Not abstracted as byte arrays | Rejected production inputs | Rust unit/integration tests and fuzzing |
+| Durable crash cuts and asset transfers | Assumed atomic and idempotent | Not owned by this in-memory crate | Embedding recovery tests |
+| Arbitrary cardinalities | Not proved inductively | Larger production fixtures | Quorum algebra plus implementation tests |
+
+“Exhaustive” in this document always means the complete reachable graph of the declared finite
+instance. The deterministic traces demonstrate specific causal user journeys; they are not a
+substitute for the graph, an implementation-refinement proof, or crash-consistency evidence.
+
+## Fund-recovery contract
+
+For every modeled permanent fault, new intake and admission stay fenced. A proven challenge may
+leave an earlier clean prefix, which must resolve FIFO; no later epoch can skip it. Terminal
+settlement then freezes the last finalized state and exposes one replay-protected claim per live
+account plus one replay-protected aggregate refund per account with unfinalized deposits. Deposit
+IDs remain intake replay keys, but multiple deposits to one account settle together. An Amount
+request splits the frozen tail into withdrawal and residual; an amountless Close sends the entire
+authenticated tail to its destination. Clean reserves created before the fault stay in separate
+claim ledgers.
+
+The checker proves conservation and enabled recovery, not fairness. Completion assumes an
+authenticated monotonic clock, available claim material, eventual claim submission, and an
+embedding that persists each returned asset transfer atomically and idempotently with the state
+mutation.
+
+## Refinement boundary
+
+The model uses small enums, ideal cryptography, mathematical amounts, explicit proof-fault profiles,
+and representative challenge endpoint classes. It does not independently derive the production
+Merkle/row verifier or quantify over every numeric payment tuple. Codecs, hash framing, Merkle
+implementations, BLS verification and randomized batching, arithmetic limits, allocation bounds,
+storage crash cuts, and external asset adapters remain covered by Bajillion's Rust unit/integration
+tests, fuzz targets, and the embedding's crash-consistency tests. The finite results establish every
+reachable state of these instances; they are not an inductive proof for arbitrary account,
+validator, slice, or payment counts.
+
+## Why Stateright
+
+Bajillion's central obligations are temporal: many enabled actions can interleave, the first fault
+must be retained, an admitted suffix can be cut, and only the clean FIFO prefix may finalize before
+recovery. Stateright directly represents that nondeterministic transition system in Rust and checks
+`always` and `sometimes` properties over its complete reachable finite graph.
+
+Kani is complementary, not a replacement for this lifecycle model. It is most valuable for a
+bounded symbolic harness around one production function, arithmetic boundary, or unsafe block. No
+distinct Kani-only obligation was found here: byte-level adversarial inputs already belong to the
+production verifier and fuzz targets, while reproducing the temporal scheduler in Kani would add a
+second model with substantially higher search cost. A focused Kani harness can still be added if a
+specific production-only invariant later warrants it.
+
+## Run
+
+```bash
+cargo test -p commonware-clearing --test bajillion_model
+```
+
+The model is an ordinary clearing integration test and therefore runs in the workspace's normal
+Rust test jobs. No Node.js, JVM, Docker image, or external model-checker process is required.
+
+## Explore
+
+Stateright's built-in web explorer exposes the actual initial states, enabled actions, successor
+states, and property status for each component. Start one component and open the printed URL:
+
+```bash
+cargo run -p commonware-clearing --example bajillion_model -- settlement
+```
+
+The command accepts `certification`, `challenge`, `claims`, or `settlement`, followed by an optional
+listen address such as `127.0.0.1:3001`. Exploration is on demand: the browser follows only the
+selected paths unless **Run to completion** is requested. The exhaustive tests remain the canonical
+fixed-point check and assert the complete finite state counts above.
+
+The explorer is an interactive action/path view, not a static rendering of every graph node. A
+single image containing the settlement instance's 3,929,740 states would not be usable.
+
+There is no single monolithic explorer target. The four models deliberately compose through
+`CertifiedClose` and `ProvenChallenge` capabilities so the checked graph does not multiply every
+proof delivery and challenge witness by every settlement ordering. The deterministic scenarios are
+named paths through the same settlement transition function, not a fifth transition system.

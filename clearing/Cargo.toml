@@ -32,6 +32,7 @@ commonware-conformance.workspace = true
 commonware-cryptography.workspace = true
 commonware-cryptography-curve25519 = { workspace = true, features = [ "arbitrary", "std" ] }
 criterion.workspace = true
+stateright.workspace = true
 
 [features]
 default = [ "std" ]
@@ -57,6 +58,10 @@ arbitrary = [
 
 [lib]
 bench = false
+
+[[example]]
+name = "bajillion_model"
+path = "stateright/explorer.rs"
 
 [[bench]]
 name = "bajillion"

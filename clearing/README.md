@@ -82,7 +82,8 @@ A zero tail is valid and removes the account without creating a payout claim.
 
 ## Formal model
 
-The [executable Quint model](quint/README.md) covers Bajillion's construction, certification,
-settlement, challenge, deadline, hard-fault, claim, and fund-recovery states. Its documentation
-records the checked bounds and the refinement obligations that remain with the Rust implementation
-and embedding.
+The [executable Stateright model](stateright/README.md) exhausts its finite certification,
+challenge, claim-ledger, and settlement state spaces to completion and pairs them with deterministic
+end-to-end fund-recovery traces. Its documentation records the exact state counts, composition
+boundaries, reachability matrix, and the refinement obligations that remain with the Rust
+implementation and embedding.

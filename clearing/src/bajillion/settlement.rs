@@ -5091,16 +5091,6 @@ mod tests {
         assert_eq!(finalized.withdrawal_total, 7);
         assert_eq!(fixture.chain.claimable_balance(), 7);
 
-        let output = fixture
-            .chain
-            .claim_withdrawal(batch_id, &claims[1])
-            .unwrap();
-        assert_withdrawal_output(&output, &queued[1].1, queued[1].3);
-        assert_eq!(fixture.chain.claimable_balance(), queued[0].3);
-        assert!(matches!(
-            fixture.chain.claim_withdrawal(batch_id, &claims[1]),
-            Err(SettlementError::ClaimAlreadyConsumed)
-        ));
         let destination = claims[1].output().destination();
         let mut malformed = claims[1].encode().to_vec();
         let destination_offset = malformed
@@ -5112,8 +5102,27 @@ mod tests {
             WithdrawalClaim::<ShaDigest>::decode_cfg(malformed.as_slice(), &(..=usize::MAX).into())
                 .unwrap();
         assert_eq!(malformed.position(), claims[1].position());
+        let claimable_before = fixture.chain.claimable_balance();
+        let batch_before = fixture.chain.claimable_batches.get(&batch_id).unwrap();
+        let reserve_before = batch_before.withdrawal_remaining;
+        let consumed_before = batch_before.claimed_withdrawals.len();
         assert!(matches!(
             fixture.chain.claim_withdrawal(batch_id, &malformed),
+            Err(SettlementError::Transition(TransitionError::Commitment(_)))
+        ));
+        let batch_after = fixture.chain.claimable_batches.get(&batch_id).unwrap();
+        assert_eq!(fixture.chain.claimable_balance(), claimable_before);
+        assert_eq!(batch_after.withdrawal_remaining, reserve_before);
+        assert_eq!(batch_after.claimed_withdrawals.len(), consumed_before);
+
+        let output = fixture
+            .chain
+            .claim_withdrawal(batch_id, &claims[1])
+            .unwrap();
+        assert_withdrawal_output(&output, &queued[1].1, queued[1].3);
+        assert_eq!(fixture.chain.claimable_balance(), queued[0].3);
+        assert!(matches!(
+            fixture.chain.claim_withdrawal(batch_id, &claims[1]),
             Err(SettlementError::ClaimAlreadyConsumed)
         ));
         let output = fixture

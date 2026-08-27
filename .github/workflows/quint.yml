@@ -27,5 +27,3 @@ jobs:
         run: npm i @informalsystems/quint@${{ env.QUINT_VERSION }} -g
       - name: Check Minimmit
         run: cd pipeline/minimmit/quint && make typecheck && make test
-      - name: Check Bajillion
-        run: cd clearing/quint && make check
