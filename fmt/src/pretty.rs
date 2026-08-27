@@ -234,6 +234,12 @@ fn format_or_preserve(
     format: impl FnOnce() -> Result<String, Error>,
 ) -> Result<ProtectedFragment, Error> {
     if source_requires_preservation(source) {
+        if let Some(comments) = crate::trivia::LineComments::prepare(source) {
+            let formatted = format()?;
+            if let Some(restored) = comments.restore(&formatted) {
+                return Ok(ProtectedFragment::formatted(restored));
+            }
+        }
         return Ok(ProtectedFragment::preserved(source));
     }
 
@@ -492,14 +498,74 @@ mod tests {
     }
 
     #[test]
-    fn preserves_ordinary_comments() {
-        for source in ["value // keep", "call(/* keep */ value)"] {
-            let input: Expr = syn::parse_str(source).expect("expression should parse");
-            let formatted = expression(&input, source).expect("expression should be protected");
+    fn reattaches_trailing_line_comment() {
+        let source = "value // keep exactly";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should format");
 
-            assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
-            assert_eq!(formatted.text(), source);
-        }
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(formatted.text(), "value // keep exactly\n");
+    }
+
+    #[test]
+    fn reattaches_line_comments_inside_block() {
+        let source = "{\n// keep before\nlet value=source();\nvalue // keep trailing\n}";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let once = expression(&input, source)
+            .expect("expression should format")
+            .into_string();
+        let reparsed = syn::parse_str(&once).expect("formatted expression should parse");
+        let twice = expression(&reparsed, &once)
+            .expect("expression should format twice")
+            .into_string();
+
+        assert!(once.contains("// keep before"));
+        assert!(once.contains("value // keep trailing"));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn reattaches_comments_across_prettyplease_token_normalization() {
+        let source = "{\nlet value=match input {\nSome(value)=>match value {\n// keep nested\n0=>1,\n_=>2,\n},\nNone=>0,\n};\nif value>0 { call(); };\n// keep after optional semicolon\nvalue\n}";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let once = expression(&input, source)
+            .expect("expression should format")
+            .into_string();
+        let reparsed = syn::parse_str(&once).expect("formatted expression should parse");
+        let twice = expression(&reparsed, &once)
+            .expect("expression should format twice")
+            .into_string();
+
+        assert_eq!(once.matches("// keep nested").count(), 1);
+        assert_eq!(once.matches("// keep after optional semicolon").count(), 1);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn places_trailing_comment_after_normalized_match_arm() {
+        let source = "match value {\nSome(value)=>{value} // keep arm\nNone=>0,\n}";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let once = expression(&input, source)
+            .expect("expression should format")
+            .into_string();
+        let reparsed = syn::parse_str(&once).expect("formatted expression should parse");
+        let twice = expression(&reparsed, &once)
+            .expect("expression should format twice")
+            .into_string();
+
+        assert!(once.contains("value, // keep arm\n"), "{once}");
+        assert_eq!(once.matches("// keep arm").count(), 1);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn preserves_block_comments() {
+        let source = "call(/* keep */ value)";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should be protected");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
     }
 
     #[test]

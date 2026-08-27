@@ -1,0 +1,508 @@
+//! Conservative token-anchored recovery of ordinary line comments.
+
+use crate::source::SourceMap;
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
+use std::ops::Range;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TokenKey {
+    Open(char),
+    Close(char),
+    Ident(String),
+    Punct(char),
+    Literal(String),
+}
+
+#[derive(Clone)]
+struct Token {
+    key: TokenKey,
+    range: Range<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Comment {
+    text: String,
+    trailing: bool,
+    left: Option<usize>,
+    right: Option<usize>,
+}
+
+pub(crate) struct LineComments {
+    tokens: Vec<Token>,
+    comments: Vec<Comment>,
+}
+
+pub(crate) struct ShellComment {
+    pub(crate) text: String,
+    pub(crate) trailing: bool,
+}
+
+pub(crate) fn shell_comments(source: &str, range: Range<usize>) -> Option<Vec<ShellComment>> {
+    let mut comments = Vec::new();
+    parse_gap(source, range, None, None, &mut comments)?;
+    Some(
+        comments
+            .into_iter()
+            .map(|comment| ShellComment {
+                text: comment.text,
+                trailing: comment.trailing,
+            })
+            .collect(),
+    )
+}
+
+impl LineComments {
+    pub(crate) fn prepare(source: &str) -> Option<Self> {
+        let stream = source.parse::<TokenStream>().ok()?;
+        let source_map = SourceMap::new(source);
+        let mut tokens = Vec::new();
+        let mut literal_ranges = Vec::new();
+        flatten(stream, &source_map, &mut tokens, &mut literal_ranges)?;
+        if literal_ranges.iter().any(|range| {
+            source_map
+                .slice(range.clone())
+                .is_ok_and(|literal| literal.contains('\n') || literal.contains('\r'))
+        }) || has_source_spelled_doc_comment(source, &literal_ranges)
+        {
+            return None;
+        }
+        if tokens
+            .windows(2)
+            .any(|pair| pair[0].range.end > pair[1].range.start)
+        {
+            return None;
+        }
+
+        let mut comments = Vec::new();
+        let mut cursor = 0;
+        for (right, token) in tokens.iter().enumerate() {
+            parse_gap(
+                source,
+                cursor..token.range.start,
+                right.checked_sub(1),
+                Some(right),
+                &mut comments,
+            )?;
+            cursor = token.range.end;
+        }
+        parse_gap(
+            source,
+            cursor..source.len(),
+            tokens.len().checked_sub(1),
+            None,
+            &mut comments,
+        )?;
+        if comments.is_empty() {
+            return None;
+        }
+        Some(Self { tokens, comments })
+    }
+
+    pub(crate) fn restore(&self, formatted: &str) -> Option<String> {
+        let formatted_plan = token_plan(formatted)?;
+        let mapping = token_mapping(&self.tokens, &formatted_plan)?;
+        let mut replacements = Vec::new();
+        let mut expected_comments = Vec::with_capacity(self.comments.len());
+        let mut index = 0;
+        while index < self.comments.len() {
+            let left = self.comments[index].left;
+            let right = self.comments[index].right;
+            let start = index;
+            while index < self.comments.len()
+                && self.comments[index].left == left
+                && self.comments[index].right == right
+            {
+                index += 1;
+            }
+
+            let mapped_left = nearest_mapped_left(&mapping, left);
+            let mapped_right = nearest_mapped_right(&mapping, right);
+            if mapped_left
+                .zip(mapped_right)
+                .is_some_and(|(left, right)| left >= right)
+            {
+                return None;
+            }
+            let insertion_left = mapped_right.map_or_else(
+                || formatted_plan.len().checked_sub(1),
+                |right| right.checked_sub(1),
+            );
+            if mapped_left
+                .zip(insertion_left)
+                .is_some_and(|(left, insertion)| left > insertion)
+            {
+                return None;
+            }
+            let range = insertion_left.map_or(0, |left| formatted_plan[left].range.end)
+                ..mapped_right.map_or(formatted.len(), |right| formatted_plan[right].range.start);
+            let comments = &self.comments[start..index];
+            let replacement = render_gap(
+                formatted,
+                &formatted_plan,
+                insertion_left,
+                mapped_right,
+                comments,
+            )?;
+            replacements.push((range, replacement));
+            expected_comments.extend(comments.iter().map(|comment| Comment {
+                text: comment.text.clone(),
+                trailing: comment.trailing,
+                left: insertion_left,
+                right: mapped_right,
+            }));
+        }
+        if replacements
+            .windows(2)
+            .any(|pair| pair[0].0.end > pair[1].0.start)
+        {
+            return None;
+        }
+
+        let mut output = formatted.to_owned();
+        for (range, replacement) in replacements.into_iter().rev() {
+            output.replace_range(range, &replacement);
+        }
+        let restored = Self::prepare(&output)?;
+        if restored.comments != expected_comments
+            || restored
+                .tokens
+                .iter()
+                .map(|token| &token.key)
+                .ne(formatted_plan.iter().map(|token| &token.key))
+        {
+            return None;
+        }
+        Some(output)
+    }
+}
+
+fn token_plan(source: &str) -> Option<Vec<Token>> {
+    let stream = source.parse::<TokenStream>().ok()?;
+    let source_map = SourceMap::new(source);
+    let mut tokens = Vec::new();
+    flatten(stream, &source_map, &mut tokens, &mut Vec::new())?;
+    Some(tokens)
+}
+
+fn flatten(
+    stream: TokenStream,
+    source: &SourceMap<'_>,
+    tokens: &mut Vec<Token>,
+    literal_ranges: &mut Vec<Range<usize>>,
+) -> Option<()> {
+    for token in stream {
+        match token {
+            TokenTree::Group(group) => {
+                if group.delimiter() == Delimiter::None {
+                    flatten(group.stream(), source, tokens, literal_ranges)?;
+                    continue;
+                }
+                let (open, close) = delimiter_keys(group.delimiter())?;
+                tokens.push(Token {
+                    key: TokenKey::Open(open),
+                    range: source.span_range(group.span_open()).ok()?,
+                });
+                flatten(group.stream(), source, tokens, literal_ranges)?;
+                tokens.push(Token {
+                    key: TokenKey::Close(close),
+                    range: source.span_range(group.span_close()).ok()?,
+                });
+            }
+            TokenTree::Ident(ident) => tokens.push(Token {
+                key: TokenKey::Ident(ident.to_string()),
+                range: source.span_range(ident.span()).ok()?,
+            }),
+            TokenTree::Punct(punct) => tokens.push(Token {
+                key: TokenKey::Punct(punct.as_char()),
+                range: source.span_range(punct.span()).ok()?,
+            }),
+            TokenTree::Literal(literal) => {
+                let range = source.span_range(literal.span()).ok()?;
+                tokens.push(Token {
+                    key: TokenKey::Literal(source.slice(range.clone()).ok()?.to_owned()),
+                    range: range.clone(),
+                });
+                literal_ranges.push(range);
+            }
+        }
+    }
+    Some(())
+}
+
+const fn delimiter_keys(delimiter: Delimiter) -> Option<(char, char)> {
+    match delimiter {
+        Delimiter::Parenthesis => Some(('(', ')')),
+        Delimiter::Brace => Some(('{', '}')),
+        Delimiter::Bracket => Some(('[', ']')),
+        Delimiter::None => None,
+    }
+}
+
+fn parse_gap(
+    source: &str,
+    range: Range<usize>,
+    left: Option<usize>,
+    right: Option<usize>,
+    comments: &mut Vec<Comment>,
+) -> Option<()> {
+    let mut offset = range.start;
+    while offset < range.end {
+        let remaining = &source[offset..range.end];
+        let character = remaining.chars().next()?;
+        if character.is_whitespace() {
+            offset += character.len_utf8();
+            continue;
+        }
+        if !remaining.starts_with("//")
+            || remaining.starts_with("///")
+            || remaining.starts_with("//!")
+        {
+            return None;
+        }
+
+        let comment_start = offset;
+        let newline = source[comment_start..range.end]
+            .find('\n')
+            .map(|relative| comment_start + relative)
+            .unwrap_or(range.end);
+        let comment_end =
+            if newline > comment_start && source.as_bytes().get(newline - 1) == Some(&b'\r') {
+                newline - 1
+            } else {
+                newline
+            };
+        let line_start = source[..comment_start]
+            .rfind('\n')
+            .map_or(0, |newline| newline + 1);
+        let trailing = source[line_start..comment_start]
+            .chars()
+            .any(|character| !character.is_whitespace());
+        comments.push(Comment {
+            text: source[comment_start..comment_end].to_owned(),
+            trailing,
+            left,
+            right,
+        });
+        offset = newline.saturating_add(usize::from(newline < range.end));
+    }
+    Some(())
+}
+
+fn token_mapping(original: &[Token], formatted: &[Token]) -> Option<Vec<Option<usize>>> {
+    let mut mapping = vec![None; original.len()];
+    let mut original_index = 0;
+    let mut formatted_index = 0;
+    while original_index < original.len() && formatted_index < formatted.len() {
+        if original[original_index].key == formatted[formatted_index].key {
+            mapping[original_index] = Some(formatted_index);
+            original_index += 1;
+            formatted_index += 1;
+        } else if is_removable_original_token(&original[original_index].key) {
+            original_index += 1;
+        } else if is_inserted_formatted_token(&formatted[formatted_index].key) {
+            formatted_index += 1;
+        } else {
+            return None;
+        }
+    }
+    if original[original_index..]
+        .iter()
+        .any(|token| !is_removable_original_token(&token.key))
+        || formatted[formatted_index..]
+            .iter()
+            .any(|token| !is_inserted_formatted_token(&token.key))
+    {
+        return None;
+    }
+    Some(mapping)
+}
+
+const fn is_removable_original_token(key: &TokenKey) -> bool {
+    matches!(
+        key,
+        TokenKey::Punct(',' | ';') | TokenKey::Open(_) | TokenKey::Close(_)
+    )
+}
+
+const fn is_inserted_formatted_token(key: &TokenKey) -> bool {
+    matches!(
+        key,
+        TokenKey::Punct(',' | ';') | TokenKey::Open(_) | TokenKey::Close(_)
+    )
+}
+
+fn nearest_mapped_left(mapping: &[Option<usize>], left: Option<usize>) -> Option<usize> {
+    mapping[..left?.saturating_add(1)]
+        .iter()
+        .rev()
+        .find_map(|mapped| *mapped)
+}
+
+fn nearest_mapped_right(mapping: &[Option<usize>], right: Option<usize>) -> Option<usize> {
+    mapping[right?..].iter().find_map(|mapped| *mapped)
+}
+
+fn render_gap(
+    formatted: &str,
+    tokens: &[Token],
+    left: Option<usize>,
+    right: Option<usize>,
+    comments: &[Comment],
+) -> Option<String> {
+    let comment_indentation = comment_indentation(formatted, tokens, left, right);
+    let right_indentation = right.map(|right| {
+        line_leading_whitespace(formatted, tokens[right].range.start).map_or_else(
+            || {
+                if matches!(tokens[right].key, TokenKey::Close(_)) {
+                    enclosing_indentation(formatted, tokens, right)
+                } else {
+                    comment_indentation.clone()
+                }
+            },
+            str::to_owned,
+        )
+    });
+    let mut output = String::new();
+    for (index, comment) in comments.iter().enumerate() {
+        if comment.trailing {
+            if index != 0 || !output.is_empty() {
+                return None;
+            }
+            output.push(' ');
+            output.push_str(&comment.text);
+            output.push('\n');
+        } else {
+            if !output.ends_with('\n') && (left.is_some() || !output.is_empty()) {
+                output.push('\n');
+            }
+            output.push_str(&comment_indentation);
+            output.push_str(&comment.text);
+            output.push('\n');
+        }
+    }
+    if let Some(indentation) = right_indentation {
+        output.push_str(&indentation);
+    }
+    Some(output)
+}
+
+fn comment_indentation(
+    source: &str,
+    tokens: &[Token],
+    left: Option<usize>,
+    right: Option<usize>,
+) -> String {
+    if let Some(right) = right
+        && !matches!(tokens[right].key, TokenKey::Close(_))
+        && let Some(indentation) = line_leading_whitespace(source, tokens[right].range.start)
+    {
+        return indentation.to_owned();
+    }
+    if let Some(left) = left
+        && !matches!(tokens[left].key, TokenKey::Open(_))
+        && let Some(indentation) = line_leading_whitespace(source, tokens[left].range.start)
+    {
+        return indentation.to_owned();
+    }
+
+    let position = right.unwrap_or(tokens.len());
+    let indentation = enclosing_indentation(source, tokens, position);
+    if has_enclosing_delimiter(tokens, position) {
+        format!("{indentation}    ")
+    } else {
+        indentation
+    }
+}
+
+fn enclosing_indentation(source: &str, tokens: &[Token], position: usize) -> String {
+    let mut delimiters = Vec::new();
+    for token in &tokens[..position] {
+        match token.key {
+            TokenKey::Open(open) => delimiters.push((open, token.range.start)),
+            TokenKey::Close(close) => {
+                if delimiters
+                    .last()
+                    .is_some_and(|(open, _)| delimiters_match(*open, close))
+                {
+                    delimiters.pop();
+                }
+            }
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) => {}
+        }
+    }
+    delimiters.last().map_or_else(String::new, |(_, offset)| {
+        line_indentation(source, *offset).to_owned()
+    })
+}
+
+fn has_enclosing_delimiter(tokens: &[Token], position: usize) -> bool {
+    let mut delimiters = Vec::new();
+    for token in &tokens[..position] {
+        match token.key {
+            TokenKey::Open(open) => delimiters.push(open),
+            TokenKey::Close(close) => {
+                if delimiters
+                    .last()
+                    .is_some_and(|open| delimiters_match(*open, close))
+                {
+                    delimiters.pop();
+                }
+            }
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) => {}
+        }
+    }
+    !delimiters.is_empty()
+}
+
+const fn delimiters_match(open: char, close: char) -> bool {
+    matches!((open, close), ('(', ')') | ('{', '}') | ('[', ']'))
+}
+
+fn line_leading_whitespace(source: &str, offset: usize) -> Option<&str> {
+    let line_start = source[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let prefix = &source[line_start..offset];
+    prefix.chars().all(char::is_whitespace).then_some(prefix)
+}
+
+fn line_indentation(source: &str, offset: usize) -> &str {
+    let line_start = source[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line = &source[line_start..offset];
+    let end = line
+        .char_indices()
+        .find_map(|(index, character)| (!character.is_whitespace()).then_some(index))
+        .unwrap_or(line.len());
+    &line[..end]
+}
+
+fn has_source_spelled_doc_comment(source: &str, literal_ranges: &[Range<usize>]) -> bool {
+    let mut literal_ranges = literal_ranges.to_vec();
+    literal_ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    let mut literals = literal_ranges.iter().peekable();
+    let mut offset = 0;
+    while offset < source.len() {
+        while literals.peek().is_some_and(|literal| literal.end <= offset) {
+            literals.next();
+        }
+        let remaining = &source[offset..];
+        if remaining.starts_with("///")
+            || remaining.starts_with("//!")
+            || remaining.starts_with("/**")
+            || remaining.starts_with("/*!")
+        {
+            return true;
+        }
+        if let Some(literal) = literals.peek()
+            && literal.start <= offset
+        {
+            offset = literal.end;
+            literals.next();
+            continue;
+        }
+        offset += source[offset..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}

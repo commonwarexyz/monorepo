@@ -4,6 +4,7 @@ use super::{Error, Options, nested};
 use crate::{
     pretty::{self, Disposition, ProtectedFragment},
     source::SourceMap,
+    trivia::{self, ShellComment},
     writer::Writer,
 };
 use commonware_macros_grammar::{
@@ -27,6 +28,16 @@ struct LifecycleLayout {
     expression: String,
 }
 
+struct ShellTrivia {
+    boundaries: Vec<Vec<ShellComment>>,
+}
+
+struct SelectLoopPrefix {
+    context: String,
+    on_start: Option<LifecycleLayout>,
+    shell_trivia: ShellTrivia,
+}
+
 /// Formats the delimiter contents of a `select!` invocation.
 pub fn select(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
     select_at_depth(source, options, 0)
@@ -39,9 +50,9 @@ pub(super) fn select_at_depth(
 ) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<SelectInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
-    if select_has_structural_trivia(source, &source_map, &input)? {
+    let Some(shell_trivia) = select_shell_trivia(source, &source_map, &input)? else {
         return preserve_select(source, &source_map, &input, options, depth);
-    }
+    };
     let mut branches = Vec::with_capacity(input.branches.len());
     for branch in &input.branches {
         let Some(branch) = format_select_branch(source, &source_map, branch, depth)? else {
@@ -51,9 +62,10 @@ pub(super) fn select_at_depth(
     }
 
     let output = render(options, |writer| {
-        for branch in &branches {
+        write_boundary(writer, false, &shell_trivia.boundaries[0]);
+        for (index, branch) in branches.iter().enumerate() {
             write_branch(writer, branch);
-            writer.newline();
+            write_boundary(writer, true, &shell_trivia.boundaries[index + 1]);
         }
     });
     syn::parse_str::<SelectInput>(&output).map_err(Error::Output)?;
@@ -73,9 +85,9 @@ pub(super) fn select_loop_at_depth(
     let input = syn::parse_str::<SelectLoopInput>(source).map_err(Error::Parse)?;
     input.validate().map_err(Error::Validate)?;
     let source_map = SourceMap::new(source);
-    if select_loop_has_structural_trivia(source, &source_map, &input)? {
+    let Some(shell_trivia) = select_loop_shell_trivia(source, &source_map, &input)? else {
         return preserve_select_loop(source, &source_map, &input, options, depth);
-    }
+    };
     let Some(context) = format_expression(source, &source_map, &input.context, depth)? else {
         return preserve_select_loop(source, &source_map, &input, options, depth);
     };
@@ -94,8 +106,11 @@ pub(super) fn select_loop_at_depth(
         options,
         &input,
         &source_map,
-        context,
-        on_start,
+        SelectLoopPrefix {
+            context,
+            on_start,
+            shell_trivia,
+        },
         depth,
     )
 }
@@ -105,8 +120,7 @@ fn render_select_loop(
     options: Options,
     input: &SelectLoopInput,
     source_map: &SourceMap<'_>,
-    context: String,
-    on_start: Option<LifecycleLayout>,
+    prefix: SelectLoopPrefix,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     let Some(on_stopped) = format_lifecycle(source, source_map, &input.on_stopped, depth)? else {
@@ -130,22 +144,30 @@ fn render_select_loop(
     };
 
     let output = render(options, |writer| {
-        write_expression_entry(writer, None, &context);
-        writer.newline();
-        if let Some(on_start) = &on_start {
+        let mut boundary = 0;
+        write_boundary(writer, false, &prefix.shell_trivia.boundaries[boundary]);
+        write_expression_entry(writer, None, &prefix.context);
+        boundary += 1;
+        write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
+        if let Some(on_start) = &prefix.on_start {
             write_expression_entry(writer, Some(&on_start.keyword), &on_start.expression);
-            writer.newline();
+            boundary += 1;
+            write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         }
         write_expression_entry(writer, Some(&on_stopped.keyword), &on_stopped.expression);
-        writer.newline();
+        boundary += 1;
+        write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         for branch in &branches {
             write_branch(writer, branch);
-            writer.newline();
+            boundary += 1;
+            write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         }
         if let Some(on_end) = &on_end {
             write_expression_entry(writer, Some(&on_end.keyword), &on_end.expression);
-            writer.newline();
+            boundary += 1;
+            write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         }
+        debug_assert_eq!(boundary + 1, prefix.shell_trivia.boundaries.len());
     });
     let reparsed = syn::parse_str::<SelectLoopInput>(&output).map_err(Error::Output)?;
     reparsed.validate().map_err(Error::Validate)?;
@@ -315,12 +337,13 @@ fn preserve_select_loop(
     nested::preserve_with_nested(source, source_map, &expressions, options, depth)
 }
 
-fn select_has_structural_trivia(
+fn select_shell_trivia(
     source: &str,
     source_map: &SourceMap<'_>,
     input: &SelectInput,
-) -> Result<bool, Error> {
+) -> Result<Option<ShellTrivia>, Error> {
     let mut spans = Vec::new();
+    let mut entries = Vec::new();
     for branch in &input.branches {
         spans.extend([
             branch.pattern.span(),
@@ -330,20 +353,32 @@ fn select_has_structural_trivia(
             branch.body.span(),
         ]);
         spans.extend(branch.comma_token.as_ref().map(Spanned::span));
+        let end = branch
+            .comma_token
+            .as_ref()
+            .map_or_else(|| branch.body.span(), Spanned::span);
+        entries.push(entry_range(source_map, branch.pattern.span(), end)?);
     }
-    has_unowned_source(source, source_map, spans)
+    shell_trivia(source, source_map, spans, entries)
 }
 
-fn select_loop_has_structural_trivia(
+fn select_loop_shell_trivia(
     source: &str,
     source_map: &SourceMap<'_>,
     input: &SelectLoopInput,
-) -> Result<bool, Error> {
+) -> Result<Option<ShellTrivia>, Error> {
     let mut spans = vec![input.context.span(), input.context_comma_token.span()];
+    let mut entries = vec![entry_range(
+        source_map,
+        input.context.span(),
+        input.context_comma_token.span(),
+    )?];
     if let Some(on_start) = &input.on_start {
         push_lifecycle_spans(&mut spans, on_start);
+        entries.push(lifecycle_range(source_map, on_start)?);
     }
     push_lifecycle_spans(&mut spans, &input.on_stopped);
+    entries.push(lifecycle_range(source_map, &input.on_stopped)?);
     for branch in &input.branches {
         spans.extend([
             branch.pattern.span(),
@@ -355,11 +390,17 @@ fn select_loop_has_structural_trivia(
         }
         spans.extend([branch.fat_arrow_token.span(), branch.body.span()]);
         spans.extend(branch.comma_token.as_ref().map(Spanned::span));
+        let end = branch
+            .comma_token
+            .as_ref()
+            .map_or_else(|| branch.body.span(), Spanned::span);
+        entries.push(entry_range(source_map, branch.pattern.span(), end)?);
     }
     if let Some(on_end) = &input.on_end {
         push_lifecycle_spans(&mut spans, on_end);
+        entries.push(lifecycle_range(source_map, on_end)?);
     }
-    has_unowned_source(source, source_map, spans)
+    shell_trivia(source, source_map, spans, entries)
 }
 
 fn push_lifecycle_spans(spans: &mut Vec<Span>, lifecycle: &SelectLoopLifecycle) {
@@ -371,27 +412,103 @@ fn push_lifecycle_spans(spans: &mut Vec<Span>, lifecycle: &SelectLoopLifecycle) 
     spans.extend(lifecycle.comma_token.as_ref().map(Spanned::span));
 }
 
-fn has_unowned_source(
+fn lifecycle_range(
+    source_map: &SourceMap<'_>,
+    lifecycle: &SelectLoopLifecycle,
+) -> Result<Range<usize>, Error> {
+    let end = lifecycle
+        .comma_token
+        .as_ref()
+        .map_or_else(|| lifecycle.expression.span(), Spanned::span);
+    entry_range(source_map, lifecycle.keyword.span(), end)
+}
+
+fn entry_range(source_map: &SourceMap<'_>, start: Span, end: Span) -> Result<Range<usize>, Error> {
+    let start = source_map.span_range(start)?.start;
+    let end = source_map.span_range(end)?.end;
+    Ok(start..end)
+}
+
+fn shell_trivia(
     source: &str,
     source_map: &SourceMap<'_>,
     spans: Vec<Span>,
-) -> Result<bool, Error> {
+    entries: Vec<Range<usize>>,
+) -> Result<Option<ShellTrivia>, Error> {
     let mut ranges = spans
         .into_iter()
         .map(|span| source_map.span_range(span))
         .collect::<Result<Vec<Range<usize>>, _>>()?;
     ranges.sort_unstable_by_key(|range| (range.start, range.end));
 
+    if entries.windows(2).any(|pair| pair[0].end > pair[1].start) {
+        return Ok(None);
+    }
+    let mut boundaries = Vec::with_capacity(entries.len() + 1);
+    if entries.is_empty() {
+        boundaries.extend(std::iter::once(0..source.len()));
+    } else {
+        boundaries.push(0..entries[0].start);
+        boundaries.extend(entries.windows(2).map(|pair| pair[0].end..pair[1].start));
+        boundaries.push(entries.last().expect("entries are not empty").end..source.len());
+    }
+
     let mut cursor = 0;
     for range in ranges {
-        if range.start > cursor && !source[cursor..range.start].chars().all(char::is_whitespace) {
-            return Ok(true);
+        let gap = cursor..range.start;
+        if gap.start < gap.end
+            && !source[gap.clone()].chars().all(char::is_whitespace)
+            && !boundaries
+                .iter()
+                .any(|boundary| boundary.start <= gap.start && gap.end <= boundary.end)
+        {
+            return Ok(None);
         }
         cursor = cursor.max(range.end);
     }
-    Ok(source[cursor..]
-        .chars()
-        .any(|character| !character.is_whitespace()))
+    let gap = cursor..source.len();
+    if gap.start < gap.end
+        && !source[gap.clone()].chars().all(char::is_whitespace)
+        && !boundaries
+            .iter()
+            .any(|boundary| boundary.start <= gap.start && gap.end <= boundary.end)
+    {
+        return Ok(None);
+    }
+
+    let mut parsed = Vec::with_capacity(boundaries.len());
+    for boundary in boundaries {
+        let Some(comments) = trivia::shell_comments(source, boundary) else {
+            return Ok(None);
+        };
+        parsed.push(comments);
+    }
+    Ok(Some(ShellTrivia { boundaries: parsed }))
+}
+
+fn write_boundary(writer: &mut Writer<'_>, has_previous: bool, comments: &[ShellComment]) {
+    if comments.is_empty() {
+        if has_previous {
+            writer.newline();
+        }
+        return;
+    }
+
+    let mut previous_line_open = has_previous;
+    for comment in comments {
+        if comment.trailing && previous_line_open {
+            writer.push(" ");
+            writer.push(&comment.text);
+            writer.newline();
+        } else {
+            if previous_line_open {
+                writer.newline();
+            }
+            writer.push(&comment.text);
+            writer.newline();
+        }
+        previous_line_open = false;
+    }
 }
 
 fn render(options: Options, write: impl FnOnce(&mut Writer<'_>)) -> String {
@@ -630,29 +747,59 @@ mod tests {
     }
 
     #[test]
-    fn preserves_comment_bearing_select() {
+    fn formats_structural_line_comment() {
         let source = "\n    // Keep this branch.\n    value = receive() => value,\n";
-        let formatted = select(source, OPTIONS).expect("select should be preserved");
+        let formatted = select(source, OPTIONS).expect("select should format");
 
-        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
-        assert_eq!(formatted.text(), source);
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(
+            formatted.text(),
+            "\n    // Keep this branch.\n    value = receive() => value,\n"
+        );
     }
 
     #[test]
-    fn formats_nested_select_inside_preserved_shell() {
-        let source = "\n    // Keep the outer shell.\n    outer = receive_outer() => select! {inner=receive_inner()=>inner},\n";
-        let once = select(source, OPTIONS)
-            .expect("nested select should format inside preserved shell")
+    fn formats_structural_comments_in_select_loop() {
+        let source = "context,on_stopped=>{},\n// first line\n// second line\nvalue=receive()=>{\n// field comment\nvalue\n},";
+        let once = select_loop(source, OPTIONS)
+            .expect("select loop should format comments")
             .into_string();
+        let twice = select_loop(&once, OPTIONS)
+            .expect("select loop should format twice")
+            .into_string();
+
+        assert!(once.contains("    // first line\n    // second line\n"));
+        assert!(once.contains("        // field comment\n"), "{once}");
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn keeps_trailing_comment_after_branch_comma() {
+        let source =
+            "first=receive_first()=>first, // keep trailing\nsecond=receive_second()=>second";
+        let once = select(source, OPTIONS)
+            .expect("select should format trailing comment")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("select should format twice")
+            .into_string();
+
+        assert!(once.contains("first = receive_first() => first, // keep trailing\n"));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_nested_select_inside_commented_shell() {
+        let source = "\n    // Keep the outer shell.\n    outer = receive_outer() => select! {inner=receive_inner()=>inner},\n";
+        let once = select(source, OPTIONS).expect("nested select should format commented shell");
+        assert_eq!(once.disposition(), Disposition::Formatted);
+        let once = once.into_string();
         let twice = select(&once, OPTIONS)
             .expect("nested select should format twice")
             .into_string();
 
         assert!(once.contains("// Keep the outer shell."));
-        assert!(
-            once.contains("select! {\n        inner = receive_inner() => inner,\n    }"),
-            "{once}"
-        );
+        assert!(once.contains("inner = receive_inner() => inner,"), "{once}");
         assert_eq!(once, twice);
     }
 
@@ -742,6 +889,23 @@ mod tests {
         assert!(
             once.contains("select! {\n            inner = receive_inner() => inner,\n        }")
         );
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_outer_comments_around_nested_select() {
+        let source = "outer=receive_outer()=>{\n// before nested\nlet value=select! {\n// inside nested\ninner=receive_inner()=>inner\n};\n// after nested\nvalue\n}";
+        let once = select(source, OPTIONS)
+            .expect("nested select and comments should format")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("nested select and comments should format twice")
+            .into_string();
+
+        assert_eq!(once.matches("// before nested").count(), 1);
+        assert_eq!(once.matches("// inside nested").count(), 1);
+        assert_eq!(once.matches("// after nested").count(), 1);
+        assert!(once.contains("inner = receive_inner() => inner,"), "{once}");
         assert_eq!(once, twice);
     }
 

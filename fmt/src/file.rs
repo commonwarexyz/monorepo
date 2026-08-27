@@ -210,16 +210,31 @@ mod tests {
     }
 
     #[test]
-    fn formats_nested_macro_inside_preserved_outer_shell() {
+    fn formats_nested_macro_inside_commented_outer_shell() {
         let source = "fn example() {\n    select! {\n        // Keep this seam.\n        outer = receive_outer() => select! {inner=receive_inner()=>inner},\n    }\n}\n";
         let formatted = format(source).expect("file should format safely");
 
+        assert_eq!(formatted.formatted_macros(), 1);
+        assert_eq!(formatted.preserved_macros(), 0);
         assert!(formatted.text().contains("// Keep this seam."));
         assert!(
             formatted
                 .text()
-                .contains("select! {\n            inner = receive_inner() => inner,\n        }")
+                .contains("inner = receive_inner() => inner,")
         );
+    }
+
+    #[test]
+    fn preserves_block_comment_around_formatted_nested_macro() {
+        let source = "fn example() {\n    select! {\n        outer=receive_outer()=>{/* keep */select! {inner=receive_inner()=>inner}}\n    }\n}\n";
+        let once = format(source).expect("file should preserve block comment safely");
+        let twice = format(once.text()).expect("file should reach a fixed point");
+
+        assert_eq!(once.text().matches("/* keep */").count(), 1);
+        assert!(once.text().contains("select!"));
+        assert!(!once.text().contains("__commonware_fmt_nested_"));
+        assert!(once.text().contains("inner = receive_inner() => inner,"));
+        assert_eq!(once.text(), twice.text());
     }
 
     #[test]
@@ -242,6 +257,19 @@ mod tests {
                 .text()
                 .contains("select! {\r\n        value = receive() => value,\r\n    }")
         );
+    }
+
+    #[test]
+    fn reattaches_exact_line_comments_in_crlf_file() {
+        let source = "fn example() {\r\n    select! {\r\n        // na\u{ef}ve leading  \r\n        value=receive()=>{\r\n            // duplicate  \r\n            value // duplicate  \r\n        },\r\n        // trailing body  \r\n    }\r\n}\r\n";
+        let formatted = format(source).expect("comments should format safely");
+
+        assert_eq!(formatted.formatted_macros(), 1);
+        assert_eq!(formatted.preserved_macros(), 0);
+        assert!(!formatted.text().replace("\r\n", "").contains('\n'));
+        assert!(formatted.text().contains("// na\u{ef}ve leading  \r\n"));
+        assert_eq!(formatted.text().matches("// duplicate  \r\n").count(), 2);
+        assert!(formatted.text().contains("// trailing body  \r\n"));
     }
 
     #[test]

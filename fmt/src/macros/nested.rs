@@ -25,6 +25,7 @@ enum Style {
 struct NestedMacro {
     marker: String,
     kind: MacroKind,
+    source_range: Range<usize>,
     prefix: String,
     body: String,
     suffix: String,
@@ -57,6 +58,7 @@ impl Shield<'_> {
         self.nested.push(NestedMacro {
             marker: marker.clone(),
             kind,
+            source_range: start..close.end,
             prefix: self.source_map.slice(start..open.end)?.to_owned(),
             body: self.source_map.slice(open.end..close.start)?.to_owned(),
             suffix: self.source_map.slice(close.start..close.end)?.to_owned(),
@@ -269,18 +271,70 @@ fn format_expression(
         return Err(Error::RecursionLimit);
     }
 
+    let expression_range = source_map.span_range(expression.span())?;
+    if source_map.slice(expression_range.clone())? != fragment_source {
+        return Err(Error::MarkerMismatch);
+    }
+    let shielded_source = shield_source(fragment_source, expression_range.start, &shield.nested)?;
+
     let formatted = match style {
-        Style::Expression => pretty::expression(&shielded, fragment_source)?,
-        Style::ValueBlock => pretty::value_block(&shielded, fragment_source)?,
+        Style::Expression => pretty::expression(&shielded, &shielded_source)?,
+        Style::ValueBlock => pretty::value_block(&shielded, &shielded_source)?,
     };
     if formatted.disposition() == Disposition::PreservedForTrivia {
-        return Ok(formatted);
+        let Some(restored) = restore(&shielded_source, &marker_prefix, &shield.nested, depth)?
+        else {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        };
+        syn::parse_str::<Expr>(&restored).map_err(Error::Output)?;
+        return Ok(ProtectedFragment::preserved_with_nested_formatting(
+            restored,
+        ));
     }
     let Some(restored) = restore(formatted.text(), &marker_prefix, &shield.nested, depth)? else {
         return Ok(ProtectedFragment::preserved(fragment_source));
     };
     syn::parse_str::<Expr>(&restored).map_err(Error::Output)?;
     Ok(ProtectedFragment::formatted(restored))
+}
+
+fn shield_source(
+    fragment_source: &str,
+    fragment_start: usize,
+    nested: &[NestedMacro],
+) -> Result<String, Error> {
+    let mut replacements = nested
+        .iter()
+        .map(|nested| {
+            let start = nested
+                .source_range
+                .start
+                .checked_sub(fragment_start)
+                .ok_or(Error::MarkerMismatch)?;
+            let end = nested
+                .source_range
+                .end
+                .checked_sub(fragment_start)
+                .ok_or(Error::MarkerMismatch)?;
+            if start > end || end > fragment_source.len() {
+                return Err(Error::MarkerMismatch);
+            }
+            Ok((start..end, format!("{}! {{}}", nested.marker)))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    replacements.sort_unstable_by_key(|(range, _)| (range.start, range.end));
+    if replacements
+        .windows(2)
+        .any(|pair| pair[0].0.end > pair[1].0.start)
+    {
+        return Err(Error::MarkerMismatch);
+    }
+
+    let mut output = fragment_source.to_owned();
+    for (range, replacement) in replacements.into_iter().rev() {
+        output.replace_range(range, &replacement);
+    }
+    Ok(output)
 }
 
 fn marker_prefix(source: &str) -> Result<String, Error> {
