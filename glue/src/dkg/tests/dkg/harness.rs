@@ -20,10 +20,13 @@ use crate::{
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     Signer as _,
-    bls12381::primitives::{
-        group::{Private, Share},
-        sharing::Mode,
-        variant::MinPk,
+    bls12381::{
+        dkg::feldman_desmedt::Reveal,
+        primitives::{
+            group::{Private, Share},
+            sharing::Mode,
+            variant::MinPk,
+        },
     },
     ed25519,
 };
@@ -204,6 +207,7 @@ impl EngineDefinition for DkgEngine {
                 strategy: Sequential,
                 namespace: NAMESPACE,
                 sharing_mode: Mode::NonZeroCounter,
+                reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: format!("dkg-{index}"),
                 participants: self.participants_set(),
@@ -392,6 +396,7 @@ pub(super) fn run_closed_network_receiver() {
                 strategy: Sequential,
                 namespace: NAMESPACE,
                 sharing_mode: Mode::NonZeroCounter,
+                reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-closed-receiver".into(),
                 participants,
@@ -465,6 +470,7 @@ pub(super) fn run_activation_failure_completes_empty() {
                 strategy: Sequential,
                 namespace: NAMESPACE,
                 sharing_mode: Mode::NonZeroCounter,
+                reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-activation-failure".into(),
                 participants: engine.participants_set(),

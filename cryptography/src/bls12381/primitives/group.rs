@@ -5,10 +5,13 @@
 //!
 //! # Warning
 //!
-//! Ensure that points are checked to belong to the correct subgroup
-//! (G1 or G2) to prevent small subgroup attacks. This is particularly important
-//! when handling deserialized points or points received from untrusted sources. This
-//! is already taken care of for you if you use the provided `deserialize` function.
+//! Points received from untrusted sources must be checked for membership in the correct subgroup
+//! to prevent small-subgroup attacks. The [`Read`] implementations for [`G1`] and [`G2`] perform
+//! this check and also reject the identity.
+//!
+//! [`G1`] and [`G2`] include the identity because group operations require it. Values produced by
+//! group operations can still be the identity, so an API that treats it as invalid must reject it
+//! at its own boundary.
 
 use super::variant::Variant;
 use crate::Secret;
@@ -1270,10 +1273,12 @@ impl Read for G1 {
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G1", "Type mismatch")),
-                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G1", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G1", "PK is Infinity")),
-                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
+                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
+                | BLST_ERROR::BLST_VERIFY_FAIL
+                | BLST_ERROR::BLST_PK_IS_INFINITY
+                | BLST_ERROR::BLST_BAD_SCALAR => {
+                    return Err(Invalid("G1", "Unexpected uncompress error"));
+                }
             }
             blst_p1_from_affine(&mut ret, &affine);
 
@@ -1690,11 +1695,13 @@ impl Read for G2 {
                 BLST_ERROR::BLST_SUCCESS => {}
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
-                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G2", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G2", "Type mismatch")),
-                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G2", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G2", "PK is Infinity")),
-                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
+                BLST_ERROR::BLST_POINT_NOT_IN_GROUP
+                | BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
+                | BLST_ERROR::BLST_VERIFY_FAIL
+                | BLST_ERROR::BLST_PK_IS_INFINITY
+                | BLST_ERROR::BLST_BAD_SCALAR => {
+                    return Err(Invalid("G2", "Unexpected uncompress error"));
+                }
             }
             blst_p2_from_affine(&mut ret, &affine);
 
@@ -2071,12 +2078,22 @@ mod tests {
     }
 
     #[test]
+    fn test_g1_codec_rejects_identity() {
+        assert!(G1::decode(G1::zero().encode()).is_err());
+    }
+
+    #[test]
     fn test_g2_codec() {
         let original = G2::generator() * &Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g2_codec_rejects_identity() {
+        assert!(G2::decode(G2::zero().encode()).is_err());
     }
 
     /// Naive calculation of Multi-Scalar Multiplication: sum(scalar * point)

@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn batch_verify_empty() {
         let batch = Batch::new(0);
-        assert!(batch.verify(&mut test_rng(), &Sequential));
+        assert!(!batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[test]

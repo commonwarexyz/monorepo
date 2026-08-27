@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{NZUsize, test_rng};
+use commonware_utils::{NZUsize, non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 
@@ -26,7 +26,9 @@ fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
                                 .iter()
                                 .map(|msg| ops::sign_message::<MinSig>(&private, namespace, msg))
                                 .collect();
-                            let agg_sig = ops::aggregate::combine_signatures::<MinSig, _>(&sigs);
+                            let agg_sig = ops::aggregate::combine_signatures::<MinSig, _>(
+                                non_empty![@sigs.iter()],
+                            );
                             let messages: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| (namespace.as_ref(), msg.as_ref()))
@@ -36,10 +38,13 @@ fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
                         |(public, messages, agg_sig)| {
                             #[allow(clippy::option_if_let_else)]
                             let combined_msg = if let Some(rayon) = rayon.as_ref() {
-                                ops::aggregate::combine_messages::<MinSig, _>(&messages, rayon)
+                                ops::aggregate::combine_messages::<MinSig, _>(
+                                    non_empty![@messages.iter()],
+                                    rayon,
+                                )
                             } else {
                                 ops::aggregate::combine_messages::<MinSig, _>(
-                                    &messages,
+                                    non_empty![@messages.iter()],
                                     &Sequential,
                                 )
                             };
