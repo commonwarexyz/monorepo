@@ -213,11 +213,11 @@
 //!   longer than the earliest admission or in-flight deadline, so a saturated waiter slab cannot
 //!   hide timeout progress.
 
-pub(crate) mod driver;
+mod driver;
 #[cfg(test)]
 pub(crate) use driver::testing;
-pub(crate) use driver::{AcceptTicket, Cache, Driver, Handle};
-pub use driver::{MAX_RING_SIZE, spinner::Config as SpinnerConfig};
+pub(crate) use driver::{AcceptTicket, Cache, Handle};
+pub use driver::{MAX_RING_SIZE, SpinnerConfig};
 mod runtime;
 pub use runtime::{Config, Context, Runner};
 mod sockaddr;

@@ -25,7 +25,7 @@ impl ArcWake for Unpark {
 /// Single-threaded loop harness driving `turn`/`park` interleaved with
 /// polling a future, mirroring the runtime executor's structure.
 pub(crate) struct TestLoop {
-    pub(crate) handle: Handle,
+    pub(super) handle: Handle,
     /// The owned driver, taken by [TestLoop::shutdown] (drain consumes it).
     driver: Option<Driver>,
 }
@@ -53,8 +53,28 @@ impl TestLoop {
     /// Access the owned driver.
     ///
     /// Panics after [TestLoop::shutdown].
-    pub(crate) fn driver(&mut self) -> &mut Driver {
+    pub(super) fn driver(&mut self) -> &mut Driver {
         self.driver.as_mut().expect("driver already drained")
+    }
+
+    /// Clone the operation handle used by adapter fixtures.
+    pub(crate) fn clone_handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
+    /// Service staged submissions and completions once.
+    pub(crate) fn turn(&mut self) {
+        self.driver().turn();
+    }
+
+    /// Park until ring work, a wake, or `limit` is due.
+    pub(crate) fn park(&mut self, limit: Option<Duration>) {
+        self.driver().park(limit);
+    }
+
+    /// Reject new operation admission without draining retained work.
+    pub(crate) fn close_admission(&mut self) {
+        self.driver().close();
     }
 
     /// Build a waker that latches the loop's out-of-band wake, or a noop

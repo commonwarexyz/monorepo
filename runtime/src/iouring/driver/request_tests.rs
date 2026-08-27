@@ -1379,7 +1379,7 @@ fn test_vectored_send_to_closed_socket_does_not_raise_sigpipe() {
         }
 
         let mut harness = TestLoop::new(RingConfig::default());
-        let handle = harness.handle.clone();
+        let handle = harness.clone_handle();
         let (sender, receiver) = UnixStream::pair().expect("failed to create socket pair");
         drop(receiver);
 

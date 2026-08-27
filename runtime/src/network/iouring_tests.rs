@@ -30,7 +30,7 @@ fn test_network_with_ring(cfg: Config, ring: iouring::RingConfig) -> (TestLoop, 
     // clamped by the loop's timeout horizon.
     let max_request_timeout = cfg.read_write_timeout.max(cfg.connect_timeout);
     let harness = TestLoop::new_with_max_request_timeout(ring, max_request_timeout);
-    let network = Network::new(cfg, harness.handle.clone(), pool);
+    let network = Network::new(cfg, harness.clone_handle(), pool);
     (harness, network)
 }
 
@@ -291,7 +291,7 @@ fn test_op_fd_keeps_descriptor_alive() {
     {
         let mut recv = Box::pin(client_stream.recv(1));
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.driver().turn();
+        harness.turn();
 
         // The admitted request holds an additional clone.
         assert_eq!(Arc::strong_count(&fd), 4);
@@ -312,8 +312,8 @@ fn test_op_fd_keeps_descriptor_alive() {
             "cancelled recv still holds fd after {:?}",
             start.elapsed()
         );
-        harness.driver().turn();
-        harness.driver().park(Some(Duration::from_millis(10)));
+        harness.turn();
+        harness.park(Some(Duration::from_millis(10)));
     }
 }
 
@@ -339,7 +339,7 @@ fn test_inflight_cancel_poisons_stream() {
     {
         let mut recv = Box::pin(client_stream.recv(1));
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.driver().turn();
+        harness.turn();
     }
 
     harness.block_on(async {
@@ -404,14 +404,14 @@ fn test_peek_with_buffered_data() {
 fn test_zero_length_send_short_circuits_before_submit() {
     // Verify empty sends return locally without staging any request.
     let mut harness = TestLoop::new(iouring::RingConfig::default());
-    harness.driver().close();
+    harness.close_admission();
 
     // Construct a sink whose driver would fail immediately if the wrapper
     // tried to hand work to the loop.
     let (left, _right) = UnixStream::pair().unwrap();
     let mut sink = Sink::new(
         Arc::new(left.into()),
-        harness.handle.clone(),
+        harness.clone_handle(),
         Duration::from_secs(1),
     );
 
@@ -460,13 +460,13 @@ fn test_closed_driver_fallbacks() {
     let mut registry = Registry::default();
     let pool = test_pool(&mut registry.sub_registry("pool"));
     let mut harness = TestLoop::new(iouring::RingConfig::default());
-    harness.driver().close();
+    harness.close_admission();
 
     // Send should fail locally once the driver no longer admits work.
     let (send_left, _send_right) = UnixStream::pair().unwrap();
     let mut sink = Sink::new(
         Arc::new(send_left.into()),
-        harness.handle.clone(),
+        harness.clone_handle(),
         Duration::from_secs(1),
     );
     assert!(matches!(
@@ -478,7 +478,7 @@ fn test_closed_driver_fallbacks() {
     let (recv_left, _recv_right) = UnixStream::pair().unwrap();
     let mut stream = Stream::new(
         Arc::new(recv_left.into()),
-        harness.handle.clone(),
+        harness.clone_handle(),
         Duration::from_secs(1),
         0,
         pool,
@@ -507,7 +507,7 @@ fn test_closed_driver_public_dial_and_accept() {
         .unwrap();
     let addr = listener.local_addr().unwrap();
 
-    harness.driver().close();
+    harness.close_admission();
 
     // The public accept surface is Closed, not the internal fallback.
     assert!(matches!(

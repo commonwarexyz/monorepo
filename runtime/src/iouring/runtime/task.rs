@@ -21,7 +21,7 @@
 #[allow(unused_imports)]
 use super::Executor;
 use super::capture_cleanup_panic;
-use crate::iouring::driver::{Affine, current_thread_id, waker::Waker as RingWaker};
+use crate::iouring::driver::{Affine, RingWaker, current_thread_id};
 #[allow(unused_imports)]
 use crate::{Error, Handle};
 use commonware_utils::sync::Mutex;

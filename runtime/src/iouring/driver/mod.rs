@@ -9,15 +9,17 @@ mod event_loop;
 pub use event_loop::MAX_RING_SIZE;
 pub(crate) use event_loop::{Driver, validate_ring_config};
 mod handle;
-pub(crate) use handle::{AcceptTicket, Affine, Handle, Ops, current_thread_id};
+pub(crate) use handle::{AcceptTicket, Affine, Handle, current_thread_id};
 mod request;
 pub(crate) use request::Cache;
-pub(crate) mod spinner;
+mod spinner;
+pub use spinner::Config as SpinnerConfig;
 mod timeout;
 use timeout::Tick;
 mod waiter;
 use waiter::WaiterId;
-pub(crate) mod waker;
+mod waker;
+pub(crate) use waker::Waker as RingWaker;
 use event_loop::UserData;
 
 #[cfg(test)]

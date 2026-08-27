@@ -1,6 +1,7 @@
 use super::{
-    Handle, Ops, handle,
+    Handle,
     callbacks::{WakerAction, wake_batch},
+    handle::{self, Ops},
     request,
     spinner::Spinner,
     timeout::{self, Tick, TimeoutWheel},

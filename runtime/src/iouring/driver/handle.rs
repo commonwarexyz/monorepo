@@ -147,7 +147,7 @@ impl<T> Affine<T> {
 }
 
 /// Shared operation state for futures, detached tickets, and the event loop.
-pub(crate) struct Ops {
+pub(super) struct Ops {
     /// Slot table tracking every admitted logical request. Slots own all
     /// operation resources (buffers, FDs) for the request lifetime.
     pub(super) waiters: Waiters,
@@ -326,7 +326,7 @@ impl Handle {
     ///
     /// The borrow is a leaf section: callers must not invoke wakers or user
     /// code inside `f`.
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut Ops) -> R) -> R {
+    pub(super) fn with<R>(&self, f: impl FnOnce(&mut Ops) -> R) -> R {
         self.inner.ops.with(|cell| f(&mut cell.borrow_mut()))
     }
 

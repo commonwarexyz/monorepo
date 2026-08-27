@@ -75,7 +75,10 @@
 //! that worker has torn down, using the context from elsewhere fails loudly
 //! instead of submitting work nothing will run.
 
-use super::{Driver, RingConfig, driver::validate_ring_config};
+use super::{
+    RingConfig,
+    driver::{Driver, validate_ring_config},
+};
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{

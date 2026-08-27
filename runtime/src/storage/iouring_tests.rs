@@ -37,7 +37,7 @@ fn create_test_storage() -> (TestLoop, Storage, PathBuf) {
     let harness = TestLoop::new(iouring::RingConfig::default());
     let storage = Storage::new(
         storage_directory.clone(),
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Arc::new(Mutex::new(())),
     );
@@ -488,7 +488,7 @@ fn test_open_reports_partition_creation_failure() {
     let mut harness = TestLoop::new(iouring::RingConfig::default());
     let storage = Storage::new(
         storage_root.clone(),
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Arc::new(Mutex::new(())),
     );
@@ -520,7 +520,7 @@ fn test_open_reports_blob_open_failure_for_directory_path() {
     let mut harness = TestLoop::new(iouring::RingConfig::default());
     let storage = Storage::new(
         storage_directory.clone(),
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Arc::new(Mutex::new(())),
     );
@@ -595,13 +595,13 @@ fn test_read_and_write_report_closed_driver() {
     let mut registry = Registry::default();
     let pool = test_pool(&mut registry.sub_registry("pool"));
     let mut harness = TestLoop::new(iouring::RingConfig::default());
-    harness.driver().close();
+    harness.close_admission();
 
     let blob = Blob::new(
         "partition".into(),
         b"blob",
         file,
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Layout::V0.data_offset(),
     );
@@ -658,13 +658,13 @@ fn test_blob_sync_reports_closed_driver() {
     let mut registry = Registry::default();
     let pool = test_pool(&mut registry.sub_registry("pool"));
     let mut harness = TestLoop::new(iouring::RingConfig::default());
-    harness.driver().close();
+    harness.close_admission();
 
     let blob = Blob::new(
         "partition".into(),
         b"blob",
         file,
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Layout::V0.data_offset(),
     );
@@ -687,13 +687,13 @@ fn test_blob_start_sync_reports_closed_driver() {
     let mut registry = Registry::default();
     let pool = test_pool(&mut registry.sub_registry("pool"));
     let mut harness = TestLoop::new(iouring::RingConfig::default());
-    harness.driver().close();
+    harness.close_admission();
 
     let blob = Blob::new(
         "partition".into(),
         b"blob",
         file,
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Layout::V0.data_offset(),
     );
@@ -727,7 +727,7 @@ fn test_resize_reports_kernel_error() {
         "partition".into(),
         b"blob",
         file,
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Layout::V0.data_offset(),
     );
@@ -760,7 +760,7 @@ fn test_blob_sync_reports_kernel_error() {
         "partition".into(),
         b"blob",
         file,
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Layout::V0.data_offset(),
     );
@@ -801,7 +801,7 @@ fn test_blob_start_sync_reports_kernel_error() {
         "partition".into(),
         b"blob",
         file,
-        harness.handle.clone(),
+        harness.clone_handle(),
         pool,
         Layout::V0.data_offset(),
     );
