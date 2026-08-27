@@ -61,15 +61,23 @@ use tracing::warn;
 /// The caller owns `incoming` outside the driver-state borrow. This helper
 /// only moves wakers, so RawWaker clone and drop callbacks remain outside the
 /// waiter and completion arenas.
-fn replace_waker(stored: &mut Option<Waker>, incoming: &mut Option<Waker>) -> Option<Waker> {
+fn replace_waker(stored: &mut Option<Waker>, incoming: &mut Option<Waker>) -> Waker {
     let next = incoming.as_ref().expect("poll missing incoming waker");
-    if stored
-        .as_ref()
-        .is_some_and(|current| current.will_wake(next))
-    {
-        return incoming.take();
+    let current = stored.as_ref().expect("pending observer missing waker");
+    if current.will_wake(next) {
+        return incoming.take().expect("poll waker consumed twice");
     }
-    stored.replace(incoming.take().expect("poll waker consumed twice"))
+    stored
+        .replace(incoming.take().expect("poll waker consumed twice"))
+        .expect("pending observer missing waker")
+}
+
+/// Callback-free result of refreshing a pending waker or taking ready output.
+pub(super) enum DeferredPoll {
+    /// The terminal output was removed from its arena.
+    Ready(Output),
+    /// One waker must be dropped outside the driver-state borrow.
+    Pending(Waker),
 }
 
 /// Callback-free first phase of polling a waiter or ticket completion.
@@ -543,10 +551,8 @@ impl TicketCompletions {
         let completion = self.entry_mut(completion_id, "poll_state");
         match completion {
             Completion::Pending { waker: stored, .. } => {
-                if stored
-                    .as_ref()
-                    .is_some_and(|stored| stored.will_wake(waker))
-                {
+                let stored = stored.as_ref().expect("pending completion missing waker");
+                if stored.will_wake(waker) {
                     PollState::PendingCurrent
                 } else {
                     PollState::PendingNeedsWaker
@@ -564,26 +570,26 @@ impl TicketCompletions {
     /// Take a ready output, or refresh the pending ticket waker.
     ///
     /// Taking a ready output recycles its completion slot. A pending entry
-    /// remains linked to its waiter and stores the latest task waker. Returns
-    /// `None` while pending.
+    /// remains linked to its waiter and stores the latest task waker. Pending
+    /// returns the one detached waker that must be dropped after releasing the
+    /// driver-state borrow.
     ///
     /// Panics if `completion_id` is untracked.
     pub fn poll_take_deferred(
         &mut self,
         completion_id: CompletionId,
         incoming_waker: &mut Option<Waker>,
-    ) -> (Option<Output>, Option<Waker>) {
+    ) -> DeferredPoll {
         let completion = self.entry_mut(completion_id, "poll_take");
         match completion {
             Completion::Pending { waker: stored, .. } => {
-                let detached = replace_waker(stored, incoming_waker);
-                (None, detached)
+                DeferredPoll::Pending(replace_waker(stored, incoming_waker))
             }
             Completion::Ready(_) => {
                 let Completion::Ready(output) = self.take(completion_id) else {
                     unreachable!("completion verified ready above");
                 };
-                (Some(output), None)
+                DeferredPoll::Ready(output)
             }
         }
     }
@@ -592,10 +598,16 @@ impl TicketCompletions {
     #[cfg(test)]
     pub fn poll_take(&mut self, completion_id: CompletionId, waker: &Waker) -> Option<Output> {
         let mut incoming = Some(waker.clone());
-        let (output, detached) = self.poll_take_deferred(completion_id, &mut incoming);
-        drop(detached);
-        drop(incoming);
-        output
+        match self.poll_take_deferred(completion_id, &mut incoming) {
+            DeferredPoll::Ready(output) => {
+                drop(incoming);
+                Some(output)
+            }
+            DeferredPoll::Pending(detached) => {
+                drop(detached);
+                None
+            }
+        }
     }
 
     /// Remove a ticket's completion state and recycle its slot.
@@ -1160,7 +1172,7 @@ impl Waiters {
         &mut self,
         waiter_id: WaiterId,
         incoming_waker: &mut Option<Waker>,
-    ) -> (Option<Output>, Option<Waker>) {
+    ) -> DeferredPoll {
         let index = waiter_id.index() as usize;
         let slot = self
             .entries
@@ -1178,14 +1190,13 @@ impl Waiters {
                 let Lifecycle::Ready(output) = self.take(index) else {
                     unreachable!("lifecycle verified ready above");
                 };
-                (Some(output), None)
+                DeferredPoll::Ready(output)
             }
             Lifecycle::Pending(_) => {
                 let Observer::Op(stored) = &mut slot.observer else {
                     unreachable!("observer verified op above");
                 };
-                let detached = replace_waker(stored, incoming_waker);
-                (None, detached)
+                DeferredPoll::Pending(replace_waker(stored, incoming_waker))
             }
             Lifecycle::TicketComplete => panic!("op waiter reached ticket terminal state"),
         }
@@ -1221,10 +1232,8 @@ impl Waiters {
                 let Observer::Op(stored) = &slot.observer else {
                     unreachable!("observer verified op above");
                 };
-                if stored
-                    .as_ref()
-                    .is_some_and(|stored| stored.will_wake(waker))
-                {
+                let stored = stored.as_ref().expect("pending op waiter missing waker");
+                if stored.will_wake(waker) {
                     PollState::PendingCurrent
                 } else {
                     PollState::PendingNeedsWaker
@@ -1238,10 +1247,16 @@ impl Waiters {
     #[cfg(test)]
     pub fn poll_take(&mut self, waiter_id: WaiterId, waker: &Waker) -> Option<Output> {
         let mut incoming = Some(waker.clone());
-        let (output, detached) = self.poll_take_deferred(waiter_id, &mut incoming);
-        drop(detached);
-        drop(incoming);
-        output
+        match self.poll_take_deferred(waiter_id, &mut incoming) {
+            DeferredPoll::Ready(output) => {
+                drop(incoming);
+                Some(output)
+            }
+            DeferredPoll::Pending(detached) => {
+                drop(detached);
+                None
+            }
+        }
     }
 
     /// Recycle a terminal ticket waiter after its output is published.

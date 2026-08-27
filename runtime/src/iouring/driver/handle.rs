@@ -59,8 +59,8 @@ use super::{
         Request, SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
     },
     waiter::{
-        CompletionDropOutcome, CompletionId, DropOutcome, PollState, TicketCompletions, WaiterId,
-        Waiters,
+        CompletionDropOutcome, CompletionId, DeferredPoll, DropOutcome, PollState,
+        TicketCompletions, WaiterId, Waiters,
     },
     waker::Waker as RingWaker,
 };
@@ -1284,13 +1284,22 @@ fn poll_op_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Po
 
     let mut incoming = Some(cx.waker().clone());
     let mut actions = CapacityActions::new();
-    actions.reserve(2);
-    let (output, detached) = handle.with(|ops| ops.waiters.poll_take_deferred(id, &mut incoming));
-    for waker in detached.into_iter().chain(incoming) {
-        actions.push(WakerAction::Drop(waker));
-    }
+    actions.reserve(1);
+    let poll = match handle.with(|ops| ops.waiters.poll_take_deferred(id, &mut incoming)) {
+        DeferredPoll::Ready(output) => {
+            actions.push(WakerAction::Drop(
+                incoming.take().expect("ready poll missing incoming waker"),
+            ));
+            Poll::Ready(output)
+        }
+        DeferredPoll::Pending(waker) => {
+            debug_assert!(incoming.is_none());
+            actions.push(WakerAction::Drop(waker));
+            Poll::Pending
+        }
+    };
     wake_batch(actions);
-    output.map_or(Poll::Pending, Poll::Ready)
+    poll
 }
 
 /// Poll a detached ticket's completion entry.
@@ -1303,14 +1312,22 @@ fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_
 
     let mut incoming = Some(cx.waker().clone());
     let mut actions = CapacityActions::new();
-    actions.reserve(2);
-    let (output, detached) =
-        handle.with(|ops| ops.completions.poll_take_deferred(id, &mut incoming));
-    for waker in detached.into_iter().chain(incoming) {
-        actions.push(WakerAction::Drop(waker));
-    }
+    actions.reserve(1);
+    let poll = match handle.with(|ops| ops.completions.poll_take_deferred(id, &mut incoming)) {
+        DeferredPoll::Ready(output) => {
+            actions.push(WakerAction::Drop(
+                incoming.take().expect("ready poll missing incoming waker"),
+            ));
+            Poll::Ready(output)
+        }
+        DeferredPoll::Pending(waker) => {
+            debug_assert!(incoming.is_none());
+            actions.push(WakerAction::Drop(waker));
+            Poll::Pending
+        }
+    };
     wake_batch(actions);
-    output.map_or(Poll::Pending, Poll::Ready)
+    poll
 }
 
 /// Reserve every destination an orphan transition can append to after it
