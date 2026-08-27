@@ -4,14 +4,17 @@ use crate::bajillion::{
     boundary::{
         BoundaryError, Deadline, DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
     },
-    challenge::{AccountLookup, RowOpening, StateLookup, StateOpening},
+    challenge::{
+        AccountLookup, ChangeAbsence, ChangeLookup, ChangeOpening, HigherShardTipLookup,
+        StateAbsence, StateLookup, StateOpening, StateValueOpening,
+    },
     commitment::{self, Tree, VectorKind, VectorRoot},
     credit::{self, ShardHead, ShardSet},
     payment::{PaymentContext, PaymentError},
-    state::{AccountRow, Prefix, StateLeaf},
+    state::{AccountChange, AccountRow, ChangeGuard, Prefix, SettlementOutput, StateLeaf},
 };
-use alloc::{boxed::Box, collections::BTreeSet, vec, vec::Vec};
-use bytes::{Buf, BufMut};
+use alloc::{boxed::Box, collections::BTreeSet, vec::Vec};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
@@ -21,8 +24,8 @@ use thiserror::Error;
 
 mod slice;
 pub use slice::{
-    ChangeRange, LayoutRange, ProofSlice, SliceBoundary, SliceCodecConfig, StateRange,
-    assemble_slices, decode_slice_bounded, validate_slice,
+    ChangeRange, CoverageRange, ProofSlice, SliceBoundary, SliceCodecConfig, StateRange,
+    WithdrawalOutputRange, assemble_slices, decode_slice_bounded, validate_slice,
 };
 pub(crate) use slice::{validate_slice_header, validate_slice_structure_after_header};
 
@@ -162,17 +165,17 @@ where
     }
 }
 
-/// The state, change, and slice-layout roots authenticated by one close header.
+/// The change, withdrawal-output, successor-state, and coverage roots for one close.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RootBundle<D: Digest> {
-    /// Complete opening account-state vector.
-    pub opening: VectorRoot<D>,
     /// Exact sorted changed-account vector.
     pub change: VectorRoot<D>,
-    /// Complete closing account-state vector.
-    pub closing: VectorRoot<D>,
+    /// Validator-derived withdrawal outputs in request order.
+    pub withdrawal_outputs: VectorRoot<D>,
+    /// Complete successor account-state vector.
+    pub successor: VectorRoot<D>,
     /// Gap-free positional boundaries for every deterministic proof slice.
-    pub layout: VectorRoot<D>,
+    pub coverage: VectorRoot<D>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -182,20 +185,20 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            opening: u.arbitrary()?,
             change: u.arbitrary()?,
-            closing: u.arbitrary()?,
-            layout: u.arbitrary()?,
+            withdrawal_outputs: u.arbitrary()?,
+            successor: u.arbitrary()?,
+            coverage: u.arbitrary()?,
         })
     }
 }
 
 impl<D: Digest> Write for RootBundle<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.opening.write(writer);
         self.change.write(writer);
-        self.closing.write(writer);
-        self.layout.write(writer);
+        self.withdrawal_outputs.write(writer);
+        self.successor.write(writer);
+        self.coverage.write(writer);
     }
 }
 
@@ -208,10 +211,10 @@ impl<D: Digest> Read for RootBundle<D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
-            opening: VectorRoot::read(reader)?,
             change: VectorRoot::read(reader)?,
-            closing: VectorRoot::read(reader)?,
-            layout: VectorRoot::read(reader)?,
+            withdrawal_outputs: VectorRoot::read(reader)?,
+            successor: VectorRoot::read(reader)?,
+            coverage: VectorRoot::read(reader)?,
         })
     }
 }
@@ -223,25 +226,26 @@ impl<D: Digest> Read for RootBundle<D> {
 pub struct Header<D: Digest>(D);
 
 impl<D: Digest> Header<D> {
-    /// Commits to the exact root roles under one authenticated payment context.
-    pub fn new<H, P>(context: &PaymentContext<P, D>, roots: &RootBundle<D>) -> Self
+    /// Commits to the close context and every root in its exact protocol role.
+    pub fn new<H, P>(context: &CloseContext<P, D>, roots: &RootBundle<D>) -> Self
     where
         H: Hasher<Digest = D>,
         P: PublicKey,
     {
-        let context = context.encode();
+        let payment = context.payment().encode();
         Self(H::hash(&[
             HEADER_ROOT_HASH_NAMESPACE,
-            context.as_ref(),
-            roots.opening.digest.as_ref(),
+            payment.as_ref(),
+            context.predecessor_root().digest.as_ref(),
             roots.change.digest.as_ref(),
-            roots.closing.digest.as_ref(),
-            roots.layout.digest.as_ref(),
+            roots.withdrawal_outputs.digest.as_ref(),
+            roots.successor.digest.as_ref(),
+            roots.coverage.digest.as_ref(),
         ]))
     }
 
-    /// Returns whether `roots` are the unique contextual opening of this header.
-    pub fn verify<H, P>(&self, context: &PaymentContext<P, D>, roots: &RootBundle<D>) -> bool
+    /// Returns whether `context` and `roots` match this header's exact protocol roles.
+    pub fn verify<H, P>(&self, context: &CloseContext<P, D>, roots: &RootBundle<D>) -> bool
     where
         H: Hasher<Digest = D>,
         P: PublicKey,
@@ -407,17 +411,18 @@ impl Read for CloseLimits {
     }
 }
 
-/// Root-independent registration shared by every payment in one epoch.
+/// Predecessor-state-root-independent registration shared by every payment in one epoch.
 ///
-/// The settlement chain binds this registration to exactly one opening state when the close is
-/// registered. An embedding must never reuse the registration after its ancestry is invalidated.
+/// The settlement chain binds this registration to exactly one predecessor state root when the
+/// close is registered. An embedding must never reuse the registration after its ancestry is
+/// invalidated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EpochContext<P: PublicKey, D: Digest> {
     payment: PaymentContext<P, D>,
     deployment: D,
     deposit_root: VectorRoot<D>,
     withdrawal_root: VectorRoot<D>,
-    opening_liability: u64,
+    predecessor_liability: u64,
     admission_deadline: Deadline,
     challenge_deadline: Deadline,
     limits: CloseLimits,
@@ -428,9 +433,9 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
     /// Authenticates the immutable payment, boundary, and validation parameters for one epoch.
     ///
     /// Admission must precede the challenge deadline, and the challenge deadline must leave one
-    /// representable later timestamp for finalization or expiry. The opening liability remains
-    /// authenticated, but the exact opening root is excluded so successor payments can begin while
-    /// the predecessor state root is constructed.
+    /// representable later timestamp for finalization or expiry. The predecessor liability remains
+    /// authenticated, but [`CloseContext`] adds its exact state root later so successor payments can
+    /// begin while the predecessor close is constructed.
     #[allow(clippy::too_many_arguments)]
     pub fn new<H: Hasher<Digest = D>>(
         deployment: D,
@@ -438,7 +443,7 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         operator: P,
         deposits: &DepositBatch<P>,
         withdrawals: &WithdrawalBatch<P, D>,
-        opening_liability: u64,
+        predecessor_liability: u64,
         admission_deadline: Deadline,
         challenge_deadline: Deadline,
         limits: CloseLimits,
@@ -453,7 +458,7 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         let withdrawal_root = withdrawals.root::<H>()?;
         let deposit_root_encoded = deposit_root.encode();
         let withdrawal_root_encoded = withdrawal_root.encode();
-        let opening_liability_encoded = opening_liability.to_be_bytes();
+        let predecessor_liability_encoded = predecessor_liability.to_be_bytes();
         let epoch_encoded = epoch.to_be_bytes();
         let admission_deadline_encoded = admission_deadline.to_be_bytes();
         let challenge_deadline_encoded = challenge_deadline.to_be_bytes();
@@ -464,7 +469,7 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             deployment.as_ref(),
             deposit_root_encoded.as_ref(),
             withdrawal_root_encoded.as_ref(),
-            &opening_liability_encoded,
+            &predecessor_liability_encoded,
             &epoch_encoded,
             operator.as_ref(),
             &admission_deadline_encoded,
@@ -478,7 +483,7 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             deployment,
             deposit_root,
             withdrawal_root,
-            opening_liability,
+            predecessor_liability,
             admission_deadline,
             challenge_deadline,
             limits,
@@ -486,7 +491,7 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         })
     }
 
-    /// Binds this epoch registration to one exact opening state.
+    /// Binds this epoch registration to one exact predecessor state.
     pub fn bind<H: Hasher<Digest = D>>(
         self,
         cache: &StateCache<P, D>,
@@ -498,13 +503,13 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         {
             return Err(TransitionError::BoundaryRoot);
         }
-        if cache.liability() != self.opening_liability {
-            return Err(TransitionError::OpeningLiability);
+        if cache.liability() != self.predecessor_liability {
+            return Err(TransitionError::PredecessorLiability);
         }
         validate_sealed_boundaries(cache, &self.deployment, deposits, withdrawals, &self.limits)?;
         Ok(CloseContext {
             epoch: self,
-            opening_root: cache.root(),
+            predecessor_root: cache.root(),
         })
     }
 
@@ -514,11 +519,11 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
     /// state. Callers outside that owner must use [`Self::bind`] with the complete state cache.
     pub(crate) const fn bind_settlement_root(
         self,
-        opening_root: VectorRoot<D>,
+        predecessor_root: VectorRoot<D>,
     ) -> CloseContext<P, D> {
         CloseContext {
             epoch: self,
-            opening_root,
+            predecessor_root,
         }
     }
 
@@ -542,9 +547,9 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         &self.withdrawal_root
     }
 
-    /// Returns the authenticated opening liability.
-    pub const fn opening_liability(&self) -> u64 {
-        self.opening_liability
+    /// Returns the authenticated predecessor liability.
+    pub const fn predecessor_liability(&self) -> u64 {
+        self.predecessor_liability
     }
 
     /// Returns the last time at which this close may be admitted.
@@ -568,11 +573,11 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
     }
 }
 
-/// Chain-known epoch registration bound to one exact opening state.
+/// Chain-known epoch registration bound to one exact predecessor state root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloseContext<P: PublicKey, D: Digest> {
     epoch: EpochContext<P, D>,
-    opening_root: VectorRoot<D>,
+    predecessor_root: VectorRoot<D>,
 }
 
 impl<P: PublicKey, D: Digest> CloseContext<P, D> {
@@ -601,14 +606,14 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
         self.epoch.withdrawal_root()
     }
 
-    /// Returns the bound opening state root.
-    pub const fn opening_root(&self) -> &VectorRoot<D> {
-        &self.opening_root
+    /// Returns the bound predecessor state root.
+    pub const fn predecessor_root(&self) -> &VectorRoot<D> {
+        &self.predecessor_root
     }
 
-    /// Returns the authenticated opening liability.
-    pub const fn opening_liability(&self) -> u64 {
-        self.epoch.opening_liability()
+    /// Returns the authenticated predecessor liability.
+    pub const fn predecessor_liability(&self) -> u64 {
+        self.epoch.predecessor_liability()
     }
 
     /// Returns the last time at which this close may be admitted.
@@ -656,6 +661,76 @@ pub struct ExternalPayout<P: PublicKey> {
     pub amount: u64,
 }
 
+/// Validator-derived settlement output for one canonical withdrawal request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalOutput {
+    destination: Bytes,
+    amount: u64,
+}
+
+impl WithdrawalOutput {
+    pub(crate) fn from_request<P: PublicKey, D: Digest>(
+        request: &SignedWithdrawal<P, D>,
+        amount: u64,
+    ) -> Self {
+        Self {
+            destination: request.body().destination().clone(),
+            amount,
+        }
+    }
+
+    /// Returns the opaque asset-adapter destination.
+    #[must_use]
+    pub const fn destination(&self) -> &Bytes {
+        &self.destination
+    }
+
+    /// Returns the exact amount released by the certified close.
+    #[must_use]
+    pub const fn amount(&self) -> u64 {
+        self.amount
+    }
+}
+
+impl Write for WithdrawalOutput {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.destination.write(writer);
+        self.amount.write(writer);
+    }
+}
+
+impl EncodeSize for WithdrawalOutput {
+    fn encode_size(&self) -> usize {
+        self.destination.encode_size() + u64::SIZE
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        self.destination.encode_inline_size() + u64::SIZE
+    }
+}
+
+impl Read for WithdrawalOutput {
+    type Cfg = RangeCfg<usize>;
+
+    fn read_cfg(reader: &mut impl Buf, destination_cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            destination: Bytes::read_cfg(reader, destination_cfg)?,
+            amount: u64::read(reader)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for WithdrawalOutput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let len = usize::from(u.arbitrary::<u8>()? % 65);
+        Ok(Self {
+            destination: Bytes::copy_from_slice(u.bytes(len)?),
+            amount: u.arbitrary()?,
+        })
+    }
+}
+
 /// Constant-size settlement witness for the terminal counts and aggregate flows.
 ///
 /// Individual external payouts and withdrawals are claimed later with bounded Merkle witnesses.
@@ -668,7 +743,7 @@ pub struct TerminalProof<D: Digest> {
 }
 
 impl<D: Digest> TerminalProof<D> {
-    /// Returns the authenticated terminal layout boundary.
+    /// Returns the authenticated terminal coverage boundary.
     #[must_use]
     pub const fn terminal(&self) -> &SliceBoundary {
         &self.terminal
@@ -737,35 +812,30 @@ where
     }
 }
 
-/// One claim for net credit classified as an external payout by adjacent cumulative prefixes.
+/// One claim for net credit classified as an external payout by a certified changed row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalPayoutClaim<P: PublicKey, D: Digest> {
-    predecessor: Option<AccountRow<P, D>>,
-    row: AccountRow<P, D>,
-    change_opening: commitment::MultiOpening<D>,
+    leaf: AccountChange<P, D>,
+    opening: commitment::Opening<D>,
 }
 
 impl<P: PublicKey, D: Digest> ExternalPayoutClaim<P, D> {
     /// Returns the claimed change-vector position.
     #[must_use]
-    pub fn position(&self) -> u32 {
-        self.change_opening
-            .positions
-            .last()
-            .copied()
-            .unwrap_or_default()
+    pub const fn position(&self) -> u32 {
+        self.opening.position
     }
 
-    /// Returns the authenticated changed-account row.
+    /// Returns the payout recipient.
     #[must_use]
-    pub const fn row(&self) -> &AccountRow<P, D> {
-        &self.row
+    pub const fn recipient(&self) -> &P {
+        self.leaf.account()
     }
 
     /// Verifies this claim against an already authenticated finalized change root.
     ///
-    /// The row and its predecessor, when present, must authenticate an exact positive payout
-    /// prefix delta. Credit assigned to a deposit or withdrawal cannot satisfy this claim.
+    /// Validators derive the compact output while validating the full changed row. This method
+    /// therefore proves inclusion and classification, not the row relation independently.
     ///
     /// The embedding must bind `change_root` to the finalized batch and consume the tuple of that
     /// batch identifier and [`Self::position`] atomically with the payout.
@@ -776,34 +846,19 @@ impl<P: PublicKey, D: Digest> ExternalPayoutClaim<P, D> {
     where
         H: Hasher<Digest = D>,
     {
-        let previous_prefix = adjacent_change_prefix(
-            self.predecessor.as_ref(),
-            &self.row,
-            &self.change_opening.positions,
-        )
-        .ok_or(TransitionError::PayoutClaim)?;
-        match &self.predecessor {
-            Some(predecessor) => {
-                let predecessor_encoded = predecessor.encode();
-                let row_encoded = self.row.encode();
-                self.change_opening.verify::<H, _>(
-                    VectorKind::Change,
-                    change_root,
-                    &[predecessor_encoded.as_ref(), row_encoded.as_ref()],
-                )?;
-            }
-            None => self.change_opening.verify::<H, _>(
-                VectorKind::Change,
-                change_root,
-                &[self.row.encode()],
-            )?,
+        self.opening.verify::<H>(
+            VectorKind::Change,
+            change_root,
+            self.leaf.guard::<H>().encode().as_ref(),
+        )?;
+        let SettlementOutput::ExternalPayout(amount) = self.leaf.output() else {
+            return Err(TransitionError::PayoutClaim);
+        };
+        if amount == 0 {
+            return Err(TransitionError::PayoutClaim);
         }
-
-        validate_row_state_sides(&self.row)?;
-        let amount = external_payout_amount(&self.row, previous_prefix)
-            .ok_or(TransitionError::PayoutClaim)?;
         Ok(ExternalPayout {
-            recipient: self.row.account.clone(),
+            recipient: self.leaf.account().clone(),
             amount,
         })
     }
@@ -811,15 +866,14 @@ impl<P: PublicKey, D: Digest> ExternalPayoutClaim<P, D> {
 
 impl<P: PublicKey, D: Digest> Write for ExternalPayoutClaim<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.predecessor.write(writer);
-        self.row.write(writer);
-        self.change_opening.write(writer);
+        self.leaf.write(writer);
+        self.opening.write(writer);
     }
 }
 
 impl<P: PublicKey, D: Digest> EncodeSize for ExternalPayoutClaim<P, D> {
     fn encode_size(&self) -> usize {
-        self.predecessor.encode_size() + self.row.encode_size() + self.change_opening.encode_size()
+        self.leaf.encode_size() + self.opening.encode_size()
     }
 }
 
@@ -827,21 +881,10 @@ impl<P: PublicKey, D: Digest> Read for ExternalPayoutClaim<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let claim = Self {
-            predecessor: Option::<AccountRow<P, D>>::read(reader)?,
-            row: AccountRow::read(reader)?,
-            change_opening: commitment::MultiOpening::read_bounded(reader, 2)?,
-        };
-        adjacent_change_prefix(
-            claim.predecessor.as_ref(),
-            &claim.row,
-            &claim.change_opening.positions,
-        )
-        .ok_or(CodecError::Invalid(
-            "ExternalPayoutClaim",
-            "change rows and positions are not adjacent",
-        ))?;
-        Ok(claim)
+        Ok(Self {
+            leaf: AccountChange::read(reader)?,
+            opening: commitment::Opening::read(reader)?,
+        })
     }
 }
 
@@ -850,196 +893,122 @@ impl<P, D> arbitrary::Arbitrary<'_> for ExternalPayoutClaim<P, D>
 where
     P: PublicKey,
     D: Digest,
-    AccountRow<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    commitment::MultiOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+    AccountChange<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            predecessor: u.arbitrary()?,
-            row: u.arbitrary()?,
-            change_opening: u.arbitrary()?,
+            leaf: u.arbitrary()?,
+            opening: u.arbitrary()?,
         })
     }
 }
 
-/// One claim for a signed withdrawal included in a finalized close.
+/// One claim for a validator-derived withdrawal output in a finalized close.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WithdrawalClaim<P: PublicKey, D: Digest> {
-    request: SignedWithdrawal<P, D>,
-    withdrawal_opening: commitment::Opening<D>,
-    predecessor: Option<AccountRow<P, D>>,
-    row: AccountRow<P, D>,
-    change_opening: commitment::MultiOpening<D>,
+pub struct WithdrawalClaim<D: Digest> {
+    output: WithdrawalOutput,
+    output_opening: commitment::Opening<D>,
 }
 
-impl<P: PublicKey, D: Digest> WithdrawalClaim<P, D> {
-    /// Returns the signed withdrawal authorization.
+impl<D: Digest> WithdrawalClaim<D> {
+    /// Returns the certified settlement output.
     #[must_use]
-    pub const fn request(&self) -> &SignedWithdrawal<P, D> {
-        &self.request
+    pub const fn output(&self) -> &WithdrawalOutput {
+        &self.output
     }
 
     /// Returns the request's canonical withdrawal-vector position.
     #[must_use]
     pub const fn position(&self) -> u32 {
-        self.withdrawal_opening.position
+        self.output_opening.position
     }
 
-    /// Verifies the request and derives its exact release from finalized vector openings.
+    /// Verifies and returns the exact certified settlement output.
+    ///
+    /// Every sealer derives this output from the exact signed request assigned to the same
+    /// position. The embedding must bind `output_root` to the finalized batch and consume the
+    /// batch position atomically with the release.
     pub fn verify<H>(
         &self,
-        deployment: &D,
-        withdrawal_root: &VectorRoot<D>,
-        change_root: &VectorRoot<D>,
-    ) -> Result<u64, TransitionError>
+        output_root: &VectorRoot<D>,
+    ) -> Result<WithdrawalOutput, TransitionError>
     where
         H: Hasher<Digest = D>,
     {
-        self.request.verify_deployment(deployment)?;
-        if self.request.account() != &self.row.account {
-            return Err(TransitionError::WithdrawalClaim);
-        }
-        self.withdrawal_opening.verify::<H>(
-            VectorKind::Withdrawal,
-            withdrawal_root,
-            self.request.encode().as_ref(),
+        self.output_opening.verify::<H>(
+            VectorKind::WithdrawalOutput,
+            output_root,
+            self.output.encode().as_ref(),
         )?;
-
-        let previous_prefix = adjacent_change_prefix(
-            self.predecessor.as_ref(),
-            &self.row,
-            &self.change_opening.positions,
-        )
-        .ok_or(TransitionError::WithdrawalClaim)?;
-        match &self.predecessor {
-            Some(predecessor) => {
-                let predecessor_encoded = predecessor.encode();
-                let row_encoded = self.row.encode();
-                self.change_opening.verify::<H, _>(
-                    VectorKind::Change,
-                    change_root,
-                    &[predecessor_encoded.as_ref(), row_encoded.as_ref()],
-                )?;
-            }
-            None => {
-                self.change_opening.verify::<H, _>(
-                    VectorKind::Change,
-                    change_root,
-                    &[self.row.encode()],
-                )?;
-            }
-        }
-
-        validate_row_state_sides(&self.row)?;
-        let delta = checked_prefix_delta(self.row.prefix, previous_prefix)
-            .ok_or(TransitionError::WithdrawalClaim)?;
-        let (debit, credit, receipts) = self
-            .row
-            .checked_deltas()
-            .ok_or(TransitionError::WithdrawalClaim)?;
-        let amount = delta.withdrawal;
-        if (!self.row.opening.active && delta.deposit == 0)
-            || delta.debit != debit
-            || delta.credit != credit
-            || delta.payout != 0
-            || delta.withdrawals != 1
-            || delta.shards != u64::from(self.row.credit_root.len)
-            || self.row.credit_root.total_credit != credit
-            || self.row.credit_root.total_receipts != receipts
-        {
-            return Err(TransitionError::WithdrawalClaim);
-        }
-        match self.request.body().action() {
-            WithdrawalAction::Amount(expected) if amount != expected.get() => {
-                return Err(TransitionError::WithdrawalClaim);
-            }
-            WithdrawalAction::Close if self.row.closing.active || self.row.closing.balance != 0 => {
-                return Err(TransitionError::WithdrawalClaim);
-            }
-            WithdrawalAction::Amount(_) | WithdrawalAction::Close => {}
-        }
-        if u128::from(self.row.closing.balance) + u128::from(debit) + u128::from(amount)
-            != u128::from(self.row.opening.balance) + u128::from(credit) + u128::from(delta.deposit)
-        {
-            return Err(TransitionError::WithdrawalClaim);
-        }
-        Ok(amount)
+        Ok(self.output.clone())
     }
 }
 
-impl<P: PublicKey, D: Digest> Write for WithdrawalClaim<P, D> {
+impl<D: Digest> Write for WithdrawalClaim<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.request.write(writer);
-        self.withdrawal_opening.write(writer);
-        self.predecessor.write(writer);
-        self.row.write(writer);
-        self.change_opening.write(writer);
+        self.output.write(writer);
+        self.output_opening.write(writer);
     }
 }
 
-impl<P: PublicKey, D: Digest> EncodeSize for WithdrawalClaim<P, D> {
+impl<D: Digest> EncodeSize for WithdrawalClaim<D> {
     fn encode_size(&self) -> usize {
-        self.request.encode_size()
-            + self.withdrawal_opening.encode_size()
-            + self.predecessor.encode_size()
-            + self.row.encode_size()
-            + self.change_opening.encode_size()
+        self.output.encode_size() + self.output_opening.encode_size()
     }
 }
 
-impl<P: PublicKey, D: Digest> Read for WithdrawalClaim<P, D> {
+impl<D: Digest> Read for WithdrawalClaim<D> {
     /// Maximum encoded destination length.
     type Cfg = RangeCfg<usize>;
 
     fn read_cfg(reader: &mut impl Buf, destination_cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            request: SignedWithdrawal::read_cfg(reader, destination_cfg)?,
-            withdrawal_opening: commitment::Opening::read(reader)?,
-            predecessor: Option::<AccountRow<P, D>>::read(reader)?,
-            row: AccountRow::read(reader)?,
-            change_opening: commitment::MultiOpening::read_bounded(reader, 2)?,
+            output: WithdrawalOutput::read_cfg(reader, destination_cfg)?,
+            output_opening: commitment::Opening::read(reader)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for WithdrawalClaim<P, D>
+impl<D> arbitrary::Arbitrary<'_> for WithdrawalClaim<D>
 where
-    P: PublicKey,
     D: Digest,
-    SignedWithdrawal<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    AccountRow<P, D>: for<'a> arbitrary::Arbitrary<'a>,
     commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
-    commitment::MultiOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            request: u.arbitrary()?,
-            withdrawal_opening: u.arbitrary()?,
-            predecessor: u.arbitrary()?,
-            row: u.arbitrary()?,
-            change_opening: u.arbitrary()?,
+            output: u.arbitrary()?,
+            output_opening: u.arbitrary()?,
         })
     }
 }
 
 /// One prepared close with the Merkle state needed for dealing proof slices.
 ///
-/// This transient value is not encoded. It retains the change, closing-state, and layout trees so
-/// repeated dealing does not rebuild their roots.
+/// This transient value is not encoded. It retains the change, withdrawal-output,
+/// successor-state, and coverage trees so repeated dealing and claim construction reuse them.
 #[derive(Debug)]
 pub struct PreparedClose<P: PublicKey, D: Digest> {
     close: Close<P, D>,
+    predecessor_root: VectorRoot<D>,
+    change_leaves: Vec<AccountChange<P, D>>,
+    change_guards: Vec<ChangeGuard<P, D>>,
     changes: Tree<D>,
-    closing_leaves: Vec<StateLeaf<P>>,
-    closing: Tree<D>,
-    layout_boundaries: Vec<SliceBoundary>,
-    layout: Tree<D>,
+    withdrawal_outputs: Vec<WithdrawalOutput>,
+    withdrawal_output_tree: Tree<D>,
+    successor_leaves: Vec<StateLeaf<P>>,
+    successor: Tree<D>,
+    coverage_boundaries: Vec<SliceBoundary>,
+    coverage: Tree<D>,
 }
+
+type ChangeMaterial<P, D> = (Vec<AccountChange<P, D>>, Vec<ChangeGuard<P, D>>, Tree<D>);
+type WithdrawalOutputMaterial<D> = (Vec<WithdrawalOutput>, Tree<D>);
 
 impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
     pub(super) fn slice_bits(&self) -> u8 {
-        let slice_count = self.layout_boundaries.len() - 1;
+        let slice_count = self.coverage_boundaries.len() - 1;
         debug_assert!(slice_count.is_power_of_two());
         u8::try_from(slice_count.ilog2()).expect("prepared slice count fits the supported width")
     }
@@ -1078,23 +1047,21 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         slice::assemble_prepared_slices(cache, self, strategy)
     }
 
-    /// Opens one changed row from the retained change tree.
-    pub fn row_opening(&self, position: u32) -> Result<RowOpening<P, D>, TransitionError> {
-        let row = self
-            .close
-            .rows
+    /// Opens one account-relative compact value from the retained change tree.
+    pub fn change_opening(&self, position: u32) -> Result<ChangeOpening<D>, TransitionError> {
+        let leaf = self
+            .change_leaves
             .get(position as usize)
-            .cloned()
             .ok_or(TransitionError::SliceRange)?;
-        Ok(RowOpening {
-            row,
+        Ok(ChangeOpening {
+            value: leaf.value(),
             proof: self.changes.opening(position)?,
         })
     }
 
     /// Opens the terminal counts and aggregate flows needed for settlement admission.
     pub fn terminal_proof(&self) -> Result<TerminalProof<D>, TransitionError> {
-        build_terminal_proof(&self.layout_boundaries, &self.layout)
+        build_terminal_proof(&self.coverage_boundaries, &self.coverage)
     }
 
     /// Opens one external payout by recipient for later claiming.
@@ -1102,43 +1069,42 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         &self,
         recipient: &P,
     ) -> Result<ExternalPayoutClaim<P, D>, TransitionError> {
-        build_external_payout_claim(&self.close, &self.changes, recipient)
+        build_external_payout_claim(&self.close, &self.change_leaves, &self.changes, recipient)
     }
 
-    /// Opens one finalized withdrawal request and its changed row for later claiming.
+    /// Opens one validator-derived withdrawal output and its membership proof.
     pub fn withdrawal_claim<H>(
         &self,
         withdrawals: &WithdrawalBatch<P, D>,
         account: &P,
-    ) -> Result<WithdrawalClaim<P, D>, TransitionError>
+    ) -> Result<WithdrawalClaim<D>, TransitionError>
     where
         H: Hasher<Digest = D>,
     {
-        let withdrawal_tree = withdrawal_tree::<H, P, D>(withdrawals)?;
         build_withdrawal_claim(
-            &self.close,
-            &self.changes,
+            &self.withdrawal_outputs,
+            &self.withdrawal_output_tree,
             withdrawals,
-            &withdrawal_tree,
             account,
         )
     }
 }
 
 fn build_terminal_proof<D: Digest>(
-    layout_boundaries: &[SliceBoundary],
-    layout: &Tree<D>,
+    coverage_boundaries: &[SliceBoundary],
+    coverage: &Tree<D>,
 ) -> Result<TerminalProof<D>, TransitionError> {
     let position =
-        u32::try_from(layout_boundaries.len() - 1).map_err(|_| TransitionError::SliceLayout)?;
+        u32::try_from(coverage_boundaries.len() - 1).map_err(|_| TransitionError::SliceCoverage)?;
     Ok(TerminalProof {
-        terminal: layout_boundaries[position as usize],
-        terminal_opening: layout.opening(position)?,
+        terminal: coverage_boundaries[position as usize],
+        terminal_opening: coverage.opening(position)?,
     })
 }
 
 fn build_external_payout_claim<P: PublicKey, D: Digest>(
     close: &Close<P, D>,
+    leaves: &[AccountChange<P, D>],
     changes: &Tree<D>,
     recipient: &P,
 ) -> Result<ExternalPayoutClaim<P, D>, TransitionError> {
@@ -1147,72 +1113,39 @@ fn build_external_payout_claim<P: PublicKey, D: Digest>(
         .binary_search_by(|row| row.account.cmp(recipient))
         .map_err(|_| TransitionError::PayoutClaim)?;
     let position = u32::try_from(position).map_err(|_| TransitionError::TooManyRows)?;
-    let change_positions = if position == 0 {
-        vec![position]
-    } else {
-        vec![position - 1, position]
-    };
-    let predecessor = position
-        .checked_sub(1)
-        .map(|position| close.rows[position as usize].clone());
-    let row = close.rows[position as usize].clone();
-    let previous_prefix = adjacent_change_prefix(predecessor.as_ref(), &row, &change_positions)
+    let leaf = leaves
+        .get(position as usize)
+        .cloned()
         .ok_or(TransitionError::PayoutClaim)?;
-    external_payout_amount(&row, previous_prefix).ok_or(TransitionError::PayoutClaim)?;
+    if !matches!(leaf.output(), SettlementOutput::ExternalPayout(amount) if amount != 0) {
+        return Err(TransitionError::PayoutClaim);
+    }
     Ok(ExternalPayoutClaim {
-        predecessor,
-        row,
-        change_opening: changes.multi_opening(&change_positions)?,
+        leaf,
+        opening: changes.opening(position)?,
     })
 }
 
 fn build_withdrawal_claim<P: PublicKey, D: Digest>(
-    close: &Close<P, D>,
-    changes: &Tree<D>,
+    outputs: &[WithdrawalOutput],
+    output_tree: &Tree<D>,
     withdrawals: &WithdrawalBatch<P, D>,
-    withdrawal_tree: &Tree<D>,
     account: &P,
-) -> Result<WithdrawalClaim<P, D>, TransitionError> {
+) -> Result<WithdrawalClaim<D>, TransitionError> {
     let withdrawal_position = withdrawals
         .requests()
         .binary_search_by(|request| request.account().cmp(account))
         .map_err(|_| TransitionError::WithdrawalClaim)?;
-    let change_position = close
-        .rows
-        .binary_search_by(|row| row.account.cmp(account))
-        .map_err(|_| TransitionError::WithdrawalClaim)?;
-    let change_position =
-        u32::try_from(change_position).map_err(|_| TransitionError::TooManyRows)?;
-    let change_positions = if change_position == 0 {
-        vec![change_position]
-    } else {
-        vec![change_position - 1, change_position]
-    };
+    let output = outputs
+        .get(withdrawal_position)
+        .cloned()
+        .ok_or(TransitionError::WithdrawalClaim)?;
     Ok(WithdrawalClaim {
-        request: withdrawals.requests()[withdrawal_position].clone(),
-        withdrawal_opening: withdrawal_tree.opening(
+        output,
+        output_opening: output_tree.opening(
             u32::try_from(withdrawal_position).map_err(|_| TransitionError::WithdrawalClaim)?,
         )?,
-        predecessor: change_position
-            .checked_sub(1)
-            .map(|position| close.rows[position as usize].clone()),
-        row: close.rows[change_position as usize].clone(),
-        change_opening: changes.multi_opening(&change_positions)?,
     })
-}
-
-fn withdrawal_tree<H, P, D>(withdrawals: &WithdrawalBatch<P, D>) -> Result<Tree<D>, TransitionError>
-where
-    H: Hasher<Digest = D>,
-    P: PublicKey,
-    D: Digest,
-{
-    let len = u32::try_from(withdrawals.len()).map_err(|_| TransitionError::CloseLimit)?;
-    let mut builder = commitment::Builder::<H>::new(VectorKind::Withdrawal, len)?;
-    for request in withdrawals.requests() {
-        builder.add_encoded(request.encode().as_ref())?;
-    }
-    Ok(builder.build(&Sequential)?)
 }
 
 #[cfg(feature = "arbitrary")]
@@ -1346,7 +1279,7 @@ impl<P: PublicKey, D: Digest> Read for Close<P, D> {
     }
 }
 
-/// Complete live opening vector and its retained Merkle tree.
+/// Complete live-state vector and its retained Merkle tree.
 #[derive(Clone, Debug)]
 pub struct StateCache<P: PublicKey, D: Digest> {
     leaves: Vec<StateLeaf<P>>,
@@ -1355,12 +1288,12 @@ pub struct StateCache<P: PublicKey, D: Digest> {
 }
 
 impl<P: PublicKey, D: Digest> StateCache<P, D> {
-    /// Validates and commits a complete, strictly account-sorted opening vector.
+    /// Validates and commits a complete, strictly account-sorted live-state vector.
     pub fn new<H: Hasher<Digest = D>>(leaves: Vec<StateLeaf<P>>) -> Result<Self, TransitionError> {
         Self::new_with_strategy::<H>(leaves, &Sequential)
     }
 
-    /// Validates and commits a complete opening vector using the supplied execution strategy.
+    /// Validates and commits a complete live-state vector using the supplied execution strategy.
     pub fn new_with_strategy<H: Hasher<Digest = D>>(
         leaves: Vec<StateLeaf<P>>,
         strategy: &impl Strategy,
@@ -1407,7 +1340,7 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
         })
     }
 
-    /// Returns the complete canonical opening leaves.
+    /// Returns the complete canonical live-state leaves.
     pub fn leaves(&self) -> &[StateLeaf<P>] {
         &self.leaves
     }
@@ -1422,12 +1355,12 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
         self.leaves.is_empty()
     }
 
-    /// Returns the cached opening state root.
+    /// Returns the cached state root.
     pub const fn root(&self) -> VectorRoot<D> {
         self.tree.root()
     }
 
-    /// Returns the checked sum of opening balances.
+    /// Returns the checked sum of live-state balances.
     pub const fn liability(&self) -> u64 {
         self.liability
     }
@@ -1449,23 +1382,25 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
             .leaves
             .binary_search_by(|leaf| leaf.account.cmp(account))
         {
-            Ok(position) => Ok(StateLookup::Present(Box::new(StateOpening {
-                leaf: self.leaves[position].clone(),
+            Ok(position) => Ok(StateLookup::Present(Box::new(StateValueOpening {
+                state: self.leaves[position].state,
                 proof: self.tree.opening(position as u32)?,
             }))),
             Err(insertion) => {
-                let opening = |position: usize| -> Result<_, TransitionError> {
-                    Ok(Box::new(StateOpening {
-                        leaf: self.leaves[position].clone(),
-                        proof: self.tree.opening(position as u32)?,
-                    }))
-                };
-                Ok(StateLookup::Absent {
-                    predecessor: insertion.checked_sub(1).map(opening).transpose()?,
-                    successor: (insertion < self.leaves.len())
-                        .then(|| opening(insertion))
-                        .transpose()?,
-                })
+                let predecessor = insertion
+                    .checked_sub(1)
+                    .map(|position| self.leaves[position].clone());
+                let successor = self.leaves.get(insertion).cloned();
+                let start = insertion.saturating_sub(usize::from(predecessor.is_some()));
+                let count = usize::from(predecessor.is_some()) + usize::from(successor.is_some());
+                Ok(StateLookup::Absent(StateAbsence {
+                    predecessor,
+                    successor,
+                    opening: self.tree.range_opening(
+                        u32::try_from(start).map_err(|_| TransitionError::TooManyStates)?,
+                        u32::try_from(count).map_err(|_| TransitionError::TooManyStates)?,
+                    )?,
+                }))
             }
         }
     }
@@ -1502,13 +1437,13 @@ where
 }
 
 fn derive_unchanged<P: PublicKey, D: Digest>(
-    opening: &[StateLeaf<P>],
+    predecessor: &[StateLeaf<P>],
     rows: &[AccountRow<P, D>],
 ) -> Result<Vec<StateLeaf<P>>, TransitionError> {
-    if opening
+    if predecessor
         .windows(2)
         .any(|pair| pair[0].account >= pair[1].account)
-        || opening.iter().any(|leaf| !is_live_state(&leaf.state))
+        || predecessor.iter().any(|leaf| !is_live_state(&leaf.state))
     {
         return Err(TransitionError::NonCanonicalStateOrder);
     }
@@ -1519,42 +1454,42 @@ fn derive_unchanged<P: PublicKey, D: Digest>(
         return Err(TransitionError::NonCanonicalRows);
     }
 
-    let mut unchanged = Vec::with_capacity(opening.len().saturating_sub(rows.len()));
+    let mut unchanged = Vec::with_capacity(predecessor.len().saturating_sub(rows.len()));
     let mut state = 0_usize;
     for row in rows {
-        while opening
+        while predecessor
             .get(state)
             .is_some_and(|leaf| leaf.account < row.account)
         {
-            unchanged.push(opening[state].clone());
+            unchanged.push(predecessor[state].clone());
             state += 1;
         }
-        match opening.get(state) {
+        match predecessor.get(state) {
             Some(leaf) if leaf.account == row.account => {
-                if leaf.state != row.opening {
-                    return Err(TransitionError::OpeningLinkage);
+                if leaf.state != row.predecessor {
+                    return Err(TransitionError::PredecessorLinkage);
                 }
                 state += 1;
             }
-            _ if row.opening == crate::bajillion::state::AccountState::default() => {}
-            _ => return Err(TransitionError::OpeningLinkage),
+            _ if row.predecessor == crate::bajillion::state::AccountState::default() => {}
+            _ => return Err(TransitionError::PredecessorLinkage),
         }
     }
-    unchanged.extend_from_slice(&opening[state..]);
+    unchanged.extend_from_slice(&predecessor[state..]);
     Ok(unchanged)
 }
 
 fn validate_row_state_sides<P: PublicKey, D: Digest>(
     row: &AccountRow<P, D>,
 ) -> Result<(), TransitionError> {
-    if row.opening.active {
-        if row.opening.balance == 0 {
+    if row.predecessor.active {
+        if row.predecessor.balance == 0 {
             return Err(TransitionError::InactiveBalance);
         }
-    } else if row.opening != crate::bajillion::state::AccountState::default() {
-        return Err(TransitionError::NonCanonicalOpeningAbsence);
+    } else if row.predecessor != crate::bajillion::state::AccountState::default() {
+        return Err(TransitionError::NonCanonicalPredecessorAbsence);
     }
-    if row.closing.active != (row.closing.balance > 0) {
+    if row.successor.active != (row.successor.balance > 0) {
         return Err(TransitionError::InactiveBalance);
     }
     Ok(())
@@ -1585,49 +1520,49 @@ fn derive_state_vectors<P: PublicKey, D: Digest>(
     }
 
     let capacity = unchanged.len().saturating_add(rows.len());
-    let mut opening = Vec::with_capacity(capacity);
-    let mut closing = Vec::with_capacity(capacity);
+    let mut predecessor = Vec::with_capacity(capacity);
+    let mut successor = Vec::with_capacity(capacity);
     let mut unchanged_index = 0_usize;
     let mut row_index = 0_usize;
     while unchanged_index < unchanged.len() || row_index < rows.len() {
         match (unchanged.get(unchanged_index), rows.get(row_index)) {
             (Some(leaf), Some(row)) if leaf.account < row.account => {
-                opening.push(leaf.clone());
-                closing.push(leaf.clone());
+                predecessor.push(leaf.clone());
+                successor.push(leaf.clone());
                 unchanged_index += 1;
             }
             (Some(leaf), Some(row)) if row.account < leaf.account => {
-                if row.opening.active {
-                    opening.push(StateLeaf {
+                if row.predecessor.active {
+                    predecessor.push(StateLeaf {
                         account: row.account.clone(),
-                        state: row.opening,
+                        state: row.predecessor,
                     });
                 }
-                if row.closing.active {
-                    closing.push(StateLeaf {
+                if row.successor.active {
+                    successor.push(StateLeaf {
                         account: row.account.clone(),
-                        state: row.closing,
+                        state: row.successor,
                     });
                 }
                 row_index += 1;
             }
             (Some(_), Some(_)) => return Err(TransitionError::StateRowOverlap),
             (Some(leaf), None) => {
-                opening.push(leaf.clone());
-                closing.push(leaf.clone());
+                predecessor.push(leaf.clone());
+                successor.push(leaf.clone());
                 unchanged_index += 1;
             }
             (None, Some(row)) => {
-                if row.opening.active {
-                    opening.push(StateLeaf {
+                if row.predecessor.active {
+                    predecessor.push(StateLeaf {
                         account: row.account.clone(),
-                        state: row.opening,
+                        state: row.predecessor,
                     });
                 }
-                if row.closing.active {
-                    closing.push(StateLeaf {
+                if row.successor.active {
+                    successor.push(StateLeaf {
                         account: row.account.clone(),
-                        state: row.closing,
+                        state: row.successor,
                     });
                 }
                 row_index += 1;
@@ -1637,16 +1572,18 @@ fn derive_state_vectors<P: PublicKey, D: Digest>(
     }
 
     let protocol_max = u64::from(commitment::MAX_VECTOR_LENGTH);
-    let opening_len = u64::try_from(opening.len()).map_err(|_| TransitionError::TooManyStates)?;
-    let closing_len = u64::try_from(closing.len()).map_err(|_| TransitionError::TooManyStates)?;
-    if opening_len > max_states
-        || closing_len > max_states
-        || opening_len > protocol_max
-        || closing_len > protocol_max
+    let predecessor_len =
+        u64::try_from(predecessor.len()).map_err(|_| TransitionError::TooManyStates)?;
+    let successor_len =
+        u64::try_from(successor.len()).map_err(|_| TransitionError::TooManyStates)?;
+    if predecessor_len > max_states
+        || successor_len > max_states
+        || predecessor_len > protocol_max
+        || successor_len > protocol_max
     {
         return Err(TransitionError::TooManyStates);
     }
-    Ok((opening, closing))
+    Ok((predecessor, successor))
 }
 
 fn validated_boundary_accounts<'a, P: PublicKey, D: Digest>(
@@ -1689,7 +1626,7 @@ fn validate_sealed_boundaries<P: PublicKey, D: Digest>(
     }
 
     for account in accounts {
-        let opening = cache.locate(account).map_or_else(
+        let predecessor = cache.locate(account).map_or_else(
             crate::bajillion::state::AccountState::default,
             |(_, leaf)| leaf.state,
         );
@@ -1701,15 +1638,15 @@ fn validate_sealed_boundaries<P: PublicKey, D: Digest>(
         match body.action() {
             WithdrawalAction::Amount(amount) => {
                 let amount = amount.get();
-                let available = u128::from(opening.balance) + u128::from(deposit);
+                let available = u128::from(predecessor.balance) + u128::from(deposit);
                 if u128::from(amount) > available {
                     return Err(TransitionError::WithdrawalCoverage);
                 }
-                if opening.active && deposit != 0 && deposit == amount {
+                if predecessor.active && deposit != 0 && deposit == amount {
                     return Err(TransitionError::BoundaryNoStateChange);
                 }
             }
-            WithdrawalAction::Close if !(opening.active || deposit != 0) => {
+            WithdrawalAction::Close if !(predecessor.active || deposit != 0) => {
                 return Err(TransitionError::BoundaryNoStateChange);
             }
             WithdrawalAction::Close => {}
@@ -1727,7 +1664,7 @@ fn validate_corpus_limits<P: PublicKey, D: Digest>(
     let limits = context.limits();
     let row_count = u64::try_from(rows.len()).map_err(|_| TransitionError::CloseLimit)?;
     if row_count > limits.max_rows
-        || totals.withdrawals > limits.max_withdrawals
+        || totals.withdrawal_count > limits.max_withdrawals
         || totals.debit > limits.max_payment_total
         || totals.credit > limits.max_payment_total
         || totals.payout > limits.max_payment_total
@@ -1747,7 +1684,7 @@ fn validate_corpus_limits<P: PublicKey, D: Digest>(
             .checked_add(count)
             .ok_or(TransitionError::CloseLimit)?;
     }
-    if total_shards > limits.max_total_shards || totals.shards > limits.max_total_shards {
+    if total_shards > limits.max_total_shards || totals.shard_count > limits.max_total_shards {
         return Err(TransitionError::CloseLimit);
     }
     Ok(())
@@ -1756,14 +1693,19 @@ fn validate_corpus_limits<P: PublicKey, D: Digest>(
 /// Reusable index for constructing bounded account lookups against one close.
 #[derive(Clone, Debug)]
 pub struct ChallengeIndex<P: PublicKey, D: Digest> {
-    opening_root: VectorRoot<D>,
-    rows: Vec<AccountRow<P, D>>,
+    predecessor_root: VectorRoot<D>,
+    leaves: Vec<AccountChange<P, D>>,
+    guards: Vec<ChangeGuard<P, D>>,
     tree: Tree<D>,
 }
 
 impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
     /// Builds and authenticates the changed-row tree once for repeated challenge construction.
-    pub fn new<H: Hasher<Digest = D>>(close: &Close<P, D>) -> Result<Self, TransitionError> {
+    pub fn new<H: Hasher<Digest = D>>(
+        context: &CloseContext<P, D>,
+        close: &Close<P, D>,
+    ) -> Result<Self, TransitionError> {
+        validate_header::<H, P, D>(context, &close.header, &close.roots)?;
         if close
             .rows
             .windows(2)
@@ -1771,13 +1713,15 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
         {
             return Err(TransitionError::NonCanonicalRows);
         }
-        let tree = change_tree::<H, P, D>(&close.rows)?;
+        let (leaves, guards, tree) =
+            change_material_with_strategy::<H, P, D>(&close.rows, &close.shard_sets, &Sequential)?;
         if tree.root() != close.roots.change {
             return Err(TransitionError::ChangeRoot);
         }
         Ok(Self {
-            opening_root: close.roots.opening,
-            rows: close.rows.clone(),
+            predecessor_root: *context.predecessor_root(),
+            leaves,
+            guards,
             tree,
         })
     }
@@ -1794,59 +1738,111 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
         state: &StateCache<P, D>,
         account: &P,
     ) -> Result<AccountLookup<P, D>, TransitionError> {
-        if state.root() != self.opening_root {
-            return Err(TransitionError::OpeningRoot);
+        if state.root() != self.predecessor_root {
+            return Err(TransitionError::PredecessorRoot);
         }
-        match self.rows.binary_search_by(|row| row.account.cmp(account)) {
-            Ok(position) => Ok(AccountLookup::Present(Box::new(RowOpening {
-                row: self.rows[position].clone(),
+        match self.change_lookup(account)? {
+            ChangeLookup::Present(opening) => Ok(AccountLookup::Present(opening)),
+            ChangeLookup::Absent(change) => Ok(AccountLookup::Absent {
+                state: Box::new(state.lookup(account)?),
+                change,
+            }),
+        }
+    }
+
+    /// Constructs compact membership or shared adjacent-absence evidence for `account`.
+    pub fn change_lookup(&self, account: &P) -> Result<ChangeLookup<P, D>, TransitionError> {
+        match self
+            .leaves
+            .binary_search_by(|leaf| leaf.account().cmp(account))
+        {
+            Ok(position) => Ok(ChangeLookup::Present(Box::new(ChangeOpening {
+                value: self.leaves[position].value(),
                 proof: self.tree.opening(position as u32)?,
             }))),
             Err(insertion) => {
-                let state = state.lookup(account)?;
-                let row_opening = |position: usize| -> Result<_, TransitionError> {
-                    Ok(Box::new(RowOpening {
-                        row: self.rows[position].clone(),
-                        proof: self.tree.opening(position as u32)?,
-                    }))
-                };
-                Ok(AccountLookup::Absent {
-                    state: Box::new(state),
-                    predecessor: insertion.checked_sub(1).map(row_opening).transpose()?,
-                    successor: (insertion < self.rows.len())
-                        .then(|| row_opening(insertion))
-                        .transpose()?,
+                let predecessor = insertion
+                    .checked_sub(1)
+                    .map(|position| self.guards[position].clone());
+                let successor = self.guards.get(insertion).cloned();
+                let start = insertion.saturating_sub(usize::from(predecessor.is_some()));
+                let count = usize::from(predecessor.is_some()) + usize::from(successor.is_some());
+                Ok(ChangeLookup::Absent(ChangeAbsence {
+                    predecessor,
+                    successor,
+                    opening: self.tree.range_opening(
+                        u32::try_from(start).map_err(|_| TransitionError::SliceRange)?,
+                        u32::try_from(count).map_err(|_| TransitionError::SliceRange)?,
+                    )?,
+                }))
+            }
+        }
+    }
+
+    /// Constructs the composed recipient and shard lookup for a higher-tip challenge.
+    pub fn higher_shard_tip_lookup<H: Hasher<Digest = D>>(
+        &self,
+        account: &P,
+        shards: Option<&ShardSet<P, D>>,
+        shard: u64,
+    ) -> Result<HigherShardTipLookup<P, D>, TransitionError> {
+        match self.change_lookup(account)? {
+            ChangeLookup::Present(opening) => {
+                let shards = shards.ok_or(TransitionError::ShardAlignment)?;
+                if shards.recipient() != account {
+                    return Err(TransitionError::ShardAlignment);
+                }
+                let shard_lookup = shards.lookup::<H>(shard)?;
+                let (credit_tip_root, _) = shard_lookup.reconstruct::<H>(shard)?;
+                if credit_tip_root != opening.value.credit_tip_root() {
+                    return Err(TransitionError::ShardAlignment);
+                }
+                Ok(HigherShardTipLookup::Present {
+                    value: opening.value.core(),
+                    proof: opening.proof,
+                    shard: shard_lookup,
                 })
+            }
+            ChangeLookup::Absent(absence) => {
+                if shards.is_some() {
+                    return Err(TransitionError::ShardAlignment);
+                }
+                Ok(HigherShardTipLookup::Absent(absence))
             }
         }
     }
 }
 
-fn checked_closing_liability(
-    opening: u64,
+fn checked_successor_liability(
+    predecessor: u64,
     deposits: u64,
     withdrawals: u64,
     payouts: u64,
 ) -> Result<u64, TransitionError> {
-    let available = u128::from(opening) + u128::from(deposits);
-    let closing = available
+    let available = u128::from(predecessor) + u128::from(deposits);
+    let successor = available
         .checked_sub(u128::from(withdrawals))
         .and_then(|remaining| remaining.checked_sub(u128::from(payouts)))
         .ok_or(TransitionError::LiabilityEquation)?;
-    u64::try_from(closing).map_err(|_| TransitionError::LiabilityOverflow)
+    u64::try_from(successor).map_err(|_| TransitionError::LiabilityOverflow)
 }
 
-fn change_tree<H, P, D>(rows: &[AccountRow<P, D>]) -> Result<Tree<D>, TransitionError>
+#[cfg(test)]
+fn change_tree<H, P, D>(
+    rows: &[AccountRow<P, D>],
+    shard_sets: &[ShardSet<P, D>],
+) -> Result<Tree<D>, TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
     D: Digest,
 {
-    change_tree_with_strategy::<H, P, D>(rows, &Sequential)
+    change_tree_with_strategy::<H, P, D>(rows, shard_sets, &Sequential)
 }
 
 fn change_tree_with_strategy<H, P, D>(
     rows: &[AccountRow<P, D>],
+    shard_sets: &[ShardSet<P, D>],
     strategy: &impl Strategy,
 ) -> Result<Tree<D>, TransitionError>
 where
@@ -1854,10 +1850,78 @@ where
     P: PublicKey,
     D: Digest,
 {
+    let (_, _, tree) = change_material_with_strategy::<H, P, D>(rows, shard_sets, strategy)?;
+    Ok(tree)
+}
+
+fn change_material_with_strategy<H, P, D>(
+    rows: &[AccountRow<P, D>],
+    shard_sets: &[ShardSet<P, D>],
+    strategy: &impl Strategy,
+) -> Result<ChangeMaterial<P, D>, TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    if rows.len() != shard_sets.len() {
+        return Err(TransitionError::ShardAlignment);
+    }
     let len = u32::try_from(rows.len()).map_err(|_| TransitionError::TooManyRows)?;
+    let leaves = strategy.try_map_collect_vec(rows.iter().zip(shard_sets), |(row, shards)| {
+        AccountChange::<P, D>::from_row::<H>(row, shards).map_err(TransitionError::from)
+    })?;
+    let guards = strategy.map_collect_vec(leaves.iter(), |leaf| leaf.guard::<H>());
     let mut builder = commitment::Builder::<H>::new(VectorKind::Change, len)?;
-    builder.add_values(rows, strategy)?;
-    Ok(builder.build(strategy)?)
+    builder.add_values(&guards, strategy)?;
+    Ok((leaves, guards, builder.build(strategy)?))
+}
+
+fn withdrawal_output_material_with_strategy<H, P, D>(
+    rows: &[AccountRow<P, D>],
+    withdrawals: &WithdrawalBatch<P, D>,
+    strategy: &impl Strategy,
+) -> Result<WithdrawalOutputMaterial<D>, TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    let len = u32::try_from(withdrawals.len()).map_err(|_| TransitionError::CloseLimit)?;
+    let outputs = derive_withdrawal_outputs::<P, D>(rows, withdrawals)?;
+    let mut builder = commitment::Builder::<H>::new(VectorKind::WithdrawalOutput, len)?;
+    builder.add_values(&outputs, strategy)?;
+    Ok((outputs, builder.build(strategy)?))
+}
+
+fn derive_withdrawal_outputs<P, D>(
+    rows: &[AccountRow<P, D>],
+    withdrawals: &WithdrawalBatch<P, D>,
+) -> Result<Vec<WithdrawalOutput>, TransitionError>
+where
+    P: PublicKey,
+    D: Digest,
+{
+    let mut outputs = Vec::with_capacity(withdrawals.len());
+    let mut row_index = 0_usize;
+    for request in withdrawals.requests() {
+        while rows
+            .get(row_index)
+            .is_some_and(|row| row.account < *request.account())
+        {
+            row_index += 1;
+        }
+        let row = rows
+            .get(row_index)
+            .filter(|row| row.account == *request.account())
+            .ok_or(TransitionError::SettlementOutput)?;
+        let SettlementOutput::Withdrawal(amount) = row.output else {
+            return Err(TransitionError::SettlementOutput);
+        };
+        outputs.push(WithdrawalOutput::from_request(request, amount));
+        row_index += 1;
+    }
+    Ok(outputs)
 }
 
 fn state_liability<P: PublicKey>(leaves: &[StateLeaf<P>]) -> Result<u64, TransitionError> {
@@ -1868,7 +1932,7 @@ fn state_liability<P: PublicKey>(leaves: &[StateLeaf<P>]) -> Result<u64, Transit
     })
 }
 
-/// Builds one close from the complete live opening state, then validates it fully.
+/// Builds one close from the complete live predecessor state, then validates it fully.
 pub fn build_close<H, P, D>(
     cache: &StateCache<P, D>,
     context: &CloseContext<P, D>,
@@ -1923,7 +1987,7 @@ where
 
 /// Assembles a close and retains its Merkle material for later dealing.
 ///
-/// This validates canonical shape, authenticated context, boundary roots, and exact opening-state
+/// This validates canonical shape, authenticated context, boundary roots, and exact predecessor-state
 /// linkage. Call [`PreparedClose::validate`] before relying on row equations or signatures when
 /// the corpus was not assembled from already accepted local payments.
 pub fn prepare_close_with_strategy<H, P, D>(
@@ -1940,11 +2004,11 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if cache.root() != *context.opening_root() {
-        return Err(TransitionError::OpeningRoot);
+    if cache.root() != *context.predecessor_root() {
+        return Err(TransitionError::PredecessorRoot);
     }
-    if cache.liability != context.opening_liability() {
-        return Err(TransitionError::OpeningLiability);
+    if cache.liability != context.predecessor_liability() {
+        return Err(TransitionError::PredecessorLiability);
     }
     if rows
         .windows(2)
@@ -1960,38 +2024,41 @@ where
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
 
     let unchanged = derive_unchanged(cache.leaves(), &rows)?;
-    let (opening_leaves, closing_leaves) =
+    let (predecessor_leaves, successor_leaves) =
         derive_state_vectors(&unchanged, &rows, context.limits().max_states())?;
-    if opening_leaves != cache.leaves {
-        return Err(TransitionError::OpeningLinkage);
+    if predecessor_leaves != cache.leaves {
+        return Err(TransitionError::PredecessorLinkage);
     }
 
-    let closing = state_tree_with_strategy::<H, P, D>(&closing_leaves, strategy)?;
-    let changes = change_tree_with_strategy::<H, P, D>(&rows, strategy)?;
-    let layout_boundaries = slice::derive_layout(
+    let successor = state_tree_with_strategy::<H, P, D>(&successor_leaves, strategy)?;
+    let (change_leaves, change_guards, changes) =
+        change_material_with_strategy::<H, P, D>(&rows, &shard_sets, strategy)?;
+    let (withdrawal_outputs, withdrawal_output_tree) =
+        withdrawal_output_material_with_strategy::<H, P, D>(&rows, withdrawals, strategy)?;
+    let coverage_boundaries = slice::derive_coverage(
         &rows,
-        &opening_leaves,
-        &closing_leaves,
+        &predecessor_leaves,
+        &successor_leaves,
         context.assignment().slice_bits(),
     )?;
-    let layout = slice::layout_tree_with_strategy::<H, D>(&layout_boundaries, strategy)?;
-    let expected_liability = checked_closing_liability(
+    let coverage = slice::coverage_tree_with_strategy::<H, D>(&coverage_boundaries, strategy)?;
+    let expected_liability = checked_successor_liability(
         cache.liability,
         deposits.total(),
         totals.withdrawal,
         totals.payout,
     )?;
-    if state_liability(&closing_leaves)? != expected_liability {
+    if state_liability(&successor_leaves)? != expected_liability {
         return Err(TransitionError::LiabilityEquation);
     }
     let roots = RootBundle {
-        opening: cache.root(),
         change: changes.root(),
-        closing: closing.root(),
-        layout: layout.root(),
+        withdrawal_outputs: withdrawal_output_tree.root(),
+        successor: successor.root(),
+        coverage: coverage.root(),
     };
     let close = Close {
-        header: Header::new::<H, P>(context.payment(), &roots),
+        header: Header::new::<H, P>(context, &roots),
         roots,
         unchanged,
         rows,
@@ -1999,18 +2066,23 @@ where
     };
     Ok(PreparedClose {
         close,
+        predecessor_root: cache.root(),
+        change_leaves,
+        change_guards,
         changes,
-        closing_leaves,
-        closing,
-        layout_boundaries,
-        layout,
+        withdrawal_outputs,
+        withdrawal_output_tree,
+        successor_leaves,
+        successor,
+        coverage_boundaries,
+        coverage,
     })
 }
 
 /// Assembles the terminal settlement witness from a decoded close.
 ///
 /// Close producers should prefer [`PreparedClose::terminal_proof`], which reuses the retained
-/// layout tree. This convenience path reconstructs that tree from the public corpus.
+/// coverage tree. This convenience path reconstructs that tree from the public corpus.
 pub fn assemble_terminal_proof<H, P, D>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
@@ -2024,19 +2096,19 @@ where
     D: Digest,
 {
     validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
-    let (opening, closing) =
+    let (predecessor, successor) =
         derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
-    let layout_boundaries = slice::derive_layout(
+    let coverage_boundaries = slice::derive_coverage(
         &close.rows,
-        &opening,
-        &closing,
+        &predecessor,
+        &successor,
         context.assignment().slice_bits(),
     )?;
-    let layout = slice::layout_tree_with_strategy::<H, D>(&layout_boundaries, strategy)?;
-    if layout.root() != close.roots.layout {
-        return Err(TransitionError::SliceLayout);
+    let coverage = slice::coverage_tree_with_strategy::<H, D>(&coverage_boundaries, strategy)?;
+    if coverage.root() != close.roots.coverage {
+        return Err(TransitionError::SliceCoverage);
     }
-    build_terminal_proof(&layout_boundaries, &layout)
+    build_terminal_proof(&coverage_boundaries, &coverage)
 }
 
 /// Opens one external payout from a decoded close.
@@ -2050,34 +2122,35 @@ where
     P: PublicKey,
     D: Digest,
 {
-    let changes = change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?;
+    let (leaves, _, changes) =
+        change_material_with_strategy::<H, P, D>(&close.rows, &close.shard_sets, strategy)?;
     if changes.root() != close.roots.change {
         return Err(TransitionError::ChangeRoot);
     }
-    build_external_payout_claim(close, &changes, recipient)
+    build_external_payout_claim(close, &leaves, &changes, recipient)
 }
 
-/// Opens one withdrawal request and its changed row from a decoded close.
+/// Opens one validator-derived withdrawal output from a decoded close.
 pub fn assemble_withdrawal_claim<H, P, D>(
     close: &Close<P, D>,
     withdrawals: &WithdrawalBatch<P, D>,
     account: &P,
     strategy: &impl Strategy,
-) -> Result<WithdrawalClaim<P, D>, TransitionError>
+) -> Result<WithdrawalClaim<D>, TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
     D: Digest,
 {
-    let changes = change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?;
-    if changes.root() != close.roots.change {
-        return Err(TransitionError::ChangeRoot);
+    let (outputs, output_tree) =
+        withdrawal_output_material_with_strategy::<H, P, D>(&close.rows, withdrawals, strategy)?;
+    if output_tree.root() != close.roots.withdrawal_outputs {
+        return Err(TransitionError::WithdrawalOutputRoot);
     }
-    let withdrawal_tree = withdrawal_tree::<H, P, D>(withdrawals)?;
-    build_withdrawal_claim(close, &changes, withdrawals, &withdrawal_tree, account)
+    build_withdrawal_claim(&outputs, &output_tree, withdrawals, account)
 }
 
-/// Validates the contextual root commitment and opening-state ancestry.
+/// Validates the contextual root commitment and predecessor-state ancestry.
 pub fn validate_header<H, P, D>(
     context: &CloseContext<P, D>,
     header: &Header<D>,
@@ -2088,11 +2161,8 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if !header.verify::<H, P>(context.payment(), roots) {
+    if !header.verify::<H, P>(context, roots) {
         return Err(TransitionError::HeaderRoot);
-    }
-    if roots.opening != *context.opening_root() {
-        return Err(TransitionError::OpeningRoot);
     }
     Ok(())
 }
@@ -2155,15 +2225,15 @@ pub(crate) fn validate_terminal_prefix<P: PublicKey, D: Digest>(
         u64::try_from(withdrawals.len()).map_err(|_| TransitionError::BoundaryTotals)?;
     if totals.deposit != deposits.total()
         || totals.withdrawal < withdrawals.total()
-        || totals.withdrawals != withdrawal_count
+        || totals.withdrawal_count != withdrawal_count
     {
         return Err(TransitionError::BoundaryTotals);
     }
 
     let limits = context.limits();
     if u64::from(row_count) > limits.max_rows()
-        || totals.withdrawals > limits.max_withdrawals()
-        || totals.shards > limits.max_total_shards()
+        || totals.withdrawal_count > limits.max_withdrawals()
+        || totals.shard_count > limits.max_total_shards()
         || totals.debit > limits.max_payment_total()
         || totals.credit > limits.max_payment_total()
         || totals.payout > limits.max_payment_total()
@@ -2175,73 +2245,13 @@ pub(crate) fn validate_terminal_prefix<P: PublicKey, D: Digest>(
     if totals.debit != totals.credit {
         return Err(TransitionError::PaymentConservation);
     }
-    checked_closing_liability(
-        context.opening_liability(),
+    checked_successor_liability(
+        context.predecessor_liability(),
         totals.deposit,
         totals.withdrawal,
         totals.payout,
     )?;
     Ok(())
-}
-
-fn adjacent_change_prefix<P: PublicKey, D: Digest>(
-    predecessor: Option<&AccountRow<P, D>>,
-    row: &AccountRow<P, D>,
-    positions: &[u32],
-) -> Option<Prefix> {
-    match predecessor {
-        Some(predecessor) => {
-            let position = positions.last().copied()?;
-            if predecessor.account >= row.account
-                || positions != [position.checked_sub(1)?, position]
-            {
-                return None;
-            }
-            Some(predecessor.prefix)
-        }
-        None => (positions == [0]).then_some(Prefix::default()),
-    }
-}
-
-fn external_payout_amount<P: PublicKey, D: Digest>(
-    row: &AccountRow<P, D>,
-    previous_prefix: Prefix,
-) -> Option<u64> {
-    if row.opening != crate::bajillion::state::AccountState::default()
-        || row.closing.active
-        || row.closing.balance != 0
-        || row.outgoing.is_some()
-    {
-        return None;
-    }
-    let (debit, credit, receipts) = row.checked_deltas()?;
-    let delta = checked_prefix_delta(row.prefix, previous_prefix)?;
-    (debit == 0
-        && credit > 0
-        && receipts > 0
-        && row.credit_root.len > 0
-        && row.credit_root.total_credit == credit
-        && row.credit_root.total_receipts == receipts
-        && delta.debit == debit
-        && delta.credit == credit
-        && delta.payout == credit
-        && delta.deposit == 0
-        && delta.withdrawal == 0
-        && delta.withdrawals == 0
-        && delta.shards == u64::from(row.credit_root.len))
-    .then_some(credit)
-}
-
-fn checked_prefix_delta(current: Prefix, previous: Prefix) -> Option<Prefix> {
-    Some(Prefix {
-        debit: current.debit.checked_sub(previous.debit)?,
-        credit: current.credit.checked_sub(previous.credit)?,
-        payout: current.payout.checked_sub(previous.payout)?,
-        deposit: current.deposit.checked_sub(previous.deposit)?,
-        withdrawal: current.withdrawal.checked_sub(previous.withdrawal)?,
-        withdrawals: current.withdrawals.checked_sub(previous.withdrawals)?,
-        shards: current.shards.checked_sub(previous.shards)?,
-    })
 }
 
 pub(crate) fn verify_terminal_proof_after_header<H, P, D>(
@@ -2257,20 +2267,20 @@ where
     D: Digest,
 {
     let terminal_position = u32::from(context.assignment().slice_count());
-    let layout_len = terminal_position
+    let coverage_len = terminal_position
         .checked_add(1)
         .ok_or(TransitionError::TerminalProof)?;
     if proof.terminal_opening.position != terminal_position
-        || proof.terminal_opening.proof.leaf_count != layout_len
-        || u64::from(proof.terminal.opening) > context.limits().max_states()
+        || proof.terminal_opening.proof.leaf_count != coverage_len
+        || u64::from(proof.terminal.predecessor) > context.limits().max_states()
         || u64::from(proof.terminal.change) > context.limits().max_rows()
-        || u64::from(proof.terminal.closing) > context.limits().max_states()
+        || u64::from(proof.terminal.successor) > context.limits().max_states()
     {
         return Err(TransitionError::TerminalProof);
     }
     proof.terminal_opening.verify::<H>(
-        VectorKind::Layout,
-        &roots.layout,
+        VectorKind::Coverage,
+        &roots.coverage,
         &proof.terminal.encode(),
     )?;
     validate_terminal_prefix(
@@ -2325,7 +2335,7 @@ where
             WithdrawalAction::Amount(amount) => amount.get(),
             WithdrawalAction::Close => {
                 let available =
-                    u128::from(row.opening.balance) + u128::from(deposit) + u128::from(credit);
+                    u128::from(row.predecessor.balance) + u128::from(deposit) + u128::from(credit);
                 let tail = available
                     .checked_sub(u128::from(debit))
                     .ok_or(TransitionError::BalanceEquation)?;
@@ -2335,37 +2345,46 @@ where
         None => 0,
     };
 
-    let registered = row.opening.active || deposit != 0;
+    let registered = row.predecessor.active || deposit != 0;
     let payout = if registered { 0 } else { credit };
-    if !registered && (row.closing.active || debit != 0 || credit == 0 || withdrawal.is_some()) {
+    if !registered && (row.successor.active || debit != 0 || credit == 0 || withdrawal.is_some()) {
         return Err(TransitionError::AccountActivity);
     }
     let has_effect =
         debit != 0 || credit != 0 || receipts != 0 || deposit != 0 || withdrawal.is_some();
-    if (!row.is_changed() && !(has_effect && !row.opening.active && !row.closing.active))
-        || (!row.opening.active && !row.closing.active && !has_effect)
+    if (!row.is_changed() && !(has_effect && !row.predecessor.active && !row.successor.active))
+        || (!row.predecessor.active && !row.successor.active && !has_effect)
     {
         return Err(TransitionError::UnchangedRow);
     }
     if withdrawal.is_some_and(|request| matches!(request.body().action(), WithdrawalAction::Close))
-        && (row.closing.balance != 0 || row.closing.active)
+        && (row.successor.balance != 0 || row.successor.active)
     {
         return Err(TransitionError::AccountActivity);
     }
-    if u128::from(row.closing.balance)
+    if u128::from(row.successor.balance)
         + u128::from(debit)
         + u128::from(withdrawal_amount)
         + u128::from(payout)
-        != u128::from(row.opening.balance) + u128::from(credit) + u128::from(deposit)
+        != u128::from(row.predecessor.balance) + u128::from(credit) + u128::from(deposit)
     {
         return Err(TransitionError::BalanceEquation);
+    }
+
+    let expected_output = match withdrawal {
+        Some(_) => SettlementOutput::Withdrawal(withdrawal_amount),
+        None if payout != 0 => SettlementOutput::ExternalPayout(payout),
+        None => SettlementOutput::None,
+    };
+    if row.output != expected_output {
+        return Err(TransitionError::SettlementOutput);
     }
 
     match (&row.outgoing, debit) {
         (None, 0) => {}
         (Some(payment), debit) if debit != 0 => {
             if payment.payer() != &row.account
-                || payment.send().body().cumulative_debit() != row.closing.cumulative_debit
+                || payment.send().body().cumulative_debit() != row.successor.cumulative_debit
                 || payment.amount() > debit
             {
                 return Err(TransitionError::OutgoingEndpoint);
@@ -2382,11 +2401,8 @@ where
     if shards.epoch() != context.payment().epoch() || shards.recipient() != &row.account {
         return Err(TransitionError::ShardAlignment);
     }
-    shards.verify_root::<H>(&row.credit_root)?;
-    if row.credit_root.total_credit != credit
-        || row.credit_root.total_receipts != receipts
-        || usize::try_from(row.credit_root.len).ok() != Some(shards.heads().len())
-    {
+    let (total_credit, total_receipts) = shards.totals()?;
+    if total_credit != credit || total_receipts != receipts {
         return Err(TransitionError::CreditTotals);
     }
     for head in shards.heads() {
@@ -2404,8 +2420,9 @@ where
         payout,
         deposit,
         withdrawal: withdrawal_amount,
-        withdrawals: u64::from(withdrawal.is_some()),
-        shards: u64::try_from(shards.heads().len()).map_err(|_| TransitionError::PrefixOverflow)?,
+        withdrawal_count: u64::from(withdrawal.is_some()),
+        shard_count: u64::try_from(shards.heads().len())
+            .map_err(|_| TransitionError::PrefixOverflow)?,
     })
 }
 
@@ -2513,14 +2530,22 @@ where
     if prepared.changes.root() != close.roots.change {
         return Err(TransitionError::ChangeRoot);
     }
-    let (opening, closing) =
-        derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
-    if prepared.closing_leaves != closing || prepared.closing.root() != close.roots.closing {
-        return Err(TransitionError::ClosingRoot);
+    if prepared.withdrawal_output_tree.root() != close.roots.withdrawal_outputs
+        || prepared.withdrawal_outputs
+            != derive_withdrawal_outputs::<P, D>(&close.rows, withdrawals)?
+    {
+        return Err(TransitionError::WithdrawalOutputRoot);
     }
-    let layout = slice::derive_layout(&close.rows, &opening, &closing, slice_bits)?;
-    if prepared.layout_boundaries != layout || prepared.layout.root() != close.roots.layout {
-        return Err(TransitionError::SliceLayout);
+    let (predecessor, successor) =
+        derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
+    if prepared.successor_leaves != successor || prepared.successor.root() != close.roots.successor
+    {
+        return Err(TransitionError::SuccessorRoot);
+    }
+    let coverage = slice::derive_coverage(&close.rows, &predecessor, &successor, slice_bits)?;
+    if prepared.coverage_boundaries != coverage || prepared.coverage.root() != close.roots.coverage
+    {
+        return Err(TransitionError::SliceCoverage);
     }
     validate_close_rows::<H, P, D>(context, deposits, withdrawals, close)
 }
@@ -2554,30 +2579,41 @@ where
     D: Digest,
 {
     validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
-    if change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?.root() != close.roots.change {
+    if change_tree_with_strategy::<H, P, D>(&close.rows, &close.shard_sets, strategy)?.root()
+        != close.roots.change
+    {
         return Err(TransitionError::ChangeRoot);
     }
-    let (opening, closing) =
+    if withdrawal_output_material_with_strategy::<H, P, D>(&close.rows, withdrawals, strategy)?
+        .1
+        .root()
+        != close.roots.withdrawal_outputs
+    {
+        return Err(TransitionError::WithdrawalOutputRoot);
+    }
+    let (predecessor, successor) =
         derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
-    let opening_tree = state_tree_with_strategy::<H, P, D>(&opening, strategy)?;
-    let closing_tree = state_tree_with_strategy::<H, P, D>(&closing, strategy)?;
-    if opening_tree.root() != close.roots.opening {
-        return Err(TransitionError::OpeningRoot);
+    let predecessor_tree = state_tree_with_strategy::<H, P, D>(&predecessor, strategy)?;
+    let successor_tree = state_tree_with_strategy::<H, P, D>(&successor, strategy)?;
+    if predecessor_tree.root() != *context.predecessor_root() {
+        return Err(TransitionError::PredecessorRoot);
     }
-    if closing_tree.root() != close.roots.closing {
-        return Err(TransitionError::ClosingRoot);
+    if successor_tree.root() != close.roots.successor {
+        return Err(TransitionError::SuccessorRoot);
     }
-    let layout = slice::derive_layout(
+    let coverage = slice::derive_coverage(
         &close.rows,
-        &opening,
-        &closing,
+        &predecessor,
+        &successor,
         context.assignment().slice_bits(),
     )?;
-    if slice::layout_tree_with_strategy::<H, D>(&layout, strategy)?.root() != close.roots.layout {
-        return Err(TransitionError::SliceLayout);
+    if slice::coverage_tree_with_strategy::<H, D>(&coverage, strategy)?.root()
+        != close.roots.coverage
+    {
+        return Err(TransitionError::SliceCoverage);
     }
-    let expected_liability = checked_closing_liability(
-        context.opening_liability(),
+    let expected_liability = checked_successor_liability(
+        context.predecessor_liability(),
         deposits.total(),
         close
             .rows
@@ -2590,7 +2626,7 @@ where
             .map_or_else(Prefix::default, |row| row.prefix)
             .payout,
     )?;
-    if state_liability(&closing)? != expected_liability {
+    if state_liability(&successor)? != expected_liability {
         return Err(TransitionError::LiabilityEquation);
     }
     validate_close_rows::<H, P, D>(context, deposits, withdrawals, close)
@@ -2617,23 +2653,23 @@ pub enum TransitionError {
     /// A slice does not authenticate one exact state interval assigned to it.
     #[error("proof-slice state range is not canonical")]
     SliceStateRange,
-    /// A slice does not authenticate its exact gap-free vector boundaries.
-    #[error("proof-slice layout boundaries are not canonical")]
-    SliceLayout,
+    /// A slice does not authenticate its exact gap-free vector coverage.
+    #[error("proof-slice coverage boundaries are not canonical")]
+    SliceCoverage,
     /// The terminal settlement opening is malformed or out of bounds.
     #[error("terminal settlement proof is not canonical")]
     TerminalProof,
-    /// A changed row is not a valid external payout claim.
-    #[error("changed row is not a valid external payout claim")]
+    /// A compact change opening does not classify an external payout.
+    #[error("change opening does not classify an external payout")]
     PayoutClaim,
-    /// A signed withdrawal and changed row do not form one finalized claim.
+    /// A derived withdrawal output and opening do not form one finalized claim.
     #[error("withdrawal claim is not canonical")]
     WithdrawalClaim,
-    /// The opening state vector exceeds the protocol bound.
-    #[error("opening state vector exceeds the protocol bound")]
+    /// The predecessor state vector exceeds the protocol bound.
+    #[error("predecessor state vector exceeds the protocol bound")]
     TooManyStates,
-    /// Opening accounts are not strictly sorted and unique.
-    #[error("opening state accounts are not strictly sorted and unique")]
+    /// State accounts are not strictly sorted and unique.
+    #[error("predecessor state accounts are not strictly sorted and unique")]
     NonCanonicalStateOrder,
     /// A committed leaf or projected row side is not active with positive balance.
     #[error("live state must be active with positive balance")]
@@ -2647,24 +2683,24 @@ pub enum TransitionError {
     /// A requested account is absent from the committed live state.
     #[error("account is absent from the committed live state")]
     UnknownAccount,
-    /// A row's opening state does not match its cached account.
-    #[error("row does not match the cached opening account state")]
-    OpeningLinkage,
-    /// An opening-absent row side is not the canonical default state.
-    #[error("an absent opening row side must be the canonical default state")]
-    NonCanonicalOpeningAbsence,
+    /// A row's predecessor state does not match its cached account.
+    #[error("row does not match the cached predecessor account state")]
+    PredecessorLinkage,
+    /// An absent predecessor row side is not the canonical default state.
+    #[error("an absent predecessor row side must be the canonical default state")]
+    NonCanonicalPredecessorAbsence,
     /// One account appears in both the unchanged vector and changed rows.
     #[error("unchanged leaves and changed rows must have disjoint accounts")]
     StateRowOverlap,
-    /// A header does not authenticate its roots under the registered payment context.
-    #[error("header does not authenticate the supplied roots and payment context")]
+    /// A header does not authenticate its roots under the registered close context.
+    #[error("header does not authenticate the supplied roots and close context")]
     HeaderRoot,
-    /// Root bundle and expected opening roots differ.
-    #[error("root bundle opening root does not match the expected root")]
-    OpeningRoot,
-    /// Cached and expected opening liabilities differ.
-    #[error("cached opening liability does not match the expected liability")]
-    OpeningLiability,
+    /// The derived predecessor state root differs from the root owned by the close context.
+    #[error("predecessor state root does not match the close context")]
+    PredecessorRoot,
+    /// Cached and expected predecessor liabilities differ.
+    #[error("cached predecessor liability does not match the expected liability")]
+    PredecessorLiability,
     /// Admission does not precede a challenge deadline with a representable resolution time.
     #[error("admission must precede a challenge deadline below the maximum timestamp")]
     DeadlineOrder,
@@ -2674,12 +2710,15 @@ pub enum TransitionError {
     /// Rows and receive-shard sets are not aligned one-for-one.
     #[error("changed rows and terminal shard sets are not aligned")]
     ShardAlignment,
-    /// The committed change root does not match the exact rows.
-    #[error("change root does not commit the supplied rows")]
+    /// The committed change root does not match the exact semantic projections derived from rows.
+    #[error("change root does not commit the derived row projections")]
     ChangeRoot,
-    /// The committed closing root does not match the exact derived live state.
-    #[error("closing root does not commit the derived live state")]
-    ClosingRoot,
+    /// The committed withdrawal-output root does not match the exact derived outputs.
+    #[error("withdrawal-output root does not commit the derived outputs")]
+    WithdrawalOutputRoot,
+    /// The committed successor-state root does not match the exact derived live state.
+    #[error("successor-state root does not commit the derived live state")]
+    SuccessorRoot,
     /// A close or sealed boundary exceeds its anchor-bound resource limits.
     #[error("close exceeds an anchor-bound resource limit")]
     CloseLimit,
@@ -2695,8 +2734,8 @@ pub enum TransitionError {
     /// Terminal prefix boundary totals or record count do not match the sealed batches.
     #[error("terminal prefix does not match the sealed boundary")]
     BoundaryTotals,
-    /// A withdrawal is not affordable from the sealed opening state and deposit.
-    #[error("withdrawal is not covered by the sealed opening state and deposit")]
+    /// A withdrawal is not affordable from the sealed predecessor state and deposit.
+    #[error("withdrawal is not covered by the sealed predecessor state and deposit")]
     WithdrawalCoverage,
     /// A disclosed row does not change authenticated state.
     #[error("a disclosed changed-account row is unchanged")]
@@ -2710,11 +2749,14 @@ pub enum TransitionError {
     /// An account does not satisfy the exact widened balance equation.
     #[error("account balance equation is invalid")]
     BalanceEquation,
+    /// A row's settlement output does not match its authenticated local effect.
+    #[error("changed row settlement output is invalid")]
+    SettlementOutput,
     /// Terminal outgoing evidence is not present exactly when debit advanced.
     #[error("terminal outgoing evidence presence does not match debit activity")]
     OutgoingPresence,
     /// Terminal outgoing evidence names another payer or debit endpoint.
-    #[error("terminal outgoing evidence does not match the closing debit endpoint")]
+    #[error("terminal outgoing evidence does not match the terminal debit endpoint")]
     OutgoingEndpoint,
     /// Receive-shard totals do not match the account credit and receipt deltas.
     #[error("terminal receive-shard totals do not match account deltas")]
@@ -2728,8 +2770,8 @@ pub enum TransitionError {
     /// Gross payment debit and credit differ.
     #[error("gross payment debit and credit are not conserved")]
     PaymentConservation,
-    /// Opening and closing liabilities do not satisfy boundary flow conservation.
-    #[error("opening and closing liabilities violate boundary flow conservation")]
+    /// Predecessor and successor liabilities do not satisfy boundary flow conservation.
+    #[error("predecessor and successor liabilities violate boundary flow conservation")]
     LiabilityEquation,
     /// A liability cannot be represented as a `u64`.
     #[error("aggregate account liability overflows u64")]
@@ -2923,6 +2965,13 @@ mod tests {
         WithdrawalAction::Amount(NonZeroU64::new(value).unwrap())
     }
 
+    fn withdrawal_output(destination: &'static [u8], amount: u64) -> WithdrawalOutput {
+        WithdrawalOutput {
+            destination: Bytes::from_static(destination),
+            amount,
+        }
+    }
+
     const fn limits(rows: u64, per_account_shards: u64, total_shards: u64) -> CloseLimits {
         CloseLimits::new(
             commitment::MAX_VECTOR_LENGTH as u64,
@@ -2999,24 +3048,31 @@ mod tests {
             let amount = withdrawal.map_or(0, |request| match request.body().action() {
                 WithdrawalAction::Amount(amount) => amount.get(),
                 WithdrawalAction::Close => {
-                    let available =
-                        u128::from(row.opening.balance) + u128::from(deposit) + u128::from(credit);
+                    let available = u128::from(row.predecessor.balance)
+                        + u128::from(deposit)
+                        + u128::from(credit);
                     u64::try_from(available.checked_sub(u128::from(debit)).unwrap()).unwrap()
                 }
             });
+            let payout = if row.predecessor.active || deposit != 0 {
+                0
+            } else {
+                credit
+            };
+            row.output = match withdrawal {
+                Some(_) => SettlementOutput::Withdrawal(amount),
+                None if payout != 0 => SettlementOutput::ExternalPayout(payout),
+                None => SettlementOutput::None,
+            };
             prefix = prefix
                 .checked_extend(Prefix {
                     debit,
                     credit,
-                    payout: if row.opening.active || deposit != 0 {
-                        0
-                    } else {
-                        credit
-                    },
+                    payout,
                     deposit,
                     withdrawal: amount,
-                    withdrawals: u64::from(withdrawal.is_some()),
-                    shards: shards.heads().len() as u64,
+                    withdrawal_count: u64::from(withdrawal.is_some()),
+                    shard_count: shards.heads().len() as u64,
                 })
                 .unwrap();
             row.prefix = prefix;
@@ -3070,14 +3126,14 @@ mod tests {
             (
                 AccountRow {
                     account: payer.public_key(),
-                    opening: payer_opening,
-                    closing: AccountState {
+                    predecessor: payer_opening,
+                    successor: AccountState {
                         balance: 80,
                         cumulative_debit: 20,
                         ..payer_opening
                     },
                     outgoing: Some(payment.clone()),
-                    credit_root: payer_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 payer_shards,
@@ -3085,15 +3141,15 @@ mod tests {
             (
                 AccountRow {
                     account: recipient.public_key(),
-                    opening: recipient_opening,
-                    closing: AccountState {
+                    predecessor: recipient_opening,
+                    successor: AccountState {
                         balance: 60,
                         cumulative_credit: 20,
                         receipt_count: 1,
                         ..recipient_opening
                     },
                     outgoing: None,
-                    credit_root: recipient_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 recipient_shards,
@@ -3196,30 +3252,30 @@ mod tests {
     }
 
     fn rebind_state(context: &TestContext, close: &mut TestClose) {
-        close.roots.change = change_tree::<Sha256, _, _>(&close.rows).unwrap().root();
-        let (opening, closing) = derive_state_vectors(
+        close.roots.change = change_tree::<Sha256, _, _>(&close.rows, &close.shard_sets)
+            .unwrap()
+            .root();
+        let (predecessor, successor) = derive_state_vectors(
             &close.unchanged,
             &close.rows,
             u64::from(commitment::MAX_VECTOR_LENGTH),
         )
         .unwrap();
-        close.roots.opening = state_tree_with_strategy::<Sha256, _, _>(&opening, &Sequential)
+        close.roots.successor = state_tree_with_strategy::<Sha256, _, _>(&successor, &Sequential)
             .unwrap()
             .root();
-        close.roots.closing = state_tree_with_strategy::<Sha256, _, _>(&closing, &Sequential)
-            .unwrap()
-            .root();
-        let layout = slice::derive_layout(
+        let coverage = slice::derive_coverage(
             &close.rows,
-            &opening,
-            &closing,
+            &predecessor,
+            &successor,
             context.assignment().slice_bits(),
         )
         .unwrap();
-        close.roots.layout = slice::layout_tree_with_strategy::<Sha256, _>(&layout, &Sequential)
-            .unwrap()
-            .root();
-        close.header = Header::new::<Sha256, _>(context.payment(), &close.roots);
+        close.roots.coverage =
+            slice::coverage_tree_with_strategy::<Sha256, _>(&coverage, &Sequential)
+                .unwrap()
+                .root();
+        close.header = Header::new::<Sha256, _>(context, &close.roots);
     }
 
     #[test]
@@ -3306,25 +3362,23 @@ mod tests {
         let fixture = payment_fixture();
         let header = &fixture.close.header;
         assert_eq!(Header::<ShaDigest>::SIZE, ShaDigest::SIZE);
+        assert_eq!(RootBundle::<ShaDigest>::SIZE, ShaDigest::SIZE * 4);
         assert_eq!(header.encode().len(), ShaDigest::SIZE);
         validate_header::<Sha256, _, _>(&fixture.context, header, &fixture.close.roots).unwrap();
 
         let mut reordered = fixture.close.roots;
-        core::mem::swap(&mut reordered.opening, &mut reordered.closing);
+        core::mem::swap(&mut reordered.change, &mut reordered.successor);
         assert!(matches!(
             validate_header::<Sha256, _, _>(&fixture.context, header, &reordered),
             Err(TransitionError::HeaderRoot)
         ));
 
         let other_context = empty_fixture().0;
-        assert!(!header.verify::<Sha256, _>(other_context.payment(), &fixture.close.roots));
-
-        let mut other_opening = fixture.close.roots;
-        other_opening.opening.digest = Sha256::hash(&[b"other-opening"]);
-        let rebound = Header::new::<Sha256, _>(fixture.context.payment(), &other_opening);
+        assert!(!header.verify::<Sha256, _>(&other_context, &fixture.close.roots));
+        let rebound = Header::new::<Sha256, _>(&other_context, &fixture.close.roots);
         assert!(matches!(
-            validate_header::<Sha256, _, _>(&fixture.context, &rebound, &other_opening),
-            Err(TransitionError::OpeningRoot)
+            validate_header::<Sha256, _, _>(&fixture.context, &rebound, &fixture.close.roots),
+            Err(TransitionError::HeaderRoot)
         ));
     }
 
@@ -3424,13 +3478,13 @@ mod tests {
     }
 
     #[test]
-    fn maximum_partition_decodes_middle_layout_opening() {
+    fn maximum_partition_decodes_middle_coverage_opening() {
         let operator = SigningKey::from_seed(188);
         let cache = StateCache::<VerifyingKey, ShaDigest>::new::<Sha256>(Vec::new()).unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
         let context = close_context::<Sha256, _, _>(
-            Sha256::hash(&[b"maximum-layout-partition"]),
+            Sha256::hash(&[b"maximum-coverage-partition"]),
             1,
             operator.public_key(),
             &cache,
@@ -3463,7 +3517,7 @@ mod tests {
 
         assert_eq!(slices.len(), 256);
         let middle = &slices[128];
-        assert_eq!(middle.layout.opening.proof.leaf_count, 257);
+        assert_eq!(middle.coverage.opening.proof.leaf_count, 257);
         let encoded = middle.encode();
         assert!(
             ProofSlice::<VerifyingKey, ShaDigest>::decode_cfg(
@@ -3504,10 +3558,10 @@ mod tests {
         .unwrap()
         .pop()
         .unwrap();
-        assert!(slice.layout.opening.proof.siblings.is_empty());
+        assert!(slice.coverage.opening.proof.siblings.is_empty());
         assert!(slice.changes.opening.proof.siblings.is_empty());
-        assert!(slice.opening.opening.proof.siblings.is_empty());
-        assert!(slice.closing.opening.proof.siblings.is_empty());
+        assert!(slice.predecessor.opening.proof.siblings.is_empty());
+        assert!(slice.successor.opening.proof.siblings.is_empty());
 
         let encoded = slice.encode();
         assert_eq!(
@@ -3520,15 +3574,15 @@ mod tests {
         );
 
         let siblings = vec![Sha256::hash(&[b"oversized-frontier"]); 3];
-        let mut layout = slice.clone();
-        layout.layout.opening.proof.siblings = siblings.clone();
+        let mut coverage = slice.clone();
+        coverage.coverage.opening.proof.siblings = siblings.clone();
         let mut changes = slice.clone();
         changes.changes.opening.proof.siblings = siblings.clone();
-        let mut opening = slice.clone();
-        opening.opening.opening.proof.siblings = siblings.clone();
-        let mut closing = slice;
-        closing.closing.opening.proof.siblings = siblings;
-        for oversized in [layout, changes, opening, closing] {
+        let mut predecessor = slice.clone();
+        predecessor.predecessor.opening.proof.siblings = siblings.clone();
+        let mut successor = slice;
+        successor.successor.opening.proof.siblings = siblings;
+        for oversized in [coverage, changes, predecessor, successor] {
             assert!(
                 ProofSlice::<VerifyingKey, ShaDigest>::decode_cfg(
                     oversized.encode().as_ref(),
@@ -3592,14 +3646,14 @@ mod tests {
             (
                 AccountRow {
                     account: payer.public_key(),
-                    opening: payer_opening,
-                    closing: AccountState {
+                    predecessor: payer_opening,
+                    successor: AccountState {
                         balance: 80,
                         cumulative_debit: 20,
                         ..payer_opening
                     },
                     outgoing: Some(payment),
-                    credit_root: payer_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 payer_shards,
@@ -3607,14 +3661,14 @@ mod tests {
             (
                 AccountRow {
                     account: recipient.public_key(),
-                    opening: AccountState::default(),
-                    closing: AccountState {
+                    predecessor: AccountState::default(),
+                    successor: AccountState {
                         cumulative_credit: 20,
                         receipt_count: 1,
                         ..AccountState::default()
                     },
                     outgoing: None,
-                    credit_root: recipient_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 recipient_shards,
@@ -3658,7 +3712,7 @@ mod tests {
             .external_payout_claim(&recipient.public_key())
             .unwrap();
         assert_eq!(claim.position(), 0);
-        assert!(claim.predecessor.is_none());
+        assert_eq!(claim.recipient(), &recipient.public_key());
         assert_eq!(
             claim
                 .verify::<Sha256>(&prepared.close().roots.change)
@@ -3672,32 +3726,41 @@ mod tests {
             ExternalPayoutClaim::<VerifyingKey, ShaDigest>::decode_cfg(claim.encode(), &())
                 .unwrap();
         assert_eq!(decoded, claim);
-        let mut unexpected_predecessor = claim.clone();
-        unexpected_predecessor.predecessor = Some(claim.row);
+        let mut wrong_kind_row = prepared.close().rows[0].clone();
+        wrong_kind_row.output = SettlementOutput::Withdrawal(20);
+        let wrong_kind_leaf =
+            AccountChange::from_row::<Sha256>(&wrong_kind_row, &prepared.close().shard_sets[0])
+                .unwrap();
+        let mut wrong_kind_builder =
+            commitment::Builder::<Sha256>::new(VectorKind::Change, 1).unwrap();
+        wrong_kind_builder
+            .add_values(
+                std::slice::from_ref(&wrong_kind_leaf.guard::<Sha256>()),
+                &Sequential,
+            )
+            .unwrap();
+        let wrong_kind_tree = wrong_kind_builder.build(&Sequential).unwrap();
+        let wrong_kind = ExternalPayoutClaim {
+            leaf: wrong_kind_leaf,
+            opening: wrong_kind_tree.opening(0).unwrap(),
+        };
         assert!(matches!(
-            unexpected_predecessor.verify::<Sha256>(&prepared.close().roots.change),
+            wrong_kind.verify::<Sha256>(&wrong_kind_tree.root()),
             Err(TransitionError::PayoutClaim)
         ));
-        assert!(
-            ExternalPayoutClaim::<VerifyingKey, ShaDigest>::decode_cfg(
-                unexpected_predecessor.encode(),
-                &(),
-            )
-            .is_err()
-        );
 
         let close = prepared.close();
 
         assert_eq!(close.rows.last().unwrap().prefix.payout, 20);
-        let (_, closing) = derive_state_vectors(
+        let (_, successor) = derive_state_vectors(
             &close.unchanged,
             &close.rows,
             u64::from(commitment::MAX_VECTOR_LENGTH),
         )
         .unwrap();
-        assert_eq!(closing.len(), 1);
-        assert_eq!(closing[0].account, payer.public_key());
-        assert_eq!(closing[0].state.balance, 80);
+        assert_eq!(successor.len(), 1);
+        assert_eq!(successor[0].account, payer.public_key());
+        assert_eq!(successor[0].state.balance, 80);
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close).unwrap();
     }
 
@@ -3711,26 +3774,26 @@ mod tests {
             SigningKey::from_seed(196),
         ];
         accounts.sort_by_key(SigningKey::public_key);
-        let closing_payer = &accounts[0];
-        let closing_recipient = &accounts[1];
+        let close_payer = &accounts[0];
+        let close_recipient = &accounts[1];
         let external_payer = &accounts[2];
         let external_recipient = &accounts[3];
-        let opening = state(100);
+        let predecessor = state(100);
         let mut leaves = vec![
             StateLeaf {
-                account: closing_payer.public_key(),
-                state: opening,
+                account: close_payer.public_key(),
+                state: predecessor,
             },
             StateLeaf {
                 account: external_payer.public_key(),
-                state: opening,
+                state: predecessor,
             },
         ];
         leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
         let cache = StateCache::new::<Sha256>(leaves).unwrap();
         let deployment = Sha256::hash(&[b"close-withdrawal-is-not-payout"]);
         let deposits = DepositBatch::new(vec![
-            DepositRecord::new(closing_recipient.public_key(), 5).unwrap(),
+            DepositRecord::new(close_recipient.public_key(), 5).unwrap(),
         ])
         .unwrap();
         let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
@@ -3739,7 +3802,7 @@ mod tests {
             Bytes::from_static(b"destination"),
             WithdrawalAction::Close,
             100,
-            closing_recipient,
+            close_recipient,
         )])
         .unwrap();
         let context = close_context::<Sha256, _, _>(
@@ -3755,11 +3818,11 @@ mod tests {
             assignment(0),
         )
         .unwrap();
-        let closing_payment = payment(
+        let close_payment = payment(
             context.payment(),
             &operator,
-            closing_payer,
-            closing_recipient,
+            close_payer,
+            close_recipient,
             7,
         );
         let external_payment = payment(
@@ -3769,12 +3832,12 @@ mod tests {
             external_recipient,
             7,
         );
-        let closing_payer_shards =
-            ShardSet::empty(context.payment().epoch(), closing_payer.public_key());
-        let closing_recipient_shards = ShardSet::new(
+        let close_payer_shards =
+            ShardSet::empty(context.payment().epoch(), close_payer.public_key());
+        let close_recipient_shards = ShardSet::new(
             context.payment().epoch(),
-            closing_recipient.public_key(),
-            vec![ShardHead::new(0, closing_payment.clone())],
+            close_recipient.public_key(),
+            vec![ShardHead::new(0, close_payment.clone())],
         )
         .unwrap();
         let external_payer_shards =
@@ -3788,45 +3851,45 @@ mod tests {
         let mut pairs = vec![
             (
                 AccountRow {
-                    account: closing_payer.public_key(),
-                    opening,
-                    closing: AccountState {
+                    account: close_payer.public_key(),
+                    predecessor,
+                    successor: AccountState {
                         balance: 93,
                         cumulative_debit: 7,
-                        ..opening
+                        ..predecessor
                     },
-                    outgoing: Some(closing_payment),
-                    credit_root: closing_payer_shards.root::<Sha256>().unwrap(),
+                    outgoing: Some(close_payment),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
-                closing_payer_shards,
+                close_payer_shards,
             ),
             (
                 AccountRow {
-                    account: closing_recipient.public_key(),
-                    opening: AccountState::default(),
-                    closing: AccountState {
+                    account: close_recipient.public_key(),
+                    predecessor: AccountState::default(),
+                    successor: AccountState {
                         cumulative_credit: 7,
                         receipt_count: 1,
                         ..AccountState::default()
                     },
                     outgoing: None,
-                    credit_root: closing_recipient_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
-                closing_recipient_shards,
+                close_recipient_shards,
             ),
             (
                 AccountRow {
                     account: external_payer.public_key(),
-                    opening,
-                    closing: AccountState {
+                    predecessor,
+                    successor: AccountState {
                         balance: 93,
                         cumulative_debit: 7,
-                        ..opening
+                        ..predecessor
                     },
                     outgoing: Some(external_payment),
-                    credit_root: external_payer_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 external_payer_shards,
@@ -3834,14 +3897,14 @@ mod tests {
             (
                 AccountRow {
                     account: external_recipient.public_key(),
-                    opening: AccountState::default(),
-                    closing: AccountState {
+                    predecessor: AccountState::default(),
+                    successor: AccountState {
                         cumulative_credit: 7,
                         receipt_count: 1,
                         ..AccountState::default()
                     },
                     outgoing: None,
-                    credit_root: external_recipient_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 external_recipient_shards,
@@ -3876,37 +3939,25 @@ mod tests {
         assert_eq!(terminal.payout, 7);
         assert_eq!(
             prepared
-                .withdrawal_claim::<Sha256>(&withdrawals, &closing_recipient.public_key())
+                .withdrawal_claim::<Sha256>(&withdrawals, &close_recipient.public_key())
                 .unwrap()
-                .verify::<Sha256>(
-                    context.deployment(),
-                    context.withdrawal_root(),
-                    &prepared.close().roots.change,
-                )
+                .verify::<Sha256>(&prepared.close().roots.withdrawal_outputs)
                 .unwrap(),
-            12
+            withdrawal_output(b"destination", 12)
         );
         assert!(matches!(
-            prepared.external_payout_claim(&closing_recipient.public_key()),
+            prepared.external_payout_claim(&close_recipient.public_key()),
             Err(TransitionError::PayoutClaim)
         ));
 
         let position = prepared
             .close()
             .rows
-            .binary_search_by(|row| row.account.cmp(&closing_recipient.public_key()))
+            .binary_search_by(|row| row.account.cmp(&close_recipient.public_key()))
             .unwrap() as u32;
-        let positions = if position == 0 {
-            vec![position]
-        } else {
-            vec![position - 1, position]
-        };
         let forged = ExternalPayoutClaim {
-            predecessor: position
-                .checked_sub(1)
-                .map(|position| prepared.close().rows[position as usize].clone()),
-            row: prepared.close().rows[position as usize].clone(),
-            change_opening: prepared.changes.multi_opening(&positions).unwrap(),
+            leaf: prepared.change_leaves[position as usize].clone(),
+            opening: prepared.changes.opening(position).unwrap(),
         };
         assert!(matches!(
             forged.verify::<Sha256>(&prepared.close().roots.change),
@@ -3921,7 +3972,6 @@ mod tests {
         let genuine = prepared
             .external_payout_claim(&external_recipient.public_key())
             .unwrap();
-        assert!(genuine.predecessor.is_some());
         assert_eq!(
             genuine
                 .verify::<Sha256>(&prepared.close().roots.change)
@@ -3931,19 +3981,12 @@ mod tests {
                 amount: 7,
             }
         );
-        let mut missing_predecessor = genuine;
-        missing_predecessor.predecessor = None;
+        let mut wrong_opening = genuine;
+        wrong_opening.opening.position = position;
         assert!(matches!(
-            missing_predecessor.verify::<Sha256>(&prepared.close().roots.change),
-            Err(TransitionError::PayoutClaim)
+            wrong_opening.verify::<Sha256>(&prepared.close().roots.change),
+            Err(TransitionError::Commitment(_))
         ));
-        assert!(
-            ExternalPayoutClaim::<VerifyingKey, ShaDigest>::decode_cfg(
-                missing_predecessor.encode(),
-                &(),
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -4080,7 +4123,7 @@ mod tests {
         );
 
         let mut shifted = member.clone();
-        shifted.opening.opening.start = shifted.opening.opening.start.saturating_add(1);
+        shifted.predecessor.opening.start = shifted.predecessor.opening.start.saturating_add(1);
         assert!(
             validate_slice::<Sha256, _, _>(
                 &fixture.context,
@@ -4298,7 +4341,7 @@ mod tests {
     }
 
     #[test]
-    fn epoch_anchor_binds_liability_but_not_opening_root() {
+    fn epoch_anchor_binds_liability_but_not_predecessor_root() {
         let operator = SigningKey::from_seed(70);
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
@@ -4349,7 +4392,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             wrong_liability.bind::<Sha256>(&first_cache, &deposits, &withdrawals),
-            Err(TransitionError::OpeningLiability)
+            Err(TransitionError::PredecessorLiability)
         ));
         let first = epoch
             .clone()
@@ -4359,7 +4402,7 @@ mod tests {
             .bind::<Sha256>(&second_cache, &deposits, &withdrawals)
             .unwrap();
 
-        assert_ne!(first.opening_root(), second.opening_root());
+        assert_ne!(first.predecessor_root(), second.predecessor_root());
         assert_eq!(first.payment(), &payment);
         assert_eq!(second.payment(), &payment);
     }
@@ -4436,10 +4479,10 @@ mod tests {
             sealed_withdrawal_root
         );
 
-        let opening = state(10);
+        let predecessor = state(10);
         let cache = StateCache::new::<Sha256>(vec![StateLeaf {
             account: account.public_key(),
-            state: opening,
+            state: predecessor,
         }])
         .unwrap();
         let context = close_context::<Sha256, _, _>(
@@ -4459,10 +4502,10 @@ mod tests {
         let mut pairs = vec![(
             AccountRow {
                 account: account.public_key(),
-                opening,
-                closing: state(15),
+                predecessor,
+                successor: state(15),
                 outgoing: None,
-                credit_root: shards.root::<Sha256>().unwrap(),
+                output: SettlementOutput::None,
                 prefix: Prefix::default(),
             },
             shards,
@@ -4544,10 +4587,10 @@ mod tests {
     fn sealing_rejects_zero_net_boundary_without_state_change() {
         let operator = SigningKey::from_seed(72);
         let account = SigningKey::from_seed(73);
-        let opening = state(10);
+        let predecessor = state(10);
         let cache = StateCache::new::<Sha256>(vec![StateLeaf {
             account: account.public_key(),
-            state: opening,
+            state: predecessor,
         }])
         .unwrap();
         let deployment = Sha256::hash(&[b"equal-flow-deployment"]);
@@ -4623,18 +4666,52 @@ mod tests {
     #[test]
     fn challenge_index_builds_present_and_absent_account_evidence() {
         let fixture = payment_fixture();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.close).unwrap();
+        let index = ChallengeIndex::new::<Sha256>(&fixture.context, &fixture.close).unwrap();
         assert_eq!(index.root(), fixture.close.roots.change);
         let payer = fixture.payment.payer();
         let present = index.account_lookup(&fixture.cache, payer).unwrap();
         let resolved = present
             .resolve::<Sha256>(
-                &fixture.close.roots.opening,
+                fixture.context.predecessor_root(),
                 &fixture.close.roots.change,
                 payer,
             )
             .unwrap();
-        assert!(resolved.row.is_some());
+        let payer_row = fixture
+            .close
+            .rows
+            .iter()
+            .find(|row| &row.account == payer)
+            .unwrap();
+        assert_eq!(
+            resolved.terminal_debit,
+            payer_row.successor.cumulative_debit
+        );
+        assert_eq!(
+            resolved.leaf.as_ref().map(AccountChange::account),
+            Some(payer)
+        );
+
+        let recipient = fixture.payment.recipient();
+        let recipient_position = fixture
+            .close
+            .rows
+            .binary_search_by(|row| row.account.cmp(recipient))
+            .unwrap();
+        let receipt = fixture.payment.receipt().body();
+        let recipient_lookup = index
+            .higher_shard_tip_lookup::<Sha256>(
+                recipient,
+                Some(&fixture.close.shard_sets[recipient_position]),
+                receipt.shard(),
+            )
+            .unwrap();
+        let tip = recipient_lookup
+            .resolve::<Sha256>(&fixture.close.roots.change, recipient, receipt.shard())
+            .unwrap()
+            .unwrap();
+        assert_eq!(tip.cumulative_credit, receipt.cumulative_shard_credit());
+        assert_eq!(tip.index, receipt.index());
 
         let operator = SigningKey::from_seed(19);
         let dormant = SigningKey::from_seed(20).public_key();
@@ -4667,13 +4744,25 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let index = ChallengeIndex::new::<Sha256>(&close).unwrap();
+        let index = ChallengeIndex::new::<Sha256>(&context, &close).unwrap();
         let absent = index.account_lookup(&cache, &dormant).unwrap();
         let resolved = absent
-            .resolve::<Sha256>(&close.roots.opening, &close.roots.change, &dormant)
+            .resolve::<Sha256>(context.predecessor_root(), &close.roots.change, &dormant)
             .unwrap();
-        assert!(resolved.row.is_none());
-        assert_eq!(resolved.opening, resolved.closing);
+        assert_eq!(
+            resolved.terminal_debit,
+            cache.leaves()[0].state.cumulative_debit
+        );
+        assert!(resolved.leaf.is_none());
+        let absent = index
+            .higher_shard_tip_lookup::<Sha256>(&dormant, None, 0)
+            .unwrap();
+        assert!(
+            absent
+                .resolve::<Sha256>(&close.roots.change, &dormant, 0)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -4682,7 +4771,7 @@ mod tests {
         assert!(close.rows.is_empty());
         assert!(close.shard_sets.is_empty());
         assert_eq!(close.unchanged.len(), 1);
-        assert_eq!(close.roots.opening, close.roots.closing);
+        assert_eq!(*context.predecessor_root(), close.roots.successor);
         assert_eq!(close.rows.last().map(|row| row.prefix), None);
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
     }
@@ -4692,11 +4781,11 @@ mod tests {
         let (context, deposits, withdrawals, mut close) = empty_fixture();
         validate_header::<Sha256, _, _>(&context, &close.header, &close.roots).unwrap();
 
-        close.roots.closing.digest = Sha256::hash(&[b"hidden-empty-change"]);
-        close.header = Header::new::<Sha256, _>(context.payment(), &close.roots);
+        close.roots.successor.digest = Sha256::hash(&[b"hidden-empty-change"]);
+        close.header = Header::new::<Sha256, _>(&context, &close.roots);
         assert!(matches!(
             validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close),
-            Err(TransitionError::ClosingRoot)
+            Err(TransitionError::SuccessorRoot)
         ));
     }
 
@@ -4729,10 +4818,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            close.roots.opening,
+            *context.predecessor_root(),
             commitment::empty_root::<Sha256>(VectorKind::State)
         );
-        assert_eq!(close.roots.opening, close.roots.closing);
+        assert_eq!(*context.predecessor_root(), close.roots.successor);
         assert_eq!(
             close.roots.change,
             commitment::empty_root::<Sha256>(VectorKind::Change)
@@ -4777,14 +4866,14 @@ mod tests {
         let shards = ShardSet::empty(context.payment().epoch(), account.clone());
         let row = AccountRow {
             account,
-            opening: state(1),
-            closing: AccountState {
+            predecessor: state(1),
+            successor: AccountState {
                 balance: 2,
                 active: true,
                 ..AccountState::default()
             },
             outgoing: None,
-            credit_root: shards.root::<CountingHasher>().unwrap(),
+            output: SettlementOutput::None,
             prefix: Prefix {
                 deposit: 1,
                 ..Prefix::default()
@@ -4823,12 +4912,12 @@ mod tests {
         assert_eq!(slices.len(), 1);
         assert!(
             slice_hashes > 1_024,
-            "slice assembly did not rebuild the {slice_hashes}-hash closing tree"
+            "slice assembly did not rebuild the {slice_hashes}-hash successor tree"
         );
     }
 
     #[test]
-    fn zero_balance_payment_removes_account_from_closing_state() {
+    fn zero_balance_payment_removes_account_from_successor_state() {
         let operator = SigningKey::from_seed(25);
         let payer = SigningKey::from_seed(26);
         let recipient = SigningKey::from_seed(27);
@@ -4869,7 +4958,7 @@ mod tests {
             vec![ShardHead::new(0, payment.clone())],
         )
         .unwrap();
-        let recipient_closing = AccountState {
+        let recipient_successor = AccountState {
             balance: 25,
             cumulative_credit: 20,
             receipt_count: 1,
@@ -4880,13 +4969,13 @@ mod tests {
             (
                 AccountRow {
                     account: payer.public_key(),
-                    opening: payer_opening,
-                    closing: AccountState {
+                    predecessor: payer_opening,
+                    successor: AccountState {
                         cumulative_debit: 20,
                         ..AccountState::default()
                     },
                     outgoing: Some(payment),
-                    credit_root: payer_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 payer_shards,
@@ -4894,10 +4983,10 @@ mod tests {
             (
                 AccountRow {
                     account: recipient.public_key(),
-                    opening: recipient_opening,
-                    closing: recipient_closing,
+                    predecessor: recipient_opening,
+                    successor: recipient_successor,
                     outgoing: None,
-                    credit_root: recipient_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 recipient_shards,
@@ -4920,25 +5009,25 @@ mod tests {
             .validate::<Sha256>(&context, &deposits, &withdrawals)
             .unwrap();
 
-        assert_eq!(prepared.closing_leaves.len(), 1);
-        assert_eq!(prepared.closing_leaves[0].account, recipient.public_key());
-        assert_eq!(prepared.closing_leaves[0].state, recipient_closing);
+        assert_eq!(prepared.successor_leaves.len(), 1);
+        assert_eq!(prepared.successor_leaves[0].account, recipient.public_key());
+        assert_eq!(prepared.successor_leaves[0].state, recipient_successor);
         assert!(
             prepared
-                .closing_leaves
+                .successor_leaves
                 .iter()
                 .all(|leaf| leaf.state.balance > 0)
         );
     }
 
     #[test]
-    fn close_sweeps_opening_balance_and_deactivates() {
+    fn close_sweeps_predecessor_balance_and_deactivates() {
         let operator = SigningKey::from_seed(30);
         let account = SigningKey::from_seed(31);
-        let opening = state(10);
+        let predecessor = state(10);
         let cache = StateCache::new::<Sha256>(vec![StateLeaf {
             account: account.public_key(),
-            state: opening,
+            state: predecessor,
         }])
         .unwrap();
         let deployment = Sha256::hash(&[b"deployment"]);
@@ -4970,14 +5059,14 @@ mod tests {
         let mut pairs = vec![(
             AccountRow {
                 account: account.public_key(),
-                opening,
-                closing: AccountState {
+                predecessor,
+                successor: AccountState {
                     balance: 0,
                     active: false,
-                    ..opening
+                    ..predecessor
                 },
                 outgoing: None,
-                credit_root: shards.root::<Sha256>().unwrap(),
+                output: SettlementOutput::None,
                 prefix: Prefix::default(),
             },
             shards,
@@ -5024,7 +5113,7 @@ mod tests {
         assert_eq!(withdrawals.total(), 0);
         assert_eq!(close.rows.last().unwrap().prefix.withdrawal, 10);
         assert_eq!(
-            checked_closing_liability(context.opening_liability(), 0, 10, 0).unwrap(),
+            checked_successor_liability(context.predecessor_liability(), 0, 10, 0).unwrap(),
             0
         );
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
@@ -5035,55 +5124,58 @@ mod tests {
             &Sequential,
         )
         .unwrap();
+        let expected = withdrawal_output(b"destination", 10);
+        assert_eq!(claim.output(), &expected);
+        assert_eq!(claim.position(), 0);
         assert_eq!(
             claim
-                .verify::<Sha256>(
-                    context.deployment(),
-                    context.withdrawal_root(),
-                    &close.roots.change,
-                )
+                .verify::<Sha256>(&close.roots.withdrawal_outputs)
                 .unwrap(),
-            10
+            expected
         );
 
-        let mut wrong_prefix = claim.clone();
-        wrong_prefix.row.prefix.withdrawal = 9;
-        let wrong_prefix_tree = change_tree::<Sha256, _, _>(&[wrong_prefix.row.clone()]).unwrap();
-        wrong_prefix.change_opening = wrong_prefix_tree.multi_opening(&[0]).unwrap();
+        let mut wrong_destination = claim.clone();
+        wrong_destination.output.destination = Bytes::from_static(b"wrong-destination");
         assert!(matches!(
-            wrong_prefix.verify::<Sha256>(
-                context.deployment(),
-                context.withdrawal_root(),
-                &wrong_prefix_tree.root(),
-            ),
-            Err(TransitionError::WithdrawalClaim)
+            wrong_destination.verify::<Sha256>(&close.roots.withdrawal_outputs),
+            Err(TransitionError::Commitment(_))
         ));
 
-        let mut wrong_tail = claim.clone();
-        wrong_tail.row.closing.balance = 1;
-        wrong_tail.row.closing.active = true;
-        wrong_tail.row.prefix.withdrawal = 9;
-        let wrong_tail_tree = change_tree::<Sha256, _, _>(&[wrong_tail.row.clone()]).unwrap();
-        wrong_tail.change_opening = wrong_tail_tree.multi_opening(&[0]).unwrap();
+        let mut wrong_amount = claim.clone();
+        wrong_amount.output.amount = 9;
         assert!(matches!(
-            wrong_tail.verify::<Sha256>(
-                context.deployment(),
-                context.withdrawal_root(),
-                &wrong_tail_tree.root(),
-            ),
-            Err(TransitionError::WithdrawalClaim)
+            wrong_amount.verify::<Sha256>(&close.roots.withdrawal_outputs),
+            Err(TransitionError::Commitment(_))
         ));
 
-        let decoded = WithdrawalClaim::<VerifyingKey, ShaDigest>::decode_cfg(
-            claim.encode(),
-            &(..=usize::MAX).into(),
-        )
-        .unwrap();
+        let mut wrong_root = close.roots.withdrawal_outputs;
+        wrong_root.digest = Sha256::hash(&[b"wrong-withdrawal-output-root"]);
+        assert!(matches!(
+            claim.verify::<Sha256>(&wrong_root),
+            Err(TransitionError::Commitment(_))
+        ));
+
+        let amount_request = SignedWithdrawal::sign(
+            deployment,
+            withdrawal_root,
+            Bytes::from_static(b"destination"),
+            amount(10),
+            100,
+            &account,
+        );
+        assert_eq!(
+            WithdrawalOutput::from_request(&amount_request, 10),
+            claim.output().clone()
+        );
+
+        let decoded =
+            WithdrawalClaim::<ShaDigest>::decode_cfg(claim.encode(), &(..=usize::MAX).into())
+                .unwrap();
         assert_eq!(decoded, claim);
     }
 
     #[test]
-    fn withdrawal_claim_derives_epoch_tail_balance_from_adjacent_prefixes() {
+    fn withdrawal_claim_opens_compact_epoch_tail_output() {
         let operator = SigningKey::from_seed(34);
         let mut accounts = [SigningKey::from_seed(35), SigningKey::from_seed(36)];
         accounts.sort_by_key(SigningKey::public_key);
@@ -5098,7 +5190,7 @@ mod tests {
                 .collect(),
         )
         .unwrap();
-        let deployment = Sha256::hash(&[b"withdrawal-claim-adjacent-prefix"]);
+        let deployment = Sha256::hash(&[b"withdrawal-claim-compact-output"]);
         let deposits = DepositBatch::new(vec![
             DepositRecord::new(accounts[1].public_key(), 7).unwrap(),
         ])
@@ -5140,14 +5232,14 @@ mod tests {
                 (
                     AccountRow {
                         account: leaf.account.clone(),
-                        opening: leaf.state,
-                        closing: AccountState {
+                        predecessor: leaf.state,
+                        successor: AccountState {
                             balance: 0,
                             active: false,
                             ..leaf.state
                         },
                         outgoing: None,
-                        credit_root: shards.root::<Sha256>().unwrap(),
+                        output: SettlementOutput::None,
                         prefix: Prefix::default(),
                     },
                     shards,
@@ -5173,28 +5265,123 @@ mod tests {
             &Sequential,
         )
         .unwrap();
-        assert!(claim.predecessor.is_some());
+        let one_opening = claim.output_opening.encode_size();
+        let expected = withdrawal_output(b"destination", 18);
+        assert_eq!(claim.output(), &expected);
+        assert_eq!(claim.position(), 1);
+        assert_eq!(
+            claim.encode_size(),
+            claim.output.encode_size() + one_opening
+        );
         assert_eq!(
             claim
-                .verify::<Sha256>(
-                    context.deployment(),
-                    context.withdrawal_root(),
-                    &close.roots.change,
-                )
+                .verify::<Sha256>(&close.roots.withdrawal_outputs)
                 .unwrap(),
-            18
+            expected
+        );
+        let mut wrong_position = claim;
+        wrong_position.output_opening.position = 0;
+        assert!(matches!(
+            wrong_position.verify::<Sha256>(&close.roots.withdrawal_outputs),
+            Err(TransitionError::Commitment(_))
+        ));
+
+        let mut slice = assemble_slices::<Sha256, _, _>(
+            &cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &Sequential,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let mut outputs = derive_withdrawal_outputs(&close.rows, &withdrawals).unwrap();
+        outputs.push(outputs[0].clone());
+        let mut builder = commitment::Builder::<Sha256>::new(
+            VectorKind::WithdrawalOutput,
+            u32::try_from(outputs.len()).unwrap(),
+        )
+        .unwrap();
+        builder.add_values(&outputs, &Sequential).unwrap();
+        let extended = builder.build(&Sequential).unwrap();
+        let mut roots = close.roots;
+        roots.withdrawal_outputs = extended.root();
+        let header = Header::new::<Sha256, _>(&context, &roots);
+        slice.withdrawal_outputs.opening = Some(extended.range_opening(0, 2).unwrap());
+        assert!(matches!(
+            validate_slice::<Sha256, _, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &header,
+                &roots,
+                &slice,
+            ),
+            Err(TransitionError::SliceRange)
+        ));
+    }
+
+    #[test]
+    fn amount_and_close_have_the_same_compact_withdrawal_output_shape() {
+        let account = SigningKey::from_seed(39);
+        let deployment = Sha256::hash(&[b"compact-withdrawal-action-shape"]);
+        let state_root = Sha256::hash(&[b"compact-withdrawal-action-state"]);
+        let amount_request = SignedWithdrawal::sign(
+            deployment,
+            state_root,
+            Bytes::from_static(b"destination"),
+            amount(7),
+            100,
+            &account,
+        );
+        let close_request = SignedWithdrawal::sign(
+            deployment,
+            state_root,
+            Bytes::from_static(b"destination"),
+            WithdrawalAction::Close,
+            100,
+            &account,
         );
 
-        let mut missing_predecessor = claim;
-        missing_predecessor.predecessor = None;
-        assert!(matches!(
-            missing_predecessor.verify::<Sha256>(
-                context.deployment(),
-                context.withdrawal_root(),
-                &close.roots.change,
-            ),
-            Err(TransitionError::WithdrawalClaim)
-        ));
+        let amount_output = WithdrawalOutput::from_request(&amount_request, 7);
+        let close_output = WithdrawalOutput::from_request(&close_request, 7);
+        assert_eq!(amount_output, close_output);
+        assert_eq!(amount_output.encode(), close_output.encode());
+    }
+
+    #[test]
+    fn withdrawal_claim_encoding_grows_logarithmically() {
+        let output = withdrawal_output(b"opaque-destination-21", 7);
+        assert_eq!(output.destination().len(), 21);
+        let mut previous_size = None;
+
+        for exponent in 0..=10 {
+            let count = 1_u32 << exponent;
+            let outputs = vec![output.clone(); usize::try_from(count).unwrap()];
+            let mut builder =
+                commitment::Builder::<Sha256>::new(VectorKind::WithdrawalOutput, count).unwrap();
+            builder.add_values(&outputs, &Sequential).unwrap();
+            let tree = builder.build(&Sequential).unwrap();
+            let claim = WithdrawalClaim {
+                output: output.clone(),
+                output_opening: tree.opening(count - 1).unwrap(),
+            };
+
+            assert_eq!(claim.position(), count - 1);
+            assert_eq!(
+                claim.verify::<Sha256>(&tree.root()).unwrap(),
+                output.clone()
+            );
+            if exponent == 0 {
+                assert_eq!(claim.encode_size(), 39);
+            }
+            if let Some(previous_size) = previous_size {
+                assert_eq!(claim.encode_size() - previous_size, ShaDigest::SIZE);
+            }
+            previous_size = Some(claim.encode_size());
+        }
     }
 
     #[test]
@@ -5235,14 +5422,14 @@ mod tests {
             &withdrawals,
             vec![AccountRow {
                 account: account.public_key(),
-                opening: AccountState::default(),
-                closing: state(5),
+                predecessor: AccountState::default(),
+                successor: state(5),
                 outgoing: None,
-                credit_root: shards.root::<Sha256>().unwrap(),
+                output: SettlementOutput::Withdrawal(4),
                 prefix: Prefix {
                     deposit: 9,
                     withdrawal: 4,
-                    withdrawals: 1,
+                    withdrawal_count: 1,
                     ..Prefix::default()
                 },
             }],
@@ -5256,30 +5443,18 @@ mod tests {
             &Sequential,
         )
         .unwrap();
+        let expected = withdrawal_output(b"destination", 4);
+        assert_eq!(claim.output(), &expected);
         assert_eq!(
             claim
-                .verify::<Sha256>(
-                    context.deployment(),
-                    context.withdrawal_root(),
-                    &close.roots.change,
-                )
+                .verify::<Sha256>(&close.roots.withdrawal_outputs)
                 .unwrap(),
-            4
+            expected
         );
-
-        let mut inexact = claim;
-        inexact.row.closing.balance = 4;
-        inexact.row.prefix.withdrawal = 5;
-        let inexact_tree = change_tree::<Sha256, _, _>(&[inexact.row.clone()]).unwrap();
-        inexact.change_opening = inexact_tree.multi_opening(&[0]).unwrap();
-        assert!(matches!(
-            inexact.verify::<Sha256>(
-                context.deployment(),
-                context.withdrawal_root(),
-                &inexact_tree.root(),
-            ),
-            Err(TransitionError::WithdrawalClaim)
-        ));
+        assert_eq!(
+            claim.encode_size(),
+            claim.output.encode_size() + claim.output_opening.encode_size()
+        );
     }
 
     #[test]
@@ -5309,14 +5484,14 @@ mod tests {
         let shards = ShardSet::empty(context.payment().epoch(), account.public_key());
         let row = AccountRow {
             account: account.public_key(),
-            opening: AccountState::default(),
-            closing: AccountState {
+            predecessor: AccountState::default(),
+            successor: AccountState {
                 balance: 5,
                 active: true,
                 ..AccountState::default()
             },
             outgoing: None,
-            credit_root: shards.root::<Sha256>().unwrap(),
+            output: SettlementOutput::None,
             prefix: Prefix {
                 deposit: 5,
                 ..Prefix::default()
@@ -5331,18 +5506,18 @@ mod tests {
             vec![shards],
         )
         .unwrap();
-        assert!(close.rows[0].closing.active);
+        assert!(close.rows[0].successor.active);
         assert!(close.unchanged.is_empty());
-        assert_ne!(close.roots.opening, close.roots.closing);
+        assert_ne!(*context.predecessor_root(), close.roots.successor);
         assert_eq!(
-            checked_closing_liability(context.opening_liability(), 5, 0, 0).unwrap(),
+            checked_successor_liability(context.predecessor_liability(), 5, 0, 0).unwrap(),
             5
         );
 
-        let opening = state(5);
+        let predecessor = state(5);
         let cache = StateCache::new::<Sha256>(vec![StateLeaf {
             account: account.public_key(),
-            state: opening,
+            state: predecessor,
         }])
         .unwrap();
         let authorization_root = Sha256::hash(&[b"finalized"]);
@@ -5372,13 +5547,13 @@ mod tests {
         let shards = ShardSet::empty(context.payment().epoch(), account.public_key());
         let row = AccountRow {
             account: account.public_key(),
-            opening,
-            closing: AccountState::default(),
+            predecessor,
+            successor: AccountState::default(),
             outgoing: None,
-            credit_root: shards.root::<Sha256>().unwrap(),
+            output: SettlementOutput::Withdrawal(5),
             prefix: Prefix {
                 withdrawal: 5,
-                withdrawals: 1,
+                withdrawal_count: 1,
                 ..Prefix::default()
             },
         };
@@ -5391,11 +5566,11 @@ mod tests {
             vec![shards],
         )
         .unwrap();
-        assert!(!close.rows[0].closing.active);
+        assert!(!close.rows[0].successor.active);
         assert!(close.rows[0].is_changed());
         assert!(close.unchanged.is_empty());
         assert_eq!(
-            close.roots.closing,
+            close.roots.successor,
             commitment::empty_root::<Sha256>(VectorKind::State)
         );
     }
@@ -5447,8 +5622,8 @@ mod tests {
             .binary_search_by(|row| row.account.cmp(&fixture.payer.public_key()))
             .unwrap();
         fixture.close.rows[payer_position].outgoing = Some(payment.clone());
-        fixture.close.rows[payer_position].closing.balance = 0;
-        fixture.close.rows[payer_position].closing.active = false;
+        fixture.close.rows[payer_position].successor.balance = 0;
+        fixture.close.rows[payer_position].successor.active = false;
         let recipient_position = fixture
             .close
             .rows
@@ -5460,12 +5635,8 @@ mod tests {
             vec![ShardHead::new(0, payment)],
         )
         .unwrap();
-        fixture.close.rows[recipient_position].credit_root = fixture.close.shard_sets
-            [recipient_position]
-            .root::<Sha256>()
-            .unwrap();
-        fixture.close.rows[recipient_position].closing.balance = 0;
-        fixture.close.rows[recipient_position].closing.active = false;
+        fixture.close.rows[recipient_position].successor.balance = 0;
+        fixture.close.rows[recipient_position].successor.active = false;
         let mut pairs = fixture
             .close
             .rows
@@ -5489,7 +5660,7 @@ mod tests {
         assert_eq!(close.rows.last().unwrap().prefix.debit, 20);
         assert_eq!(close.rows.last().unwrap().prefix.credit, 20);
         assert_eq!(
-            close.roots.closing,
+            close.roots.successor,
             commitment::empty_root::<Sha256>(VectorKind::State)
         );
 
@@ -5502,13 +5673,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             payer_claim
-                .verify::<Sha256>(
-                    context.deployment(),
-                    context.withdrawal_root(),
-                    &close.roots.change,
-                )
+                .verify::<Sha256>(&close.roots.withdrawal_outputs)
                 .unwrap(),
-            80
+            withdrawal_output(b"destination", 80)
         );
         let recipient_claim = assemble_withdrawal_claim::<Sha256, _, _>(
             &close,
@@ -5519,13 +5686,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             recipient_claim
-                .verify::<Sha256>(
-                    context.deployment(),
-                    context.withdrawal_root(),
-                    &close.roots.change,
-                )
+                .verify::<Sha256>(&close.roots.withdrawal_outputs)
                 .unwrap(),
-            60
+            withdrawal_output(b"destination", 60)
         );
     }
 
@@ -5567,30 +5730,30 @@ mod tests {
             .rows
             .binary_search_by(|row| row.account.cmp(&fixture.payer.public_key()))
             .unwrap();
-        fixture.close.rows[payer_position].closing.balance = 0;
-        fixture.close.rows[payer_position].closing.cumulative_debit = 100;
-        fixture.close.rows[payer_position].closing.active = false;
+        fixture.close.rows[payer_position].successor.balance = 0;
+        fixture.close.rows[payer_position]
+            .successor
+            .cumulative_debit = 100;
+        fixture.close.rows[payer_position].successor.active = false;
         fixture.close.rows[payer_position].outgoing = Some(payment.clone());
         let recipient_position = fixture
             .close
             .rows
             .binary_search_by(|row| row.account.cmp(&recipient.public_key()))
             .unwrap();
-        fixture.close.rows[recipient_position].closing.balance = 140;
+        fixture.close.rows[recipient_position].successor.balance = 140;
         fixture.close.rows[recipient_position]
-            .closing
+            .successor
             .cumulative_credit = 100;
-        fixture.close.rows[recipient_position].closing.receipt_count = 1;
+        fixture.close.rows[recipient_position]
+            .successor
+            .receipt_count = 1;
         fixture.close.shard_sets[recipient_position] = ShardSet::new(
             context.payment().epoch(),
             recipient.public_key(),
             vec![ShardHead::new(0, payment)],
         )
         .unwrap();
-        fixture.close.rows[recipient_position].credit_root = fixture.close.shard_sets
-            [recipient_position]
-            .root::<Sha256>()
-            .unwrap();
         let mut pairs = fixture
             .close
             .rows
@@ -5610,7 +5773,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(close.rows.last().unwrap().prefix.withdrawal, 0);
-        assert_eq!(close.rows.last().unwrap().prefix.withdrawals, 1);
+        assert_eq!(close.rows.last().unwrap().prefix.withdrawal_count, 1);
         let claim = assemble_withdrawal_claim::<Sha256, _, _>(
             &close,
             &withdrawals,
@@ -5620,24 +5783,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             claim
-                .verify::<Sha256>(
-                    context.deployment(),
-                    context.withdrawal_root(),
-                    &close.roots.change,
-                )
+                .verify::<Sha256>(&close.roots.withdrawal_outputs)
                 .unwrap(),
-            0
+            withdrawal_output(b"destination", 0)
         );
     }
 
     #[test]
-    fn mismatched_closing_root_is_rejected() {
+    fn mismatched_successor_root_is_rejected() {
         let (context, deposits, withdrawals, mut close) = empty_fixture();
-        close.roots.closing.digest = Sha256::hash(&[b"hidden"]);
-        close.header = Header::new::<Sha256, _>(context.payment(), &close.roots);
+        close.roots.successor.digest = Sha256::hash(&[b"hidden"]);
+        close.header = Header::new::<Sha256, _>(&context, &close.roots);
         assert!(matches!(
             validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close),
-            Err(TransitionError::ClosingRoot)
+            Err(TransitionError::SuccessorRoot)
         ));
     }
 
@@ -5658,7 +5817,7 @@ mod tests {
         ));
 
         let mut fixture = payment_fixture();
-        fixture.close.rows[0].closing.balance += 1;
+        fixture.close.rows[0].successor.balance += 1;
         assert!(matches!(
             validate_row::<Sha256, _, _>(
                 &fixture.context,
@@ -5679,6 +5838,28 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn settlement_output_is_derived_from_the_validated_row() {
+        let fixture = payment_fixture();
+        let mut rows = fixture.close.rows.clone();
+        rows[0].output = SettlementOutput::Withdrawal(1);
+        let prepared = prepare_close_with_strategy::<Sha256, _, _>(
+            &fixture.cache,
+            &fixture.context,
+            &fixture.deposits,
+            &fixture.withdrawals,
+            rows,
+            fixture.close.shard_sets.clone(),
+            &Sequential,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            prepared.validate::<Sha256>(&fixture.context, &fixture.deposits, &fixture.withdrawals,),
+            Err(TransitionError::SettlementOutput)
+        ));
     }
 
     #[test]
@@ -5765,7 +5946,7 @@ mod tests {
             .collect::<Vec<_>>();
         accounts.sort_unstable();
 
-        let opening = vec![
+        let predecessor = vec![
             StateLeaf {
                 account: accounts[0].clone(),
                 state: state(10),
@@ -5775,14 +5956,16 @@ mod tests {
                 state: state(20),
             },
         ];
-        let row = |account: VerifyingKey, opening, closing| {
-            let shards = ShardSet::empty(0, account.clone());
+        let row = |account: VerifyingKey,
+                   predecessor,
+                   successor|
+         -> AccountRow<VerifyingKey, ShaDigest> {
             AccountRow {
                 account,
-                opening,
-                closing,
+                predecessor,
+                successor,
                 outgoing: None,
-                credit_root: shards.root::<Sha256>().unwrap(),
+                output: SettlementOutput::None,
                 prefix: Prefix::default(),
             }
         };
@@ -5791,12 +5974,12 @@ mod tests {
             row(accounts[2].clone(), AccountState::default(), state(30)),
         ];
 
-        let unchanged = derive_unchanged(&opening, &rows).unwrap();
-        assert_eq!(unchanged, vec![opening[1].clone()]);
-        let (derived_opening, closing) = derive_state_vectors(&unchanged, &rows, 3).unwrap();
-        assert_eq!(derived_opening, opening);
+        let unchanged = derive_unchanged(&predecessor, &rows).unwrap();
+        assert_eq!(unchanged, vec![predecessor[1].clone()]);
+        let (derived_predecessor, successor) = derive_state_vectors(&unchanged, &rows, 3).unwrap();
+        assert_eq!(derived_predecessor, predecessor);
         assert_eq!(
-            closing,
+            successor,
             vec![
                 StateLeaf {
                     account: accounts[1].clone(),

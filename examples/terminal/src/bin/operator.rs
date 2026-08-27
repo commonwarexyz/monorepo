@@ -3,7 +3,7 @@ use clap::Parser;
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
 
 #[derive(Parser)]
-#[command(about = "Run the Commonware Clearing SQLite operator role")]
+#[command(about = "Run the Bajillion SQLite operator role")]
 struct Args {
     /// Native codec RPC listener.
     #[arg(long, default_value = "127.0.0.1:7001")]

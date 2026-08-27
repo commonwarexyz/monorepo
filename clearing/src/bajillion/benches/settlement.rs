@@ -6,7 +6,7 @@ use commonware_clearing::bajillion::{
     challenge::StateOpening,
     credit::ShardSet,
     settlement::{EpochDeadlinePolicy, SettlementChain, SettlementConfig},
-    state::{AccountRow, AccountState, Prefix, StateLeaf},
+    state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
         Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, RootBundle, StateCache,
         TerminalProof, prepare_close_with_strategy,
@@ -109,6 +109,7 @@ impl Validators {
     }
 }
 
+#[derive(Clone)]
 struct AdmissionFixture {
     context: TestContext,
     deposits: DepositBatch<VerifyingKey>,
@@ -122,7 +123,6 @@ struct AdmissionFixture {
 struct QueueInput {
     chain: TestChain,
     request: SignedWithdrawal<VerifyingKey, Digest>,
-    openings: Vec<StateOpening<VerifyingKey, Digest>>,
 }
 
 struct AdmitInput {
@@ -131,6 +131,34 @@ struct AdmitInput {
     roots: RootBundle<Digest>,
     terminal_proof: TestTerminalProof,
     certificate: bls12381::Certificate,
+}
+
+struct ChainSource {
+    cache: TestCache,
+    validators: Validators,
+}
+
+struct WithdrawalSource {
+    request: SignedWithdrawal<VerifyingKey, Digest>,
+    opening: StateOpening<VerifyingKey, Digest>,
+}
+
+struct QueueSource {
+    chain: ChainSource,
+    admissions: Vec<AdmissionFixture>,
+    request: SignedWithdrawal<VerifyingKey, Digest>,
+    openings: Vec<StateOpening<VerifyingKey, Digest>>,
+}
+
+struct CloseSource {
+    chain: ChainSource,
+    withdrawals: Vec<WithdrawalSource>,
+    admission: AdmissionFixture,
+}
+
+struct HardFaultSource {
+    chain: ChainSource,
+    withdrawals: Vec<WithdrawalSource>,
 }
 
 const fn nonzero_usize(value: usize) -> NonZeroUsize {
@@ -198,6 +226,23 @@ fn chain(cache: &TestCache, validators: &Validators, max_pending_epochs: usize) 
     .expect("benchmark settlement chain is valid")
 }
 
+impl ChainSource {
+    fn new(live_accounts: usize, validator_count: usize) -> (Self, Vec<Account>) {
+        let (cache, accounts) = state_fixture(live_accounts);
+        (
+            Self {
+                cache,
+                validators: Validators::new(validator_count),
+            },
+            accounts,
+        )
+    }
+
+    fn fresh_chain(&self, max_pending_epochs: usize) -> TestChain {
+        chain(&self.cache, &self.validators, max_pending_epochs)
+    }
+}
+
 fn context(
     cache: &TestCache,
     validators: &Validators,
@@ -233,7 +278,7 @@ fn withdrawal_close(
     let mut shard_sets = Vec::with_capacity(withdrawals.len());
     for request in withdrawals.requests() {
         let account = request.account().clone();
-        let opening = cache
+        let predecessor = cache
             .leaves()
             .iter()
             .find(|leaf| leaf.account == account)
@@ -241,30 +286,28 @@ fn withdrawal_close(
             .state;
         let (applied, closes_account) = match request.body().action() {
             WithdrawalAction::Amount(amount) => (amount.get(), false),
-            WithdrawalAction::Close => (opening.balance, true),
+            WithdrawalAction::Close => (predecessor.balance, true),
         };
-        let mut closing = opening;
-        closing.balance = closing
+        let mut successor = predecessor;
+        successor.balance = successor
             .balance
             .checked_sub(applied)
             .expect("benchmark withdrawal is affordable");
-        closing.active = opening.active && !closes_account;
+        successor.active = predecessor.active && !closes_account;
         let shards = ShardSet::empty(context.payment().epoch(), account.clone());
         prefix = prefix
             .checked_extend(Prefix {
                 withdrawal: applied,
-                withdrawals: 1,
+                withdrawal_count: 1,
                 ..Prefix::default()
             })
             .expect("benchmark totals are representable");
         rows.push(AccountRow {
             account,
-            opening,
-            closing,
+            predecessor,
+            successor,
             outgoing: None,
-            credit_root: shards
-                .root::<Sha256>()
-                .expect("benchmark credit root is valid"),
+            output: SettlementOutput::Withdrawal(applied),
             prefix,
         });
         shard_sets.push(shards);
@@ -320,7 +363,7 @@ fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
         certificate,
     } = admission;
     chain
-        .register(0, context, deposits, withdrawals)
+        .register_close(0, context, deposits, withdrawals)
         .expect("benchmark close can be registered");
     chain
         .admit(0, header, roots, terminal_proof, certificate)
@@ -342,108 +385,147 @@ fn signed_withdrawal(
     )
 }
 
-fn queue_input(depth: usize) -> QueueInput {
-    let (cache, accounts) = state_fixture(LIVE_ACCOUNTS);
-    let validators = Validators::new(1);
-    let mut chain = chain(&cache, &validators, depth);
-    for epoch in 0..depth {
-        let epoch = u64::try_from(epoch).expect("benchmark epoch fits in u64");
-        admit_fixture(
-            &mut chain,
-            admission_fixture(&cache, &validators, epoch, WithdrawalBatch::empty()),
-        );
+fn withdrawal_sources(
+    cache: &TestCache,
+    accounts: &[Account],
+    count: usize,
+    deadline: u64,
+) -> Vec<WithdrawalSource> {
+    accounts
+        .iter()
+        .take(count)
+        .map(|account| WithdrawalSource {
+            request: signed_withdrawal(cache, account, deadline),
+            opening: cache
+                .opening(&account.public)
+                .expect("benchmark account can be opened"),
+        })
+        .collect()
+}
+
+fn queue_withdrawals(chain: &mut TestChain, withdrawals: &[WithdrawalSource]) {
+    for withdrawal in withdrawals {
+        chain
+            .queue_withdrawal(
+                0,
+                withdrawal.request.clone(),
+                std::slice::from_ref(&withdrawal.opening),
+                |_| true,
+            )
+            .expect("benchmark withdrawal can be queued");
     }
-    let opening = cache
+}
+
+fn queue_source(depth: usize) -> QueueSource {
+    let (chain, accounts) = ChainSource::new(LIVE_ACCOUNTS, 1);
+    let admissions = (0..depth)
+        .map(|epoch| {
+            let epoch = u64::try_from(epoch).expect("benchmark epoch fits in u64");
+            admission_fixture(
+                &chain.cache,
+                &chain.validators,
+                epoch,
+                WithdrawalBatch::empty(),
+            )
+        })
+        .collect();
+    let opening = chain
+        .cache
         .opening(&accounts[0].public)
         .expect("benchmark account can be opened");
-    QueueInput {
+    let request = signed_withdrawal(&chain.cache, &accounts[0], WITHDRAWAL_DEADLINE);
+    QueueSource {
         chain,
-        request: signed_withdrawal(&cache, &accounts[0], WITHDRAWAL_DEADLINE),
+        admissions,
+        request,
         openings: vec![opening; depth + 1],
     }
 }
 
-fn admit_input() -> AdmitInput {
-    let (cache, accounts) = state_fixture(LIVE_ACCOUNTS);
-    let validators = Validators::new(ADMISSION_VALIDATORS);
-    let mut chain = chain(&cache, &validators, 1);
-    let request = signed_withdrawal(&cache, &accounts[0], WITHDRAWAL_DEADLINE);
+fn queue_input(source: &QueueSource) -> QueueInput {
+    let mut chain = source.chain.fresh_chain(source.admissions.len());
+    for admission in source.admissions.iter().cloned() {
+        admit_fixture(&mut chain, admission);
+    }
+    QueueInput {
+        chain,
+        request: source.request.clone(),
+    }
+}
+
+fn close_source(withdrawal_count: usize, validator_count: usize) -> CloseSource {
+    let (chain, accounts) = ChainSource::new(LIVE_ACCOUNTS, validator_count);
+    let withdrawals = withdrawal_sources(
+        &chain.cache,
+        &accounts,
+        withdrawal_count,
+        WITHDRAWAL_DEADLINE,
+    );
+    let mut seed_chain = chain.fresh_chain(1);
+    queue_withdrawals(&mut seed_chain, &withdrawals);
+    let admission = admission_fixture(
+        &chain.cache,
+        &chain.validators,
+        0,
+        seed_chain.pending_withdrawals(),
+    );
+    CloseSource {
+        chain,
+        withdrawals,
+        admission,
+    }
+}
+
+fn admit_input(source: &CloseSource) -> AdmitInput {
+    let mut chain = source.chain.fresh_chain(1);
+    queue_withdrawals(&mut chain, &source.withdrawals);
+    let AdmissionFixture {
+        context,
+        deposits,
+        withdrawals,
+        header,
+        roots,
+        terminal_proof,
+        certificate,
+    } = source.admission.clone();
     chain
-        .queue_withdrawal(
-            0,
-            request,
-            &[cache
-                .opening(&accounts[0].public)
-                .expect("benchmark account can be opened")],
-            |_| true,
-        )
-        .expect("benchmark withdrawal can be queued");
-    let admission = admission_fixture(&cache, &validators, 0, chain.pending_withdrawals());
-    chain
-        .register(
-            0,
-            admission.context,
-            admission.deposits,
-            admission.withdrawals,
-        )
+        .register_close(0, context, deposits, withdrawals)
         .expect("benchmark close can be registered");
     AdmitInput {
         chain,
-        header: admission.header,
-        roots: admission.roots,
-        terminal_proof: admission.terminal_proof,
-        certificate: admission.certificate,
+        header,
+        roots,
+        terminal_proof,
+        certificate,
     }
 }
 
-fn finalize_input(withdrawals: usize) -> TestChain {
-    let (cache, accounts) = state_fixture(LIVE_ACCOUNTS);
-    let validators = Validators::new(1);
-    let mut chain = chain(&cache, &validators, 1);
-    for account in accounts.iter().take(withdrawals) {
-        let request = signed_withdrawal(&cache, account, WITHDRAWAL_DEADLINE);
-        chain
-            .queue_withdrawal(
-                0,
-                request,
-                &[cache
-                    .opening(&account.public)
-                    .expect("benchmark account can be opened")],
-                |_| true,
-            )
-            .expect("benchmark withdrawal can be queued");
-    }
-    let admission = admission_fixture(&cache, &validators, 0, chain.pending_withdrawals());
-    admit_fixture(&mut chain, admission);
+fn finalize_input(source: &CloseSource) -> TestChain {
+    let mut chain = source.chain.fresh_chain(1);
+    queue_withdrawals(&mut chain, &source.withdrawals);
+    admit_fixture(&mut chain, source.admission.clone());
     chain
 }
 
-fn hard_fault_input(live_accounts: usize, claims: usize) -> (TestChain, TestCache) {
+fn hard_fault_source(live_accounts: usize, claims: usize) -> HardFaultSource {
     assert!(claims > 0 && claims <= live_accounts);
-    let (cache, accounts) = state_fixture(live_accounts);
-    let validators = Validators::new(1);
-    let mut chain = chain(&cache, &validators, 1);
-    for account in accounts.iter().take(claims) {
-        let request = signed_withdrawal(&cache, account, FAULT_DEADLINE);
-        chain
-            .queue_withdrawal(
-                0,
-                request,
-                &[cache
-                    .opening(&account.public)
-                    .expect("benchmark account can be opened")],
-                |_| true,
-            )
-            .expect("benchmark withdrawal can be queued");
-    }
+    let (chain, accounts) = ChainSource::new(live_accounts, 1);
+    let withdrawals = withdrawal_sources(&chain.cache, &accounts, claims, FAULT_DEADLINE);
+    HardFaultSource { chain, withdrawals }
+}
+
+fn hard_fault_input(source: &HardFaultSource) -> TestChain {
+    let mut chain = source.chain.fresh_chain(1);
+    queue_withdrawals(&mut chain, &source.withdrawals);
     chain
         .fault_expired(FAULT_DEADLINE)
         .expect("benchmark withdrawal deadline creates a hard fault");
-    (chain, cache)
+    chain
 }
 
 fn bench_queue_withdrawal(c: &mut Criterion) {
     for &depth in QUEUE_DEPTHS {
+        let source = queue_source(depth);
         c.bench_function(
             &format!(
                 "{}/op=queue depth={depth} live_accounts={LIVE_ACCOUNTS}",
@@ -451,14 +533,14 @@ fn bench_queue_withdrawal(c: &mut Criterion) {
             ),
             |b| {
                 b.iter_batched(
-                    || queue_input(depth),
+                    || queue_input(&source),
                     |mut input| {
                         input
                             .chain
                             .queue_withdrawal(
                                 black_box(0),
                                 input.request,
-                                black_box(&input.openings),
+                                black_box(&source.openings),
                                 |_| true,
                             )
                             .expect("benchmark withdrawal can be queued");
@@ -472,6 +554,7 @@ fn bench_queue_withdrawal(c: &mut Criterion) {
 }
 
 fn bench_admit(c: &mut Criterion) {
+    let source = close_source(1, ADMISSION_VALIDATORS);
     c.bench_function(
         &format!(
             "{}/op=admit live_accounts={LIVE_ACCOUNTS} n={ADMISSION_VALIDATORS} q={ADMISSION_QUORUM} withdrawals=1",
@@ -479,7 +562,7 @@ fn bench_admit(c: &mut Criterion) {
         ),
         |b| {
             b.iter_batched(
-                admit_input,
+                || admit_input(&source),
                 |mut input| {
                     black_box(
                         input
@@ -502,6 +585,7 @@ fn bench_admit(c: &mut Criterion) {
 
 fn bench_finalize(c: &mut Criterion) {
     for &withdrawals in FINALIZE_WITHDRAWALS {
+        let source = close_source(withdrawals, 1);
         c.bench_function(
             &format!(
                 "{}/op=finalize live_accounts={LIVE_ACCOUNTS} withdrawals={withdrawals}",
@@ -509,7 +593,7 @@ fn bench_finalize(c: &mut Criterion) {
             ),
             |b| {
                 b.iter_batched(
-                    || finalize_input(withdrawals),
+                    || finalize_input(&source),
                     |mut chain| {
                         black_box(
                             chain
@@ -526,6 +610,7 @@ fn bench_finalize(c: &mut Criterion) {
 
 fn bench_hard_fault(c: &mut Criterion) {
     for &(live_accounts, claims) in HARD_FAULT_PROFILES {
+        let source = hard_fault_source(live_accounts, claims);
         c.bench_function(
             &format!(
                 "{}/op=begin-hard-fault live_accounts={live_accounts} withdrawals={claims}",
@@ -533,8 +618,8 @@ fn bench_hard_fault(c: &mut Criterion) {
             ),
             |b| {
                 b.iter_batched(
-                    || hard_fault_input(live_accounts, claims),
-                    |(mut chain, _cache)| {
+                    || hard_fault_input(&source),
+                    |mut chain| {
                         black_box(
                             chain
                                 .begin_hard_fault_settlement()

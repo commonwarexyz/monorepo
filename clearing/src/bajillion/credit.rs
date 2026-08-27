@@ -1,14 +1,14 @@
 //! Authenticated terminal receive-shard heads.
 //!
-//! A recipient's nonempty receive shards are committed in strictly increasing shard order. The
-//! resulting root binds the exact shard count and the checked sums of cumulative shard credit and
-//! receipt counts. Membership and absence proofs use the generic BMT commitment layer.
+//! A recipient's nonempty receive shards are committed in strictly increasing shard order. Each
+//! compact tip exposes the terminal credit and receipt counters of its fully validated head.
+//! Membership and adjacent-absence proofs use the generic BMT commitment layer.
 
 use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     payment::{Epoch, Payment},
 };
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -16,8 +16,6 @@ use commonware_codec::{
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::Sequential;
 use thiserror::Error;
-
-const CREDIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_ROOT";
 
 /// One terminal payment for a nonempty receive shard.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,80 +90,119 @@ where
     }
 }
 
-/// Fixed-size commitment to all terminal receive-shard heads for one recipient and epoch.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CreditRoot<D: Digest> {
-    /// Exact number of nonempty receive shards.
-    pub len: u32,
-    /// Sum of each shard's terminal cumulative credit.
-    pub total_credit: u64,
-    /// Sum of each shard's terminal receipt index.
-    pub total_receipts: u64,
-    /// Digest binding the vector root, recipient, epoch, count, and totals.
-    pub digest: D,
+/// Compact terminal receive-shard projection authenticated by a changed-account leaf.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditTip {
+    /// Recipient-local receive-shard identifier.
+    pub shard: u64,
+    /// Terminal cumulative credit in this shard.
+    pub cumulative_credit: u64,
+    /// Terminal receipt index in this shard.
+    pub index: u64,
 }
 
-impl<D: Digest> CreditRoot<D> {
-    const fn validate_metadata(&self) -> Result<(), Error> {
-        if self.len > commitment::MAX_VECTOR_LENGTH {
-            return Err(Error::TooManyHeads);
+/// Shard-relative value for a compact credit-tip membership opening.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditTipValue {
+    /// Terminal cumulative credit in the challenged shard.
+    pub cumulative_credit: u64,
+    /// Terminal receipt index in the challenged shard.
+    pub index: u64,
+}
+
+impl CreditTip {
+    /// Projects the settlement-relevant counters from one fully validated terminal head.
+    #[must_use]
+    pub const fn from_head<P: PublicKey, D: Digest>(head: &ShardHead<P, D>) -> Self {
+        let receipt = head.payment.receipt().body();
+        Self {
+            shard: head.shard,
+            cumulative_credit: receipt.cumulative_shard_credit(),
+            index: receipt.index(),
         }
-        if (self.len == 0) != (self.total_credit == 0 && self.total_receipts == 0) {
-            return Err(Error::InvalidTotals);
+    }
+
+    /// Projects the value whose shard is supplied by a membership lookup target.
+    #[must_use]
+    pub const fn value(&self) -> CreditTipValue {
+        CreditTipValue {
+            cumulative_credit: self.cumulative_credit,
+            index: self.index,
         }
-        if self.len != 0 && (self.total_credit == 0 || self.total_receipts == 0) {
-            return Err(Error::InvalidTotals);
+    }
+
+    const fn from_value(shard: u64, value: CreditTipValue) -> Self {
+        Self {
+            shard,
+            cumulative_credit: value.cumulative_credit,
+            index: value.index,
         }
-        Ok(())
     }
 }
 
-impl<D: Digest> Write for CreditRoot<D> {
+impl Write for CreditTip {
     fn write(&self, writer: &mut impl BufMut) {
-        self.len.write(writer);
-        self.total_credit.write(writer);
-        self.total_receipts.write(writer);
-        self.digest.write(writer);
+        self.shard.write(writer);
+        self.cumulative_credit.write(writer);
+        self.index.write(writer);
     }
 }
 
-impl<D: Digest> Read for CreditRoot<D> {
+impl FixedSize for CreditTip {
+    const SIZE: usize = u64::SIZE * 3;
+}
+
+impl Read for CreditTip {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let root = Self {
-            len: u32::read(reader)?,
-            total_credit: u64::read(reader)?,
-            total_receipts: u64::read(reader)?,
-            digest: D::read(reader)?,
-        };
-        root.validate_metadata()
-            .map_err(|_| CodecError::Invalid("CreditRoot", "credit count or totals are invalid"))?;
-        Ok(root)
+        Ok(Self {
+            shard: u64::read(reader)?,
+            cumulative_credit: u64::read(reader)?,
+            index: u64::read(reader)?,
+        })
     }
 }
 
-impl<D: Digest> FixedSize for CreditRoot<D> {
-    const SIZE: usize = u32::SIZE + u64::SIZE + u64::SIZE + D::SIZE;
+impl Write for CreditTipValue {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.cumulative_credit.write(writer);
+        self.index.write(writer);
+    }
+}
+
+impl FixedSize for CreditTipValue {
+    const SIZE: usize = u64::SIZE * 2;
+}
+
+impl Read for CreditTipValue {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            cumulative_credit: u64::read(reader)?,
+            index: u64::read(reader)?,
+        })
+    }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D> arbitrary::Arbitrary<'_> for CreditRoot<D>
-where
-    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
-{
+impl arbitrary::Arbitrary<'_> for CreditTip {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let len = u.int_in_range(0..=commitment::MAX_VECTOR_LENGTH)?;
-        let (total_credit, total_receipts) = if len == 0 {
-            (0, 0)
-        } else {
-            (u.int_in_range(1..=u64::MAX)?, u.int_in_range(1..=u64::MAX)?)
-        };
         Ok(Self {
-            len,
-            total_credit,
-            total_receipts,
-            digest: u.arbitrary()?,
+            shard: u.arbitrary()?,
+            cumulative_credit: u.arbitrary()?,
+            index: u.arbitrary()?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for CreditTipValue {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            cumulative_credit: u.arbitrary()?,
+            index: u.arbitrary()?,
         })
     }
 }
@@ -246,34 +283,34 @@ impl<P: PublicKey, D: Digest> ShardSet<P, D> {
 
     fn commitment<H: Hasher<Digest = D>>(
         &self,
-    ) -> Result<(CreditRoot<D>, commitment::Tree<D>), Error> {
-        let (total_credit, total_receipts) = self.validate()?;
+    ) -> Result<(Vec<CreditTip>, commitment::Tree<D>), Error> {
+        self.validate()?;
         let len = u32::try_from(self.heads.len()).map_err(|_| Error::TooManyHeads)?;
-        let mut builder = commitment::Builder::<H>::new(VectorKind::Credit, len)?;
-        for head in &self.heads {
-            builder.add_encoded(head.encode().as_ref())?;
-        }
+        let tips = self
+            .heads
+            .iter()
+            .map(CreditTip::from_head)
+            .collect::<Vec<_>>();
+        let mut builder = commitment::Builder::<H>::new(VectorKind::CreditTip, len)?;
+        builder.add_values(&tips, &Sequential)?;
         let tree = builder.build(&Sequential)?;
-        let root = bind_credit_root::<H, P>(
-            self.epoch,
-            &self.recipient,
-            tree.root(),
-            len,
-            total_credit,
-            total_receipts,
-        );
-        Ok((root, tree))
+        Ok((tips, tree))
     }
 
-    /// Computes the aggregate-binding credit root.
-    pub fn root<H: Hasher<Digest = D>>(&self) -> Result<CreditRoot<D>, Error> {
-        self.commitment::<H>().map(|(root, _)| root)
+    /// Returns the checked terminal credit and receipt totals.
+    pub(crate) fn totals(&self) -> Result<(u64, u64), Error> {
+        self.validate()
+    }
+
+    /// Computes the exact typed compact-tip root.
+    pub fn root<H: Hasher<Digest = D>>(&self) -> Result<VectorRoot<D>, Error> {
+        self.commitment::<H>().map(|(_, tree)| tree.root())
     }
 
     /// Recomputes and compares the complete set against `expected`.
     pub fn verify_root<H: Hasher<Digest = D>>(
         &self,
-        expected: &CreditRoot<D>,
+        expected: &VectorRoot<D>,
     ) -> Result<(), Error> {
         if self.root::<H>()? == *expected {
             Ok(())
@@ -283,41 +320,29 @@ impl<P: PublicKey, D: Digest> ShardSet<P, D> {
     }
 
     /// Produces either a membership opening or an adjacent-neighbor absence proof.
-    pub fn lookup<H: Hasher<Digest = D>>(&self, shard: u64) -> Result<ShardLookup<P, D>, Error> {
-        let (_, tree) = self.commitment::<H>()?;
+    pub fn lookup<H: Hasher<Digest = D>>(&self, shard: u64) -> Result<CreditTipLookup<D>, Error> {
+        let (tips, tree) = self.commitment::<H>()?;
         match self.heads.binary_search_by_key(&shard, |head| head.shard) {
-            Ok(position) => Ok(ShardLookup::Present {
-                opening: Box::new(self.opening(&tree, position)?),
+            Ok(position) => Ok(CreditTipLookup::Present {
+                value: tips[position].value(),
+                opening: tree
+                    .opening(u32::try_from(position).map_err(|_| Error::IndexOutOfRange)?)?,
             }),
-            Err(position) => Ok(ShardLookup::Absent {
-                shard,
-                predecessor: position
-                    .checked_sub(1)
-                    .map(|index| self.opening(&tree, index))
-                    .transpose()?
-                    .map(Box::new),
-                successor: (position < self.heads.len())
-                    .then(|| self.opening(&tree, position))
-                    .transpose()?
-                    .map(Box::new),
-            }),
+            Err(position) => {
+                let predecessor = position.checked_sub(1).map(|index| tips[index].clone());
+                let successor = tips.get(position).cloned();
+                let start = position.saturating_sub(usize::from(predecessor.is_some()));
+                let count = usize::from(predecessor.is_some()) + usize::from(successor.is_some());
+                Ok(CreditTipLookup::Absent {
+                    predecessor,
+                    successor,
+                    opening: tree.range_opening(
+                        u32::try_from(start).map_err(|_| Error::IndexOutOfRange)?,
+                        u32::try_from(count).map_err(|_| Error::IndexOutOfRange)?,
+                    )?,
+                })
+            }
         }
-    }
-
-    fn opening(
-        &self,
-        tree: &commitment::Tree<D>,
-        position: usize,
-    ) -> Result<ShardOpening<P, D>, Error> {
-        let value = self
-            .heads
-            .get(position)
-            .ok_or(Error::IndexOutOfRange)?
-            .clone();
-        Ok(ShardOpening {
-            value,
-            proof: tree.opening(u32::try_from(position).map_err(|_| Error::IndexOutOfRange)?)?,
-        })
     }
 }
 
@@ -392,326 +417,173 @@ where
     }
 }
 
-/// A terminal shard head and its bounded vector opening.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ShardOpening<P: PublicKey, D: Digest> {
-    /// Authenticated terminal head.
-    pub value: ShardHead<P, D>,
-    /// Position and BMT authentication path.
-    pub proof: commitment::Opening<D>,
-}
-
-impl<P: PublicKey, D: Digest> Write for ShardOpening<P, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.value.write(writer);
-        self.proof.write(writer);
-    }
-}
-
-impl<P: PublicKey, D: Digest> Read for ShardOpening<P, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self {
-            value: ShardHead::read(reader)?,
-            proof: commitment::Opening::read(reader)?,
-        })
-    }
-}
-
-impl<P: PublicKey, D: Digest> EncodeSize for ShardOpening<P, D> {
-    fn encode_size(&self) -> usize {
-        self.value.encode_size() + self.proof.encode_size()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for ShardOpening<P, D>
-where
-    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
-    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
-    ShardHead<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            value: u.arbitrary()?,
-            proof: u.arbitrary()?,
-        })
-    }
-}
-
 /// Authenticated answer to a receive-shard lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ShardLookup<P: PublicKey, D: Digest> {
+pub enum CreditTipLookup<D: Digest> {
     /// The requested shard is present.
     Present {
-        /// Membership opening for the terminal head.
-        opening: Box<ShardOpening<P, D>>,
+        /// Authenticated compact terminal tip.
+        value: CreditTipValue,
+        /// Membership opening for the compact tip.
+        opening: commitment::Opening<D>,
     },
     /// The requested shard is absent, bracketed by adjacent vector neighbors.
     Absent {
-        /// Requested absent shard identifier.
-        shard: u64,
         /// Immediate predecessor, or `None` at the beginning of the vector.
-        predecessor: Option<Box<ShardOpening<P, D>>>,
+        predecessor: Option<CreditTip>,
         /// Immediate successor, or `None` at the end of the vector.
-        successor: Option<Box<ShardOpening<P, D>>>,
+        successor: Option<CreditTip>,
+        /// One shared opening for the adjacent disclosed neighbors.
+        opening: commitment::RangeOpening<D>,
     },
 }
 
-impl<P: PublicKey, D: Digest> ShardLookup<P, D> {
-    /// Verifies the lookup against a trusted recipient, epoch, and credit root.
-    pub fn resolve<H: Hasher<Digest = D>>(
+impl<D: Digest> CreditTipLookup<D> {
+    pub(crate) fn reconstruct<H: Hasher<Digest = D>>(
         &self,
-        epoch: Epoch,
-        recipient: &P,
-        root: &CreditRoot<D>,
         shard: u64,
-    ) -> Result<Option<ShardHead<P, D>>, Error> {
-        root.validate_metadata()?;
+    ) -> Result<(VectorRoot<D>, Option<CreditTip>), Error> {
         match self {
-            Self::Present { opening } => {
-                verify_opening::<H, P>(epoch, recipient, root, opening)?;
-                if opening.value.shard != shard {
+            Self::Present { value, opening } => {
+                let tip = CreditTip::from_value(shard, value.clone());
+                if tip.cumulative_credit == 0 || tip.index == 0 {
                     return Err(Error::LookupKey);
                 }
-                Ok(Some(opening.value.clone()))
+                let root =
+                    opening.reconstruct::<H>(VectorKind::CreditTip, tip.encode().as_ref())?;
+                Ok((root, Some(tip)))
             }
             Self::Absent {
-                shard: claimed,
                 predecessor,
                 successor,
+                opening,
+                ..
             } => {
-                if *claimed != shard {
-                    return Err(Error::LookupKey);
+                let insertion = opening
+                    .start
+                    .checked_add(u32::from(predecessor.is_some()))
+                    .ok_or(Error::LookupOrder)?;
+                if predecessor.is_some() != (insertion > 0)
+                    || successor.is_some() != (insertion < opening.proof.leaf_count)
+                    || predecessor.as_ref().is_some_and(|tip| {
+                        tip.shard >= shard || tip.cumulative_credit == 0 || tip.index == 0
+                    })
+                    || successor.as_ref().is_some_and(|tip| {
+                        tip.shard <= shard || tip.cumulative_credit == 0 || tip.index == 0
+                    })
+                {
+                    return Err(Error::LookupOrder);
                 }
-                if root.len == 0 {
-                    if predecessor.is_some()
-                        || successor.is_some()
-                        || *root != empty_credit_root::<H, P>(epoch, recipient)
-                    {
-                        return Err(Error::RootMismatch);
-                    }
-                    return Ok(None);
-                }
-                for opening in predecessor.iter().chain(successor.iter()) {
-                    verify_opening::<H, P>(epoch, recipient, root, opening)?;
-                }
-
-                let insertion = successor
-                    .as_ref()
-                    .map_or(root.len, |opening| opening.proof.position);
-                match predecessor {
-                    None if insertion == 0 => {}
-                    Some(opening)
-                        if opening.proof.position.checked_add(1) == Some(insertion)
-                            && opening.value.shard < shard => {}
-                    _ => return Err(Error::LookupOrder),
-                }
-                match successor {
-                    None if insertion == root.len => {}
-                    Some(opening)
-                        if opening.proof.position == insertion && opening.value.shard > shard => {}
-                    _ => return Err(Error::LookupOrder),
-                }
-                Ok(None)
+                let encoded = predecessor
+                    .iter()
+                    .chain(successor.iter())
+                    .map(Encode::encode)
+                    .collect::<Vec<_>>();
+                let root = opening.reconstruct::<H, _>(VectorKind::CreditTip, &encoded)?;
+                Ok((root, None))
             }
         }
     }
-}
 
-fn write_optional_opening<P: PublicKey, D: Digest>(
-    writer: &mut impl BufMut,
-    opening: Option<&ShardOpening<P, D>>,
-) {
-    match opening {
-        None => 0_u8.write(writer),
-        Some(opening) => {
-            1_u8.write(writer);
-            opening.write(writer);
+    /// Verifies the lookup against a trusted compact-tip root.
+    pub fn resolve<H: Hasher<Digest = D>>(
+        &self,
+        root: &VectorRoot<D>,
+        shard: u64,
+    ) -> Result<Option<CreditTip>, Error> {
+        let (reconstructed, tip) = self.reconstruct::<H>(shard)?;
+        if reconstructed != *root {
+            return Err(commitment::Error::InvalidOpening.into());
         }
+        Ok(tip)
     }
 }
 
-fn read_optional_opening<P: PublicKey, D: Digest>(
-    reader: &mut impl Buf,
-) -> Result<Option<Box<ShardOpening<P, D>>>, CodecError> {
-    match u8::read(reader)? {
-        0 => Ok(None),
-        1 => Ok(Some(Box::new(ShardOpening::read(reader)?))),
-        tag => Err(CodecError::InvalidEnum(tag)),
-    }
-}
-
-fn optional_opening_size<P: PublicKey, D: Digest>(opening: Option<&ShardOpening<P, D>>) -> usize {
-    u8::SIZE + opening.map_or(0, EncodeSize::encode_size)
-}
-
-impl<P: PublicKey, D: Digest> Write for ShardLookup<P, D> {
+impl<D: Digest> Write for CreditTipLookup<D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::Present { opening } => {
+            Self::Present { value, opening } => {
                 1_u8.write(writer);
+                value.write(writer);
                 opening.write(writer);
             }
             Self::Absent {
-                shard,
                 predecessor,
                 successor,
+                opening,
+                ..
             } => {
                 2_u8.write(writer);
-                shard.write(writer);
-                write_optional_opening(writer, predecessor.as_deref());
-                write_optional_opening(writer, successor.as_deref());
+                predecessor.write(writer);
+                successor.write(writer);
+                opening.write(writer);
             }
         }
     }
 }
 
-impl<P: PublicKey, D: Digest> Read for ShardLookup<P, D> {
+impl<D: Digest> Read for CreditTipLookup<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             1 => Ok(Self::Present {
-                opening: Box::new(ShardOpening::read(reader)?),
+                value: CreditTipValue::read(reader)?,
+                opening: commitment::Opening::read(reader)?,
             }),
             2 => Ok(Self::Absent {
-                shard: u64::read(reader)?,
-                predecessor: read_optional_opening(reader)?,
-                successor: read_optional_opening(reader)?,
+                predecessor: Option::<CreditTip>::read(reader)?,
+                successor: Option::<CreditTip>::read(reader)?,
+                opening: commitment::RangeOpening::read_bounded(reader, 2, usize::MAX)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
 }
 
-impl<P: PublicKey, D: Digest> EncodeSize for ShardLookup<P, D> {
+impl<D: Digest> EncodeSize for CreditTipLookup<D> {
     fn encode_size(&self) -> usize {
         match self {
-            Self::Present { opening } => u8::SIZE + opening.encode_size(),
+            Self::Present { value, opening } => {
+                u8::SIZE + value.encode_size() + opening.encode_size()
+            }
             Self::Absent {
                 predecessor,
                 successor,
+                opening,
                 ..
             } => {
                 u8::SIZE
-                    + u64::SIZE
-                    + optional_opening_size(predecessor.as_deref())
-                    + optional_opening_size(successor.as_deref())
+                    + predecessor.encode_size()
+                    + successor.encode_size()
+                    + opening.encode_size()
             }
         }
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for ShardLookup<P, D>
+impl<D> arbitrary::Arbitrary<'_> for CreditTipLookup<D>
 where
-    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
     D: Digest + for<'a> arbitrary::Arbitrary<'a>,
-    ShardOpening<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    CreditTipValue: for<'a> arbitrary::Arbitrary<'a>,
+    CreditTip: for<'a> arbitrary::Arbitrary<'a>,
+    commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
+    commitment::RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         if u.arbitrary()? {
             Ok(Self::Present {
-                opening: Box::new(u.arbitrary()?),
+                value: u.arbitrary()?,
+                opening: u.arbitrary()?,
             })
         } else {
             Ok(Self::Absent {
-                shard: u.arbitrary()?,
-                predecessor: u.arbitrary::<Option<ShardOpening<P, D>>>()?.map(Box::new),
-                successor: u.arbitrary::<Option<ShardOpening<P, D>>>()?.map(Box::new),
+                predecessor: u.arbitrary()?,
+                successor: u.arbitrary()?,
+                opening: u.arbitrary()?,
             })
         }
-    }
-}
-
-/// Verifies one terminal shard opening, including its aggregate-binding root wrapper.
-pub fn verify_opening<H, P>(
-    epoch: Epoch,
-    recipient: &P,
-    root: &CreditRoot<H::Digest>,
-    opening: &ShardOpening<P, H::Digest>,
-) -> Result<(), Error>
-where
-    H: Hasher,
-    P: PublicKey,
-{
-    root.validate_metadata()?;
-    if root.len == 0 {
-        return Err(Error::IndexOutOfRange);
-    }
-    opening.value.validate(epoch, recipient)?;
-    let receipt = opening.value.payment.receipt().body();
-    if receipt.cumulative_shard_credit() > root.total_credit
-        || receipt.index() > root.total_receipts
-    {
-        return Err(Error::InvalidTotals);
-    }
-    let vector_root = opening
-        .proof
-        .reconstruct::<H>(VectorKind::Credit, opening.value.encode().as_ref())?;
-    let reconstructed = bind_credit_root::<H, P>(
-        epoch,
-        recipient,
-        vector_root,
-        root.len,
-        root.total_credit,
-        root.total_receipts,
-    );
-    if reconstructed == *root {
-        Ok(())
-    } else {
-        Err(Error::RootMismatch)
-    }
-}
-
-/// Returns the canonical empty credit root for a recipient and epoch.
-#[must_use]
-pub fn empty_credit_root<H, P>(epoch: Epoch, recipient: &P) -> CreditRoot<H::Digest>
-where
-    H: Hasher,
-    P: PublicKey,
-{
-    bind_credit_root::<H, P>(
-        epoch,
-        recipient,
-        commitment::empty_root::<H>(VectorKind::Credit),
-        0,
-        0,
-        0,
-    )
-}
-
-fn bind_credit_root<H, P>(
-    epoch: Epoch,
-    recipient: &P,
-    vector_root: VectorRoot<H::Digest>,
-    len: u32,
-    total_credit: u64,
-    total_receipts: u64,
-) -> CreditRoot<H::Digest>
-where
-    H: Hasher,
-    P: PublicKey,
-{
-    let recipient_len = u32::try_from(recipient.as_ref().len())
-        .expect("a fixed-size public key length fits in u32")
-        .to_be_bytes();
-    CreditRoot {
-        len,
-        total_credit,
-        total_receipts,
-        digest: H::hash(&[
-            CREDIT_ROOT_DOMAIN,
-            &epoch.to_be_bytes(),
-            &recipient_len,
-            recipient.as_ref(),
-            &len.to_be_bytes(),
-            &total_credit.to_be_bytes(),
-            &total_receipts.to_be_bytes(),
-            vector_root.digest.as_ref(),
-        ]),
     }
 }
 
@@ -739,20 +611,17 @@ pub enum Error {
     /// Summing terminal shard endpoints overflowed.
     #[error("terminal shard aggregate arithmetic overflowed")]
     Arithmetic,
-    /// Root count and aggregate fields are inconsistent.
-    #[error("credit root count or aggregate totals are invalid")]
-    InvalidTotals,
     /// A root or opening does not authenticate the supplied value.
-    #[error("credit root does not authenticate the supplied set or opening")]
+    #[error("credit-tip root does not authenticate the supplied set or opening")]
     RootMismatch,
     /// An opening position is outside the committed vector.
-    #[error("credit opening position is outside the committed vector")]
+    #[error("credit-tip opening position is outside the committed vector")]
     IndexOutOfRange,
     /// A lookup was supplied for another shard identifier.
-    #[error("credit lookup was supplied for another shard")]
+    #[error("credit-tip lookup was supplied for another shard")]
     LookupKey,
     /// An absence proof does not contain the adjacent ordered neighbors.
-    #[error("credit absence proof is not an adjacent ordered bracket")]
+    #[error("credit-tip absence proof is not an adjacent ordered bracket")]
     LookupOrder,
     /// The generic vector commitment is invalid.
     #[error("invalid vector commitment: {0}")]
@@ -772,7 +641,7 @@ mod tests {
     type TestContext = PaymentContext<VerifyingKey, Sha256Digest>;
     type TestHead = ShardHead<VerifyingKey, Sha256Digest>;
     type TestSet = ShardSet<VerifyingKey, Sha256Digest>;
-    type TestLookup = ShardLookup<VerifyingKey, Sha256Digest>;
+    type TestLookup = CreditTipLookup<Sha256Digest>;
 
     fn fixture() -> (TestContext, SigningKey, SigningKey) {
         let operator = SigningKey::from_seed(1);
@@ -833,16 +702,14 @@ mod tests {
         let root = empty.root::<Sha256>().unwrap();
         assert_eq!(
             root,
-            empty_credit_root::<Sha256, _>(context.epoch(), &recipient.public_key())
+            commitment::empty_root::<Sha256>(VectorKind::CreditTip)
         );
-        assert_eq!(root.len, 0);
-        assert_eq!(root.total_credit, 0);
-        assert_eq!(root.total_receipts, 0);
+        assert_eq!(empty.totals().unwrap(), (0, 0));
         assert!(
             empty
                 .lookup::<Sha256>(7)
                 .unwrap()
-                .resolve::<Sha256>(context.epoch(), &recipient.public_key(), &root, 7)
+                .resolve::<Sha256>(&root, 7)
                 .unwrap()
                 .is_none()
         );
@@ -851,50 +718,38 @@ mod tests {
         let singleton =
             ShardSet::new(context.epoch(), recipient.public_key(), vec![only.clone()]).unwrap();
         let root = singleton.root::<Sha256>().unwrap();
-        assert_eq!(root.len, 1);
-        assert_eq!(root.total_credit, 13);
-        assert_eq!(root.total_receipts, 4);
+        assert_eq!(singleton.totals().unwrap(), (13, 4));
+        let lookup = singleton.lookup::<Sha256>(7).unwrap();
         assert_eq!(
-            singleton
-                .lookup::<Sha256>(7)
-                .unwrap()
-                .resolve::<Sha256>(context.epoch(), &recipient.public_key(), &root, 7)
-                .unwrap(),
-            Some(only)
+            lookup.resolve::<Sha256>(&root, 7).unwrap(),
+            Some(CreditTip::from_head(&only))
         );
+        assert_eq!(TestLookup::decode(lookup.encode()).unwrap(), lookup);
     }
 
     #[test]
     fn non_power_of_two_membership_and_adjacent_absence_verify() {
-        let (context, _, recipient, set) = three_head_set();
+        let (_, _, _, set) = three_head_set();
         let root = set.root::<Sha256>().unwrap();
-        assert_eq!(root.len, 3);
-        assert_eq!(root.total_credit, 37);
-        assert_eq!(root.total_receipts, 9);
+        assert_eq!(set.totals().unwrap(), (37, 9));
 
         for head in set.heads() {
+            let lookup = set.lookup::<Sha256>(head.shard).unwrap();
             assert_eq!(
-                set.lookup::<Sha256>(head.shard)
-                    .unwrap()
-                    .resolve::<Sha256>(context.epoch(), &recipient.public_key(), &root, head.shard,)
-                    .unwrap(),
-                Some(head.clone())
+                lookup.resolve::<Sha256>(&root, head.shard).unwrap(),
+                Some(CreditTip::from_head(head))
             );
+            assert_eq!(TestLookup::decode(lookup.encode()).unwrap(), lookup);
         }
 
         for missing in [0, 10, 99] {
             let lookup = set.lookup::<Sha256>(missing).unwrap();
-            assert_eq!(
-                lookup
-                    .resolve::<Sha256>(context.epoch(), &recipient.public_key(), &root, missing,)
-                    .unwrap(),
-                None
-            );
+            assert_eq!(lookup.resolve::<Sha256>(&root, missing).unwrap(), None);
             assert_eq!(TestLookup::decode(lookup.encode()).unwrap(), lookup);
         }
         assert_eq!(TestSet::decode(set.encode()).unwrap(), set);
         assert_eq!(
-            CreditRoot::<Sha256Digest>::decode(root.encode()).unwrap(),
+            VectorRoot::<Sha256Digest>::decode(root.encode()).unwrap(),
             root
         );
     }
@@ -981,17 +836,16 @@ mod tests {
         let root = set.root::<Sha256>().unwrap();
         let lookup = set.lookup::<Sha256>(8).unwrap();
 
-        let mut wrong_total = root;
-        wrong_total.total_credit += 1;
+        let mut wrong_root = root;
+        wrong_root.digest = Sha256::hash(&[b"wrong credit-tip root"]);
         assert!(matches!(
-            lookup.resolve::<Sha256>(context.epoch(), &recipient.public_key(), &wrong_total, 8,),
+            set.verify_root::<Sha256>(&wrong_root),
             Err(Error::RootMismatch)
         ));
-
-        let mut malformed_empty =
-            empty_credit_root::<Sha256, _>(context.epoch(), &recipient.public_key());
-        malformed_empty.total_receipts = 1;
-        assert!(CreditRoot::<Sha256Digest>::decode(malformed_empty.encode()).is_err());
+        assert!(matches!(
+            lookup.resolve::<Sha256>(&wrong_root, 8),
+            Err(Error::Commitment(_))
+        ));
 
         let overflowing = vec![
             head(&context, &operator, &recipient, 20, 1, u64::MAX, 1),
@@ -1004,37 +858,31 @@ mod tests {
 
     #[test]
     fn proof_and_absence_bracket_tampering_are_rejected() {
-        let (context, _, recipient, set) = three_head_set();
+        let (_, _, _, set) = three_head_set();
         let root = set.root::<Sha256>().unwrap();
         let mut present = set.lookup::<Sha256>(2).unwrap();
-        let ShardLookup::Present { opening } = &mut present else {
+        let CreditTipLookup::Present { opening, .. } = &mut present else {
             panic!("known shard must be present");
         };
-        opening.proof.proof.siblings[0] = Sha256::hash(&[b"tampered sibling"]);
-        assert!(
-            present
-                .resolve::<Sha256>(context.epoch(), &recipient.public_key(), &root, 2)
-                .is_err()
-        );
+        opening.proof.siblings[0] = Sha256::hash(&[b"tampered sibling"]);
+        assert!(present.resolve::<Sha256>(&root, 2).is_err());
 
         let lookup = set.lookup::<Sha256>(10).unwrap();
-        let ShardLookup::Absent {
-            shard, predecessor, ..
+        let CreditTipLookup::Absent {
+            predecessor,
+            opening,
+            ..
         } = lookup
         else {
             panic!("missing interior shard must be absent");
         };
-        let nonadjacent_successor = match set.lookup::<Sha256>(2).unwrap() {
-            ShardLookup::Present { opening } => opening,
-            ShardLookup::Absent { .. } => panic!("known shard must be present"),
-        };
-        let nonadjacent = ShardLookup::Absent {
-            shard,
+        let nonadjacent = CreditTipLookup::Absent {
             predecessor,
-            successor: Some(nonadjacent_successor),
+            successor: Some(CreditTip::from_head(&set.heads()[0])),
+            opening,
         };
         assert!(matches!(
-            nonadjacent.resolve::<Sha256>(context.epoch(), &recipient.public_key(), &root, shard,),
+            nonadjacent.resolve::<Sha256>(&root, 10),
             Err(Error::LookupOrder)
         ));
     }

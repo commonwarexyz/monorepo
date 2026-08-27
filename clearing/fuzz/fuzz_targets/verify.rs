@@ -6,23 +6,29 @@ use commonware_clearing::bajillion::{
     admission::{Committee, assigned_slice_indices, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::{
-        AccountLookup, Challenge, ChallengeKind, RangeLower, StateLookup, Verdict, adjudicate,
+        AccountLookup, Challenge, ChallengeKind, HigherShardTipLookup, RangeLower,
+        ReceiptForkWitness, ReceiptWitness, SameIndexPaymentWitness, Verdict, adjudicate,
         decode_bounded,
     },
     commitment::{Builder, MultiOpening, Opening, VectorKind, VectorRoot, empty_root},
-    credit::{CreditRoot, ShardHead, ShardLookup, ShardOpening, ShardSet, verify_opening},
+    credit::{CreditTipLookup, ShardHead, ShardSet},
     payment::{
-        Payment, PaymentContext, ReceiptBody, SignedReceipt, SignedSend, receipt_range_is_feasible,
-        verify_consecutive_receipts, verify_receipt_range, verify_receipt_step,
+        Payment, PaymentContext, PaymentWitness, ReceiptBody, SignedReceipt, SignedSend,
+        receipt_range_is_feasible, verify_consecutive_receipts, verify_receipt_range,
+        verify_receipt_step,
     },
-    state::{AccountRow, AccountState, Prefix, StateLeaf},
+    state::{
+        AccountChange, AccountRow, AccountState, ChangeValueCore, Prefix, SettlementOutput,
+        StateLeaf,
+    },
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, ProofSlice, RootBundle,
-        StateCache, TransitionError, assemble_slices, assemble_withdrawal_claim, build_close,
-        prepare_close_with_strategy, validate_close, validate_slice,
+        Assignment, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, Header,
+        ProofSlice, RootBundle, StateCache, TransitionError, assemble_slices,
+        assemble_withdrawal_claim, build_close, prepare_close_with_strategy, validate_close,
+        validate_slice,
     },
 };
-use commonware_codec::{Encode, EncodeSize};
+use commonware_codec::{DecodeExt, Encode, EncodeSize};
 use commonware_cryptography::{
     Hasher, Sha256, Signer,
     bls12381::primitives::{
@@ -48,6 +54,8 @@ const MAX_STATES: usize = 16;
 const MAX_ROWS: usize = 8;
 const MAX_SHARDS_PER_ACCOUNT: usize = 8;
 const MAX_BOUNDARY_RECORDS: usize = 8;
+const NON_WITHDRAWAL_SLICE_MUTATIONS: u8 = 32;
+const SLICE_MUTATIONS: u8 = 36;
 
 type TestPayment = Payment<VerifyingKey, Digest>;
 type TestContext = PaymentContext<VerifyingKey, Digest>;
@@ -117,7 +125,7 @@ struct ChallengeCase {
 struct CommitmentCase {
     opening: Opening<Digest>,
     multi: MultiOpening<Digest>,
-    opening_root: VectorRoot<Digest>,
+    predecessor_root: VectorRoot<Digest>,
     opening_values: Vec<Vec<u8>>,
     positions: Vec<u8>,
     kind: VectorKind,
@@ -125,11 +133,8 @@ struct CommitmentCase {
 
 #[derive(Arbitrary, Debug)]
 struct CreditCase {
-    epoch: u64,
-    recipient: VerifyingKey,
-    root: CreditRoot<Digest>,
-    opening: ShardOpening<VerifyingKey, Digest>,
-    lookup: ShardLookup<VerifyingKey, Digest>,
+    root: VectorRoot<Digest>,
+    lookup: CreditTipLookup<Digest>,
     set: ShardSet<VerifyingKey, Digest>,
     shard: u64,
     seed: u64,
@@ -347,30 +352,10 @@ fn fuzz_payment(case: PaymentCase) {
     assert!(verify_receipt_range::<Sha256, _, _>(&context, &first, &second).is_ok());
 }
 
-fn unchanged_lookup(
-    cache: &StateCache<VerifyingKey, Digest>,
-    account: &VerifyingKey,
-) -> AccountLookup<VerifyingKey, Digest> {
-    AccountLookup::Absent {
-        state: Box::new(
-            cache
-                .lookup(account)
-                .expect("fixture account has a canonical live-state lookup"),
-        ),
-        predecessor: None,
-        successor: None,
-    }
-}
-
 fn invalidate_lookup(lookup: &mut AccountLookup<VerifyingKey, Digest>) {
     match lookup {
         AccountLookup::Present(opening) => opening.proof.proof.leaf_count ^= 1,
-        AccountLookup::Absent { state, .. } => {
-            let StateLookup::Present(opening) = state.as_mut() else {
-                panic!("constructed unchanged lookup must prove live-state membership");
-            };
-            opening.proof.proof.leaf_count ^= 1;
-        }
+        AccountLookup::Absent { change, .. } => change.opening.proof.leaf_count ^= 1,
     }
 }
 
@@ -381,27 +366,59 @@ fn invalidate_payment(payment: &TestPayment, wrong: &SigningKey) -> TestPayment 
     )
 }
 
-fn invalidate_challenge_body(challenge: &mut TestChallenge, wrong: &SigningKey) {
-    let payment = match challenge {
+fn invalidate_challenge_body(
+    challenge: &mut TestChallenge,
+    context: &TestContext,
+    wrong: &SigningKey,
+) {
+    let witness = match challenge {
         Challenge::LatestAcknowledgedSend { payment, .. }
         | Challenge::HigherShardTip { payment, .. } => payment,
         Challenge::InconsistentReceiptRange { upper, .. } => upper,
-        Challenge::ReceiptFork { left, .. } => left,
+        Challenge::ReceiptFork { fork } => match fork.as_mut() {
+            ReceiptForkWitness::SameSend { left, .. }
+            | ReceiptForkWitness::SameIndex { left, .. }
+            | ReceiptForkWitness::Full { left, .. } => left,
+        },
     };
-    **payment = invalidate_payment(payment, wrong);
+    let payment = witness
+        .reconstruct::<Sha256, Digest>(context)
+        .expect("canonical challenge witness must reconstruct");
+    **witness = PaymentWitness::from_payment(&invalidate_payment(&payment, wrong));
 }
 
-fn invalidate_challenge_scope(challenge: &mut TestChallenge) {
+fn invalidate_challenge_scope(challenge: &mut TestChallenge, context: &TestContext, child: bool) {
     match challenge {
         Challenge::LatestAcknowledgedSend { payer, .. } => invalidate_lookup(payer),
-        Challenge::HigherShardTip { shard, .. } => match shard.as_mut() {
-            ShardLookup::Present { opening } => opening.value.shard ^= 1,
-            ShardLookup::Absent { shard, .. } => *shard ^= 1,
+        Challenge::HigherShardTip { recipient, .. } => match recipient.as_mut() {
+            HigherShardTipLookup::Present { shard, .. } if child => match shard {
+                CreditTipLookup::Present { opening, .. } => opening.proof.leaf_count ^= 1,
+                CreditTipLookup::Absent { opening, .. } => opening.proof.leaf_count ^= 1,
+            },
+            HigherShardTipLookup::Present { proof, .. } => proof.proof.leaf_count ^= 1,
+            HigherShardTipLookup::Absent(absence) => absence.opening.proof.leaf_count ^= 1,
         },
         Challenge::InconsistentReceiptRange { upper, lower, .. } => {
-            *lower = RangeLower::Payment(upper.clone());
+            let upper = upper
+                .reconstruct::<Sha256, Digest>(context)
+                .expect("canonical upper witness must reconstruct");
+            *lower = RangeLower::from_payment(&upper);
         }
-        Challenge::ReceiptFork { left, right, .. } => std::mem::swap(left, right),
+        Challenge::ReceiptFork { fork } => match fork.as_mut() {
+            ReceiptForkWitness::SameSend { left, right } => {
+                let left = left
+                    .reconstruct::<Sha256, Digest>(context)
+                    .expect("canonical fork witness must reconstruct");
+                *right = ReceiptWitness::from_payment(&left);
+            }
+            ReceiptForkWitness::SameIndex { left, right } => {
+                let left = left
+                    .reconstruct::<Sha256, Digest>(context)
+                    .expect("canonical fork witness must reconstruct");
+                *right = SameIndexPaymentWitness::from_payment(&left);
+            }
+            ReceiptForkWitness::Full { left, right } => **right = (**left).clone(),
+        },
     }
 }
 
@@ -433,11 +450,76 @@ fn exercise_challenge(
     ));
 
     let mut invalid_body = challenge.clone();
-    invalidate_challenge_body(&mut invalid_body, wrong);
+    invalidate_challenge_body(&mut invalid_body, context.payment(), wrong);
     assert!(adjudicate::<Sha256, _>(context, header, roots, now, &invalid_body).is_err());
     let mut invalid_scope = challenge.clone();
-    invalidate_challenge_scope(&mut invalid_scope);
-    assert!(adjudicate::<Sha256, _>(context, header, roots, now, &invalid_scope).is_err());
+    invalidate_challenge_scope(&mut invalid_scope, context.payment(), false);
+    let invalid_scope = adjudicate::<Sha256, _>(context, header, roots, now, &invalid_scope);
+    if matches!(
+        challenge,
+        Challenge::HigherShardTip { recipient, .. }
+            if matches!(recipient.as_ref(), HigherShardTipLookup::Present { .. })
+    ) {
+        assert!(invalid_scope.is_err());
+    } else {
+        assert!(!matches!(invalid_scope, Ok(Verdict::Proven(_))));
+    }
+    if matches!(
+        challenge,
+        Challenge::HigherShardTip { recipient, .. }
+            if matches!(recipient.as_ref(), HigherShardTipLookup::Present { .. })
+    ) {
+        let mut invalid_child = challenge.clone();
+        invalidate_challenge_scope(&mut invalid_child, context.payment(), true);
+        assert!(adjudicate::<Sha256, _>(context, header, roots, now, &invalid_child).is_err());
+    }
+    if matches!(
+        challenge,
+        Challenge::HigherShardTip { recipient, .. }
+            if matches!(
+                recipient.as_ref(),
+                HigherShardTipLookup::Present {
+                    shard: CreditTipLookup::Present { .. },
+                    ..
+                }
+            )
+    ) {
+        let mut invalid_child_value = challenge.clone();
+        let Challenge::HigherShardTip { recipient, .. } = &mut invalid_child_value else {
+            unreachable!("matched higher-tip challenge");
+        };
+        let HigherShardTipLookup::Present {
+            shard: CreditTipLookup::Present { value, .. },
+            ..
+        } = recipient.as_mut()
+        else {
+            unreachable!("matched present higher-tip child");
+        };
+        value.cumulative_credit = value
+            .cumulative_credit
+            .checked_add(1)
+            .expect("bounded challenge fixture credit cannot overflow");
+        assert!(
+            adjudicate::<Sha256, _>(context, header, roots, now, &invalid_child_value).is_err()
+        );
+
+        let mut invalid_parent_value = challenge.clone();
+        let Challenge::HigherShardTip { recipient, .. } = &mut invalid_parent_value else {
+            unreachable!("matched higher-tip challenge");
+        };
+        let HigherShardTipLookup::Present { value, .. } = recipient.as_mut() else {
+            unreachable!("matched present higher-tip recipient");
+        };
+        let mut encoded = value.encode().to_vec();
+        *encoded
+            .last_mut()
+            .expect("change value core encoding is nonempty") ^= 1;
+        *value = ChangeValueCore::decode(encoded.as_slice())
+            .expect("digest mutation preserves the change value core encoding");
+        assert!(
+            adjudicate::<Sha256, _>(context, header, roots, now, &invalid_parent_value).is_err()
+        );
+    }
 
     let mut mutated = encoded.to_vec();
     let maximum = match mutation % 4 {
@@ -459,6 +541,39 @@ fn exercise_challenge(
     if let Ok(decoded) = decode_bounded::<VerifyingKey, Digest>(&mutated, maximum) {
         let _ = adjudicate::<Sha256, _>(context, header, roots, now, &decoded);
     }
+}
+
+fn exercise_no_contradiction(
+    context: &TestCloseContext,
+    header: &Header<Digest>,
+    roots: &RootBundle<Digest>,
+    challenge: &TestChallenge,
+    wrong: &SigningKey,
+) {
+    let now = context.challenge_deadline();
+    assert!(matches!(
+        adjudicate::<Sha256, _>(context, header, roots, now, challenge),
+        Ok(Verdict::NoContradiction)
+    ));
+
+    let encoded = challenge.encode();
+    let decoded = decode_bounded::<VerifyingKey, Digest>(&encoded, encoded.len())
+        .expect("canonical bounded challenge must decode");
+    assert_eq!(&decoded, challenge);
+    assert!(matches!(
+        adjudicate::<Sha256, _>(context, header, roots, now, &decoded),
+        Ok(Verdict::NoContradiction)
+    ));
+
+    let mut invalid_body = challenge.clone();
+    invalidate_challenge_body(&mut invalid_body, context.payment(), wrong);
+    assert!(adjudicate::<Sha256, _>(context, header, roots, now, &invalid_body).is_err());
+    let mut invalid_scope = challenge.clone();
+    invalidate_challenge_scope(&mut invalid_scope, context.payment(), false);
+    assert!(!matches!(
+        adjudicate::<Sha256, _>(context, header, roots, now, &invalid_scope),
+        Ok(Verdict::Proven(_))
+    ));
 }
 
 fn fuzz_challenge(case: ChallengeCase) {
@@ -493,7 +608,11 @@ fn fuzz_challenge(case: ChallengeCase) {
     let Ok(cache) = StateCache::<VerifyingKey, Digest>::new::<Sha256>(leaves) else {
         return;
     };
-    let deposits = DepositBatch::empty();
+    let deposits = DepositBatch::new(vec![
+        DepositRecord::new(recipient.public_key(), 1)
+            .expect("positive challenge fixture deposit must be valid"),
+    ])
+    .expect("singleton challenge fixture deposit must be canonical");
     let withdrawals = WithdrawalBatch::empty();
     let challenge_deadline = case.now % 1_024 + 1;
     let context = close_context(
@@ -517,17 +636,102 @@ fn fuzz_challenge(case: ChallengeCase) {
         case.now,
         &case.challenge,
     );
-    let close = build_close::<Sha256, _, _>(
-        &cache,
-        &context,
-        &deposits,
-        &withdrawals,
-        Vec::new(),
-        Vec::new(),
+    let recipient_account = recipient.public_key();
+    let recipient_opening = cache
+        .leaves()
+        .iter()
+        .find(|leaf| leaf.account == recipient_account)
+        .expect("challenge fixture recipient is live")
+        .state;
+    let retained = make_payment(
+        context.payment(),
+        &operator,
+        &other_payer,
+        &recipient,
+        1,
+        0,
+        case.shard,
+        0,
+        0,
+    );
+    let retained_receipt = retained.receipt().body();
+    let retained_credit = retained_receipt.cumulative_shard_credit();
+    let retained_index = retained_receipt.index();
+    let sender_account = other_payer.public_key();
+    let sender_opening = cache
+        .leaves()
+        .iter()
+        .find(|leaf| leaf.account == sender_account)
+        .expect("challenge fixture sender is live")
+        .state;
+    let recipient_shards = ShardSet::new(
+        context.payment().epoch(),
+        recipient_account.clone(),
+        vec![ShardHead::new(case.shard, retained.clone())],
     )
-    .expect("unchanged state must form a valid close");
+    .expect("singleton challenge shard set must be canonical");
+    let sender_shards = ShardSet::empty(context.payment().epoch(), sender_account.clone());
+    let mut entries = vec![
+        (
+            AccountRow {
+                account: sender_account,
+                predecessor: sender_opening,
+                successor: AccountState {
+                    balance: sender_opening.balance - 1,
+                    cumulative_debit: sender_opening.cumulative_debit + 1,
+                    ..sender_opening
+                },
+                outgoing: Some(retained),
+                output: SettlementOutput::None,
+                prefix: Prefix::default(),
+            },
+            sender_shards,
+            Prefix {
+                debit: 1,
+                ..Prefix::default()
+            },
+        ),
+        (
+            AccountRow {
+                account: recipient_account.clone(),
+                predecessor: recipient_opening,
+                successor: AccountState {
+                    balance: recipient_opening.balance + 1 + retained_credit,
+                    cumulative_credit: recipient_opening.cumulative_credit + retained_credit,
+                    receipt_count: recipient_opening.receipt_count + retained_index,
+                    ..recipient_opening
+                },
+                outgoing: None,
+                output: SettlementOutput::None,
+                prefix: Prefix::default(),
+            },
+            recipient_shards,
+            Prefix {
+                credit: retained_credit,
+                deposit: 1,
+                shard_count: 1,
+                ..Prefix::default()
+            },
+        ),
+    ];
+    entries.sort_unstable_by(|(left, _, _), (right, _, _)| left.account.cmp(&right.account));
+    let mut prefix = Prefix::default();
+    for (row, _, delta) in &mut entries {
+        prefix = prefix
+            .checked_extend(*delta)
+            .expect("bounded challenge fixture prefix cannot overflow");
+        row.prefix = prefix;
+    }
+    let (rows, shard_sets) = entries
+        .into_iter()
+        .map(|(row, shards, _)| (row, shards))
+        .unzip();
+    let close =
+        build_close::<Sha256, _, _>(&cache, &context, &deposits, &withdrawals, rows, shard_sets)
+            .expect("recipient deposit must form a valid close");
+    let index = ChallengeIndex::new::<Sha256>(&context, &close)
+        .expect("validated close has a canonical challenge index");
     let header = close.header;
-    let batch = header.batch_id::<Sha256>();
     let amount = u64::from(case.left_amount) + 1;
     let acknowledged = make_payment(
         context.payment(),
@@ -537,24 +741,40 @@ fn fuzz_challenge(case: ChallengeCase) {
         amount,
         0,
         case.shard,
-        0,
-        0,
+        retained_credit,
+        retained_index,
     );
     let latest = Challenge::LatestAcknowledgedSend {
-        batch,
-        payment: Box::new(acknowledged.clone()),
-        payer: Box::new(unchanged_lookup(&cache, &payer.public_key())),
-    };
-    let higher = Challenge::HigherShardTip {
-        batch,
-        payment: Box::new(acknowledged.clone()),
-        recipient: Box::new(unchanged_lookup(&cache, &recipient.public_key())),
-        shard: Box::new(
-            ShardSet::empty(context.payment().epoch(), recipient.public_key())
-                .lookup::<Sha256>(case.shard)
-                .expect("empty shard set has a canonical absence proof"),
+        payment: Box::new(PaymentWitness::from_payment(&acknowledged)),
+        payer: Box::new(
+            index
+                .account_lookup(&cache, &payer.public_key())
+                .expect("validated close has canonical payer evidence"),
         ),
     };
+    let higher = Challenge::HigherShardTip {
+        payment: Box::new(PaymentWitness::from_payment(&acknowledged)),
+        recipient: Box::new(
+            index
+                .higher_shard_tip_lookup::<Sha256>(
+                    &recipient_account,
+                    Some(&close.shard_sets[0]),
+                    case.shard,
+                )
+                .expect("validated close has canonical composed recipient evidence"),
+        ),
+    };
+    assert!(matches!(
+        &higher,
+        Challenge::HigherShardTip { recipient, .. }
+            if matches!(
+                recipient.as_ref(),
+                HigherShardTipLookup::Present {
+                    shard: CreditTipLookup::Present { .. },
+                    ..
+                }
+            )
+    ));
 
     let lower = make_payment(
         context.payment(),
@@ -589,7 +809,7 @@ fn fuzz_challenge(case: ChallengeCase) {
     let lower = if from_start {
         RangeLower::ShardStart
     } else {
-        RangeLower::Payment(Box::new(lower))
+        RangeLower::from_payment(&lower)
     };
     let inconsistent_upper = if from_start {
         payment_with_endpoint(
@@ -609,10 +829,29 @@ fn fuzz_challenge(case: ChallengeCase) {
         upper
     };
     let inconsistent = Challenge::InconsistentReceiptRange {
-        batch,
-        upper: Box::new(inconsistent_upper),
+        upper: Box::new(PaymentWitness::from_payment(&inconsistent_upper)),
         lower,
     };
+
+    let same_send_right = payment_with_endpoint(
+        context.payment(),
+        &operator,
+        &payer,
+        &recipient,
+        amount,
+        ReceiptEndpoint {
+            previous_debit: 0,
+            shard: case.shard ^ 1,
+            credit: amount,
+            index: 1,
+        },
+    );
+    let same_send_fork = Challenge::receipt_fork(acknowledged.clone(), same_send_right);
+    assert!(matches!(
+        &same_send_fork,
+        Challenge::ReceiptFork { fork }
+            if matches!(fork.as_ref(), ReceiptForkWitness::SameSend { .. })
+    ));
 
     let right = make_payment(
         context.payment(),
@@ -622,15 +861,21 @@ fn fuzz_challenge(case: ChallengeCase) {
         u64::from(case.right_amount) + 1,
         0,
         case.shard,
-        0,
-        0,
+        retained_credit,
+        retained_index,
     );
-    let fork = Challenge::receipt_fork(batch, acknowledged, right);
+    let same_index_fork = Challenge::receipt_fork(acknowledged.clone(), right);
+    assert!(matches!(
+        &same_index_fork,
+        Challenge::ReceiptFork { fork }
+            if matches!(fork.as_ref(), ReceiptForkWitness::SameIndex { .. })
+    ));
     let challenges = [
         (ChallengeKind::LatestAcknowledgedSend, latest),
         (ChallengeKind::HigherShardTip, higher),
         (ChallengeKind::InconsistentReceiptRange, inconsistent),
-        (ChallengeKind::ReceiptFork, fork),
+        (ChallengeKind::ReceiptFork, same_send_fork),
+        (ChallengeKind::ReceiptFork, same_index_fork),
     ];
     let wrong = SigningKey::from_seed(case.seed.wrapping_add(100));
     for (offset, (kind, challenge)) in challenges.iter().enumerate() {
@@ -644,6 +889,25 @@ fn fuzz_challenge(case: ChallengeCase) {
             case.shard.to_be_bytes()[offset],
         );
     }
+
+    let unrelated = make_payment(
+        context.payment(),
+        &operator,
+        &other_payer,
+        &payer,
+        u64::from(case.right_amount) + 2,
+        0,
+        case.shard ^ 1,
+        0,
+        1,
+    );
+    let full_fork = Challenge::receipt_fork(acknowledged, unrelated);
+    assert!(matches!(
+        &full_fork,
+        Challenge::ReceiptFork { fork }
+            if matches!(fork.as_ref(), ReceiptForkWitness::Full { .. })
+    ));
+    exercise_no_contradiction(&context, &header, &close.roots, &full_fork, &wrong);
 }
 
 fn bounded_values(mut values: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
@@ -663,11 +927,11 @@ fn fuzz_commitment(mut case: CommitmentCase) {
 
     let _ = case
         .opening
-        .verify::<Sha256>(case.kind, &case.opening_root, first);
+        .verify::<Sha256>(case.kind, &case.predecessor_root, first);
     let _ = case.opening.reconstruct::<Sha256>(case.kind, first);
     let _ = case
         .multi
-        .verify::<Sha256, _>(case.kind, &case.opening_root, &opening_values);
+        .verify::<Sha256, _>(case.kind, &case.predecessor_root, &opening_values);
     let mut builder = Builder::<Sha256>::new(case.kind, opening_values.len() as u32)
         .expect("small vector must fit the protocol bound");
     for value in &opening_values {
@@ -742,10 +1006,7 @@ fn bounded_set(set: ShardSet<VerifyingKey, Digest>) -> ShardSet<VerifyingKey, Di
 
 fn fuzz_credit(case: CreditCase) {
     let set = bounded_set(case.set);
-    let _ = verify_opening::<Sha256, _>(case.epoch, &case.recipient, &case.root, &case.opening);
-    let _ = case
-        .lookup
-        .resolve::<Sha256>(case.epoch, &case.recipient, &case.root, case.shard);
+    let _ = case.lookup.resolve::<Sha256>(&case.root, case.shard);
     let _ = set.root::<Sha256>();
     let _ = set.verify_root::<Sha256>(&case.root);
     let _ = set.lookup::<Sha256>(case.shard);
@@ -775,7 +1036,7 @@ fn fuzz_credit(case: CreditCase) {
         .lookup::<Sha256>(case.shard)
         .expect("present lookup must be constructible");
     assert!(matches!(
-        present.resolve::<Sha256>(context.epoch(), set.recipient(), &root, case.shard),
+        present.resolve::<Sha256>(&root, case.shard),
         Ok(Some(_))
     ));
     let absent_shard = case.shard ^ 1;
@@ -783,7 +1044,7 @@ fn fuzz_credit(case: CreditCase) {
         .lookup::<Sha256>(absent_shard)
         .expect("absent lookup must be constructible");
     assert!(matches!(
-        absent.resolve::<Sha256>(context.epoch(), set.recipient(), &root, absent_shard),
+        absent.resolve::<Sha256>(&root, absent_shard),
         Ok(None)
     ));
 }
@@ -828,19 +1089,19 @@ fn mutate_slice(
             ..AccountState::default()
         },
     });
-    match selector % 32 {
+    match selector % SLICE_MUTATIONS {
         0 => mutated.index = u16::MAX,
-        1 => mutated.layout.start.opening ^= 1,
-        2 => mutated.layout.start.change ^= 1,
-        3 => mutated.layout.start.closing ^= 1,
-        4 => mutated.layout.start.prefix.payout ^= 1,
-        5 => mutated.layout.end.opening ^= 1,
-        6 => mutated.layout.end.change ^= 1,
-        7 => mutated.layout.end.closing ^= 1,
-        8 => mutated.layout.end.prefix.payout ^= 1,
-        9 => mutated.layout.opening.start = u32::MAX,
-        10 => mutated.layout.opening.proof.leaf_count ^= 1,
-        11 => mutated.layout.opening.proof.siblings.push(marker),
+        1 => mutated.coverage.start.predecessor ^= 1,
+        2 => mutated.coverage.start.change ^= 1,
+        3 => mutated.coverage.start.successor ^= 1,
+        4 => mutated.coverage.start.prefix.payout ^= 1,
+        5 => mutated.coverage.end.predecessor ^= 1,
+        6 => mutated.coverage.end.change ^= 1,
+        7 => mutated.coverage.end.successor ^= 1,
+        8 => mutated.coverage.end.prefix.payout ^= 1,
+        9 => mutated.coverage.opening.start = u32::MAX,
+        10 => mutated.coverage.opening.proof.leaf_count ^= 1,
+        11 => mutated.coverage.opening.proof.siblings.push(marker),
         12 => mutated.changes.opening.start = u32::MAX,
         13 => mutated.changes.opening.proof.leaf_count ^= 1,
         14 => mutated.changes.opening.proof.siblings.push(marker),
@@ -867,38 +1128,38 @@ fn mutate_slice(
         }
         18 => {
             if let Some(leaf) = live_overlap.clone() {
-                mutated.opening.predecessor = Some(leaf);
+                mutated.predecessor.predecessor = Some(leaf);
             } else {
-                mutated.opening.opening.start = u32::MAX;
+                mutated.predecessor.opening.start = u32::MAX;
             }
         }
         19 => {
             if let Some(leaf) = live_overlap.clone() {
-                mutated.opening.successor = Some(leaf);
+                mutated.predecessor.successor = Some(leaf);
             } else {
-                mutated.opening.opening.start = u32::MAX;
+                mutated.predecessor.opening.start = u32::MAX;
             }
         }
-        20 => mutated.opening.opening.start = u32::MAX,
-        21 => mutated.opening.opening.proof.leaf_count ^= 1,
-        22 => mutated.opening.opening.proof.siblings.push(marker),
+        20 => mutated.predecessor.opening.start = u32::MAX,
+        21 => mutated.predecessor.opening.proof.leaf_count ^= 1,
+        22 => mutated.predecessor.opening.proof.siblings.push(marker),
         23 => {
             if let Some(leaf) = live_overlap.clone() {
-                mutated.closing.predecessor = Some(leaf);
+                mutated.successor.predecessor = Some(leaf);
             } else {
-                mutated.closing.opening.start = u32::MAX;
+                mutated.successor.opening.start = u32::MAX;
             }
         }
         24 => {
             if let Some(leaf) = live_overlap {
-                mutated.closing.successor = Some(leaf);
+                mutated.successor.successor = Some(leaf);
             } else {
-                mutated.closing.opening.start = u32::MAX;
+                mutated.successor.opening.start = u32::MAX;
             }
         }
-        25 => mutated.closing.opening.start = u32::MAX,
-        26 => mutated.closing.opening.proof.leaf_count ^= 1,
-        27 => mutated.closing.opening.proof.siblings.push(marker),
+        25 => mutated.successor.opening.start = u32::MAX,
+        26 => mutated.successor.opening.proof.leaf_count ^= 1,
+        27 => mutated.successor.opening.proof.siblings.push(marker),
         28 => {
             if let Some(row) = mutated.changes.rows.first().cloned() {
                 mutated.changes.rows.push(row);
@@ -907,20 +1168,27 @@ fn mutate_slice(
             }
         }
         29 => {
-            if let Some(row) = mutated.changes.rows.first().cloned() {
-                mutated.changes.predecessor = Some(row);
+            if let Some((row, shards)) =
+                mutated.changes.rows.first().zip(mutated.shard_sets.first())
+            {
+                let leaf = AccountChange::from_row::<Sha256>(row, shards)
+                    .expect("validated slice row has canonical shard material");
+                mutated.changes.predecessor = Some(leaf.guard::<Sha256>());
             } else {
                 mutated.changes.opening.start = u32::MAX;
             }
         }
         30 => {
-            if let Some(row) = mutated.changes.rows.last().cloned() {
-                mutated.changes.successor = Some(row);
+            if let Some((row, shards)) = mutated.changes.rows.last().zip(mutated.shard_sets.last())
+            {
+                let leaf = AccountChange::from_row::<Sha256>(row, shards)
+                    .expect("validated slice row has canonical shard material");
+                mutated.changes.successor = Some(leaf.guard::<Sha256>());
             } else {
                 mutated.changes.opening.start = u32::MAX;
             }
         }
-        _ => {
+        31 => {
             if let Some(shards) = mutated.shard_sets.first_mut() {
                 *shards =
                     ShardSet::empty(shards.epoch().wrapping_add(1), shards.recipient().clone());
@@ -928,6 +1196,34 @@ fn mutate_slice(
                 mutated.changes.opening.start = u32::MAX;
             }
         }
+        32 => {
+            mutated
+                .withdrawal_outputs
+                .opening
+                .as_mut()
+                .expect("withdrawal mutation requires a present output range")
+                .start ^= 1;
+        }
+        33 => {
+            mutated
+                .withdrawal_outputs
+                .opening
+                .as_mut()
+                .expect("withdrawal mutation requires a present output range")
+                .proof
+                .leaf_count ^= 1;
+        }
+        34 => {
+            mutated
+                .withdrawal_outputs
+                .opening
+                .as_mut()
+                .expect("withdrawal mutation requires a present output range")
+                .proof
+                .siblings
+                .push(marker);
+        }
+        _ => mutated.withdrawal_outputs.opening = None,
     }
     mutated
 }
@@ -988,12 +1284,12 @@ fn fuzz_transition(mut case: TransitionCase) {
         .chain(
             case.rows
                 .iter()
-                .filter(|row| row.opening.active)
+                .filter(|row| row.predecessor.active)
                 .map(|row| StateLeaf {
                     account: row.account.clone(),
                     state: AccountState {
-                        balance: row.opening.balance.max(1),
-                        ..row.opening
+                        balance: row.predecessor.balance.max(1),
+                        ..row.predecessor
                     },
                 }),
         )
@@ -1037,7 +1333,7 @@ fn fuzz_transition(mut case: TransitionCase) {
         .map(bounded_set)
         .collect::<Vec<_>>();
     let roots = case.header.roots;
-    let header = Header::new::<Sha256, _>(context.payment(), &roots);
+    let header = Header::new::<Sha256, _>(&context, &roots);
     let close = Close {
         header,
         roots,
@@ -1121,16 +1417,14 @@ fn fuzz_transition(mut case: TransitionCase) {
     let shards = ShardSet::empty(context.payment().epoch(), account.public_key());
     let row = AccountRow {
         account: account.public_key(),
-        opening: AccountState::default(),
-        closing: AccountState {
+        predecessor: AccountState::default(),
+        successor: AccountState {
             balance: amount,
             active: true,
             ..AccountState::default()
         },
         outgoing: None,
-        credit_root: shards
-            .root::<Sha256>()
-            .expect("empty fuzz shard set must commit"),
+        output: SettlementOutput::None,
         prefix: Prefix {
             deposit: amount,
             ..Prefix::default()
@@ -1145,8 +1439,14 @@ fn fuzz_transition(mut case: TransitionCase) {
         vec![shards],
     )
     .expect("constructed deposit creation must validate");
-    assert_eq!(close.roots.opening, empty_root::<Sha256>(VectorKind::State));
-    assert_ne!(close.roots.closing, empty_root::<Sha256>(VectorKind::State));
+    assert_eq!(
+        *context.predecessor_root(),
+        empty_root::<Sha256>(VectorKind::State)
+    );
+    assert_ne!(
+        close.roots.successor,
+        empty_root::<Sha256>(VectorKind::State)
+    );
     validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
         .expect("constructed deposit creation must validate");
     let slices = assemble_slices::<Sha256, _, _>(
@@ -1175,7 +1475,7 @@ fn fuzz_transition(mut case: TransitionCase) {
         &withdrawals,
         &close,
         &slices,
-        case.seed.to_be_bytes()[2],
+        case.seed.to_be_bytes()[2] % NON_WITHDRAWAL_SLICE_MUTATIONS,
     );
 
     let account = SigningKey::from_seed(case.seed.wrapping_add(20));
@@ -1219,15 +1519,13 @@ fn fuzz_transition(mut case: TransitionCase) {
     let shards = ShardSet::empty(context.payment().epoch(), account.public_key());
     let row = AccountRow {
         account: account.public_key(),
-        opening,
-        closing: AccountState::default(),
+        predecessor: opening,
+        successor: AccountState::default(),
         outgoing: None,
-        credit_root: shards
-            .root::<Sha256>()
-            .expect("empty withdrawal shard set must commit"),
+        output: SettlementOutput::Withdrawal(opening.balance),
         prefix: Prefix {
             withdrawal: opening.balance,
-            withdrawals: 1,
+            withdrawal_count: 1,
             ..Prefix::default()
         },
     };
@@ -1240,7 +1538,10 @@ fn fuzz_transition(mut case: TransitionCase) {
         vec![shards],
     )
     .expect("constructed close withdrawal must validate");
-    assert_eq!(close.roots.closing, empty_root::<Sha256>(VectorKind::State));
+    assert_eq!(
+        close.roots.successor,
+        empty_root::<Sha256>(VectorKind::State)
+    );
     validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
         .expect("constructed close withdrawal must validate again");
     let claim = assemble_withdrawal_claim::<Sha256, _, _>(
@@ -1250,16 +1551,14 @@ fn fuzz_transition(mut case: TransitionCase) {
         &Sequential,
     )
     .expect("constructed withdrawal must have a claim");
+    let output = claim
+        .verify::<Sha256>(&close.roots.withdrawal_outputs)
+        .expect("constructed withdrawal claim must verify");
     assert_eq!(
-        claim
-            .verify::<Sha256>(
-                context.deployment(),
-                context.withdrawal_root(),
-                &close.roots.change,
-            )
-            .expect("constructed withdrawal claim must verify"),
-        opening.balance
+        output.destination(),
+        withdrawals.requests()[0].body().destination()
     );
+    assert_eq!(output.amount(), opening.balance);
     let slices = assemble_slices::<Sha256, _, _>(
         &cache,
         &context,
@@ -1280,6 +1579,9 @@ fn fuzz_transition(mut case: TransitionCase) {
         )
         .is_ok()
     }));
+    for selector in NON_WITHDRAWAL_SLICE_MUTATIONS..SLICE_MUTATIONS {
+        exercise_slice_mutation(&context, &deposits, &withdrawals, &close, &slices, selector);
+    }
 
     let payer = SigningKey::from_seed(case.seed.wrapping_add(30));
     let recipient = SigningKey::from_seed(case.seed.wrapping_add(31));
@@ -1332,16 +1634,14 @@ fn fuzz_transition(mut case: TransitionCase) {
         (
             AccountRow {
                 account: payer.public_key(),
-                opening: payer_opening,
-                closing: AccountState {
+                predecessor: payer_opening,
+                successor: AccountState {
                     balance: 1,
                     cumulative_debit: payout,
                     ..payer_opening
                 },
                 outgoing: Some(payment),
-                credit_root: payer_shards
-                    .root::<Sha256>()
-                    .expect("empty payer shard set commits"),
+                output: SettlementOutput::None,
                 prefix: Prefix::default(),
             },
             payer_shards,
@@ -1353,23 +1653,21 @@ fn fuzz_transition(mut case: TransitionCase) {
         (
             AccountRow {
                 account: recipient.public_key(),
-                opening: AccountState::default(),
-                closing: AccountState {
+                predecessor: AccountState::default(),
+                successor: AccountState {
                     cumulative_credit: payout,
                     receipt_count: 1,
                     ..AccountState::default()
                 },
                 outgoing: None,
-                credit_root: recipient_shards
-                    .root::<Sha256>()
-                    .expect("payout shard set commits"),
+                output: SettlementOutput::ExternalPayout(payout),
                 prefix: Prefix::default(),
             },
             recipient_shards,
             Prefix {
                 credit: payout,
                 payout,
-                shards: 1,
+                shard_count: 1,
                 ..Prefix::default()
             },
         ),
@@ -1435,9 +1733,9 @@ fn fuzz_transition(mut case: TransitionCase) {
         .iter()
         .find(|row| row.account == recipient.public_key())
         .expect("constructed external payout retains its recipient row");
-    assert_eq!(payout_row.opening, AccountState::default());
-    assert!(!payout_row.closing.active);
-    assert_eq!(payout_row.closing.balance, 0);
+    assert_eq!(payout_row.predecessor, AccountState::default());
+    assert!(!payout_row.successor.active);
+    assert_eq!(payout_row.successor.balance, 0);
     assert!(payout_row.outgoing.is_none());
     assert_eq!(payout_row.checked_deltas(), Some((0, payout, 1)));
     validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close)
@@ -1526,16 +1824,14 @@ fn fuzz_admission(case: AdmissionCase) {
     let shards = ShardSet::empty(context.payment().epoch(), account.public_key());
     let row = AccountRow {
         account: account.public_key(),
-        opening: AccountState::default(),
-        closing: AccountState {
+        predecessor: AccountState::default(),
+        successor: AccountState {
             balance: amount,
             active: true,
             ..AccountState::default()
         },
         outgoing: None,
-        credit_root: shards
-            .root::<Sha256>()
-            .expect("empty admission shard set commits"),
+        output: SettlementOutput::None,
         prefix: Prefix {
             deposit: amount,
             ..Prefix::default()
@@ -1581,7 +1877,7 @@ fn fuzz_admission(case: AdmissionCase) {
         .map(|slice| all[usize::from(slice)].clone())
         .collect::<Vec<_>>();
         let canonical = assigned.clone();
-        let (vote, retained) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+        let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &scheme,
             &context,
             &deposits,
@@ -1594,10 +1890,10 @@ fn fuzz_admission(case: AdmissionCase) {
         )
         .expect("complete valid assignment must sign");
         assert!(
-            retained
+            sealed
                 .slices()
                 .iter()
-                .all(|slice| retained.serve(slice.index).is_some())
+                .all(|slice| sealed.serve(slice.index).is_some())
         );
         if validator == 0 {
             let position = usize::from(case.mutation) % canonical.len();
@@ -1644,7 +1940,10 @@ fn fuzz_admission(case: AdmissionCase) {
             .filter(|_| !checked_nonempty_mutation)
         {
             let mut malformed = canonical.clone();
-            malformed[position] = mutate_slice(&malformed[position], case.mutation);
+            malformed[position] = mutate_slice(
+                &malformed[position],
+                case.mutation % NON_WITHDRAWAL_SLICE_MUTATIONS,
+            );
             assert!(assignment_is_rejected(
                 &scheme,
                 &context,

@@ -1,7 +1,7 @@
 //! Ratatui presentation for one independently owned agent wallet.
 
 use crate::{
-    agent::Agent,
+    agent::{Agent, DepositOutcome, WithdrawalOutcome},
     operator::DEFAULT_AMOUNT,
     operator_rpc::{PollCloseResponse, StatusResponse as OperatorStatus},
     settlement_rpc::StatusResponse as SettlementStatus,
@@ -97,7 +97,7 @@ impl UiState {
     fn new() -> Self {
         let mut activity = VecDeque::new();
         activity.push_back(
-            "Ready: deposit or withdraw before paying, then close without pausing the next epoch."
+            "Ready: deposit or withdraw before paying; a close finalizes after its challenge window."
                 .to_string(),
         );
         Self {
@@ -157,7 +157,7 @@ pub(crate) async fn run<E: Network>(
             KeyCode::Char('p') => {
                 let recipient = agent.recipient_name(state.recipient);
                 match agent
-                    .pay(network, operator, state.recipient, state.amount)
+                    .pay(network, settlement, operator, state.recipient, state.amount)
                     .await
                 {
                     Ok(payment) => state.log(format!(
@@ -167,15 +167,28 @@ pub(crate) async fn run<E: Network>(
                     Err(error) => state.log(format!("payment rejected: {error:#}")),
                 }
             }
+            KeyCode::Char('h') => {
+                handle_hard_fault_recovery(network, settlement, &agent, &mut state).await;
+            }
+            KeyCode::Char('r') => {
+                handle_pending_deposit_recovery(network, settlement, &agent, &mut state).await;
+            }
             KeyCode::Char('d') => match agent
                 .deposit(network, settlement, operator, state.amount)
                 .await
             {
-                Ok(deposit) => state.log(format!(
+                Ok(DepositOutcome::Applied { epoch, event }) => state.log(format!(
                     "epoch {} deposit credited: {}",
-                    deposit.epoch, deposit.amount
+                    epoch, event.amount
                 )),
-                Err(error) => state.log(format!("deposit rejected: {error:#}")),
+                Ok(DepositOutcome::Recorded {
+                    event,
+                    error,
+                }) => state.log(format!(
+                    "settlement custody recorded for {}; operator credit unknown; retry uses the same deposit: {error:#}",
+                    event.amount
+                )),
+                Err(error) => state.log(format!("deposit not confirmed: {error:#}")),
             },
             KeyCode::Char('w') | KeyCode::Char('f') => {
                 let action = if key.code == KeyCode::Char('f') {
@@ -186,17 +199,24 @@ pub(crate) async fn run<E: Network>(
                     )
                 };
                 match agent.withdraw(network, settlement, operator, action).await {
-                    Ok(withdrawal) => match withdrawal.action {
+                    Ok(WithdrawalOutcome::Applied { epoch, request }) => match request.body().action() {
                         WithdrawalAction::Amount(amount) => state.log(format!(
                             "epoch {} withdrawal queued: {}",
-                            withdrawal.epoch, amount
+                            epoch, amount
                         )),
                         WithdrawalAction::Close => state.log(format!(
                             "epoch {} Close queued; payout is finalized at epoch close",
-                            withdrawal.epoch
+                            epoch
                         )),
                     },
-                    Err(error) => state.log(format!("withdrawal rejected: {error:#}")),
+                    Ok(WithdrawalOutcome::Queued {
+                        request,
+                        error,
+                    }) => state.log(format!(
+                        "withdrawal queued at settlement through deadline {}; operator application unknown; retry uses the same signed request: {error:#}",
+                        request.body().deadline()
+                    )),
+                    Err(error) => state.log(format!("withdrawal not confirmed: {error:#}")),
                 }
             }
             KeyCode::Char('c') => match agent.claim_withdrawal(network, settlement, operator).await
@@ -227,7 +247,7 @@ pub(crate) async fn run<E: Network>(
                         state.pending_closes.push_back(close.epoch);
                     }
                     state.log(format!(
-                        "epoch {} cut{}; its successor is accepting payments",
+                        "epoch {} cut{}; successor payments resume after settlement finalization",
                         close.epoch,
                         if close.queued { " and queued" } else { "" }
                     ));
@@ -240,6 +260,37 @@ pub(crate) async fn run<E: Network>(
     Ok(())
 }
 
+async fn handle_hard_fault_recovery<E: Network>(
+    network: &E,
+    settlement: SocketAddr,
+    agent: &Agent,
+    state: &mut UiState,
+) {
+    match agent.recover_hard_fault(network, settlement).await {
+        Ok(release) => state.log(format!(
+            "hard-fault recovery released {} (residual {})",
+            release.released_custody, release.residual
+        )),
+        Err(error) => state.log(format!("hard-fault recovery rejected: {error:#}")),
+    }
+}
+
+async fn handle_pending_deposit_recovery<E: Network>(
+    network: &E,
+    settlement: SocketAddr,
+    agent: &Agent,
+    state: &mut UiState,
+) {
+    match agent.recover_pending_deposit(network, settlement).await {
+        Ok(refund) => state.log(format!(
+            "pending deposit refunded for {}: {}",
+            agent.name(),
+            refund.amount
+        )),
+        Err(error) => state.log(format!("deposit refund rejected: {error:#}")),
+    }
+}
+
 async fn refresh<E: Network>(
     network: &E,
     operator: SocketAddr,
@@ -248,9 +299,9 @@ async fn refresh<E: Network>(
     state: &mut UiState,
 ) -> Result<()> {
     if let Some(epoch) = state.pending_closes.front().copied() {
-        match agent.poll_close(network, operator, epoch).await? {
-            PollCloseResponse::NoEvent => {}
-            PollCloseResponse::Finished(close) => {
+        match agent.poll_close(network, operator, epoch).await {
+            Ok(PollCloseResponse::NoEvent) | Err(_) => {}
+            Ok(PollCloseResponse::Finished(close)) => {
                 state.pending_closes.pop_front();
                 state.log(format!(
                     "epoch {} finalized {}: {} rows, {} slices, prepare {}us, deal {}us, seal {}us",
@@ -263,7 +314,7 @@ async fn refresh<E: Network>(
                     close.seal_micros
                 ));
             }
-            PollCloseResponse::Failed { epoch, error } => {
+            Ok(PollCloseResponse::Failed { epoch, error }) => {
                 state.pending_closes.pop_front();
                 state.log(format!(
                     "epoch {epoch} close failed: {}",
@@ -272,8 +323,8 @@ async fn refresh<E: Network>(
             }
         }
     }
-    state.operator = Some(agent.operator_status(network, operator).await?);
-    state.settlement = Some(agent.settlement_status(network, settlement).await?);
+    state.operator = agent.operator_status(network, operator).await.ok();
+    state.settlement = agent.settlement_status(network, settlement).await.ok();
     state.balance = agent.balance(network, operator).await.ok();
     Ok(())
 }
@@ -291,7 +342,7 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
 
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
-            " Commonware Clearing Agent ",
+            " Bajillion Agent ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -327,7 +378,7 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
         || "settlement unavailable".to_string(),
         |status| {
             format!(
-                "Settlement custody {} | claimable {} | time {} | state {}...",
+                "Settlement custody {} | claimable {} | time {} | state {}...{}",
                 status.custody_balance,
                 status.claimable_balance,
                 status.now,
@@ -338,7 +389,12 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
                     .iter()
                     .take(4)
                     .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
+                    .collect::<String>(),
+                if status.hard_faulted {
+                    " | HARD FAULT"
+                } else {
+                    ""
+                }
             )
         },
     );
@@ -351,7 +407,7 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
             state.amount
         )),
         Line::raw(
-            "p pay  d deposit  w withdraw  f Close account  c claim withdrawal  e claim external  s close",
+            "p pay  d deposit  r refund deposit  w withdraw  f Close  c claim  e payout  h recover state  s close",
         ),
         Line::raw("Left/Right recipient  +/- amount  PgUp/PgDn +/-10"),
     ])
@@ -392,24 +448,43 @@ pub(crate) async fn scripted<E: Network>(
     settlement: SocketAddr,
     mut agent: Agent,
 ) -> Result<()> {
-    let deposit = agent.deposit(network, settlement, operator, 10).await?;
-    println!("epoch {} deposited {}", deposit.epoch, deposit.amount);
-    let withdrawal = agent
+    let (deposit_epoch, deposit) = match agent.deposit(network, settlement, operator, 10).await? {
+        DepositOutcome::Applied { epoch, event } => (epoch, event),
+        DepositOutcome::Recorded { event, error } => anyhow::bail!(
+            "settlement custody recorded for {}; operator credit unknown; retry uses the same deposit: {error:#}",
+            event.amount
+        ),
+    };
+    println!("epoch {} deposited {}", deposit_epoch, deposit.amount);
+    let withdrawal = match agent
         .withdraw(
             network,
             settlement,
             operator,
             WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()),
         )
-        .await?;
-    println!("epoch {} queued withdrawal 3", withdrawal.epoch);
-    let payment = agent.pay(network, operator, 1, 5).await?;
+        .await?
+    {
+        WithdrawalOutcome::Applied { epoch, .. } => epoch,
+        WithdrawalOutcome::Queued { request, error } => anyhow::bail!(
+            "withdrawal queued at settlement through deadline {}; operator application unknown; retry uses the same signed request: {error:#}",
+            request.body().deadline()
+        ),
+    };
+    println!("epoch {} queued withdrawal 3", withdrawal);
+    let payment = agent.pay(network, settlement, operator, 1, 5).await?;
     println!(
         "epoch {} accepted payment #{}",
         payment.epoch, payment.sequence
     );
     let external = agent
-        .pay(network, operator, agent.recipient_count() - 1, 2)
+        .pay(
+            network,
+            settlement,
+            operator,
+            agent.recipient_count() - 1,
+            2,
+        )
         .await?;
     println!(
         "epoch {} accepted external payment #{}",
@@ -417,11 +492,6 @@ pub(crate) async fn scripted<E: Network>(
     );
     let close = agent.start_close(network, operator).await?;
     println!("epoch {} cut and closing asynchronously", close.epoch);
-    let successor = agent.pay(network, operator, 1, 1).await?;
-    println!(
-        "epoch {} accepted successor payment #{} before epoch {} completed",
-        successor.epoch, successor.sequence, close.epoch
-    );
     loop {
         match agent.poll_close(network, operator, close.epoch).await? {
             PollCloseResponse::NoEvent => thread::sleep(Duration::from_millis(10)),
@@ -444,6 +514,11 @@ pub(crate) async fn scripted<E: Network>(
             }
         }
     }
+    let successor = agent.pay(network, settlement, operator, 1, 1).await?;
+    println!(
+        "epoch {} accepted successor payment #{} after epoch {} finalized",
+        successor.epoch, successor.sequence, close.epoch
+    );
     let release = agent
         .claim_withdrawal(network, settlement, operator)
         .await?;
@@ -458,10 +533,22 @@ pub(crate) async fn scripted<E: Network>(
 
 #[cfg(test)]
 mod tests {
-    use super::initialize_while_guarded;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+    use super::{
+        UiState, handle_hard_fault_recovery, handle_pending_deposit_recovery,
+        initialize_while_guarded, refresh,
+    };
+    use crate::{agent::Agent, rpc, settlement::Settlement, settlement_rpc};
+    use bytes::Bytes;
+    use commonware_codec::Encode as _;
+    use commonware_runtime::{
+        Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
+    };
+    use std::{
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     struct DropProbe(Arc<AtomicBool>);
@@ -480,5 +567,85 @@ mod tests {
 
         assert!(result.is_err());
         assert!(dropped.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn unavailable_operator_keeps_settlement_visible_and_recovery_reachable() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut settlement = Settlement::new().unwrap();
+            let expected = settlement_rpc::StatusResponse::from(settlement.status().unwrap());
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let settlement_address = listener.local_addr().unwrap();
+            let server = context.child("settlement").spawn(move |_| async move {
+                for expected_method in [
+                    settlement_rpc::METHOD_STATUS,
+                    settlement_rpc::METHOD_BEGIN_HARD_FAULT_SETTLEMENT,
+                    settlement_rpc::METHOD_CLAIM_PENDING_DEPOSIT,
+                ] {
+                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    assert_eq!(request.method, expected_method);
+                    let response = match expected_method {
+                        settlement_rpc::METHOD_STATUS => rpc::Response::Success {
+                            body: expected.encode(),
+                        },
+                        settlement_rpc::METHOD_BEGIN_HARD_FAULT_SETTLEMENT => {
+                            rpc::Response::Error {
+                                error: Bytes::from_static(b"recovery key reached settlement"),
+                            }
+                        }
+                        settlement_rpc::METHOD_CLAIM_PENDING_DEPOSIT => rpc::Response::Error {
+                            error: Bytes::from_static(b"refund key reached settlement"),
+                        },
+                        _ => unreachable!(),
+                    };
+                    rpc::send_response(&mut sink, &response).await.unwrap();
+                }
+            });
+
+            let operator_address = SocketAddr::from(([127, 0, 0, 1], 1));
+            let agent = Agent::new(0).unwrap();
+            let mut state = UiState::new();
+            state.pending_closes.push_back(7);
+
+            refresh(
+                &context,
+                operator_address,
+                settlement_address,
+                &agent,
+                &mut state,
+            )
+            .await
+            .unwrap();
+
+            assert!(state.operator.is_none());
+            assert!(state.balance.is_none());
+            assert_eq!(
+                state.pending_closes.iter().copied().collect::<Vec<_>>(),
+                [7]
+            );
+            assert_eq!(state.settlement.unwrap(), expected);
+
+            handle_hard_fault_recovery(&context, settlement_address, &agent, &mut state).await;
+            assert!(
+                state
+                    .activity
+                    .back()
+                    .unwrap()
+                    .contains("recovery key reached settlement")
+            );
+            handle_pending_deposit_recovery(&context, settlement_address, &agent, &mut state).await;
+            assert!(
+                state
+                    .activity
+                    .back()
+                    .unwrap()
+                    .contains("refund key reached settlement")
+            );
+            server.await.unwrap();
+        });
     }
 }

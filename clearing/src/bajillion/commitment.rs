@@ -19,13 +19,15 @@ const STATE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_STATE_ROOT";
 const CHANGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_LEAF";
 const CHANGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_ROOT";
 const CREDIT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_LEAF";
-const CREDIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_VECTOR_ROOT";
+const CREDIT_TIP_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_VECTOR_ROOT";
 const DEPOSIT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_LEAF";
 const DEPOSIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_ROOT";
 const WITHDRAWAL_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_LEAF";
 const WITHDRAWAL_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_ROOT";
-const LAYOUT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_LAYOUT_LEAF";
-const LAYOUT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_LAYOUT_ROOT";
+const COVERAGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_LAYOUT_LEAF";
+const COVERAGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_LAYOUT_ROOT";
+const WITHDRAWAL_OUTPUT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_LEAF";
+const WITHDRAWAL_OUTPUT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_ROOT";
 
 /// Maximum number of values in a committed vector or disclosed in one proof.
 ///
@@ -42,16 +44,18 @@ pub const MAX_VECTOR_LENGTH: u32 = 1 << 24;
 pub enum VectorKind {
     /// Complete account-state vector.
     State = 1,
-    /// Sorted vector of changed-account rows.
+    /// Sorted vector of changed-account guards.
     Change = 2,
-    /// Sorted vector of terminal receive-shard heads.
-    Credit = 3,
+    /// Sorted vector of terminal receive-shard tips.
+    CreditTip = 3,
     /// Chain-sealed deposit vector.
     Deposit = 4,
     /// Chain-sealed withdrawal vector.
     Withdrawal = 5,
     /// Gap-free deterministic proof-slice boundaries.
-    Layout = 6,
+    Coverage = 6,
+    /// Validator-derived withdrawal outputs in request order.
+    WithdrawalOutput = 7,
 }
 
 impl VectorKind {
@@ -59,10 +63,11 @@ impl VectorKind {
         match self {
             Self::State => STATE_LEAF_DOMAIN,
             Self::Change => CHANGE_LEAF_DOMAIN,
-            Self::Credit => CREDIT_LEAF_DOMAIN,
+            Self::CreditTip => CREDIT_LEAF_DOMAIN,
             Self::Deposit => DEPOSIT_LEAF_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_LEAF_DOMAIN,
-            Self::Layout => LAYOUT_LEAF_DOMAIN,
+            Self::Coverage => COVERAGE_LEAF_DOMAIN,
+            Self::WithdrawalOutput => WITHDRAWAL_OUTPUT_LEAF_DOMAIN,
         }
     }
 
@@ -70,10 +75,11 @@ impl VectorKind {
         match self {
             Self::State => STATE_ROOT_DOMAIN,
             Self::Change => CHANGE_ROOT_DOMAIN,
-            Self::Credit => CREDIT_ROOT_DOMAIN,
+            Self::CreditTip => CREDIT_TIP_ROOT_DOMAIN,
             Self::Deposit => DEPOSIT_ROOT_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_ROOT_DOMAIN,
-            Self::Layout => LAYOUT_ROOT_DOMAIN,
+            Self::Coverage => COVERAGE_ROOT_DOMAIN,
+            Self::WithdrawalOutput => WITHDRAWAL_OUTPUT_ROOT_DOMAIN,
         }
     }
 }
@@ -91,10 +97,11 @@ impl Read for VectorKind {
         match u8::read(reader)? {
             1 => Ok(Self::State),
             2 => Ok(Self::Change),
-            3 => Ok(Self::Credit),
+            3 => Ok(Self::CreditTip),
             4 => Ok(Self::Deposit),
             5 => Ok(Self::Withdrawal),
-            6 => Ok(Self::Layout),
+            6 => Ok(Self::Coverage),
+            7 => Ok(Self::WithdrawalOutput),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -107,13 +114,14 @@ impl FixedSize for VectorKind {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for VectorKind {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(1..=6)? {
+        Ok(match u.int_in_range(1..=7)? {
             1 => Self::State,
             2 => Self::Change,
-            3 => Self::Credit,
+            3 => Self::CreditTip,
             4 => Self::Deposit,
             5 => Self::Withdrawal,
-            6 => Self::Layout,
+            6 => Self::Coverage,
+            7 => Self::WithdrawalOutput,
             _ => unreachable!("range contains every vector kind"),
         })
     }
@@ -496,13 +504,11 @@ impl<D: Digest> RangeOpening<D> {
         Ok(())
     }
 
-    /// Verifies contiguous encoded values against a domain-separated root.
-    pub fn verify<H, B>(
+    pub(crate) fn reconstruct<H, B>(
         &self,
         kind: VectorKind,
-        root: &VectorRoot<D>,
         encoded_values: &[B],
-    ) -> Result<(), Error>
+    ) -> Result<VectorRoot<D>, Error>
     where
         H: Hasher<Digest = D>,
         B: AsRef<[u8]>,
@@ -510,8 +516,8 @@ impl<D: Digest> RangeOpening<D> {
         self.validate_shape()?;
         let len = self.proof.leaf_count;
         if encoded_values.is_empty() {
-            return if len == 0 && self.start == 0 && *root == empty_root::<H>(kind) {
-                Ok(())
+            return if len == 0 && self.start == 0 {
+                Ok(empty_root::<H>(kind))
             } else {
                 Err(Error::MalformedEmpty)
             };
@@ -533,7 +539,21 @@ impl<D: Digest> RangeOpening<D> {
         let inner = self
             .proof
             .root_from_multi_inclusion::<H>(&leaves, &Sequential)?;
-        if bind_root::<H>(kind, len, &inner) == *root {
+        Ok(bind_root::<H>(kind, len, &inner))
+    }
+
+    /// Verifies contiguous encoded values against a domain-separated root.
+    pub fn verify<H, B>(
+        &self,
+        kind: VectorKind,
+        root: &VectorRoot<D>,
+        encoded_values: &[B],
+    ) -> Result<(), Error>
+    where
+        H: Hasher<Digest = D>,
+        B: AsRef<[u8]>,
+    {
+        if self.reconstruct::<H, B>(kind, encoded_values)? == *root {
             Ok(())
         } else {
             Err(Error::InvalidOpening)

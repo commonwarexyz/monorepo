@@ -1,12 +1,12 @@
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
-    challenge::{AccountLookup, Challenge, ChallengeKind, Verdict, adjudicate},
-    credit::{ShardHead, ShardLookup, ShardSet},
-    payment::{Payment, PaymentContext, SignedReceipt, SignedSend},
-    state::{AccountRow, AccountState, Prefix, StateLeaf},
+    challenge::{Challenge, ChallengeKind, HigherShardTipLookup, Verdict, adjudicate},
+    credit::{CreditTipLookup, ShardHead, ShardSet},
+    payment::{Payment, PaymentContext, PaymentWitness, SignedReceipt, SignedSend},
+    state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, PreparedClose,
-        RootBundle, StateCache, prepare_close_with_strategy,
+        Assignment, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, Header,
+        PreparedClose, RootBundle, StateCache, prepare_close_with_strategy,
     },
 };
 use commonware_cryptography::{Hasher, Sha256, Signer as _, sha256::Digest};
@@ -196,7 +196,7 @@ pub(crate) struct ChallengeFixture {
     pub(crate) challenge: Challenge<VerifyingKey, Digest>,
 }
 
-fn opening_state() -> AccountState {
+fn predecessor_state() -> AccountState {
     AccountState {
         balance: OPENING_BALANCE,
         active: true,
@@ -224,7 +224,7 @@ fn leaves(accounts: &[Account]) -> Vec<StateLeaf<VerifyingKey>> {
         .iter()
         .map(|account| StateLeaf {
             account: account.public.clone(),
-            state: opening_state(),
+            state: predecessor_state(),
         })
         .collect()
 }
@@ -325,15 +325,21 @@ where
             ShardSet::new(payment_context.epoch(), account.public.clone(), heads)
                 .expect("benchmark shards are canonical")
         };
-        let credit_root = shards
-            .root::<Sha256>()
-            .expect("benchmark credit root is valid");
-        let received = credit_root.total_credit;
-        let receipts = credit_root.total_receipts;
+        let (received, receipts) = shards
+            .heads()
+            .iter()
+            .try_fold((0_u64, 0_u64), |(credit, receipts), head| {
+                let receipt = head.payment.receipt().body();
+                Some((
+                    credit.checked_add(receipt.cumulative_shard_credit())?,
+                    receipts.checked_add(receipt.index())?,
+                ))
+            })
+            .expect("benchmark shard totals are representable");
         assert_ne!(sent + received, 0, "every disclosed account must change");
-        let opening = opening_state();
-        let closing = AccountState {
-            balance: opening
+        let predecessor = predecessor_state();
+        let successor = AccountState {
+            balance: predecessor
                 .balance
                 .checked_sub(sent)
                 .and_then(|balance| balance.checked_add(received))
@@ -345,10 +351,10 @@ where
         };
         rows.push(AccountRow {
             account: account.public.clone(),
-            opening,
-            closing,
+            predecessor,
+            successor,
             outgoing: outgoing[index].take(),
-            credit_root,
+            output: SettlementOutput::None,
             prefix: Prefix::default(),
         });
         shard_sets.push(shards);
@@ -361,7 +367,7 @@ where
             .checked_extend(Prefix {
                 debit,
                 credit,
-                shards: u64::try_from(shards.heads().len())
+                shard_count: u64::try_from(shards.heads().len())
                     .expect("benchmark shard count fits in u64"),
                 ..Prefix::default()
             })
@@ -561,8 +567,18 @@ pub(crate) fn payment_fixture() -> PaymentFixture {
 pub(crate) fn active_chain_fixture(
     profile: ActiveProfile,
     assignment: Assignment<Digest>,
-) -> (CloseFixture, Challenge<VerifyingKey, Digest>) {
+) -> (CloseFixture, Challenge<VerifyingKey, Digest>, SigningKey) {
     let (fixture, accounts) = active_close_fixture_parts(profile, assignment);
+    let claim_account = fixture
+        .rows
+        .get(1)
+        .expect("the active profile has a non-first changed row")
+        .account
+        .clone();
+    let claim_account_position = accounts
+        .binary_search_by(|account| account.public.cmp(&claim_account))
+        .expect("the claim account is registered");
+    let claim_signer = accounts[claim_account_position].private.clone();
     let row_position = fixture
         .shard_sets
         .iter()
@@ -581,7 +597,7 @@ pub(crate) fn active_chain_fixture(
         .expect("the challenged recipient is registered");
     assert_eq!(recipient_position, 0);
     let public_receipt = public_tip.receipt().body();
-    let previous_debit = fixture.rows[row_position].closing.cumulative_debit;
+    let previous_debit = fixture.rows[row_position].successor.cumulative_debit;
     let previous_credit = public_receipt.cumulative_shard_credit();
     let previous_index = public_receipt.index();
     let expected_debit = previous_debit
@@ -616,39 +632,35 @@ pub(crate) fn active_chain_fixture(
     );
     assert_eq!(retained.receipt().body().index(), expected_index);
 
-    let recipient = fixture
-        .prepared
-        .row_opening(u32::try_from(row_position).expect("benchmark row position fits in u32"))
-        .expect("benchmark recipient row can be opened");
-    assert_eq!(recipient.proof.position, 0);
+    let index = ChallengeIndex::new::<Sha256>(&fixture.context, fixture.prepared.close())
+        .expect("benchmark challenge index is valid");
+    let recipient = index
+        .higher_shard_tip_lookup::<Sha256>(
+            &fixture.rows[row_position].account,
+            Some(&fixture.shard_sets[row_position]),
+            0,
+        )
+        .expect("benchmark recipient and shard lookup are aligned");
+    let HigherShardTipLookup::Present { proof, shard, .. } = &recipient else {
+        unreachable!("benchmark recipient is present")
+    };
+    assert_eq!(proof.position, 0);
     assert_eq!(
-        recipient.proof.proof.leaf_count,
+        proof.proof.leaf_count,
         u32::try_from(fixture.rows.len()).expect("benchmark row count fits in u32")
     );
-    let recipient = AccountLookup::Present(Box::new(recipient));
-    assert_eq!(
-        fixture.shard_sets[row_position]
-            .root::<Sha256>()
-            .expect("benchmark shard set has a valid root"),
-        fixture.rows[row_position].credit_root
-    );
-    let shard = fixture.shard_sets[row_position]
-        .lookup::<Sha256>(0)
-        .expect("benchmark shard has a valid opening");
-    let ShardLookup::Present { opening } = &shard else {
+    let CreditTipLookup::Present { opening, .. } = shard else {
         unreachable!("benchmark shard zero is present")
     };
-    assert_eq!(opening.proof.position, 0);
+    assert_eq!(opening.position, 0);
     assert_eq!(
-        opening.proof.proof.leaf_count,
+        opening.proof.leaf_count,
         u32::try_from(profile.receive_shards_per_credited)
             .expect("benchmark shard count fits in u32")
     );
     let challenge = Challenge::HigherShardTip {
-        batch: fixture.prepared.close().header.batch_id::<Sha256>(),
-        payment: Box::new(retained),
+        payment: Box::new(PaymentWitness::from_payment(&retained)),
         recipient: Box::new(recipient),
-        shard: Box::new(shard),
     };
     assert_eq!(
         adjudicate::<Sha256, _>(
@@ -661,7 +673,7 @@ pub(crate) fn active_chain_fixture(
         .expect("benchmark challenge is well formed"),
         Verdict::Proven(ChallengeKind::HigherShardTip)
     );
-    (fixture, challenge)
+    (fixture, challenge, claim_signer)
 }
 
 pub(crate) fn challenge_fixture(
@@ -706,21 +718,18 @@ pub(crate) fn challenge_fixture(
         .rows
         .binary_search_by(|row| row.account.cmp(&accounts[0].public))
         .expect("challenged recipient has a changed row");
-    let recipient = AccountLookup::Present(Box::new(
-        fixture
-            .prepared
-            .row_opening(u32::try_from(row_position).expect("benchmark row position fits in u32"))
-            .expect("benchmark row opening is valid"),
-    ));
-    let shard = fixture.shard_sets[row_position]
-        .lookup::<Sha256>(0)
-        .expect("challenged shard has a valid opening");
-    let expected_batch = fixture.prepared.close().header.batch_id::<Sha256>();
+    let index = ChallengeIndex::new::<Sha256>(&fixture.context, fixture.prepared.close())
+        .expect("benchmark challenge index is valid");
+    let recipient = index
+        .higher_shard_tip_lookup::<Sha256>(
+            &accounts[0].public,
+            Some(&fixture.shard_sets[row_position]),
+            0,
+        )
+        .expect("benchmark recipient and shard lookup are aligned");
     let challenge = Challenge::HigherShardTip {
-        batch: expected_batch,
-        payment: Box::new(retained),
+        payment: Box::new(PaymentWitness::from_payment(&retained)),
         recipient: Box::new(recipient),
-        shard: Box::new(shard),
     };
     let context = fixture.context.clone();
     let header = fixture.prepared.close().header;

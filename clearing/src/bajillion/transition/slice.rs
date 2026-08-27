@@ -2,15 +2,16 @@
 
 use super::{
     Assignment, Close, CloseContext, CloseLimits, Header, PreparedClose, RootBundle, StateCache,
-    TransitionError, account_slice, change_tree_with_strategy, derive_state_vectors, is_live_state,
-    read_shard_sets, state_tree_with_strategy, validate_boundary_roots, validate_header,
-    validate_row, validate_row_structure, validate_terminal_prefix,
+    TransitionError, WithdrawalOutput, account_slice, change_material_with_strategy,
+    derive_state_vectors, is_live_state, read_shard_sets, state_tree_with_strategy,
+    validate_boundary_roots, validate_header, validate_row, validate_row_structure,
+    validate_terminal_prefix, withdrawal_output_material_with_strategy,
 };
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     commitment::{self, RangeOpening, VectorKind},
     credit::ShardSet,
-    state::{AccountRow, Prefix, StateLeaf},
+    state::{AccountChange, AccountRow, ChangeGuard, Prefix, StateLeaf},
 };
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
@@ -25,21 +26,21 @@ use core::ops::Range;
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SliceBoundary {
-    /// Position in the opening live-state vector.
-    pub opening: u32,
+    /// Position in the predecessor live-state vector.
+    pub predecessor: u32,
     /// Position in the changed-row vector.
     pub change: u32,
-    /// Position in the closing live-state vector.
-    pub closing: u32,
+    /// Position in the successor live-state vector.
+    pub successor: u32,
     /// Exact cumulative row prefix before `change`.
     pub prefix: Prefix,
 }
 
 impl Write for SliceBoundary {
     fn write(&self, writer: &mut impl BufMut) {
-        self.opening.write(writer);
+        self.predecessor.write(writer);
         self.change.write(writer);
-        self.closing.write(writer);
+        self.successor.write(writer);
         self.prefix.write(writer);
     }
 }
@@ -53,17 +54,17 @@ impl Read for SliceBoundary {
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            opening: u32::read(reader)?,
+            predecessor: u32::read(reader)?,
             change: u32::read(reader)?,
-            closing: u32::read(reader)?,
+            successor: u32::read(reader)?,
             prefix: Prefix::read(reader)?,
         })
     }
 }
 
-/// Two adjacent authenticated layout boundaries defining one slice.
+/// Two adjacent authenticated coverage boundaries defining one slice.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LayoutRange<D: Digest> {
+pub struct CoverageRange<D: Digest> {
     /// Boundary before this slice.
     pub start: SliceBoundary,
     /// Boundary after this slice.
@@ -72,7 +73,7 @@ pub struct LayoutRange<D: Digest> {
     pub opening: RangeOpening<D>,
 }
 
-impl<D: Digest> Write for LayoutRange<D> {
+impl<D: Digest> Write for CoverageRange<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.start.write(writer);
         self.end.write(writer);
@@ -80,13 +81,13 @@ impl<D: Digest> Write for LayoutRange<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for LayoutRange<D> {
+impl<D: Digest> EncodeSize for CoverageRange<D> {
     fn encode_size(&self) -> usize {
         SliceBoundary::SIZE * 2 + self.opening.encode_size()
     }
 }
 
-impl<D: Digest> Read for LayoutRange<D> {
+impl<D: Digest> Read for CoverageRange<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
@@ -94,7 +95,7 @@ impl<D: Digest> Read for LayoutRange<D> {
     }
 }
 
-impl<D: Digest> LayoutRange<D> {
+impl<D: Digest> CoverageRange<D> {
     fn read_bounded(reader: &mut impl Buf, max_hashes: usize) -> Result<Self, CodecError> {
         Ok(Self {
             start: SliceBoundary::read(reader)?,
@@ -105,7 +106,7 @@ impl<D: Digest> LayoutRange<D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D> arbitrary::Arbitrary<'_> for LayoutRange<D>
+impl<D> arbitrary::Arbitrary<'_> for CoverageRange<D>
 where
     D: Digest,
     RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
@@ -122,13 +123,13 @@ where
 /// Exact contiguous changed-row slice for one account-key interval.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangeRange<P: PublicKey, D: Digest> {
-    /// Immediate row before this interval, when one exists.
-    pub predecessor: Option<AccountRow<P, D>>,
+    /// Immediate compact guard before this interval, when one exists.
+    pub predecessor: Option<ChangeGuard<P, D>>,
     /// Every changed row whose account belongs to this interval.
     pub rows: Vec<AccountRow<P, D>>,
-    /// Immediate row after this interval, when one exists.
-    pub successor: Option<AccountRow<P, D>>,
-    /// Authentication of the contiguous guard-and-row slice.
+    /// Immediate compact guard after this interval, when one exists.
+    pub successor: Option<ChangeGuard<P, D>>,
+    /// Authentication of the contiguous guards derived from the disclosed rows and boundaries.
     pub opening: RangeOpening<D>,
 }
 
@@ -165,9 +166,9 @@ impl<P: PublicKey, D: Digest> ChangeRange<P, D> {
         maximum: usize,
         max_hashes: usize,
     ) -> Result<Self, CodecError> {
-        let predecessor = Option::<AccountRow<P, D>>::read(reader)?;
+        let predecessor = Option::<ChangeGuard<P, D>>::read(reader)?;
         let rows = Vec::<AccountRow<P, D>>::read_cfg(reader, &(RangeCfg::new(..=maximum), ()))?;
-        let successor = Option::<AccountRow<P, D>>::read(reader)?;
+        let successor = Option::<ChangeGuard<P, D>>::read(reader)?;
         let values = rows
             .len()
             .saturating_add(usize::from(predecessor.is_some()))
@@ -188,6 +189,7 @@ where
     P: PublicKey,
     D: Digest,
     AccountRow<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    ChangeGuard<P, D>: for<'a> arbitrary::Arbitrary<'a>,
     RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -195,6 +197,59 @@ where
             predecessor: u.arbitrary()?,
             rows: u.arbitrary()?,
             successor: u.arbitrary()?,
+            opening: u.arbitrary()?,
+        })
+    }
+}
+
+/// Authentication of the exact withdrawal outputs derived within one slice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalOutputRange<D: Digest> {
+    /// Present exactly when the slice contains at least one withdrawal output.
+    pub opening: Option<RangeOpening<D>>,
+}
+
+impl<D: Digest> Write for WithdrawalOutputRange<D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.opening.write(writer);
+    }
+}
+
+impl<D: Digest> EncodeSize for WithdrawalOutputRange<D> {
+    fn encode_size(&self) -> usize {
+        self.opening.encode_size()
+    }
+}
+
+impl<D: Digest> WithdrawalOutputRange<D> {
+    fn read_bounded(
+        reader: &mut impl Buf,
+        count: usize,
+        max_hashes: usize,
+    ) -> Result<Self, CodecError> {
+        let opening = match u8::read(reader)? {
+            0 if count == 0 => None,
+            1 if count != 0 => Some(RangeOpening::read_bounded(reader, count, max_hashes)?),
+            0 | 1 => {
+                return Err(CodecError::Invalid(
+                    "WithdrawalOutputRange",
+                    "opening presence does not match the output count",
+                ));
+            }
+            tag => return Err(CodecError::InvalidEnum(tag)),
+        };
+        Ok(Self { opening })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<D> arbitrary::Arbitrary<'_> for WithdrawalOutputRange<D>
+where
+    D: Digest,
+    RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
             opening: u.arbitrary()?,
         })
     }
@@ -279,40 +334,44 @@ pub struct ProofSlice<P: PublicKey, D: Digest> {
     /// Deterministic interval index.
     pub index: u16,
     /// Header-bound positions and prefix for this interval.
-    pub layout: LayoutRange<D>,
+    pub coverage: CoverageRange<D>,
     /// Exact changed rows in this interval.
     pub changes: ChangeRange<P, D>,
     /// Terminal shard sets aligned one-for-one with [`ChangeRange::rows`].
     pub shard_sets: Vec<ShardSet<P, D>>,
+    /// Exact range proof for validator-derived withdrawal outputs in this interval.
+    pub withdrawal_outputs: WithdrawalOutputRange<D>,
     /// Live leaves unchanged across both roots in this interval.
     pub unchanged: Vec<StateLeaf<P>>,
-    /// Exact guarded opening-state interval.
-    pub opening: StateRange<P, D>,
-    /// Exact guarded closing-state interval.
-    pub closing: StateRange<P, D>,
+    /// Exact guarded predecessor-state interval.
+    pub predecessor: StateRange<P, D>,
+    /// Exact guarded successor-state interval.
+    pub successor: StateRange<P, D>,
 }
 
 impl<P: PublicKey, D: Digest> Write for ProofSlice<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.index.write(writer);
-        self.layout.write(writer);
+        self.coverage.write(writer);
         self.changes.write(writer);
         self.shard_sets.write(writer);
+        self.withdrawal_outputs.write(writer);
         self.unchanged.write(writer);
-        self.opening.write(writer);
-        self.closing.write(writer);
+        self.predecessor.write(writer);
+        self.successor.write(writer);
     }
 }
 
 impl<P: PublicKey, D: Digest> EncodeSize for ProofSlice<P, D> {
     fn encode_size(&self) -> usize {
         self.index.encode_size()
-            + self.layout.encode_size()
+            + self.coverage.encode_size()
             + self.changes.encode_size()
             + self.shard_sets.encode_size()
+            + self.withdrawal_outputs.encode_size()
             + self.unchanged.encode_size()
-            + self.opening.encode_size()
-            + self.closing.encode_size()
+            + self.predecessor.encode_size()
+            + self.successor.encode_size()
     }
 }
 
@@ -347,9 +406,22 @@ impl<P: PublicKey, D: Digest> Read for ProofSlice<P, D> {
         let row_limit = usize::try_from(row_limit)
             .map_err(|_| CodecError::Invalid("ProofSlice", "row limit is not representable"))?;
         let index = u16::read(reader)?;
-        let layout = LayoutRange::read_bounded(reader, config.max_proof_hashes)?;
+        let coverage = CoverageRange::read_bounded(reader, config.max_proof_hashes)?;
         let changes = ChangeRange::read_bounded(reader, row_limit, config.max_proof_hashes)?;
         let shard_sets = read_shard_sets(reader, changes.rows.len(), &config.close)?;
+        let withdrawal_count = coverage
+            .end
+            .prefix
+            .withdrawal_count
+            .checked_sub(coverage.start.prefix.withdrawal_count)
+            .and_then(|count| usize::try_from(count).ok())
+            .filter(|count| *count <= changes.rows.len())
+            .ok_or(CodecError::Invalid(
+                "ProofSlice",
+                "withdrawal output count is not canonical",
+            ))?;
+        let withdrawal_outputs =
+            WithdrawalOutputRange::read_bounded(reader, withdrawal_count, config.max_proof_hashes)?;
         let state_limit = config
             .close
             .max_states()
@@ -358,30 +430,45 @@ impl<P: PublicKey, D: Digest> Read for ProofSlice<P, D> {
             .map_err(|_| CodecError::Invalid("ProofSlice", "state limit is not representable"))?;
         let unchanged =
             Vec::<StateLeaf<P>>::read_cfg(reader, &(RangeCfg::new(..=state_limit), ()))?;
-        let opening_members = unchanged
+        let predecessor_members = unchanged
             .len()
-            .checked_add(changes.rows.iter().filter(|row| row.opening.active).count())
+            .checked_add(
+                changes
+                    .rows
+                    .iter()
+                    .filter(|row| row.predecessor.active)
+                    .count(),
+            )
             .ok_or(CodecError::Invalid(
                 "ProofSlice",
-                "opening member count overflows",
+                "predecessor member count overflows",
             ))?;
-        let closing_members = unchanged
+        let successor_members = unchanged
             .len()
-            .checked_add(changes.rows.iter().filter(|row| row.closing.active).count())
+            .checked_add(
+                changes
+                    .rows
+                    .iter()
+                    .filter(|row| row.successor.active)
+                    .count(),
+            )
             .ok_or(CodecError::Invalid(
                 "ProofSlice",
-                "closing member count overflows",
+                "successor member count overflows",
             ))?;
-        let opening = StateRange::read_bounded(reader, opening_members, config.max_proof_hashes)?;
-        let closing = StateRange::read_bounded(reader, closing_members, config.max_proof_hashes)?;
+        let predecessor =
+            StateRange::read_bounded(reader, predecessor_members, config.max_proof_hashes)?;
+        let successor =
+            StateRange::read_bounded(reader, successor_members, config.max_proof_hashes)?;
         Ok(Self {
             index,
-            layout,
+            coverage,
             changes,
             shard_sets,
+            withdrawal_outputs,
             unchanged,
-            opening,
-            closing,
+            predecessor,
+            successor,
         })
     }
 }
@@ -391,21 +478,23 @@ impl<P, D> arbitrary::Arbitrary<'_> for ProofSlice<P, D>
 where
     P: PublicKey,
     D: Digest,
-    LayoutRange<D>: for<'a> arbitrary::Arbitrary<'a>,
+    CoverageRange<D>: for<'a> arbitrary::Arbitrary<'a>,
     ChangeRange<P, D>: for<'a> arbitrary::Arbitrary<'a>,
     ShardSet<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    WithdrawalOutputRange<D>: for<'a> arbitrary::Arbitrary<'a>,
     StateLeaf<P>: for<'a> arbitrary::Arbitrary<'a>,
     StateRange<P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             index: u.arbitrary()?,
-            layout: u.arbitrary()?,
+            coverage: u.arbitrary()?,
             changes: u.arbitrary()?,
             shard_sets: u.arbitrary()?,
+            withdrawal_outputs: u.arbitrary()?,
             unchanged: u.arbitrary()?,
-            opening: u.arbitrary()?,
-            closing: u.arbitrary()?,
+            predecessor: u.arbitrary()?,
+            successor: u.arbitrary()?,
         })
     }
 }
@@ -437,11 +526,11 @@ const fn max_proof_hashes(digest_size: usize, max_bytes: usize) -> Result<usize,
 }
 
 /// Authenticates the two header-bound boundaries assigned to one slice.
-fn validate_layout_range<H, D>(
+fn validate_coverage_range<H, D>(
     assignment: &Assignment<D>,
     index: u16,
     root: &commitment::VectorRoot<D>,
-    range: &LayoutRange<D>,
+    range: &CoverageRange<D>,
 ) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
@@ -450,15 +539,15 @@ where
     let expected_len = u32::from(assignment.slice_count()) + 1;
     if range.opening.start != u32::from(index)
         || range.opening.proof.leaf_count != expected_len
-        || range.start.opening > range.end.opening
+        || range.start.predecessor > range.end.predecessor
         || range.start.change > range.end.change
-        || range.start.closing > range.end.closing
+        || range.start.successor > range.end.successor
         || (index == 0 && range.start != SliceBoundary::default())
     {
-        return Err(TransitionError::SliceLayout);
+        return Err(TransitionError::SliceCoverage);
     }
     range.opening.verify::<H, _>(
-        VectorKind::Layout,
+        VectorKind::Coverage,
         root,
         &[range.start.encode(), range.end.encode()],
     )?;
@@ -471,6 +560,7 @@ fn validate_change_range<H, P, D>(
     index: u16,
     root: &commitment::VectorRoot<D>,
     range: &ChangeRange<P, D>,
+    shard_sets: &[ShardSet<P, D>],
     start: u32,
     end: u32,
 ) -> Result<(), TransitionError>
@@ -479,6 +569,9 @@ where
     P: PublicKey,
     D: Digest,
 {
+    if range.rows.len() != shard_sets.len() {
+        return Err(TransitionError::ShardAlignment);
+    }
     let len = range.opening.proof.leaf_count;
     let actual_start = range
         .opening
@@ -497,11 +590,12 @@ where
         || range
             .predecessor
             .iter()
-            .chain(&range.rows)
-            .chain(range.successor.iter())
+            .map(ChangeGuard::account)
+            .chain(range.rows.iter().map(|row| &row.account))
+            .chain(range.successor.iter().map(ChangeGuard::account))
             .collect::<Vec<_>>()
             .windows(2)
-            .any(|pair| pair[0].account >= pair[1].account)
+            .any(|pair| pair[0] >= pair[1])
     {
         return Err(TransitionError::SliceRange);
     }
@@ -511,25 +605,68 @@ where
         }
     }
     if let Some(predecessor) = &range.predecessor
-        && account_slice(&predecessor.account, assignment.slice_bits())? >= index
+        && account_slice(predecessor.account(), assignment.slice_bits())? >= index
     {
         return Err(TransitionError::SliceRange);
     }
     if let Some(successor) = &range.successor
-        && account_slice(&successor.account, assignment.slice_bits())? <= index
+        && account_slice(successor.account(), assignment.slice_bits())? <= index
     {
         return Err(TransitionError::SliceRange);
     }
+    let member_guards = range
+        .rows
+        .iter()
+        .zip(shard_sets)
+        .map(|(row, shards)| {
+            AccountChange::from_row::<H>(row, shards).map(|leaf| leaf.guard::<H>())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let encoded = range
         .predecessor
         .iter()
-        .chain(&range.rows)
+        .chain(&member_guards)
         .chain(range.successor.iter())
-        .map(Encode::encode)
+        .map(|leaf| leaf.encode())
         .collect::<Vec<_>>();
     range
         .opening
         .verify::<H, _>(VectorKind::Change, root, &encoded)?;
+    Ok(())
+}
+
+/// Authenticates the exact projection of withdrawal requests resolved by this row interval.
+fn validate_withdrawal_output_range<H, D>(
+    root: &commitment::VectorRoot<D>,
+    range: &WithdrawalOutputRange<D>,
+    start: u64,
+    end: u64,
+    total: usize,
+    outputs: &[WithdrawalOutput],
+) -> Result<(), TransitionError>
+where
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    let start = u32::try_from(start).map_err(|_| TransitionError::SliceRange)?;
+    let end = u32::try_from(end).map_err(|_| TransitionError::SliceRange)?;
+    let total = u32::try_from(total).map_err(|_| TransitionError::CloseLimit)?;
+    let count = end.checked_sub(start).ok_or(TransitionError::SliceRange)?;
+    if usize::try_from(count).ok() != Some(outputs.len()) {
+        return Err(TransitionError::SliceRange);
+    }
+    match (&range.opening, outputs.is_empty()) {
+        (None, true) => {
+            if total == 0 && *root != commitment::empty_root::<H>(VectorKind::WithdrawalOutput) {
+                return Err(TransitionError::WithdrawalOutputRoot);
+            }
+        }
+        (Some(opening), false) if opening.start == start && opening.proof.leaf_count == total => {
+            let encoded = outputs.iter().map(Encode::encode).collect::<Vec<_>>();
+            opening.verify::<H, _>(VectorKind::WithdrawalOutput, root, &encoded)?;
+        }
+        _ => return Err(TransitionError::SliceRange),
+    }
     Ok(())
 }
 
@@ -644,20 +781,21 @@ where
     if slice.index >= assignment.slice_count() {
         return Err(TransitionError::SliceIndex);
     }
-    validate_layout_range::<H, D>(assignment, slice.index, &roots.layout, &slice.layout)?;
+    validate_coverage_range::<H, D>(assignment, slice.index, &roots.coverage, &slice.coverage)?;
+    if slice.shard_sets.len() != slice.changes.rows.len() {
+        return Err(TransitionError::ShardAlignment);
+    }
     validate_change_range::<H, P, D>(
         assignment,
         slice.index,
         &roots.change,
         &slice.changes,
-        slice.layout.start.change,
-        slice.layout.end.change,
+        &slice.shard_sets,
+        slice.coverage.start.change,
+        slice.coverage.end.change,
     )?;
-    if slice.shard_sets.len() != slice.changes.rows.len() {
-        return Err(TransitionError::ShardAlignment);
-    }
 
-    let (opening, closing) = derive_state_vectors(
+    let (predecessor, successor) = derive_state_vectors(
         &slice.unchanged,
         &slice.changes.rows,
         context.limits().max_states(),
@@ -665,26 +803,27 @@ where
     validate_state_range::<H, P, D>(
         assignment,
         slice.index,
-        &roots.opening,
-        &slice.opening,
-        &opening,
+        context.predecessor_root(),
+        &slice.predecessor,
+        &predecessor,
         context.limits().max_states(),
-        slice.layout.start.opening..slice.layout.end.opening,
+        slice.coverage.start.predecessor..slice.coverage.end.predecessor,
     )?;
     validate_state_range::<H, P, D>(
         assignment,
         slice.index,
-        &roots.closing,
-        &slice.closing,
-        &closing,
+        &roots.successor,
+        &slice.successor,
+        &successor,
         context.limits().max_states(),
-        slice.layout.start.closing..slice.layout.end.closing,
+        slice.coverage.start.successor..slice.coverage.end.successor,
     )?;
 
     // Row equations advance the predecessor prefix through the interval. Admission defers only
     // signature checks so every distinct payment envelope can share one randomized batch.
-    let mut prefix = slice.layout.start.prefix;
+    let mut prefix = slice.coverage.start.prefix;
     let mut total_shards = 0_u64;
+    let mut withdrawal_outputs = Vec::new();
     for (row, shards) in slice.changes.rows.iter().zip(&slice.shard_sets) {
         let shard_count =
             u64::try_from(shards.heads().len()).map_err(|_| TransitionError::CloseLimit)?;
@@ -706,19 +845,33 @@ where
         if prefix != row.prefix {
             return Err(TransitionError::Prefix);
         }
+        if let Some(request) = withdrawals.request_for(&row.account) {
+            let crate::bajillion::state::SettlementOutput::Withdrawal(amount) = row.output else {
+                return Err(TransitionError::SettlementOutput);
+            };
+            withdrawal_outputs.push(WithdrawalOutput::from_request(request, amount));
+        }
     }
-    if prefix != slice.layout.end.prefix {
+    if prefix != slice.coverage.end.prefix {
         return Err(TransitionError::Prefix);
     }
+    validate_withdrawal_output_range::<H, D>(
+        &roots.withdrawal_outputs,
+        &slice.withdrawal_outputs,
+        slice.coverage.start.prefix.withdrawal_count,
+        slice.coverage.end.prefix.withdrawal_count,
+        withdrawals.len(),
+        &withdrawal_outputs,
+    )?;
 
     // The final authenticated boundary binds all vector lengths and corpus-wide totals.
     let change_len = slice.changes.opening.proof.leaf_count;
     if slice.index + 1 == assignment.slice_count() {
-        if slice.layout.end.opening != slice.opening.opening.proof.leaf_count
-            || slice.layout.end.change != change_len
-            || slice.layout.end.closing != slice.closing.opening.proof.leaf_count
+        if slice.coverage.end.predecessor != slice.predecessor.opening.proof.leaf_count
+            || slice.coverage.end.change != change_len
+            || slice.coverage.end.successor != slice.successor.opening.proof.leaf_count
         {
-            return Err(TransitionError::SliceLayout);
+            return Err(TransitionError::SliceCoverage);
         }
         validate_terminal_prefix(context, deposits, withdrawals, change_len, prefix)?;
     }
@@ -816,46 +969,46 @@ fn row_boundaries<P: PublicKey, D: Digest>(
     Ok(boundaries)
 }
 
-pub(super) fn derive_layout<P: PublicKey, D: Digest>(
+pub(super) fn derive_coverage<P: PublicKey, D: Digest>(
     rows: &[AccountRow<P, D>],
-    opening: &[StateLeaf<P>],
-    closing: &[StateLeaf<P>],
+    predecessor: &[StateLeaf<P>],
+    successor: &[StateLeaf<P>],
     slice_bits: u8,
 ) -> Result<Vec<SliceBoundary>, TransitionError> {
-    let opening = state_boundaries(opening, slice_bits)?;
+    let predecessor = state_boundaries(predecessor, slice_bits)?;
     let changes = row_boundaries(rows, slice_bits)?;
-    let closing = state_boundaries(closing, slice_bits)?;
-    opening
+    let successor = state_boundaries(successor, slice_bits)?;
+    predecessor
         .into_iter()
         .zip(changes)
-        .zip(closing)
-        .map(|((opening, change), closing)| {
+        .zip(successor)
+        .map(|((predecessor, change), successor)| {
             let prefix = if change == 0 {
                 Prefix::default()
             } else {
                 rows[change as usize - 1].prefix
             };
             Ok(SliceBoundary {
-                opening,
+                predecessor,
                 change,
-                closing,
+                successor,
                 prefix,
             })
         })
         .collect()
 }
 
-pub(super) fn layout_tree_with_strategy<H, D>(
-    layout: &[SliceBoundary],
+pub(super) fn coverage_tree_with_strategy<H, D>(
+    coverage: &[SliceBoundary],
     strategy: &impl Strategy,
 ) -> Result<commitment::Tree<D>, TransitionError>
 where
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    let len = u32::try_from(layout.len()).map_err(|_| TransitionError::SliceLayout)?;
-    let mut builder = commitment::Builder::<H>::new(VectorKind::Layout, len)?;
-    builder.add_values(layout, strategy)?;
+    let len = u32::try_from(coverage.len()).map_err(|_| TransitionError::SliceCoverage)?;
+    let mut builder = commitment::Builder::<H>::new(VectorKind::Coverage, len)?;
+    builder.add_values(coverage, strategy)?;
     Ok(builder.build(strategy)?)
 }
 
@@ -903,42 +1056,52 @@ where
     D: Digest,
 {
     validate_slice_header::<H, P, D>(context, deposits, withdrawals, &close.header, &close.roots)?;
-    if cache.root() != close.roots.opening || close.rows.len() != close.shard_sets.len() {
+    if cache.root() != *context.predecessor_root() || close.rows.len() != close.shard_sets.len() {
         return Err(TransitionError::RowCount);
     }
-    let changes = change_tree_with_strategy::<H, P, D>(&close.rows, strategy)?;
+    let (change_leaves, change_guards, changes) =
+        change_material_with_strategy::<H, P, D>(&close.rows, &close.shard_sets, strategy)?;
     if changes.root() != close.roots.change {
         return Err(TransitionError::ChangeRoot);
     }
-    let (opening, closing_leaves) =
+    let (_, withdrawal_output_tree) =
+        withdrawal_output_material_with_strategy::<H, P, D>(&close.rows, withdrawals, strategy)?;
+    if withdrawal_output_tree.root() != close.roots.withdrawal_outputs {
+        return Err(TransitionError::WithdrawalOutputRoot);
+    }
+    let (predecessor_leaves, successor_leaves) =
         derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
-    if opening != cache.leaves {
-        return Err(TransitionError::OpeningLinkage);
+    if predecessor_leaves != cache.leaves {
+        return Err(TransitionError::PredecessorLinkage);
     }
-    let closing = state_tree_with_strategy::<H, P, D>(&closing_leaves, strategy)?;
-    if closing.root() != close.roots.closing {
-        return Err(TransitionError::ClosingRoot);
+    let successor = state_tree_with_strategy::<H, P, D>(&successor_leaves, strategy)?;
+    if successor.root() != close.roots.successor {
+        return Err(TransitionError::SuccessorRoot);
     }
-    let layout_boundaries = derive_layout(
+    let coverage_boundaries = derive_coverage(
         &close.rows,
-        &opening,
-        &closing_leaves,
+        &predecessor_leaves,
+        &successor_leaves,
         context.assignment().slice_bits(),
     )?;
-    let layout = layout_tree_with_strategy::<H, D>(&layout_boundaries, strategy)?;
-    if layout.root() != close.roots.layout {
-        return Err(TransitionError::SliceLayout);
+    let coverage = coverage_tree_with_strategy::<H, D>(&coverage_boundaries, strategy)?;
+    if coverage.root() != close.roots.coverage {
+        return Err(TransitionError::SliceCoverage);
     }
     assemble_slice_material(
         cache,
         context.assignment().slice_bits(),
         SliceMaterial {
             close,
+            predecessor_root: *context.predecessor_root(),
+            change_leaves: &change_leaves,
+            change_guards: &change_guards,
             changes: &changes,
-            closing_leaves: &closing_leaves,
-            closing: &closing,
-            layout_boundaries: &layout_boundaries,
-            layout: &layout,
+            withdrawal_output_tree: &withdrawal_output_tree,
+            successor_leaves: &successor_leaves,
+            successor: &successor,
+            coverage_boundaries: &coverage_boundaries,
+            coverage: &coverage,
         },
         strategy,
     )
@@ -946,11 +1109,15 @@ where
 
 struct SliceMaterial<'a, P: PublicKey, D: Digest> {
     close: &'a Close<P, D>,
+    predecessor_root: commitment::VectorRoot<D>,
+    change_leaves: &'a [AccountChange<P, D>],
+    change_guards: &'a [ChangeGuard<P, D>],
     changes: &'a commitment::Tree<D>,
-    closing_leaves: &'a [StateLeaf<P>],
-    closing: &'a commitment::Tree<D>,
-    layout_boundaries: &'a [SliceBoundary],
-    layout: &'a commitment::Tree<D>,
+    withdrawal_output_tree: &'a commitment::Tree<D>,
+    successor_leaves: &'a [StateLeaf<P>],
+    successor: &'a commitment::Tree<D>,
+    coverage_boundaries: &'a [SliceBoundary],
+    coverage: &'a commitment::Tree<D>,
 }
 
 /// Builds slices from the Merkle material retained by a prepared close.
@@ -968,11 +1135,15 @@ where
         prepared.slice_bits(),
         SliceMaterial {
             close: &prepared.close,
+            predecessor_root: prepared.predecessor_root,
+            change_leaves: &prepared.change_leaves,
+            change_guards: &prepared.change_guards,
             changes: &prepared.changes,
-            closing_leaves: &prepared.closing_leaves,
-            closing: &prepared.closing,
-            layout_boundaries: &prepared.layout_boundaries,
-            layout: &prepared.layout,
+            withdrawal_output_tree: &prepared.withdrawal_output_tree,
+            successor_leaves: &prepared.successor_leaves,
+            successor: &prepared.successor,
+            coverage_boundaries: &prepared.coverage_boundaries,
+            coverage: &prepared.coverage,
         },
         strategy,
     )
@@ -990,18 +1161,25 @@ where
 {
     let SliceMaterial {
         close,
+        predecessor_root,
+        change_leaves,
+        change_guards,
         changes,
-        closing_leaves,
-        closing,
-        layout_boundaries,
-        layout,
+        withdrawal_output_tree,
+        successor_leaves,
+        successor,
+        coverage_boundaries,
+        coverage,
     } = material;
-    if cache.root() != close.roots.opening
-        || closing.root() != close.roots.closing
+    if cache.root() != predecessor_root
+        || change_leaves.len() != close.rows.len()
+        || change_guards.len() != close.rows.len()
+        || successor.root() != close.roots.successor
         || changes.root() != close.roots.change
-        || layout.root() != close.roots.layout
+        || withdrawal_output_tree.root() != close.roots.withdrawal_outputs
+        || coverage.root() != close.roots.coverage
     {
-        return Err(TransitionError::OpeningRoot);
+        return Err(TransitionError::PredecessorRoot);
     }
 
     let unchanged_boundaries = state_boundaries(&close.unchanged, slice_bits)?;
@@ -1010,50 +1188,63 @@ where
     // Each slice carries unchanged values once and independently opens both live-state ranges.
     strategy.try_map_collect_vec(0..slice_count, |index| {
         let slice = usize::from(index);
-        let start_boundary = layout_boundaries[slice];
-        let end_boundary = layout_boundaries[slice + 1];
+        let start_boundary = coverage_boundaries[slice];
+        let end_boundary = coverage_boundaries[slice + 1];
         let start = start_boundary.change as usize;
         let end = end_boundary.change as usize;
         let predecessor = start
             .checked_sub(1)
-            .map(|position| close.rows[position].clone());
-        let successor = close.rows.get(end).cloned();
+            .map(|position| change_guards[position].clone());
+        let change_successor = change_guards.get(end).cloned();
         let proof_start = start.saturating_sub(usize::from(predecessor.is_some()));
         let proof_end = end
-            .checked_add(usize::from(successor.is_some()))
+            .checked_add(usize::from(change_successor.is_some()))
             .ok_or(TransitionError::SliceRange)?;
         let opening = changes.range_opening(
             u32::try_from(proof_start).map_err(|_| TransitionError::SliceRange)?,
             u32::try_from(proof_end - proof_start).map_err(|_| TransitionError::SliceRange)?,
         )?;
+        let withdrawal_start = u32::try_from(start_boundary.prefix.withdrawal_count)
+            .map_err(|_| TransitionError::SliceRange)?;
+        let withdrawal_end = u32::try_from(end_boundary.prefix.withdrawal_count)
+            .map_err(|_| TransitionError::SliceRange)?;
+        let withdrawal_outputs = WithdrawalOutputRange {
+            opening: (withdrawal_start != withdrawal_end)
+                .then(|| {
+                    withdrawal_output_tree
+                        .range_opening(withdrawal_start, withdrawal_end - withdrawal_start)
+                })
+                .transpose()?,
+        };
         Ok(ProofSlice {
             index,
-            layout: LayoutRange {
+            coverage: CoverageRange {
                 start: start_boundary,
                 end: end_boundary,
-                opening: layout.range_opening(u32::from(index), 2)?,
+                opening: coverage.range_opening(u32::from(index), 2)?,
             },
             changes: ChangeRange {
                 predecessor,
                 rows: close.rows[start..end].to_vec(),
-                successor,
+                successor: change_successor,
                 opening,
             },
             shard_sets: close.shard_sets[start..end].to_vec(),
+            withdrawal_outputs,
             unchanged: close.unchanged
                 [unchanged_boundaries[slice] as usize..unchanged_boundaries[slice + 1] as usize]
                 .to_vec(),
-            opening: build_state_range(
+            predecessor: build_state_range(
                 cache.leaves(),
                 &cache.tree,
-                start_boundary.opening,
-                end_boundary.opening,
+                start_boundary.predecessor,
+                end_boundary.predecessor,
             )?,
-            closing: build_state_range(
-                closing_leaves,
-                closing,
-                start_boundary.closing,
-                end_boundary.closing,
+            successor: build_state_range(
+                successor_leaves,
+                successor,
+                start_boundary.successor,
+                end_boundary.successor,
             )?,
         })
     })
@@ -1061,8 +1252,11 @@ where
 
 #[cfg(test)]
 mod codec_tests {
-    use super::*;
-    use crate::bajillion::{credit::ShardSet, state::AccountState};
+    use super::{super::change_tree_with_strategy, *};
+    use crate::bajillion::{
+        credit::ShardSet,
+        state::{AccountState, SettlementOutput},
+    };
     use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as ShaDigest};
     use commonware_cryptography_curve25519::signing::{
         SigningKey, StrictVerifyingKey as VerifyingKey,
@@ -1087,7 +1281,7 @@ mod codec_tests {
     }
 
     fn test_assignment() -> Assignment<ShaDigest> {
-        Assignment::new(Sha256::hash(&[b"layout-regression"]), 1).unwrap()
+        Assignment::new(Sha256::hash(&[b"coverage-regression"]), 1).unwrap()
     }
 
     fn live_leaf(account: VerifyingKey) -> StateLeaf<VerifyingKey> {
@@ -1101,24 +1295,32 @@ mod codec_tests {
         }
     }
 
-    fn changed_row(account: VerifyingKey) -> AccountRow<VerifyingKey, ShaDigest> {
+    fn changed_row(
+        account: VerifyingKey,
+    ) -> (
+        AccountRow<VerifyingKey, ShaDigest>,
+        ShardSet<VerifyingKey, ShaDigest>,
+    ) {
         let shards = ShardSet::empty(0, account.clone());
-        AccountRow {
-            account,
-            opening: AccountState {
-                balance: 1,
-                active: true,
-                ..AccountState::default()
+        (
+            AccountRow {
+                account,
+                predecessor: AccountState {
+                    balance: 1,
+                    active: true,
+                    ..AccountState::default()
+                },
+                successor: AccountState {
+                    balance: 2,
+                    active: true,
+                    ..AccountState::default()
+                },
+                outgoing: None,
+                output: SettlementOutput::None,
+                prefix: Prefix::default(),
             },
-            closing: AccountState {
-                balance: 2,
-                active: true,
-                ..AccountState::default()
-            },
-            outgoing: None,
-            credit_root: shards.root::<Sha256>().unwrap(),
-            prefix: Prefix::default(),
-        }
+            shards,
+        )
     }
 
     #[test]
@@ -1130,7 +1332,7 @@ mod codec_tests {
     }
 
     #[test]
-    fn layout_positions_reject_reversed_state_guards() {
+    fn coverage_positions_reject_reversed_state_guards() {
         let (low, high) = partitioned_accounts();
         let low = live_leaf(low);
         let high = live_leaf(high);
@@ -1172,12 +1374,21 @@ mod codec_tests {
     }
 
     #[test]
-    fn layout_positions_reject_reversed_change_guards() {
+    fn coverage_positions_reject_reversed_change_guards() {
         let (low, high) = partitioned_accounts();
-        let low = changed_row(low);
-        let high = changed_row(high);
-        let reversed = vec![high.clone(), low.clone()];
-        let tree = change_tree_with_strategy::<Sha256, _, _>(&reversed, &Sequential).unwrap();
+        let (low, low_shards) = changed_row(low);
+        let (high, high_shards) = changed_row(high);
+        let reversed = vec![high, low];
+        let reversed_shards = vec![high_shards, low_shards];
+        let tree =
+            change_tree_with_strategy::<Sha256, _, _>(&reversed, &reversed_shards, &Sequential)
+                .unwrap();
+        let high = AccountChange::from_row::<Sha256>(&reversed[0], &reversed_shards[0])
+            .unwrap()
+            .guard::<Sha256>();
+        let low = AccountChange::from_row::<Sha256>(&reversed[1], &reversed_shards[1])
+            .unwrap()
+            .guard::<Sha256>();
         let low_guard = ChangeRange {
             predecessor: None,
             rows: Vec::new(),
@@ -1198,6 +1409,7 @@ mod codec_tests {
                 0,
                 &tree.root(),
                 &low_guard,
+                &[],
                 0,
                 shared_boundary,
             );
@@ -1206,6 +1418,7 @@ mod codec_tests {
                 1,
                 &tree.root(),
                 &high_guard,
+                &[],
                 shared_boundary,
                 2,
             );

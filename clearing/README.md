@@ -17,10 +17,20 @@ deterministic proof slices for authenticated dissemination, exact-quorum commitm
 retained dealings, bounded receipt challenges, and a bounded in-memory settlement state machine
 for registration, admission, FIFO finalization, custody accounting, hard-fault fencing, and
 incremental hard-fault claims. Deposits can create accounts, zero balances leave the committed
-state, and sends to absent recipients become certified external payouts. Admission binds a 32-byte
-context-bound root-of-roots Header to an ordered opening, change, closing, and slice-layout root
-bundle. The 128-byte RootBundle is public witness data. It is retained by validators and the
-data-availability layer and must be supplied or cached by external settlement operations.
+state, and sends to absent recipients become certified external payouts. Compact change leaves
+expose the validator-authenticated settlement and challenge projection, allowing independent payout
+claims without opening a neighboring row. `CloseContext` owns the predecessor state root;
+`RootBundle` carries the change, withdrawal-output, successor-state, and coverage roots; and the
+32-byte Header binds every contextual role. The 128-byte RootBundle is public witness data. It is
+retained by validators and the data-availability layer and must be supplied or cached by external
+settlement operations.
+
+Successful epoch registration activates one immutable payment anchor and a bounded obligation to
+admit its certified close. Operator receipts must not be released before that exact registration
+succeeds. The open registration slot has no periodic heartbeat, but the first authenticated-time
+observation after a registered admission deadline permanently faults the deployment; the expired
+anchor cannot be rolled into another epoch. Each cleanly finalized withdrawal is independently
+claimable as its certified destination and amount plus one opening in the withdrawal-output tree.
 
 `seal` authenticates and takes ownership of a validator's dealing before signing the Header. A
 dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator.
@@ -46,7 +56,7 @@ layer, or asset-adapter implementation.
 
 ## Benchmarks
 
-The exact benchmark matrix from the Clearing blog uses one adaptive pool with eight workers and
+The exact benchmark matrix from the Bajillion blog uses one adaptive pool with eight workers and
 selects one live-account profile per fresh process. Run profiles `0` through `3` separately:
 
 ```bash
@@ -58,13 +68,21 @@ cargo bench -p commonware-clearing --bench bajillion
 
 The harness reports raw encoded sizes and separately times preparing roots, dealing slices, the
 complete validator `seal` path for the byte-largest dealing, repeatable certified-commitment
-validation, and bounded challenge decode plus adjudication. The protocol accounting distinguishes
-the 32-byte validator-chain commitment, the external MinSig certificate's 48-byte signature plus
-`ceil(n / 8)`-byte signer bitmap, and the 128-byte RootBundle witness. The generic codec adds an
-eight-byte bitmap-length prefix, so the raw encoded Header-plus-certificate package is
-`88 + ceil(n / 8)` bytes. The harness also preflights the corresponding mutating
-`SettlementChain` admission and challenge paths outside Criterion's timed loops.
+validation, bounded challenge decode plus adjudication, and fixed-amount and Close withdrawal
+claims. The protocol accounting distinguishes the 32-byte validator-chain commitment, the external
+MinSig certificate's 48-byte signature plus `ceil(n / 8)`-byte signer bitmap, and the 128-byte
+RootBundle witness. The generic codec adds an eight-byte bitmap-length prefix, so the raw encoded
+Header-plus-certificate package is `88 + ceil(n / 8)` bytes. The harness also preflights the
+corresponding mutating `SettlementChain` admission and challenge paths outside Criterion's timed
+loops.
 
 Ordinary withdrawals authorize an exact positive amount. A close carries no amount and releases
 the account's authenticated epoch-tail balance after that epoch's deposits, credits, and debits.
 A zero tail is valid and removes the account without creating a payout claim.
+
+## Formal model
+
+The [executable Quint model](quint/README.md) covers Bajillion's construction, certification,
+settlement, challenge, deadline, hard-fault, claim, and fund-recovery states. Its documentation
+records the checked bounds and the refinement obligations that remain with the Rust implementation
+and embedding.

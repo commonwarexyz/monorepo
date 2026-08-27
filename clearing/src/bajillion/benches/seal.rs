@@ -43,7 +43,7 @@ fn bench_seal(c: &mut Criterion) {
                     for _ in 0..iterations {
                         let input = slices.take().expect("benchmark assignment is available");
                         let start = Instant::now();
-                        let (vote, retained) =
+                        let (vote, sealed) =
                             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                                 black_box(&scheme),
                                 black_box(&fixture.close.context),
@@ -58,7 +58,7 @@ fn bench_seal(c: &mut Criterion) {
                             .expect("benchmark assignment is valid");
                         elapsed += start.elapsed();
                         black_box(vote);
-                        slices = Some(retained.into_slices());
+                        slices = Some(sealed.into_slices());
                     }
                     elapsed
                 });

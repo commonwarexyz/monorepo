@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_clearing::bajillion::{
-    admission::{Committee, RetainedAssignment, Vote, assigned_slice_indices, bls12381, seal},
-    boundary::{DepositBatch, WithdrawalBatch},
+    admission::{Committee, SealedDealing, Vote, assigned_slice_indices, bls12381, seal},
+    boundary::{DepositBatch, WithdrawalAction, WithdrawalBatch},
     credit::ShardSet,
     settlement::{EpochDeadlinePolicy, FinalizedBatch, SettlementChain, SettlementConfig},
     state::{AccountRow, StateLeaf},
@@ -39,11 +39,11 @@ pub(crate) type Payment = commonware_clearing::bajillion::payment::Payment<Key, 
 pub(crate) type AccountCache = StateCache<Key, Digest>;
 
 const DEPLOYMENT_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_DEPLOYMENT";
-const FREEZE_SIGNATURE_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_FREEZE";
+const REGISTRATION_SIGNATURE_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_EPOCH_REGISTRATION";
 const VALIDATOR_SEED_START: u64 = 10_000;
 const VALIDATORS: usize = 4;
 const SLICE_BITS: u8 = 2;
-const MAX_ACCOUNTS: usize = 1_024;
+pub(crate) const MAX_ACCOUNTS: usize = 1_024;
 /// Maximum distinct payments accepted into one epoch.
 pub(crate) const MAX_ACCEPTED_PAYMENTS: usize = 1_024;
 pub(crate) const MAX_DEPOSIT_EVENTS: usize = MAX_ACCOUNTS;
@@ -53,6 +53,20 @@ const MAX_SHARDS: u64 = 1_024;
 pub(crate) const INITIAL_BALANCE: u64 = 100;
 /// Largest monetary value that the SQLite operator can persist exactly.
 pub(crate) const SQLITE_U64_MAX: u64 = i64::MAX as u64;
+const DEPOSIT_INCLUSION_TIMEOUT: u64 = 100;
+const MINIMUM_WITHDRAWAL_NOTICE: u64 = 4;
+const MAXIMUM_WITHDRAWAL_NOTICE: u64 = 100;
+
+// Each epoch gets ten admission ticks and one inclusive challenge tick. The next epoch begins on
+// the first tick at which its predecessor can finalize. Deposit and withdrawal deadlines remain
+// independent obligations and may permanently fault an admitted close before that point.
+const ADMISSION_OFFSET: u64 = 10;
+const CHALLENGE_DURATION: u64 = 1;
+const CHALLENGE_OFFSET: u64 = ADMISSION_OFFSET + CHALLENGE_DURATION;
+const EPOCH_STRIDE: u64 = CHALLENGE_OFFSET + 1;
+
+#[cfg(test)]
+pub(crate) const TERMINAL_EPOCH: u64 = (u64::MAX - CHALLENGE_OFFSET) / EPOCH_STRIDE;
 
 #[derive(Clone)]
 pub(crate) struct AccountIdentity {
@@ -162,7 +176,7 @@ pub(crate) struct PreparedEpoch {
     deposits: DepositBatch<Key>,
     withdrawals: WithdrawalBatch<Key, Digest>,
     deposit_events: Vec<DepositEvent>,
-    opening: AccountCache,
+    predecessor: AccountCache,
     prepared: PreparedClose<Key, Digest>,
     prepare_micros: u128,
 }
@@ -177,6 +191,7 @@ impl PreparedEpoch {
 /// Artifacts and metrics held through one clean finalization.
 pub(crate) struct SettlementResult {
     pub(crate) epoch: u64,
+    pub(crate) predecessor_root: commonware_clearing::bajillion::commitment::VectorRoot<Digest>,
     pub(crate) epoch_context: EpochContext<Key, Digest>,
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
@@ -187,12 +202,12 @@ pub(crate) struct SettlementResult {
     pub(crate) certificate: bls12381::Certificate,
     pub(crate) terminal_proof: commonware_clearing::bajillion::transition::TerminalProof<Digest>,
     pub(crate) external_claims: Vec<ExternalPayoutClaim<Key, Digest>>,
-    pub(crate) withdrawal_claims: Vec<WithdrawalClaim<Key, Digest>>,
+    pub(crate) withdrawal_claims: Vec<WithdrawalClaim<Digest>>,
     pub(crate) finalized: FinalizedBatch<Digest>,
     pub(crate) rows: usize,
     pub(crate) slices: usize,
-    pub(crate) retained_slices: usize,
-    retained: Vec<RetainedAssignment<Key, Digest>>,
+    pub(crate) dealing_slices: usize,
+    dealings: Vec<SealedDealing<Key, Digest>>,
     pub(crate) prepare_micros: u128,
     pub(crate) deal_micros: u128,
     pub(crate) seal_micros: u128,
@@ -201,7 +216,7 @@ pub(crate) struct SettlementResult {
 impl SettlementResult {
     /// Releases validator-owned evidence after settlement has completed finalization.
     pub(crate) fn release_dealings(&mut self) {
-        self.retained.clear();
+        self.dealings.clear();
     }
 }
 
@@ -256,29 +271,35 @@ pub(crate) fn operator_key() -> Key {
     SigningKey::from_seed(1).public_key()
 }
 
-fn freeze_message(
+fn registration_message(
     epoch: u64,
+    predecessor_liability: u64,
     deposits: &DepositBatch<Key>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
 ) -> Bytes {
     let mut message = BytesMut::with_capacity(
-        epoch.encode_size() + deposits.encode_size() + withdrawals.encode_size(),
+        epoch.encode_size()
+            + predecessor_liability.encode_size()
+            + deposits.encode_size()
+            + withdrawals.encode_size(),
     );
     epoch.write(&mut message);
+    predecessor_liability.write(&mut message);
     deposits.write(&mut message);
     withdrawals.write(&mut message);
     message.freeze()
 }
 
-pub(crate) fn verify_freeze_signature(
+pub(crate) fn verify_registration_signature(
     epoch: u64,
+    predecessor_liability: u64,
     deposits: &DepositBatch<Key>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
     signature: &Signature,
 ) -> bool {
     operator_key().verify(
-        FREEZE_SIGNATURE_NAMESPACE,
-        &freeze_message(epoch, deposits, withdrawals),
+        REGISTRATION_SIGNATURE_NAMESPACE,
+        &registration_message(epoch, predecessor_liability, deposits, withdrawals),
         signature,
     )
 }
@@ -296,13 +317,13 @@ pub(crate) const fn settlement_config() -> SettlementConfig {
     SettlementConfig::new(
         NonZeroUsize::new(4).expect("pipeline bound is nonzero"),
         EpochDeadlinePolicy::new(
-            NonZeroU64::new(10).expect("admission delay is nonzero"),
-            NonZeroU64::new(1).expect("minimum challenge duration is nonzero"),
-            NonZeroU64::new(1).expect("maximum challenge duration is nonzero"),
+            NonZeroU64::new(EPOCH_STRIDE).expect("admission delay is nonzero"),
+            NonZeroU64::new(CHALLENGE_DURATION).expect("minimum challenge duration is nonzero"),
+            NonZeroU64::new(CHALLENGE_DURATION).expect("maximum challenge duration is nonzero"),
         ),
-        NonZeroU64::new(100).expect("deposit timeout is nonzero"),
-        NonZeroU64::new(4).expect("notice is nonzero"),
-        NonZeroU64::new(100).expect("notice is nonzero"),
+        NonZeroU64::new(DEPOSIT_INCLUSION_TIMEOUT).expect("deposit timeout is nonzero"),
+        NonZeroU64::new(MINIMUM_WITHDRAWAL_NOTICE).expect("notice is nonzero"),
+        NonZeroU64::new(MAXIMUM_WITHDRAWAL_NOTICE).expect("notice is nonzero"),
         256,
         NonZeroUsize::new(MAX_DEPOSIT_EVENTS).expect("deposit bound is nonzero"),
     )
@@ -312,7 +333,7 @@ pub(crate) fn epoch_context(
     epoch: u64,
     deposits: &DepositBatch<Key>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
-    opening_liability: u64,
+    predecessor_liability: u64,
 ) -> Result<EpochContext<Key, Digest>> {
     let (admission_deadline, challenge_deadline) = deadlines(epoch)?;
     let limits = CloseLimits::new(
@@ -331,7 +352,7 @@ pub(crate) fn epoch_context(
         operator_key(),
         deposits,
         withdrawals,
-        opening_liability,
+        predecessor_liability,
         admission_deadline,
         challenge_deadline,
         limits,
@@ -370,15 +391,16 @@ impl Protocol {
         &self.operator
     }
 
-    pub(crate) fn sign_freeze(
+    pub(crate) fn sign_registration(
         &self,
         epoch: u64,
+        predecessor_liability: u64,
         deposits: &DepositBatch<Key>,
         withdrawals: &WithdrawalBatch<Key, Digest>,
     ) -> Signature {
         self.operator.sign(
-            FREEZE_SIGNATURE_NAMESPACE,
-            &freeze_message(epoch, deposits, withdrawals),
+            REGISTRATION_SIGNATURE_NAMESPACE,
+            &registration_message(epoch, predecessor_liability, deposits, withdrawals),
         )
     }
 
@@ -387,9 +409,9 @@ impl Protocol {
         epoch: u64,
         deposits: DepositBatch<Key>,
         withdrawals: WithdrawalBatch<Key, Digest>,
-        opening_liability: u64,
+        predecessor_liability: u64,
     ) -> Result<EpochRegistration> {
-        let context = epoch_context(epoch, &deposits, &withdrawals, opening_liability)?;
+        let context = epoch_context(epoch, &deposits, &withdrawals, predecessor_liability)?;
         ensure!(
             context.deployment() == &self.deployment
                 && context.payment().operator() == &self.operator.public_key()
@@ -407,24 +429,28 @@ impl Protocol {
         &self,
         registration: EpochRegistration,
         deposit_events: Vec<DepositEvent>,
-        opening: Vec<StateLeaf<Key>>,
+        predecessor: Vec<StateLeaf<Key>>,
         rows: Vec<AccountRow<Key, Digest>>,
         shard_sets: Vec<ShardSet<Key, Digest>>,
-        closing: Vec<StateLeaf<Key>>,
+        successor: Vec<StateLeaf<Key>>,
     ) -> Result<PreparedEpoch> {
         ensure!(!rows.is_empty(), "there is nothing to settle");
         let prepare_start = Instant::now();
-        let opening = StateCache::new_with_strategy::<Sha256>(opening, &self.strategy)
-            .context("commit opening account state")?;
+        let predecessor = StateCache::new_with_strategy::<Sha256>(predecessor, &self.strategy)
+            .context("commit predecessor account state")?;
         let context = registration
             .context
-            .bind::<Sha256>(&opening, &registration.deposits, &registration.withdrawals)
-            .context("bind epoch registration to its opening state")?;
-        let closing = StateCache::new_with_strategy::<Sha256>(closing, &self.strategy)
-            .context("commit projected closing state")?;
-        let closing_root = closing.root();
+            .bind::<Sha256>(
+                &predecessor,
+                &registration.deposits,
+                &registration.withdrawals,
+            )
+            .context("bind epoch registration to its predecessor state")?;
+        let successor = StateCache::new_with_strategy::<Sha256>(successor, &self.strategy)
+            .context("commit projected successor state")?;
+        let successor_root = successor.root();
         let prepared = prepare_close_with_strategy::<Sha256, _, _>(
-            &opening,
+            &predecessor,
             &context,
             &registration.deposits,
             &registration.withdrawals,
@@ -437,8 +463,8 @@ impl Protocol {
             .validate::<Sha256>(&context, &registration.deposits, &registration.withdrawals)
             .context("validate prepared close")?;
         ensure!(
-            prepared.close().roots.closing == closing_root,
-            "prepared close does not match SQLite closing state"
+            prepared.close().roots.successor == successor_root,
+            "prepared close does not match SQLite successor state"
         );
         let prepare_micros = prepare_start.elapsed().as_micros();
 
@@ -447,7 +473,7 @@ impl Protocol {
             deposits: registration.deposits,
             withdrawals: registration.withdrawals,
             deposit_events,
-            opening,
+            predecessor,
             prepared,
             prepare_micros,
         })
@@ -463,7 +489,7 @@ impl Protocol {
             deposits,
             withdrawals,
             deposit_events,
-            opening,
+            predecessor,
             prepared,
             prepare_micros,
         } = epoch;
@@ -471,15 +497,14 @@ impl Protocol {
 
         let deal_start = Instant::now();
         let slices = prepared
-            .assemble_slices(&opening, &self.strategy)
+            .assemble_slices(&predecessor, &self.strategy)
             .context("assemble proof slices")?;
         let deal_micros = deal_start.elapsed().as_micros();
 
         let seal_start = Instant::now();
         let mut votes = Vec::<Vote>::with_capacity(self.validators.committee.quorum());
-        let mut retained = Vec::<RetainedAssignment<Key, Digest>>::with_capacity(
-            self.validators.committee.quorum(),
-        );
+        let mut dealings =
+            Vec::<SealedDealing<Key, Digest>>::with_capacity(self.validators.committee.quorum());
         for index in 0..self.validators.committee.quorum() {
             let validator = Participant::from_usize(index);
             let scheme = self.validators.signer(validator)?;
@@ -493,7 +518,7 @@ impl Protocol {
                 .iter()
                 .map(|slice| slices[usize::from(*slice)].clone())
                 .collect();
-            let (vote, assignment) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+            let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
                 &context,
                 &deposits,
@@ -506,7 +531,7 @@ impl Protocol {
             )
             .context("validator failed to seal its dealing")?;
             votes.push(vote);
-            retained.push(assignment);
+            dealings.push(sealed);
         }
         let assembler = self.validators.signer(Participant::new(0))?;
         let certificate = assembler
@@ -526,7 +551,7 @@ impl Protocol {
             .close()
             .rows
             .iter()
-            .filter(|row| !row.opening.active && deposits.amount_for(&row.account) == 0)
+            .filter(|row| !row.predecessor.active && deposits.amount_for(&row.account) == 0)
             .map(|row| {
                 prepared
                     .external_payout_claim(&row.account)
@@ -536,10 +561,26 @@ impl Protocol {
         let withdrawal_claims = withdrawals
             .requests()
             .iter()
-            .map(|request| {
-                prepared
+            .enumerate()
+            .map(|(position, request)| {
+                let claim = prepared
                     .withdrawal_claim::<Sha256>(&withdrawals, request.account())
-                    .context("assemble withdrawal claim")
+                    .context("assemble withdrawal claim")?;
+                ensure!(
+                    u32::try_from(position).ok() == Some(claim.position()),
+                    "withdrawal claim has the wrong request position"
+                );
+                ensure!(
+                    claim.output().destination() == request.body().destination(),
+                    "withdrawal claim has the wrong request destination"
+                );
+                if let WithdrawalAction::Amount(amount) = request.body().action() {
+                    ensure!(
+                        claim.output().amount() == amount.get(),
+                        "withdrawal claim has the wrong requested amount"
+                    );
+                }
+                Ok(claim)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -550,19 +591,19 @@ impl Protocol {
             self.deployment,
             self.operator.public_key(),
             self.validators.committee.clone(),
-            &opening,
+            &predecessor,
             epoch,
             config,
         )
         .context("construct settlement chain")?;
-        let now = epoch.checked_mul(10).context("epoch clock overflow")?;
+        let now = epoch_start(epoch)?;
         for event in &deposit_events {
             chain
                 .record_deposit(now, event.id, event.account.clone(), event.amount)
                 .context("record deposit in settlement chain")?;
         }
         for request in withdrawals.requests() {
-            let account_opening = opening
+            let account_opening = predecessor
                 .opening(request.account())
                 .context("open withdrawing account")?;
             chain
@@ -570,7 +611,7 @@ impl Protocol {
                 .context("queue withdrawal in settlement chain")?;
         }
         chain
-            .register(now, context.clone(), deposits.clone(), withdrawals.clone())
+            .register_close(now, context.clone(), deposits.clone(), withdrawals.clone())
             .context("register close")?;
         chain
             .admit(
@@ -585,7 +626,7 @@ impl Protocol {
             .finalize(context.challenge_deadline() + 1)
             .context("finalize certified close")?;
         ensure!(
-            finalized.closing_state_root == prepared.close().roots.closing,
+            finalized.successor_root == prepared.close().roots.successor,
             "finalized root does not match SQLite state"
         );
         let claimed_payout = external_claims.iter().try_fold(0_u64, |total, claim| {
@@ -604,12 +645,10 @@ impl Protocol {
         let header = prepared.close().header;
         let roots = prepared.close().roots;
         let rows = prepared.close().rows.len();
-        let retained_slices = retained
-            .iter()
-            .map(|assignment| assignment.slices().len())
-            .sum();
+        let dealing_slices = dealings.iter().map(|dealing| dealing.slices().len()).sum();
         Ok(SettlementResult {
             epoch,
+            predecessor_root: *context.predecessor_root(),
             epoch_context: context.epoch_context().clone(),
             deposits,
             withdrawals,
@@ -623,8 +662,8 @@ impl Protocol {
             finalized,
             rows,
             slices: slices.len(),
-            retained_slices,
-            retained,
+            dealing_slices,
+            dealings,
             prepare_micros,
             deal_micros,
             seal_micros,
@@ -633,11 +672,19 @@ impl Protocol {
 }
 
 fn deadlines(epoch: u64) -> Result<(u64, u64)> {
-    let base = epoch.checked_mul(10).context("epoch clock overflow")?;
+    let base = epoch_start(epoch)?;
     Ok((
-        base.checked_add(1).context("admission deadline overflow")?,
-        base.checked_add(2).context("challenge deadline overflow")?,
+        base.checked_add(ADMISSION_OFFSET)
+            .context("admission deadline overflow")?,
+        base.checked_add(CHALLENGE_OFFSET)
+            .context("challenge deadline overflow")?,
     ))
+}
+
+pub(crate) fn epoch_start(epoch: u64) -> Result<u64> {
+    epoch
+        .checked_mul(EPOCH_STRIDE)
+        .context("epoch clock overflow")
 }
 
 fn openable_epoch_at_offset(epoch: u64, offset: u64) -> Result<u64> {

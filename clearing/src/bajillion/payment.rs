@@ -34,8 +34,9 @@ impl<P: PublicKey, D: Digest> PaymentContext<P, D> {
     /// Creates a payment context from its chain-recognized anchor and operator key.
     ///
     /// The anchor must uniquely identify one immutable, one-shot epoch registration. Linear
-    /// settlement ancestry may bind the exact opening root later, but the anchor must never be
-    /// reused after that ancestry is invalidated.
+    /// settlement ancestry may bind the exact predecessor root later, but the anchor must never be
+    /// reused after that ancestry is invalidated. The embedding must not release an
+    /// operator-signed receipt until settlement has registered this exact anchor.
     pub const fn new(anchor: D, epoch: Epoch, operator: P) -> Self {
         Self {
             anchor,
@@ -713,6 +714,24 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
         Ok(())
     }
 
+    pub(crate) fn linked_body_digest<H: Hasher<Digest = D>>(&self, domain: &[u8]) -> D {
+        let send = self.send.body.encode();
+        let receipt = self.receipt.body.encode();
+        let send_len = u32::try_from(send.len())
+            .expect("a fixed-size payment send body length fits in u32")
+            .to_be_bytes();
+        let receipt_len = u32::try_from(receipt.len())
+            .expect("a fixed-size payment receipt body length fits in u32")
+            .to_be_bytes();
+        H::hash(&[
+            domain,
+            &send_len,
+            send.as_ref(),
+            &receipt_len,
+            receipt.as_ref(),
+        ])
+    }
+
     pub(crate) fn validate_terminal_structure<H: Hasher<Digest = D>>(
         &self,
         context: &PaymentContext<P, D>,
@@ -815,6 +834,207 @@ impl<P: PublicKey, D: Digest> Read for Payment<P, D> {
         Ok(Self {
             send: SignedSend::read(buf)?,
             receipt: SignedReceipt::read(buf)?,
+        })
+    }
+}
+
+/// Lossless fields used to compose relation-specific challenge evidence.
+#[derive(Clone)]
+pub(crate) struct PaymentWitnessParts<P: PublicKey> {
+    pub payer: P,
+    pub recipient: P,
+    pub amount: Amount,
+    pub cumulative_debit: Amount,
+    pub payer_signature: P::Signature,
+    pub shard: Shard,
+    pub cumulative_shard_credit: Amount,
+    pub index: ReceiptIndex,
+    pub operator_signature: P::Signature,
+}
+
+/// Context-relative linked payment evidence used by settlement challenges.
+///
+/// The payment anchor, epoch, operator key, receipt recipient and amount, and receipt transaction
+/// identifier are reconstructed from the trusted context and payer-signed send. Both signatures
+/// remain explicit, and reconstruction runs the ordinary linked-payment verifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentWitness<P: PublicKey> {
+    payer: P,
+    recipient: P,
+    amount: Amount,
+    cumulative_debit: Amount,
+    payer_signature: P::Signature,
+    shard: Shard,
+    cumulative_shard_credit: Amount,
+    index: ReceiptIndex,
+    operator_signature: P::Signature,
+}
+
+impl<P: PublicKey> PaymentWitness<P> {
+    /// Projects one full linked payment into its context-relative challenge representation.
+    #[must_use]
+    pub fn from_payment<D: Digest>(payment: &Payment<P, D>) -> Self {
+        Self {
+            payer: payment.payer().clone(),
+            recipient: payment.recipient().clone(),
+            amount: payment.amount(),
+            cumulative_debit: payment.send().body().cumulative_debit(),
+            payer_signature: payment.send().signature().clone(),
+            shard: payment.receipt().body().shard(),
+            cumulative_shard_credit: payment.receipt().body().cumulative_shard_credit(),
+            index: payment.receipt().body().index(),
+            operator_signature: payment.receipt().signature().clone(),
+        }
+    }
+
+    pub(crate) fn parts(&self) -> PaymentWitnessParts<P> {
+        PaymentWitnessParts {
+            payer: self.payer.clone(),
+            recipient: self.recipient.clone(),
+            amount: self.amount,
+            cumulative_debit: self.cumulative_debit,
+            payer_signature: self.payer_signature.clone(),
+            shard: self.shard,
+            cumulative_shard_credit: self.cumulative_shard_credit,
+            index: self.index,
+            operator_signature: self.operator_signature.clone(),
+        }
+    }
+
+    pub(crate) fn from_parts(parts: PaymentWitnessParts<P>) -> Self {
+        Self {
+            payer: parts.payer,
+            recipient: parts.recipient,
+            amount: parts.amount,
+            cumulative_debit: parts.cumulative_debit,
+            payer_signature: parts.payer_signature,
+            shard: parts.shard,
+            cumulative_shard_credit: parts.cumulative_shard_credit,
+            index: parts.index,
+            operator_signature: parts.operator_signature,
+        }
+    }
+
+    /// Reconstructs the canonical signed bodies and verifies both signatures and their linkage.
+    pub fn reconstruct<H, D>(
+        &self,
+        context: &PaymentContext<P, D>,
+    ) -> Result<Payment<P, D>, PaymentError>
+    where
+        H: Hasher<Digest = D>,
+        D: Digest,
+    {
+        self.reconstruct_with_strategy::<H, D>(context, &Sequential)
+    }
+
+    /// Reconstructs and verifies with the supplied signature-verification strategy.
+    pub fn reconstruct_with_strategy<H, D>(
+        &self,
+        context: &PaymentContext<P, D>,
+        strategy: &impl Strategy,
+    ) -> Result<Payment<P, D>, PaymentError>
+    where
+        H: Hasher<Digest = D>,
+        D: Digest,
+    {
+        let send_body = SendBody::from_raw_unchecked(
+            *context.anchor(),
+            context.epoch(),
+            self.payer.clone(),
+            self.recipient.clone(),
+            self.amount,
+            self.cumulative_debit,
+        );
+        let send = SignedSend::from_raw_unchecked(send_body, self.payer_signature.clone());
+        let receipt_body = ReceiptBody::from_raw_unchecked(
+            *context.anchor(),
+            context.epoch(),
+            self.recipient.clone(),
+            self.shard,
+            self.amount,
+            send.tx_id::<H>(),
+            self.cumulative_shard_credit,
+            self.index,
+        );
+        let receipt =
+            SignedReceipt::from_raw_unchecked(receipt_body, self.operator_signature.clone());
+        let payment = Payment::from_parts_unchecked(send, receipt);
+        payment.verify_linked_with_strategy::<H>(context, strategy)?;
+        Ok(payment)
+    }
+
+    /// Returns the payer named by the reconstructed send.
+    #[must_use]
+    pub const fn payer(&self) -> &P {
+        &self.payer
+    }
+
+    /// Returns the recipient shared by the reconstructed send and receipt.
+    #[must_use]
+    pub const fn recipient(&self) -> &P {
+        &self.recipient
+    }
+
+    /// Returns the receive-shard identifier.
+    #[must_use]
+    pub const fn shard(&self) -> Shard {
+        self.shard
+    }
+}
+
+impl<P: PublicKey> Write for PaymentWitness<P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.payer.write(buf);
+        self.recipient.write(buf);
+        self.amount.write(buf);
+        self.cumulative_debit.write(buf);
+        self.payer_signature.write(buf);
+        self.shard.write(buf);
+        self.cumulative_shard_credit.write(buf);
+        self.index.write(buf);
+        self.operator_signature.write(buf);
+    }
+}
+
+impl<P: PublicKey> FixedSize for PaymentWitness<P> {
+    const SIZE: usize = P::SIZE * 2 + u64::SIZE * 5 + P::Signature::SIZE * 2;
+}
+
+impl<P: PublicKey> Read for PaymentWitness<P> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            payer: P::read(buf)?,
+            recipient: P::read(buf)?,
+            amount: u64::read(buf)?,
+            cumulative_debit: u64::read(buf)?,
+            payer_signature: P::Signature::read(buf)?,
+            shard: u64::read(buf)?,
+            cumulative_shard_credit: u64::read(buf)?,
+            index: u64::read(buf)?,
+            operator_signature: P::Signature::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P> arbitrary::Arbitrary<'_> for PaymentWitness<P>
+where
+    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            payer: u.arbitrary()?,
+            recipient: u.arbitrary()?,
+            amount: u.arbitrary()?,
+            cumulative_debit: u.arbitrary()?,
+            payer_signature: u.arbitrary()?,
+            shard: u.arbitrary()?,
+            cumulative_shard_credit: u.arbitrary()?,
+            index: u.arbitrary()?,
+            operator_signature: u.arbitrary()?,
         })
     }
 }
@@ -1329,6 +1549,46 @@ mod tests {
         let encoded = payment.encode();
         assert_eq!(encoded.len(), TestPayment::SIZE);
         assert_eq!(TestPayment::decode(encoded).unwrap(), payment);
+    }
+
+    #[test]
+    fn payment_witness_is_exact_and_context_relative() {
+        let (context, operator, payer, recipient) = context();
+        let payment = payment(&context, &operator, &payer, &recipient, 17, 4, 2, 9, 3);
+        let witness = PaymentWitness::from_payment(&payment);
+
+        assert_eq!(PaymentWitness::<VerifyingKey>::SIZE, 232);
+        assert_eq!(witness.encode().len(), 232);
+        assert_eq!(
+            witness.reconstruct::<Sha256, ShaDigest>(&context),
+            Ok(payment)
+        );
+
+        let wrong_context = PaymentContext::new(
+            Sha256::hash(&[b"other-anchor"]),
+            context.epoch(),
+            operator.public_key(),
+        );
+        assert_eq!(
+            witness.reconstruct::<Sha256, ShaDigest>(&wrong_context),
+            Err(PaymentError::InvalidPayerSignature)
+        );
+
+        let mut altered = witness.clone();
+        altered.amount ^= 1;
+        assert!(altered.reconstruct::<Sha256, ShaDigest>(&context).is_err());
+        let mut altered = witness.clone();
+        altered.cumulative_debit ^= 1;
+        assert!(altered.reconstruct::<Sha256, ShaDigest>(&context).is_err());
+        let mut altered = witness.clone();
+        altered.shard ^= 1;
+        assert!(altered.reconstruct::<Sha256, ShaDigest>(&context).is_err());
+        let mut altered = witness.clone();
+        altered.cumulative_shard_credit ^= 1;
+        assert!(altered.reconstruct::<Sha256, ShaDigest>(&context).is_err());
+        let mut altered = witness;
+        altered.index ^= 1;
+        assert!(altered.reconstruct::<Sha256, ShaDigest>(&context).is_err());
     }
 
     #[test]

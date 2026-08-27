@@ -188,14 +188,14 @@ where
 
 /// A validator's sealed dealing retained through the challenge deadline.
 #[derive(Clone, Debug)]
-pub struct RetainedAssignment<P: PublicKey, D: Digest> {
+pub struct SealedDealing<P: PublicKey, D: Digest> {
     validator: Participant,
     header: Header<D>,
     roots: RootBundle<D>,
     slices: Vec<ProofSlice<P, D>>,
 }
 
-impl<P: PublicKey, D: Digest> RetainedAssignment<P, D> {
+impl<P: PublicKey, D: Digest> SealedDealing<P, D> {
     /// Validator that sealed and owns this dealing.
     pub const fn validator(&self) -> Participant {
         self.validator
@@ -216,12 +216,12 @@ impl<P: PublicKey, D: Digest> RetainedAssignment<P, D> {
         &self.slices
     }
 
-    /// Consumes the retained dealing and returns its proof slices.
+    /// Consumes the sealed dealing and returns its proof slices.
     pub fn into_slices(self) -> Vec<ProofSlice<P, D>> {
         self.slices
     }
 
-    /// Returns one retained slice for service through the challenge deadline.
+    /// Returns one slice for service through the challenge deadline.
     pub fn serve(&self, slice: u16) -> Option<&ProofSlice<P, D>> {
         self.slices
             .binary_search_by_key(&slice, |candidate| candidate.index)
@@ -246,7 +246,7 @@ pub fn seal<H, P, D, B, R>(
     dealing: Vec<ProofSlice<P, D>>,
     rng: &mut R,
     strategy: &impl Strategy,
-) -> Result<(Vote, RetainedAssignment<P, D>), AdmissionError>
+) -> Result<(Vote, SealedDealing<P, D>), AdmissionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey + Ord + 'static,
@@ -325,14 +325,14 @@ where
 
     // Return the exact authenticated buffers with the vote so the caller can durably retain the
     // dealing before publishing its attestation.
-    let retained = RetainedAssignment {
+    let sealed = SealedDealing {
         validator,
         header: *header,
         roots: *roots,
         slices: dealing,
     };
     let vote = scheme.sign(header)?;
-    Ok((vote, retained))
+    Ok((vote, sealed))
 }
 
 #[cfg(test)]
@@ -342,7 +342,7 @@ mod tests {
         boundary::{DepositBatch, WithdrawalBatch},
         credit::{ShardHead, ShardSet},
         payment::{Payment, SignedReceipt, SignedSend},
-        state::{AccountRow, AccountState, Prefix, StateLeaf},
+        state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
         transition::{
             Assignment, CloseLimits, StateCache, assemble_slices, build_close, validate_close,
         },
@@ -593,7 +593,7 @@ mod tests {
             .map(|slice| all[usize::from(*slice)].clone())
             .collect::<Vec<_>>();
         let mut rng = test_rng();
-        let (vote, retained) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+        let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &scheme,
             &context,
             &deposits,
@@ -605,12 +605,12 @@ mod tests {
             &Sequential,
         )
         .unwrap();
-        assert_eq!(retained.slices(), slices);
+        assert_eq!(sealed.slices(), slices);
         for slice in expected {
-            assert_eq!(retained.serve(slice).map(|slice| slice.index), Some(slice));
+            assert_eq!(sealed.serve(slice).map(|slice| slice.index), Some(slice));
         }
 
-        let (parallel_vote, parallel_retained) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+        let (parallel_vote, parallel_sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &scheme,
             &context,
             &deposits,
@@ -623,7 +623,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parallel_vote, vote);
-        assert_eq!(parallel_retained.slices(), retained.slices());
+        assert_eq!(parallel_sealed.slices(), sealed.slices());
 
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
@@ -661,7 +661,8 @@ mod tests {
         );
 
         let mut malformed = slices;
-        malformed[0].layout.end.opening = malformed[0].layout.end.opening.saturating_add(1);
+        malformed[0].coverage.end.predecessor =
+            malformed[0].coverage.end.predecessor.saturating_add(1);
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
@@ -818,14 +819,14 @@ mod tests {
             (
                 AccountRow {
                     account: payer.public_key(),
-                    opening,
-                    closing: AccountState {
+                    predecessor: opening,
+                    successor: AccountState {
                         balance: 80,
                         cumulative_debit: 20,
                         ..opening
                     },
                     outgoing: Some(payment),
-                    credit_root: payer_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 payer_shards,
@@ -833,15 +834,15 @@ mod tests {
             (
                 AccountRow {
                     account: recipient.public_key(),
-                    opening,
-                    closing: AccountState {
+                    predecessor: opening,
+                    successor: AccountState {
                         balance: 120,
                         cumulative_credit: 20,
                         receipt_count: 1,
                         ..opening
                     },
                     outgoing: None,
-                    credit_root: recipient_shards.root::<Sha256>().unwrap(),
+                    output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
                 recipient_shards,
@@ -855,7 +856,7 @@ mod tests {
                 .checked_extend(Prefix {
                     debit,
                     credit,
-                    shards: u64::try_from(shards.heads().len()).unwrap(),
+                    shard_count: u64::try_from(shards.heads().len()).unwrap(),
                     ..Prefix::default()
                 })
                 .unwrap();
@@ -905,7 +906,7 @@ mod tests {
             original.receipt().clone(),
         ));
         assert_eq!(
-            seal::<Sha256, _, _, ExactPaymentBatch, _>(
+            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
                 &context,
                 &deposits,
@@ -940,7 +941,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            seal::<Sha256, _, _, ExactPaymentBatch, _>(
+            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
                 &context,
                 &deposits,
@@ -958,7 +959,7 @@ mod tests {
         PAYMENT_BATCH_CREATIONS.store(0, Ordering::Relaxed);
         PAYMENT_BATCH_VERIFICATIONS.store(0, Ordering::Relaxed);
         PAYMENT_BATCH_ADDS.store(0, Ordering::Relaxed);
-        let (_, retained) = seal::<Sha256, _, _, ExactPaymentBatch, _>(
+        let (_, sealed) = seal::<Sha256, _, _, ExactPaymentBatch, _>(
             &scheme,
             &context,
             &deposits,
@@ -970,7 +971,7 @@ mod tests {
             &strategy,
         )
         .unwrap();
-        assert_eq!(retained.slices().len(), 1);
+        assert_eq!(sealed.slices().len(), 1);
         assert_eq!(PAYMENT_BATCH_CREATIONS.load(Ordering::Relaxed), 1);
         assert_eq!(PAYMENT_BATCH_VERIFICATIONS.load(Ordering::Relaxed), 1);
         assert_eq!(PAYMENT_BATCH_ADDS.load(Ordering::Relaxed), 2);

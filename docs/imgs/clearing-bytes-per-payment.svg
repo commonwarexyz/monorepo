@@ -38,7 +38,7 @@
   <text class="axis-strong green-text" x="1178" y="39">N = 1,000,000</text>
 
   <rect class="frame" x="30" y="90" width="610" height="360" rx="3"/>
-  <text class="panel-title" x="335" y="122">Evidence (Offchain)</text>
+  <text class="panel-title" x="335" y="122">Proof-Slice Corpus (Offchain)</text>
   <text class="axis" x="95" y="138" text-anchor="end">bytes</text>
   <line class="grid" x1="105" y1="150" x2="620" y2="150"/>
   <line class="grid" x1="105" y1="186.67" x2="620" y2="186.67"/>
@@ -64,37 +64,37 @@
   <text class="axis-strong" x="600" y="402" text-anchor="middle">1B</text>
   <text class="axis" x="360" y="428" text-anchor="middle">payments accepted (T)</text>
 
-  <path class="blue series" d="M150 252.7 L300 289.4 L450 326.1 L600 362.7"/>
-  <path class="purple series" d="M150 228.3 L300 264.9 L450 301.6 L600 338.3"/>
-  <path class="orange series" d="M150 193.7 L300 230.4 L450 267.0 L600 303.7"/>
-  <path class="green series" d="M150 157.3 L300 194.0 L450 230.6 L600 267.3"/>
-  <circle cx="150" cy="252.7" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="300" cy="289.4" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="450" cy="326.1" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="600" cy="362.7" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="150" cy="228.3" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="300" cy="264.9" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="450" cy="301.6" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="600" cy="338.3" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="150" cy="193.7" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="300" cy="230.4" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="450" cy="267.0" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="600" cy="303.7" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="150" cy="157.3" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="300" cy="194.0" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="450" cy="230.6" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="600" cy="267.3" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value green-text" x="162" y="146">633</text>
-  <text class="value orange-text" x="162" y="183">64.3</text>
-  <text class="value purple-text" x="162" y="217">7.34</text>
-  <text class="value blue-text" x="162" y="242">1.58</text>
-  <text class="value green-text" x="588" y="256" text-anchor="end">0.633</text>
-  <text class="value orange-text" x="588" y="293" text-anchor="end">0.0643</text>
-  <text class="value purple-text" x="588" y="327" text-anchor="end">0.00734</text>
-  <text class="value blue-text" x="588" y="352" text-anchor="end">0.00158</text>
+  <path class="blue series" d="M150 256.3 L300 293.0 L450 329.7 L600 366.3"/>
+  <path class="purple series" d="M150 230.0 L300 266.7 L450 303.4 L600 340.0"/>
+  <path class="orange series" d="M150 195.1 L300 231.8 L450 268.4 L600 305.1"/>
+  <path class="green series" d="M150 158.6 L300 195.3 L450 232.0 L600 268.6"/>
+  <circle cx="150" cy="256.3" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="300" cy="293.0" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="450" cy="329.7" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="600" cy="366.3" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="150" cy="230.0" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="300" cy="266.7" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="450" cy="303.4" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="600" cy="340.0" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="150" cy="195.1" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="300" cy="231.8" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="450" cy="268.4" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="600" cy="305.1" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="150" cy="158.6" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="300" cy="195.3" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="450" cy="232.0" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="600" cy="268.6" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value green-text" x="162" y="147">582</text>
+  <text class="value orange-text" x="162" y="184">58.9</text>
+  <text class="value purple-text" x="162" y="219">6.56</text>
+  <text class="value blue-text" x="162" y="245">1.26</text>
+  <text class="value green-text" x="588" y="257" text-anchor="end">0.582</text>
+  <text class="value orange-text" x="588" y="294" text-anchor="end">0.0589</text>
+  <text class="value purple-text" x="588" y="329" text-anchor="end">0.00656</text>
+  <text class="value blue-text" x="588" y="355" text-anchor="end">0.00126</text>
 
   <rect class="frame" x="670" y="90" width="620" height="360" rx="3"/>
-  <text class="panel-title" x="980" y="122">Certified Commitment (Onchain)</text>
+  <text class="panel-title" x="980" y="122">External Certified Package (Onchain)</text>
   <text class="axis" x="760" y="138" text-anchor="end">bytes</text>
   <line class="grid" x1="770" y1="150" x2="1255" y2="150"/>
   <line class="grid" x1="770" y1="186.67" x2="1255" y2="186.67"/>

@@ -3,7 +3,7 @@ use clap::Parser;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Parser)]
-#[command(about = "Run one Commonware Clearing wallet agent")]
+#[command(about = "Run one Bajillion wallet agent")]
 struct Args {
     /// Operator RPC address.
     #[arg(long, default_value = "127.0.0.1:7001")]
@@ -17,7 +17,7 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     identity: usize,
 
-    /// SQLite wallet database path. Defaults to terminal-agent-<identity>.sqlite.
+    /// SQLite wallet database path. Defaults to `terminal-agent-<identity>.sqlite`.
     #[arg(long)]
     database: Option<PathBuf>,
 

@@ -321,7 +321,6 @@ fn fuzz(input: FuzzInput) {
                         .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()]), *pos))
                         .collect();
                     let root = t.root();
-                    let _ = mp.root_from_multi_inclusion::<Sha256>(&element_digests, &Sequential);
                     let _ = mp.verify_multi_inclusion::<Sha256>(&element_digests, &root);
                 }
             }
@@ -393,7 +392,6 @@ fn fuzz(input: FuzzInput) {
                         })
                         .collect();
                     let root = t.root();
-                    let _ = mp.root_from_multi_inclusion::<Sha256>(&correct_elements, &Sequential);
                     let _ = mp.verify_multi_inclusion::<Sha256>(&correct_elements, &root);
                 }
             }
@@ -433,7 +431,6 @@ fn fuzz(input: FuzzInput) {
             BmtOperation::VerifyMultiProofEmptyElements => {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     let root = t.root();
-                    let _ = mp.root_from_multi_inclusion::<Sha256>(&[], &Sequential);
                     let _ = mp.verify_multi_inclusion::<Sha256>(&[], &root);
                 }
             }

@@ -29,15 +29,15 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
 const MAX_CLAIM_BYTES: usize = 16 * 1024;
 const MAX_CLOSE_ERROR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_DESTINATION_BYTES: usize = 256;
 const MAX_WITHDRAWAL_BYTES: usize = 512;
 const EFFECTIVE_ACCOUNT_SQL: &str = "SELECT state.epoch, identity.name,
             length(state.public_key), state.public_key,
-            state.opening_balance, state.opening_debit, state.opening_credit,
-            state.opening_receipts, state.opening_active,
+            state.predecessor_balance, state.predecessor_debit, state.predecessor_credit,
+            state.predecessor_receipts, state.predecessor_active,
             state.current_balance, state.current_debit,
             state.current_credit, state.current_receipts
      FROM account_states AS state
@@ -49,14 +49,14 @@ const EFFECTIVE_ACCOUNT_SQL: &str = "SELECT state.epoch, identity.name,
 const EPOCH_ACCOUNTS_SQL: &str = "SELECT identity.name,
                     length(state.public_key), state.public_key,
                     CASE WHEN state.epoch = ?1
-                         THEN state.opening_balance ELSE state.current_balance END,
+                         THEN state.predecessor_balance ELSE state.current_balance END,
                     CASE WHEN state.epoch = ?1
-                         THEN state.opening_debit ELSE state.current_debit END,
+                         THEN state.predecessor_debit ELSE state.current_debit END,
                     CASE WHEN state.epoch = ?1
-                         THEN state.opening_credit ELSE state.current_credit END,
+                         THEN state.predecessor_credit ELSE state.current_credit END,
                     CASE WHEN state.epoch = ?1
-                         THEN state.opening_receipts ELSE state.current_receipts END,
-                    CASE WHEN state.epoch = ?1 THEN state.opening_active ELSE 1 END,
+                         THEN state.predecessor_receipts ELSE state.current_receipts END,
+                    CASE WHEN state.epoch = ?1 THEN state.predecessor_active ELSE 1 END,
                     state.current_balance, state.current_debit,
                     state.current_credit, state.current_receipts
              FROM account_identities AS identity
@@ -97,6 +97,14 @@ pub(crate) struct CommitUnknown {
 }
 
 #[derive(Debug, Error)]
+#[error("{operation} storage mutation failed")]
+pub(crate) struct MutationFailed {
+    operation: &'static str,
+    #[source]
+    source: anyhow::Error,
+}
+
+#[derive(Debug, Error)]
 #[error("{0}")]
 pub(crate) struct CloseRejected(&'static str);
 
@@ -106,10 +114,56 @@ impl CommitUnknown {
     }
 }
 
+impl MutationFailed {
+    fn new(operation: &'static str, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            operation,
+            source: source.into(),
+        }
+    }
+}
+
+fn mutate<T>(
+    connection: &mut Connection,
+    operation: &'static str,
+    body: impl FnOnce(&Transaction<'_>) -> Result<T>,
+) -> Result<T> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|source| MutationFailed::new(operation, source))?;
+    match body(&transaction) {
+        Ok(value) => {
+            transaction
+                .commit()
+                .map_err(|source| CommitUnknown::new(operation, source))?;
+            Ok(value)
+        }
+        Err(error) => {
+            let storage_failure = error
+                .chain()
+                .any(|source| source.downcast_ref::<rusqlite::Error>().is_some());
+            if let Err(source) = transaction.rollback() {
+                return Err(MutationFailed::new(
+                    operation,
+                    anyhow::Error::new(source).context(format!(
+                        "rollback failed after the operation returned: {error:#}"
+                    )),
+                )
+                .into());
+            }
+            if storage_failure {
+                Err(MutationFailed::new(operation, error).into())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 pub(crate) struct StoredAccount {
     pub(crate) name: String,
     pub(crate) key: Key,
-    pub(crate) opening: AccountState,
+    pub(crate) predecessor: AccountState,
     pub(crate) current: AccountState,
 }
 
@@ -228,7 +282,8 @@ pub(crate) struct StagedWithdrawal {
 
 pub(crate) struct WithdrawalEvidence {
     pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) claim: WithdrawalClaim<Key, Digest>,
+    pub(crate) account: Key,
+    pub(crate) claim: WithdrawalClaim<Digest>,
 }
 
 pub(crate) struct ExternalPayoutEvidence {
@@ -321,6 +376,8 @@ pub(crate) struct Store {
     #[cfg(test)]
     fail_payment_commit: bool,
     #[cfg(test)]
+    fail_payment_write: bool,
+    #[cfg(test)]
     fail_deposit_commit: bool,
     #[cfg(test)]
     fail_cutover_commit: bool,
@@ -370,11 +427,11 @@ impl Store {
              CREATE TABLE IF NOT EXISTS account_states (
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
                  public_key BLOB NOT NULL CHECK (length(public_key) = 32),
-                 opening_balance INTEGER NOT NULL CHECK (opening_balance >= 0),
-                 opening_debit INTEGER NOT NULL CHECK (opening_debit >= 0),
-                 opening_credit INTEGER NOT NULL CHECK (opening_credit >= 0),
-                 opening_receipts INTEGER NOT NULL CHECK (opening_receipts >= 0),
-                 opening_active INTEGER NOT NULL CHECK (opening_active IN (0, 1)),
+                 predecessor_balance INTEGER NOT NULL CHECK (predecessor_balance >= 0),
+                 predecessor_debit INTEGER NOT NULL CHECK (predecessor_debit >= 0),
+                 predecessor_credit INTEGER NOT NULL CHECK (predecessor_credit >= 0),
+                 predecessor_receipts INTEGER NOT NULL CHECK (predecessor_receipts >= 0),
+                 predecessor_active INTEGER NOT NULL CHECK (predecessor_active IN (0, 1)),
                  current_balance INTEGER NOT NULL CHECK (current_balance >= 0),
                  current_debit INTEGER NOT NULL CHECK (current_debit >= 0),
                  current_credit INTEGER NOT NULL CHECK (current_credit >= 0),
@@ -451,7 +508,7 @@ impl Store {
                  certificate BLOB NOT NULL,
                  rows INTEGER NOT NULL CHECK (rows >= 0),
                  slices INTEGER NOT NULL CHECK (slices >= 0),
-                 retained_slices INTEGER NOT NULL CHECK (retained_slices >= 0),
+                 dealing_slices INTEGER NOT NULL CHECK (dealing_slices >= 0),
                  withdrawal_total INTEGER NOT NULL CHECK (withdrawal_total >= 0),
                  payout_total INTEGER NOT NULL CHECK (payout_total >= 0),
                  prepare_micros INTEGER NOT NULL CHECK (prepare_micros >= 0),
@@ -470,15 +527,20 @@ impl Store {
              );
 
              CREATE TABLE IF NOT EXISTS withdrawal_claims (
-                 epoch INTEGER NOT NULL CHECK (epoch >= 0),
+                 batch_id BLOB NOT NULL CHECK (length(batch_id) = 32),
+                 position INTEGER NOT NULL CHECK (
+                     position BETWEEN 0 AND 4294967295
+                 ),
                  account BLOB NOT NULL CHECK (length(account) = 32),
                  proof BLOB NOT NULL CHECK (
                      length(proof) > 0 AND length(proof) <= {max_claim_bytes}
                  ),
                  claimed INTEGER NOT NULL DEFAULT 0 CHECK (claimed IN (0, 1)),
-                 PRIMARY KEY(epoch, account),
-                 FOREIGN KEY(epoch) REFERENCES settlements(epoch)
-             );",
+                 PRIMARY KEY(batch_id, position),
+                 FOREIGN KEY(batch_id) REFERENCES settlements(batch_id)
+             );
+             CREATE INDEX IF NOT EXISTS withdrawal_claims_account_unclaimed
+                 ON withdrawal_claims(account) WHERE claimed = 0;",
             payment_size = Payment::SIZE,
             context_size = EpochPaymentContext::SIZE,
             max_deposit_events = MAX_DEPOSIT_EVENTS,
@@ -528,8 +590,8 @@ impl Store {
                     transaction.execute(
                         "INSERT INTO account_states(
                              epoch, public_key,
-                             opening_balance, opening_debit, opening_credit,
-                             opening_receipts, opening_active,
+                             predecessor_balance, predecessor_debit, predecessor_credit,
+                             predecessor_receipts, predecessor_active,
                              current_balance, current_debit, current_credit, current_receipts
                          ) VALUES(0, ?1, ?2, 0, 0, 0, 1, ?2, 0, 0, 0)",
                         params![key.as_ref(), balance],
@@ -543,6 +605,8 @@ impl Store {
             source,
             #[cfg(test)]
             fail_payment_commit: false,
+            #[cfg(test)]
+            fail_payment_write: false,
             #[cfg(test)]
             fail_deposit_commit: false,
             #[cfg(test)]
@@ -779,36 +843,34 @@ impl Store {
     }
 
     pub(crate) fn ensure_current_context(&mut self, expected: &EpochPaymentContext) -> Result<()> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ensure!(
-            metadata_epoch(&transaction)? == expected.epoch(),
-            "stored epoch does not match its payment context"
-        );
-        match metadata_payment_context(&transaction)? {
-            Some(stored) => ensure!(
-                stored == *expected,
-                "stored payment context differs from the reconstructed epoch"
-            ),
-            None => {
-                let payment_count: i64 = transaction.query_row(
-                    "SELECT count(*) FROM payments WHERE epoch = ?1",
-                    [sql_u64(expected.epoch(), "epoch")?],
-                    |row| row.get(0),
-                )?;
-                ensure!(
-                    payment_count == 0,
-                    "an active payment epoch is missing its durable context"
-                );
-                transaction.execute(
-                    "UPDATE operator_meta SET payment_context = ?1 WHERE singleton = 1",
-                    [expected.encode().as_ref()],
-                )?;
+        mutate(&mut self.connection, "payment context", |transaction| {
+            ensure!(
+                metadata_epoch(transaction)? == expected.epoch(),
+                "stored epoch does not match its payment context"
+            );
+            match metadata_payment_context(transaction)? {
+                Some(stored) => ensure!(
+                    stored == *expected,
+                    "stored payment context differs from the reconstructed epoch"
+                ),
+                None => {
+                    let payment_count: i64 = transaction.query_row(
+                        "SELECT count(*) FROM payments WHERE epoch = ?1",
+                        [sql_u64(expected.epoch(), "epoch")?],
+                        |row| row.get(0),
+                    )?;
+                    ensure!(
+                        payment_count == 0,
+                        "an active payment epoch is missing its durable context"
+                    );
+                    transaction.execute(
+                        "UPDATE operator_meta SET payment_context = ?1 WHERE singleton = 1",
+                        [expected.encode().as_ref()],
+                    )?;
+                }
             }
-        }
-        transaction.commit()?;
-        Ok(())
+            Ok(())
+        })
     }
 
     pub(crate) fn closing_context(&self, epoch: u64) -> Result<EpochPaymentContext> {
@@ -826,6 +888,7 @@ impl Store {
         Self::load_epoch(&self.connection, self.epoch()?)
     }
 
+    #[cfg(test)]
     pub(crate) fn current_account(&self, account: &Key) -> Result<Option<StoredAccount>> {
         effective_account(&self.connection, self.epoch()?, account)
     }
@@ -1000,90 +1063,93 @@ impl Store {
     ) -> Result<AcceptedPayment> {
         #[cfg(test)]
         let fail_commit = std::mem::take(&mut self.fail_payment_commit);
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(accepted) = find_accepted_payment(&transaction, &send)? {
-            return Ok(accepted);
-        }
-        let plan = validate_new_payment(&transaction, context, &send, shard)?;
-        let epoch = plan.epoch;
-        let tx_id = send.tx_id::<Sha256>();
-        let recipient_key = send.body().recipient().clone();
-        let shard_sql = sql_u64(shard, "receive shard")?;
-        let receipt = SignedReceipt::issue_next::<Sha256, _>(
-            context,
-            &send,
-            shard,
-            plan.previous_credit,
-            plan.previous_index,
-            operator,
-        )
-        .context("issue operator receipt")?;
-        let payment =
-            Payment::new::<Sha256>(context, send, receipt).context("link accepted payment")?;
+        #[cfg(test)]
+        let fail_write = std::mem::take(&mut self.fail_payment_write);
+        let accepted = mutate(&mut self.connection, "payment", |transaction| {
+            if let Some(accepted) = find_accepted_payment(transaction, &send)? {
+                return Ok(accepted);
+            }
+            let plan = validate_new_payment(transaction, context, &send, shard)?;
+            let epoch = plan.epoch;
+            let tx_id = send.tx_id::<Sha256>();
+            let recipient_key = send.body().recipient().clone();
+            let shard_sql = sql_u64(shard, "receive shard")?;
+            let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                context,
+                &send,
+                shard,
+                plan.previous_credit,
+                plan.previous_index,
+                operator,
+            )
+            .context("issue operator receipt")?;
+            let payment =
+                Payment::new::<Sha256>(context, send, receipt).context("link accepted payment")?;
 
-        upsert_account_state(&transaction, epoch, &plan.payer)?;
-        if let Some(recipient) = plan.recipient.as_ref() {
-            upsert_account_state(&transaction, epoch, recipient)?;
-        }
-        if let Some(live_liability) = plan.live_liability {
-            let updated = transaction.execute(
-                "UPDATE operator_meta SET live_liability = ?1 WHERE singleton = 1",
-                [live_liability.to_be_bytes().as_slice()],
-            )?;
-            ensure!(updated == 1, "operator metadata disappeared during payment");
-        }
-        transaction.execute(
-            "INSERT INTO receive_shards(
+            upsert_account_state(transaction, epoch, &plan.payer)?;
+            if let Some(recipient) = plan.recipient.as_ref() {
+                upsert_account_state(transaction, epoch, recipient)?;
+            }
+            if let Some(live_liability) = plan.live_liability {
+                let updated = transaction.execute(
+                    "UPDATE operator_meta SET live_liability = ?1 WHERE singleton = 1",
+                    [live_liability.to_be_bytes().as_slice()],
+                )?;
+                ensure!(updated == 1, "operator metadata disappeared during payment");
+            }
+            transaction.execute(
+                "INSERT INTO receive_shards(
                  epoch, recipient, shard, cumulative_credit, receipt_index
              ) VALUES(?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(epoch, recipient, shard) DO UPDATE SET
                  cumulative_credit = excluded.cumulative_credit,
                  receipt_index = excluded.receipt_index",
-            params![
-                sql_u64(epoch, "epoch")?,
-                recipient_key.as_ref(),
-                shard_sql,
-                sql_u64(
-                    payment.receipt().body().cumulative_shard_credit(),
-                    "shard credit",
-                )?,
-                sql_u64(payment.receipt().body().index(), "receipt index")?,
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO payments(
+                params![
+                    sql_u64(epoch, "epoch")?,
+                    recipient_key.as_ref(),
+                    shard_sql,
+                    sql_u64(
+                        payment.receipt().body().cumulative_shard_credit(),
+                        "shard credit",
+                    )?,
+                    sql_u64(payment.receipt().body().index(), "receipt index")?,
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO payments(
                  epoch, payer_name, recipient_name, external, tx_id, encoded
              ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                sql_u64(epoch, "epoch")?,
-                plan.payer_name,
-                plan.recipient_name,
-                i64::from(plan.external),
-                tx_id.digest().as_ref(),
-                payment.encode().as_ref(),
-            ],
-        )?;
-        let sequence = from_sql_u64(transaction.last_insert_rowid(), "payment sequence")?;
-        transaction
-            .commit()
-            .map_err(|source| CommitUnknown::new("payment", source))?;
+                params![
+                    sql_u64(epoch, "epoch")?,
+                    plan.payer_name,
+                    plan.recipient_name,
+                    i64::from(plan.external),
+                    tx_id.digest().as_ref(),
+                    payment.encode().as_ref(),
+                ],
+            )?;
+            #[cfg(test)]
+            if fail_write {
+                return Err(rusqlite::Error::ExecuteReturnedResults.into());
+            }
+            let sequence = from_sql_u64(transaction.last_insert_rowid(), "payment sequence")?;
+            Ok(AcceptedPayment {
+                epoch,
+                sequence,
+                amount: plan.amount,
+                payment,
+            })
+        })?;
         #[cfg(test)]
         if fail_commit {
             return Err(
                 CommitUnknown::new("payment", rusqlite::Error::ExecuteReturnedResults).into(),
             );
         }
-        Ok(AcceptedPayment {
-            epoch,
-            sequence,
-            amount: plan.amount,
-            payment,
-        })
+        Ok(accepted)
     }
 
-    pub(crate) fn payment_requires_boundary_freeze(
+    pub(crate) fn payment_requires_epoch_registration(
         &self,
         context: &PaymentContext<Key, Digest>,
         send: &SignedSend<Key, Digest>,
@@ -1117,91 +1183,88 @@ impl Store {
         );
         let amount = event.amount;
         let amount_sql = sql_u64(amount, "deposit amount")?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let epoch = metadata_epoch(&transaction)?;
-        ensure!(epoch == expected.epoch(), "deposit context is stale");
-        ensure!(
-            metadata_payment_context(&transaction)?.as_ref() == Some(expected),
-            "deposit anchor is stale"
-        );
-        let deposit_events = metadata_deposit_events(&transaction)?;
-        ensure!(
-            deposit_events < MAX_DEPOSIT_EVENTS,
-            "deposit event capacity is exhausted"
-        );
-        let deposit_events = deposit_events
-            .checked_add(1)
-            .context("deposit event count overflow")?;
-        let payment_count: i64 = transaction.query_row(
-            "SELECT count(*) FROM payments WHERE epoch = ?1",
-            [sql_u64(epoch, "epoch")?],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            payment_count == 0,
-            "deposits are frozen after the first payment in an epoch"
-        );
-        let live_liability = checked_sql_add(
-            metadata_live_liability(&transaction)?,
-            amount,
-            "live liability",
-        )?;
-        let key = identity.key.clone();
-        let account = effective_account(&transaction, epoch, &key)?;
-        let account = if let Some(mut account) = account {
-            account.current.balance =
-                checked_sql_add(account.current.balance, amount, "deposit account balance")?;
-            account
-        } else {
-            StoredAccount {
-                name: identity.name.to_string(),
-                key: key.clone(),
-                opening: AccountState::default(),
-                current: AccountState {
-                    balance: amount,
-                    active: true,
-                    ..AccountState::default()
-                },
-            }
-        };
-        transaction.execute(
-            "INSERT INTO deposits(epoch, event_id, account, amount)
+        let staged = mutate(&mut self.connection, "deposit", |transaction| {
+            let epoch = metadata_epoch(transaction)?;
+            ensure!(epoch == expected.epoch(), "deposit context is stale");
+            ensure!(
+                metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                "deposit anchor is stale"
+            );
+            let deposit_events = metadata_deposit_events(transaction)?;
+            ensure!(
+                deposit_events < MAX_DEPOSIT_EVENTS,
+                "deposit event capacity is exhausted"
+            );
+            let deposit_events = deposit_events
+                .checked_add(1)
+                .context("deposit event count overflow")?;
+            let payment_count: i64 = transaction.query_row(
+                "SELECT count(*) FROM payments WHERE epoch = ?1",
+                [sql_u64(epoch, "epoch")?],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                payment_count == 0,
+                "deposits are frozen after the first payment in an epoch"
+            );
+            let live_liability = checked_sql_add(
+                metadata_live_liability(transaction)?,
+                amount,
+                "live liability",
+            )?;
+            let key = identity.key.clone();
+            let account = effective_account(transaction, epoch, &key)?;
+            let account = if let Some(mut account) = account {
+                account.current.balance =
+                    checked_sql_add(account.current.balance, amount, "deposit account balance")?;
+                account
+            } else {
+                StoredAccount {
+                    name: identity.name.to_string(),
+                    key: key.clone(),
+                    predecessor: AccountState::default(),
+                    current: AccountState {
+                        balance: amount,
+                        active: true,
+                        ..AccountState::default()
+                    },
+                }
+            };
+            transaction.execute(
+                "INSERT INTO deposits(epoch, event_id, account, amount)
              VALUES(?1, ?2, ?3, ?4)",
-            params![
-                sql_u64(epoch, "epoch")?,
-                event.id.as_ref(),
-                key.as_ref(),
-                amount_sql,
-            ],
-        )?;
-        upsert_account_state(&transaction, epoch, &account)?;
-        transaction.execute(
-            "UPDATE operator_meta
+                params![
+                    sql_u64(epoch, "epoch")?,
+                    event.id.as_ref(),
+                    key.as_ref(),
+                    amount_sql,
+                ],
+            )?;
+            upsert_account_state(transaction, epoch, &account)?;
+            transaction.execute(
+                "UPDATE operator_meta
              SET payment_context = ?1, live_liability = ?2, deposit_events = ?3
              WHERE singleton = 1",
-            params![
-                replacement.encode().as_ref(),
-                live_liability.to_be_bytes().as_slice(),
-                sql_usize(deposit_events, "deposit event count")?,
-            ],
-        )?;
-        transaction
-            .commit()
-            .map_err(|source| CommitUnknown::new("deposit", source))?;
+                params![
+                    replacement.encode().as_ref(),
+                    live_liability.to_be_bytes().as_slice(),
+                    sql_usize(deposit_events, "deposit event count")?,
+                ],
+            )?;
+            Ok(StagedDeposit {
+                epoch,
+                id: event.id,
+                account: event.account.clone(),
+                amount,
+            })
+        })?;
         #[cfg(test)]
         if fail_commit {
             return Err(
                 CommitUnknown::new("deposit", rusqlite::Error::ExecuteReturnedResults).into(),
             );
         }
-        Ok(StagedDeposit {
-            epoch,
-            id: event.id,
-            account: event.account.clone(),
-            amount,
-        })
+        Ok(staged)
     }
 
     pub(crate) fn stage_withdrawal(
@@ -1228,88 +1291,89 @@ impl Store {
             "withdrawal authorization exceeds the operator bound"
         );
 
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let epoch = metadata_epoch(&transaction)?;
-        ensure!(epoch == expected.epoch(), "withdrawal context is stale");
-        ensure!(
-            metadata_payment_context(&transaction)?.as_ref() == Some(expected),
-            "withdrawal anchor is stale"
-        );
-        let payment_count: i64 = transaction.query_row(
-            "SELECT count(*) FROM payments WHERE epoch = ?1",
-            [sql_u64(epoch, "epoch")?],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            payment_count == 0,
-            "withdrawals are frozen after the first payment in an epoch"
-        );
+        mutate(&mut self.connection, "withdrawal", |transaction| {
+            let epoch = metadata_epoch(transaction)?;
+            ensure!(epoch == expected.epoch(), "withdrawal context is stale");
+            ensure!(
+                metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                "withdrawal anchor is stale"
+            );
+            let payment_count: i64 = transaction.query_row(
+                "SELECT count(*) FROM payments WHERE epoch = ?1",
+                [sql_u64(epoch, "epoch")?],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                payment_count == 0,
+                "withdrawals are frozen after the first payment in an epoch"
+            );
 
-        let mut account = effective_account(&transaction, epoch, request.account())?
-            .context("withdrawing account is not in the live state")?;
-        let applied_amount = match request.body().action() {
-            WithdrawalAction::Amount(amount) => {
-                let amount = amount.get();
-                ensure!(
-                    account.current.balance >= amount,
-                    "withdrawal exceeds the live balance"
-                );
-                account.current.balance -= amount;
-                account.current.active = account.current.balance > 0;
-                upsert_account_state(&transaction, epoch, &account)?;
-                Some(amount)
-            }
-            WithdrawalAction::Close => None,
-        };
-        transaction.execute(
-            "INSERT INTO withdrawals(epoch, account, request_id, applied_amount, encoded)
+            let mut account = effective_account(transaction, epoch, request.account())?
+                .context("withdrawing account is not in the live state")?;
+            let applied_amount = match request.body().action() {
+                WithdrawalAction::Amount(amount) => {
+                    let amount = amount.get();
+                    ensure!(
+                        account.current.balance >= amount,
+                        "withdrawal exceeds the live balance"
+                    );
+                    account.current.balance -= amount;
+                    account.current.active = account.current.balance > 0;
+                    upsert_account_state(transaction, epoch, &account)?;
+                    Some(amount)
+                }
+                WithdrawalAction::Close => None,
+            };
+            transaction.execute(
+                "INSERT INTO withdrawals(epoch, account, request_id, applied_amount, encoded)
              VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![
-                sql_u64(epoch, "epoch")?,
-                request.account().as_ref(),
-                request.id::<Sha256>().digest().as_ref(),
-                applied_amount
-                    .map(|amount| sql_u64(amount, "withdrawal amount"))
-                    .transpose()?,
-                encoded.as_ref(),
-            ],
-        )?;
-        match applied_amount {
-            Some(amount) => {
-                let live_liability = metadata_live_liability(&transaction)?
-                    .checked_sub(amount)
-                    .context("withdrawal exceeds live liability")?;
-                transaction.execute(
-                    "UPDATE operator_meta SET payment_context = ?1, live_liability = ?2
+                params![
+                    sql_u64(epoch, "epoch")?,
+                    request.account().as_ref(),
+                    request.id::<Sha256>().digest().as_ref(),
+                    applied_amount
+                        .map(|amount| sql_u64(amount, "withdrawal amount"))
+                        .transpose()?,
+                    encoded.as_ref(),
+                ],
+            )?;
+            match applied_amount {
+                Some(amount) => {
+                    let live_liability = metadata_live_liability(transaction)?
+                        .checked_sub(amount)
+                        .context("withdrawal exceeds live liability")?;
+                    transaction.execute(
+                        "UPDATE operator_meta SET payment_context = ?1, live_liability = ?2
                      WHERE singleton = 1",
-                    params![
-                        replacement.encode().as_ref(),
-                        live_liability.to_be_bytes().as_slice(),
-                    ],
-                )?;
+                        params![
+                            replacement.encode().as_ref(),
+                            live_liability.to_be_bytes().as_slice(),
+                        ],
+                    )?;
+                }
+                None => {
+                    transaction.execute(
+                        "UPDATE operator_meta SET payment_context = ?1 WHERE singleton = 1",
+                        [replacement.encode().as_ref()],
+                    )?;
+                }
             }
-            None => {
-                transaction.execute(
-                    "UPDATE operator_meta SET payment_context = ?1 WHERE singleton = 1",
-                    [replacement.encode().as_ref()],
-                )?;
-            }
-        }
-        transaction
-            .commit()
-            .map_err(|source| CommitUnknown::new("withdrawal", source))?;
-        Ok(StagedWithdrawal {
-            epoch,
-            account: request.account().clone(),
-            action: *request.body().action(),
+            Ok(StagedWithdrawal {
+                epoch,
+                account: request.account().clone(),
+                action: *request.body().action(),
+            })
         })
     }
 
     #[cfg(test)]
     pub(crate) const fn fail_next_payment_commit(&mut self) {
         self.fail_payment_commit = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn fail_next_payment_write(&mut self) {
+        self.fail_payment_write = true;
     }
 
     #[cfg(test)]
@@ -1330,94 +1394,91 @@ impl Store {
     ) -> Result<()> {
         #[cfg(test)]
         let fail_commit = std::mem::take(&mut self.fail_cutover_commit);
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ensure!(
-            metadata_epoch(&transaction)? == epoch,
-            "epoch changed during cutover"
-        );
-        ensure!(
-            expected.epoch() == epoch,
-            "closing context has the wrong epoch"
-        );
-        ensure!(
-            metadata_payment_context(&transaction)?.as_ref() == Some(expected),
-            "closing payment anchor is stale"
-        );
-        let next_epoch = epoch.checked_add(1).context("epoch overflow")?;
-        ensure!(
-            successor.payment().epoch() == next_epoch
-                && successor.payment().operator() == expected.operator(),
-            "successor context does not extend the closing epoch"
-        );
-        let epoch_sql = sql_u64(epoch, "epoch")?;
-        let work: i64 = transaction.query_row(
-            "SELECT
+        mutate(&mut self.connection, "epoch cutover", |transaction| {
+            ensure!(
+                metadata_epoch(transaction)? == epoch,
+                "epoch changed during cutover"
+            );
+            ensure!(
+                expected.epoch() == epoch,
+                "closing context has the wrong epoch"
+            );
+            ensure!(
+                metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                "closing payment anchor is stale"
+            );
+            let next_epoch = epoch.checked_add(1).context("epoch overflow")?;
+            ensure!(
+                successor.payment().epoch() == next_epoch
+                    && successor.payment().operator() == expected.operator(),
+                "successor context does not extend the closing epoch"
+            );
+            let epoch_sql = sql_u64(epoch, "epoch")?;
+            let work: i64 = transaction.query_row(
+                "SELECT
                  EXISTS(SELECT 1 FROM payments WHERE epoch = ?1)
                  OR EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1)
                  OR EXISTS(SELECT 1 FROM withdrawals WHERE epoch = ?1)",
-            [epoch_sql],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            work != 0,
-            "there are no payments, deposits, or withdrawals to close"
-        );
-
-        let closing_accounts = pending_close_accounts(&transaction, epoch)?;
-        let close_total = closing_accounts
-            .iter()
-            .try_fold(0_u64, |total, (_, account)| {
-                total
-                    .checked_add(account.current.balance)
-                    .context("Close tail total overflow")
-            })?;
-        let successor_liability = metadata_live_liability(&transaction)?
-            .checked_sub(close_total)
-            .context("Close tails exceed live liability")?;
-        ensure!(
-            successor_liability == successor.opening_liability(),
-            "successor context has the wrong opening liability"
-        );
-
-        for (request, mut account) in closing_accounts {
-            let tail = account.current.balance;
-            account.current.balance = 0;
-            account.current.active = false;
-            upsert_account_state(&transaction, epoch, &account)?;
-            let updated = transaction.execute(
-                "UPDATE withdrawals SET applied_amount = ?1
-                 WHERE epoch = ?2 AND account = ?3 AND applied_amount IS NULL",
-                params![
-                    sql_u64(tail, "Close tail")?,
-                    epoch_sql,
-                    request.account().as_ref(),
-                ],
+                [epoch_sql],
+                |row| row.get(0),
             )?;
-            ensure!(updated == 1, "pending Close disappeared during cutover");
-        }
+            ensure!(
+                work != 0,
+                "there are no payments, deposits, or withdrawals to close"
+            );
 
-        // Close projections and the epoch transition share one commit. Unchanged accounts remain
-        // copy-on-write, so cutover work is proportional to the number of Close authorizations.
-        transaction.execute(
-            "INSERT INTO close_jobs(epoch, status, payment_context)
+            let closing_accounts = pending_close_accounts(transaction, epoch)?;
+            let close_total = closing_accounts
+                .iter()
+                .try_fold(0_u64, |total, (_, account)| {
+                    total
+                        .checked_add(account.current.balance)
+                        .context("Close tail total overflow")
+                })?;
+            let successor_liability = metadata_live_liability(transaction)?
+                .checked_sub(close_total)
+                .context("Close tails exceed live liability")?;
+            ensure!(
+                successor_liability == successor.predecessor_liability(),
+                "successor context has the wrong predecessor liability"
+            );
+
+            for (request, mut account) in closing_accounts {
+                let tail = account.current.balance;
+                account.current.balance = 0;
+                account.current.active = false;
+                upsert_account_state(transaction, epoch, &account)?;
+                let updated = transaction.execute(
+                    "UPDATE withdrawals SET applied_amount = ?1
+                 WHERE epoch = ?2 AND account = ?3 AND applied_amount IS NULL",
+                    params![
+                        sql_u64(tail, "Close tail")?,
+                        epoch_sql,
+                        request.account().as_ref(),
+                    ],
+                )?;
+                ensure!(updated == 1, "pending Close disappeared during cutover");
+            }
+
+            // Close projections and the epoch transition share one commit. Unchanged accounts remain
+            // copy-on-write, so cutover work is proportional to the number of Close authorizations.
+            transaction.execute(
+                "INSERT INTO close_jobs(epoch, status, payment_context)
              VALUES(?1, 'closing', ?2)",
-            params![epoch_sql, expected.encode().as_ref()],
-        )?;
-        transaction.execute(
-            "UPDATE operator_meta
+                params![epoch_sql, expected.encode().as_ref()],
+            )?;
+            transaction.execute(
+                "UPDATE operator_meta
              SET epoch = ?1, live_liability = ?2, payment_context = ?3, deposit_events = 0
              WHERE singleton = 1",
-            params![
-                sql_u64(next_epoch, "epoch")?,
-                successor_liability.to_be_bytes().as_slice(),
-                successor.payment().encode().as_ref(),
-            ],
-        )?;
-        transaction
-            .commit()
-            .map_err(|source| CommitUnknown::new("epoch cutover", source))?;
+                params![
+                    sql_u64(next_epoch, "epoch")?,
+                    successor_liability.to_be_bytes().as_slice(),
+                    successor.payment().encode().as_ref(),
+                ],
+            )?;
+            Ok(())
+        })?;
         #[cfg(test)]
         if fail_commit {
             return Err(CommitUnknown::new(
@@ -1464,143 +1525,159 @@ impl Store {
         );
         let mut withdrawal_total = 0_u64;
         let withdrawal_claims = result
-            .withdrawal_claims
+            .withdrawals
+            .requests()
             .iter()
-            .map(|claim| {
-                let amount = claim
-                    .verify::<Sha256>(
-                        result.epoch_context.deployment(),
-                        result.epoch_context.withdrawal_root(),
-                        &result.roots.change,
-                    )
+            .zip(&result.withdrawal_claims)
+            .enumerate()
+            .map(|(position, (request, claim))| {
+                let position = u32::try_from(position).context("withdrawal position overflow")?;
+                ensure!(
+                    claim.position() == position,
+                    "withdrawal claim has the wrong request position"
+                );
+                let output = claim
+                    .verify::<Sha256>(&result.roots.withdrawal_outputs)
                     .context("verify withdrawal claim")?;
+                ensure!(
+                    output.destination() == request.body().destination(),
+                    "withdrawal claim has the wrong request destination"
+                );
+                if let WithdrawalAction::Amount(amount) = request.body().action() {
+                    ensure!(
+                        output.amount() == amount.get(),
+                        "withdrawal claim has the wrong requested amount"
+                    );
+                }
                 withdrawal_total = withdrawal_total
-                    .checked_add(amount)
+                    .checked_add(output.amount())
                     .context("withdrawal claim total overflow")?;
                 let proof = claim.encode();
                 ensure!(
                     proof.len() <= MAX_CLAIM_BYTES,
                     "withdrawal claim exceeds the operator bound"
                 );
-                Ok((claim, amount, proof))
+                Ok((request.account().clone(), position, output, proof))
             })
             .collect::<Result<Vec<_>>>()?;
         ensure!(
             withdrawal_total == result.finalized.withdrawal_total,
             "withdrawal claims do not exhaust the finalized reserve"
         );
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let epoch = sql_u64(result.epoch, "epoch")?;
-        let status: Option<String> = transaction
-            .query_row(
-                "SELECT status FROM close_jobs WHERE epoch = ?1",
-                [epoch],
-                |row| row.get(0),
-            )
-            .optional()?;
-        ensure!(
-            status.as_deref() == Some("closing"),
-            "close job is not pending"
-        );
-        if close_payment_context(&transaction, epoch)? != result.payment_context {
-            return Err(CloseRejected("close result has the wrong payment context").into());
-        }
-        if result.epoch == 0 {
-            if result.roots.opening != genesis_root {
-                return Err(CloseRejected(
-                    "genesis close does not extend the configured opening root",
-                )
-                .into());
-            }
-        } else {
-            let predecessor = sql_u64(result.epoch - 1, "predecessor epoch")?;
-            let roots_len: Option<i64> = transaction
+        mutate(&mut self.connection, "close finalization", |transaction| {
+            let epoch = sql_u64(result.epoch, "epoch")?;
+            let status: Option<String> = transaction
                 .query_row(
-                    "SELECT length(roots) FROM settlements WHERE epoch = ?1",
-                    [predecessor],
+                    "SELECT status FROM close_jobs WHERE epoch = ?1",
+                    [epoch],
                     |row| row.get(0),
                 )
                 .optional()?;
-            let roots_len = roots_len.ok_or(CloseRejected(
-                "predecessor settlement roots are unavailable",
-            ))?;
-            if roots_len != RootBundle::<Digest>::SIZE as i64 {
-                return Err(CloseRejected("predecessor settlement roots are malformed").into());
+            ensure!(
+                status.as_deref() == Some("closing"),
+                "close job is not pending"
+            );
+            if close_payment_context(transaction, epoch)? != result.payment_context {
+                return Err(CloseRejected("close result has the wrong payment context").into());
             }
-            let roots: Vec<u8> = transaction.query_row(
-                "SELECT roots FROM settlements WHERE epoch = ?1",
-                [predecessor],
-                |row| row.get(0),
-            )?;
-            let roots = RootBundle::<Digest>::decode(roots.as_slice())
-                .map_err(|_| CloseRejected("predecessor settlement roots are malformed"))?;
-            if roots.closing != result.roots.opening {
-                return Err(CloseRejected(
-                    "close result does not extend its predecessor state root",
-                )
-                .into());
+            if result.epoch == 0 {
+                if result.predecessor_root != genesis_root {
+                    return Err(CloseRejected(
+                        "genesis close does not extend the configured predecessor root",
+                    )
+                    .into());
+                }
+            } else {
+                let predecessor = sql_u64(result.epoch - 1, "predecessor epoch")?;
+                let roots_len: Option<i64> = transaction
+                    .query_row(
+                        "SELECT length(roots) FROM settlements WHERE epoch = ?1",
+                        [predecessor],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let roots_len = roots_len.ok_or(CloseRejected(
+                    "predecessor settlement roots are unavailable",
+                ))?;
+                if roots_len != RootBundle::<Digest>::SIZE as i64 {
+                    return Err(CloseRejected("predecessor settlement roots are malformed").into());
+                }
+                let roots: Vec<u8> = transaction.query_row(
+                    "SELECT roots FROM settlements WHERE epoch = ?1",
+                    [predecessor],
+                    |row| row.get(0),
+                )?;
+                let roots = RootBundle::<Digest>::decode(roots.as_slice())
+                    .map_err(|_| CloseRejected("predecessor settlement roots are malformed"))?;
+                if roots.successor != result.predecessor_root {
+                    return Err(CloseRejected(
+                        "close result does not extend its predecessor state root",
+                    )
+                    .into());
+                }
             }
-        }
-        let (header, roots, certificate) = encoded_artifacts(result);
-        transaction.execute(
-            "INSERT INTO settlements(
-                 epoch, batch_id, header, roots, certificate, rows, slices, retained_slices,
+            let (header, roots, certificate) = encoded_artifacts(result);
+            transaction.execute(
+                "INSERT INTO settlements(
+                 epoch, batch_id, header, roots, certificate, rows, slices, dealing_slices,
                  withdrawal_total, payout_total, prepare_micros, deal_micros, seal_micros
              ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                epoch,
-                result.finalized.batch_id.digest().as_ref(),
-                header,
-                roots,
-                certificate,
-                sql_usize(result.rows, "row count")?,
-                sql_usize(result.slices, "slice count")?,
-                sql_usize(result.retained_slices, "retained slice count")?,
-                sql_u64(result.finalized.withdrawal_total, "withdrawal total")?,
-                sql_u64(result.finalized.payout_total, "payout total")?,
-                sql_u128(result.prepare_micros, "prepare duration")?,
-                sql_u128(result.deal_micros, "deal duration")?,
-                sql_u128(result.seal_micros, "seal duration")?,
-            ],
-        )?;
-        for (claim, amount, proof) in withdrawal_claims {
-            if amount == 0 {
-                continue;
-            }
-            transaction.execute(
-                "INSERT INTO withdrawal_claims(epoch, account, proof) VALUES(?1, ?2, ?3)",
-                params![epoch, claim.request().account().as_ref(), proof.as_ref()],
-            )?;
-        }
-        for (position, payout, proof) in external_claims {
-            transaction.execute(
-                "INSERT INTO payout_claims(epoch, position, recipient, amount, proof)
-                 VALUES(?1, ?2, ?3, ?4, ?5)",
                 params![
                     epoch,
-                    i64::from(position),
-                    payout.recipient.as_ref(),
-                    sql_u64(payout.amount, "payout amount")?,
-                    proof.as_ref(),
+                    result.finalized.batch_id.digest().as_ref(),
+                    header,
+                    roots,
+                    certificate,
+                    sql_usize(result.rows, "row count")?,
+                    sql_usize(result.slices, "slice count")?,
+                    sql_usize(result.dealing_slices, "dealing slice count")?,
+                    sql_u64(result.finalized.withdrawal_total, "withdrawal total")?,
+                    sql_u64(result.finalized.payout_total, "payout total")?,
+                    sql_u128(result.prepare_micros, "prepare duration")?,
+                    sql_u128(result.deal_micros, "deal duration")?,
+                    sql_u128(result.seal_micros, "seal duration")?,
                 ],
             )?;
-        }
-        transaction.execute(
-            "UPDATE close_jobs
+            for (account, position, output, proof) in withdrawal_claims {
+                if output.amount() == 0 {
+                    continue;
+                }
+                transaction.execute(
+                    "INSERT INTO withdrawal_claims(batch_id, position, account, proof)
+                 VALUES(?1, ?2, ?3, ?4)",
+                    params![
+                        result.finalized.batch_id.digest().as_ref(),
+                        i64::from(position),
+                        account.as_ref(),
+                        proof.as_ref(),
+                    ],
+                )?;
+            }
+            for (position, payout, proof) in external_claims {
+                transaction.execute(
+                    "INSERT INTO payout_claims(epoch, position, recipient, amount, proof)
+                 VALUES(?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        epoch,
+                        i64::from(position),
+                        payout.recipient.as_ref(),
+                        sql_u64(payout.amount, "payout amount")?,
+                        proof.as_ref(),
+                    ],
+                )?;
+            }
+            transaction.execute(
+                "UPDATE close_jobs
              SET status = 'finalized', error = NULL
              WHERE epoch = ?1",
-            [epoch],
-        )?;
+                [epoch],
+            )?;
 
-        // Only finalized history authorizes deletion. Retire versions shadowed by this epoch and
-        // remove its finalized zero-balance account versions without relying on a successor.
-        transaction.execute(PRUNE_FINALIZED_ACCOUNT_STATES_SQL, [epoch])?;
-        transaction
-            .commit()
-            .map_err(|source| CommitUnknown::new("close finalization", source))?;
-        Ok(())
+            // Only finalized history authorizes deletion. Retire versions shadowed by this epoch and
+            // remove its finalized zero-balance account versions without relying on a successor.
+            transaction.execute(PRUNE_FINALIZED_ACCOUNT_STATES_SQL, [epoch])?;
+            Ok(())
+        })
     }
 
     pub(crate) fn withdrawal_evidence(&self, account: &Key) -> Result<WithdrawalEvidence> {
@@ -1608,16 +1685,20 @@ impl Store {
             .connection
             .query_row(
                 "SELECT length(settlements.header), settlements.header,
+                        withdrawal_claims.position,
                         length(withdrawal_claims.proof), withdrawal_claims.proof
                  FROM withdrawal_claims
-                 JOIN settlements USING(epoch)
+                 JOIN settlements USING(batch_id)
                  WHERE withdrawal_claims.account = ?1 AND withdrawal_claims.claimed = 0
-                 ORDER BY withdrawal_claims.epoch
+                 ORDER BY settlements.epoch
                  LIMIT 1",
                 [account.as_ref()],
                 |row| {
                     let header = read_fixed_blob(row, 0, 1, Header::<Digest>::SIZE, "header")?;
-                    let proof_len = usize::try_from(row.get::<_, i64>(2)?).map_err(|_| {
+                    let position = u32::try_from(row.get::<_, i64>(2)?).map_err(|_| {
+                        to_sqlite_error(anyhow::anyhow!("invalid withdrawal claim position"))
+                    })?;
+                    let proof_len = usize::try_from(row.get::<_, i64>(3)?).map_err(|_| {
                         to_sqlite_error(anyhow::anyhow!("invalid withdrawal claim length"))
                     })?;
                     if proof_len == 0 || proof_len > MAX_CLAIM_BYTES {
@@ -1625,20 +1706,25 @@ impl Store {
                             "invalid withdrawal claim length"
                         )));
                     }
-                    Ok((header, row.get::<_, Vec<u8>>(3)?))
+                    Ok((header, position, row.get::<_, Vec<u8>>(4)?))
                 },
             )
             .optional()?
             .context("there is no finalized withdrawal claim for this account")?;
         let header = Header::<Digest>::decode(encoded.0.as_slice())
             .context("decode withdrawal settlement header")?;
-        let claim = WithdrawalClaim::<Key, Digest>::decode_cfg(
-            encoded.1.as_slice(),
+        let claim = WithdrawalClaim::<Digest>::decode_cfg(
+            encoded.2.as_slice(),
             &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
         )
         .context("decode withdrawal claim")?;
+        ensure!(
+            claim.position() == encoded.1,
+            "stored withdrawal claim has the wrong position"
+        );
         Ok(WithdrawalEvidence {
             batch_id: header.batch_id::<Sha256>(),
+            account: account.clone(),
             claim,
         })
     }
@@ -1646,56 +1732,60 @@ impl Store {
     pub(crate) fn acknowledge_withdrawal_claim(
         &mut self,
         batch_id: BatchId<Digest>,
-        claim: &WithdrawalClaim<Key, Digest>,
+        account: &Key,
+        claim: &WithdrawalClaim<Digest>,
     ) -> Result<()> {
         let proof = claim.encode();
         ensure!(
             proof.len() <= MAX_CLAIM_BYTES,
             "withdrawal claim exceeds the operator bound"
         );
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let claimed = transaction
-            .query_row(
-                "SELECT withdrawal_claims.claimed
+        mutate(
+            &mut self.connection,
+            "withdrawal claim acknowledgement",
+            |transaction| {
+                let claimed = transaction
+                    .query_row(
+                        "SELECT withdrawal_claims.claimed
                  FROM withdrawal_claims
-                 JOIN settlements USING(epoch)
-                 WHERE settlements.batch_id = ?1
-                   AND withdrawal_claims.account = ?2
-                   AND withdrawal_claims.proof = ?3",
-                params![
-                    batch_id.digest().as_ref(),
-                    claim.request().account().as_ref(),
-                    proof.as_ref(),
-                ],
-                |row| row.get::<_, bool>(0),
-            )
-            .optional()?
-            .context("withdrawal acknowledgement does not match stored evidence")?;
-        if !claimed {
-            let updated = transaction.execute(
-                "UPDATE withdrawal_claims
+                 WHERE withdrawal_claims.batch_id = ?1
+                   AND withdrawal_claims.position = ?2
+                   AND withdrawal_claims.account = ?3
+                   AND withdrawal_claims.proof = ?4",
+                        params![
+                            batch_id.digest().as_ref(),
+                            i64::from(claim.position()),
+                            account.as_ref(),
+                            proof.as_ref(),
+                        ],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .context("withdrawal acknowledgement does not match stored evidence")?;
+                if !claimed {
+                    let updated = transaction.execute(
+                        "UPDATE withdrawal_claims
                  SET claimed = 1
-                 WHERE epoch = (SELECT epoch FROM settlements WHERE batch_id = ?1)
-                   AND account = ?2
-                   AND proof = ?3
+                 WHERE batch_id = ?1
+                   AND position = ?2
+                   AND account = ?3
+                   AND proof = ?4
                    AND claimed = 0",
-                params![
-                    batch_id.digest().as_ref(),
-                    claim.request().account().as_ref(),
-                    proof.as_ref(),
-                ],
-            )?;
-            ensure!(
-                updated == 1,
-                "withdrawal acknowledgement changed concurrently"
-            );
-        }
-        transaction
-            .commit()
-            .map_err(|source| CommitUnknown::new("withdrawal claim acknowledgement", source))?;
-        Ok(())
+                        params![
+                            batch_id.digest().as_ref(),
+                            i64::from(claim.position()),
+                            account.as_ref(),
+                            proof.as_ref(),
+                        ],
+                    )?;
+                    ensure!(
+                        updated == 1,
+                        "withdrawal acknowledgement changed concurrently"
+                    );
+                }
+                Ok(())
+            },
+        )
     }
 
     pub(crate) fn external_payout_evidence(
@@ -1774,49 +1864,49 @@ impl Store {
             !proof.is_empty() && proof.len() <= MAX_CLAIM_BYTES,
             "external payout claim exceeds the operator bound"
         );
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let claimed = transaction
-            .query_row(
-                "SELECT payout_claims.claimed
+        mutate(
+            &mut self.connection,
+            "external payout acknowledgement",
+            |transaction| {
+                let claimed = transaction
+                    .query_row(
+                        "SELECT payout_claims.claimed
                  FROM payout_claims
                  JOIN settlements USING(epoch)
                  WHERE settlements.batch_id = ?1
                    AND payout_claims.position = ?2
                    AND payout_claims.proof = ?3",
-                params![
-                    batch_id.digest().as_ref(),
-                    i64::from(claim.position()),
-                    proof.as_ref(),
-                ],
-                |row| row.get::<_, bool>(0),
-            )
-            .optional()?
-            .context("external payout acknowledgement does not match stored evidence")?;
-        if !claimed {
-            let updated = transaction.execute(
-                "UPDATE payout_claims
+                        params![
+                            batch_id.digest().as_ref(),
+                            i64::from(claim.position()),
+                            proof.as_ref(),
+                        ],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .context("external payout acknowledgement does not match stored evidence")?;
+                if !claimed {
+                    let updated = transaction.execute(
+                        "UPDATE payout_claims
                  SET claimed = 1
                  WHERE epoch = (SELECT epoch FROM settlements WHERE batch_id = ?1)
                    AND position = ?2
                    AND proof = ?3
                    AND claimed = 0",
-                params![
-                    batch_id.digest().as_ref(),
-                    i64::from(claim.position()),
-                    proof.as_ref(),
-                ],
-            )?;
-            ensure!(
-                updated == 1,
-                "external payout acknowledgement changed concurrently"
-            );
-        }
-        transaction
-            .commit()
-            .map_err(|source| CommitUnknown::new("external payout acknowledgement", source))?;
-        Ok(())
+                        params![
+                            batch_id.digest().as_ref(),
+                            i64::from(claim.position()),
+                            proof.as_ref(),
+                        ],
+                    )?;
+                    ensure!(
+                        updated == 1,
+                        "external payout acknowledgement changed concurrently"
+                    );
+                }
+                Ok(())
+            },
+        )
     }
 
     pub(crate) fn fail_close(&mut self, epoch: u64, error: &str) -> Result<()> {
@@ -1826,14 +1916,16 @@ impl Store {
         }
         let bounded = &error[..end];
 
-        // A failed close invalidates every pending descendant while preserving finalized ancestors.
-        let updated = self.connection.execute(
-            "UPDATE close_jobs SET status = 'failed', error = ?2
-             WHERE epoch >= ?1 AND status = 'closing'",
-            params![sql_u64(epoch, "epoch")?, bounded],
-        )?;
-        ensure!(updated > 0, "pending close job disappeared while fencing");
-        Ok(())
+        mutate(&mut self.connection, "close fence", |transaction| {
+            // A failed close invalidates every pending descendant while preserving finalized ancestors.
+            let updated = transaction.execute(
+                "UPDATE close_jobs SET status = 'failed', error = ?2
+                 WHERE epoch >= ?1 AND status = 'closing'",
+                params![sql_u64(epoch, "epoch")?, bounded],
+            )?;
+            ensure!(updated > 0, "pending close job disappeared while fencing");
+            Ok(())
+        })
     }
 
     pub(crate) fn first_failed_epoch(&self) -> Result<Option<u64>> {
@@ -1870,7 +1962,7 @@ impl Store {
             .context("decode latest settlement roots")?;
         Ok(Some((
             from_sql_u64(epoch, "settlement epoch")?,
-            roots.closing,
+            roots.successor,
         )))
     }
 
@@ -2227,13 +2319,13 @@ fn read_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredAccount> {
         name: row.get(0)?,
         key: Key::decode(key.as_slice())
             .map_err(|error| to_sqlite_error(anyhow::anyhow!("decode account key: {error}")))?,
-        opening: AccountState {
-            balance: from_sql_u64(row.get(3)?, "opening balance").map_err(to_sqlite_error)?,
-            cumulative_debit: from_sql_u64(row.get(4)?, "opening debit")
+        predecessor: AccountState {
+            balance: from_sql_u64(row.get(3)?, "predecessor balance").map_err(to_sqlite_error)?,
+            cumulative_debit: from_sql_u64(row.get(4)?, "predecessor debit")
                 .map_err(to_sqlite_error)?,
-            cumulative_credit: from_sql_u64(row.get(5)?, "opening credit")
+            cumulative_credit: from_sql_u64(row.get(5)?, "predecessor credit")
                 .map_err(to_sqlite_error)?,
-            receipt_count: from_sql_u64(row.get(6)?, "opening receipts")
+            receipt_count: from_sql_u64(row.get(6)?, "predecessor receipts")
                 .map_err(to_sqlite_error)?,
             active: row.get::<_, i64>(7)? != 0,
         },
@@ -2262,14 +2354,14 @@ fn effective_account(
             params![account.as_ref(), epoch_sql],
             |row| {
                 let key = read_fixed_blob(row, 2, 3, Key::SIZE, "account key")?;
-                let opening = AccountState {
-                    balance: from_sql_u64(row.get(4)?, "opening balance")
+                let predecessor = AccountState {
+                    balance: from_sql_u64(row.get(4)?, "predecessor balance")
                         .map_err(to_sqlite_error)?,
-                    cumulative_debit: from_sql_u64(row.get(5)?, "opening debit")
+                    cumulative_debit: from_sql_u64(row.get(5)?, "predecessor debit")
                         .map_err(to_sqlite_error)?,
-                    cumulative_credit: from_sql_u64(row.get(6)?, "opening credit")
+                    cumulative_credit: from_sql_u64(row.get(6)?, "predecessor credit")
                         .map_err(to_sqlite_error)?,
-                    receipt_count: from_sql_u64(row.get(7)?, "opening receipts")
+                    receipt_count: from_sql_u64(row.get(7)?, "predecessor receipts")
                         .map_err(to_sqlite_error)?,
                     active: row.get::<_, i64>(8)? != 0,
                 };
@@ -2282,7 +2374,7 @@ fn effective_account(
                         key: Key::decode(key.as_slice()).map_err(|error| {
                             to_sqlite_error(anyhow::anyhow!("decode account key: {error}"))
                         })?,
-                        opening,
+                        predecessor,
                         current: AccountState {
                             balance,
                             cumulative_debit: from_sql_u64(row.get(10)?, "current debit")
@@ -2307,7 +2399,7 @@ fn effective_account(
         if account.current.balance == 0 {
             return Ok(None);
         }
-        account.opening = account.current;
+        account.predecessor = account.current;
     }
     Ok(Some(account))
 }
@@ -2331,7 +2423,8 @@ fn upsert_account_state(
     transaction.execute(
         "INSERT INTO account_states(
              epoch, public_key,
-             opening_balance, opening_debit, opening_credit, opening_receipts, opening_active,
+             predecessor_balance, predecessor_debit, predecessor_credit,
+             predecessor_receipts, predecessor_active,
              current_balance, current_debit, current_credit, current_receipts
          ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(epoch, public_key) DO UPDATE SET
@@ -2342,11 +2435,11 @@ fn upsert_account_state(
         params![
             sql_u64(epoch, "epoch")?,
             account.key.as_ref(),
-            sql_u64(account.opening.balance, "opening balance")?,
-            sql_u64(account.opening.cumulative_debit, "opening debit")?,
-            sql_u64(account.opening.cumulative_credit, "opening credit")?,
-            sql_u64(account.opening.receipt_count, "opening receipts")?,
-            i64::from(account.opening.active),
+            sql_u64(account.predecessor.balance, "predecessor balance")?,
+            sql_u64(account.predecessor.cumulative_debit, "predecessor debit")?,
+            sql_u64(account.predecessor.cumulative_credit, "predecessor credit")?,
+            sql_u64(account.predecessor.receipt_count, "predecessor receipts")?,
+            i64::from(account.predecessor.active),
             sql_u64(account.current.balance, "current balance")?,
             sql_u64(account.current.cumulative_debit, "current debit")?,
             sql_u64(account.current.cumulative_credit, "current credit")?,
@@ -2558,6 +2651,41 @@ mod tests {
     };
     use commonware_cryptography::{Hasher as _, Signer as _};
 
+    #[test]
+    fn mutation_helper_reports_rollback_failure() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let result: Result<()> = mutate(&mut connection, "test mutation", |transaction| {
+            transaction.execute_batch("ROLLBACK")?;
+            anyhow::bail!("semantic rejection");
+        });
+
+        let error = result.unwrap_err();
+        assert!(error.downcast_ref::<MutationFailed>().is_some());
+        assert!(format!("{error:#}").contains("rollback failed"));
+    }
+
+    #[test]
+    fn mutation_helper_reports_real_commit_failure() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE parent(id INTEGER PRIMARY KEY);
+                 CREATE TABLE child(
+                     parent INTEGER,
+                     FOREIGN KEY(parent) REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+                 );",
+            )
+            .unwrap();
+        let result: Result<()> = mutate(&mut connection, "test mutation", |transaction| {
+            transaction.execute("INSERT INTO child(parent) VALUES(1)", [])?;
+            Ok(())
+        });
+
+        let error = result.unwrap_err();
+        assert!(error.downcast_ref::<CommitUnknown>().is_some());
+    }
+
     struct PaymentFixture {
         store: Store,
         context: EpochPaymentContext,
@@ -2596,17 +2724,29 @@ mod tests {
         }
     }
 
-    fn payment_context(opening_liability: u64, deposits: DepositBatch<Key>) -> EpochPaymentContext {
-        epoch_context(0, &deposits, &WithdrawalBatch::empty(), opening_liability)
-            .unwrap()
-            .payment()
-            .clone()
+    fn payment_context(
+        predecessor_liability: u64,
+        deposits: DepositBatch<Key>,
+    ) -> EpochPaymentContext {
+        epoch_context(
+            0,
+            &deposits,
+            &WithdrawalBatch::empty(),
+            predecessor_liability,
+        )
+        .unwrap()
+        .payment()
+        .clone()
     }
 
-    fn deposit_context(account: Key, amount: u64, opening_liability: u64) -> EpochPaymentContext {
+    fn deposit_context(
+        account: Key,
+        amount: u64,
+        predecessor_liability: u64,
+    ) -> EpochPaymentContext {
         let deposits =
             DepositBatch::new(vec![DepositRecord::new(account, amount).unwrap()]).unwrap();
-        payment_context(opening_liability, deposits)
+        payment_context(predecessor_liability, deposits)
     }
 
     fn rejected_payment(result: Result<AcceptedPayment>) -> anyhow::Error {
@@ -2635,7 +2775,7 @@ mod tests {
 
         let error = fixture
             .store
-            .payment_requires_boundary_freeze(&fixture.context, &send, 0)
+            .payment_requires_epoch_registration(&fixture.context, &send, 0)
             .unwrap_err();
         assert!(format!("{error:#}").contains(expected));
 
@@ -2679,7 +2819,7 @@ mod tests {
         assert!(
             fixture
                 .store
-                .payment_requires_boundary_freeze(&fixture.context, &retry_send, 0)
+                .payment_requires_epoch_registration(&fixture.context, &retry_send, 0)
                 .unwrap()
         );
         let first = fixture
@@ -2690,7 +2830,7 @@ mod tests {
         assert!(
             !fixture
                 .store
-                .payment_requires_boundary_freeze(&fixture.context, &retry_send, 0)
+                .payment_requires_epoch_registration(&fixture.context, &retry_send, 0)
                 .unwrap()
         );
         let replay = fixture
@@ -2704,7 +2844,7 @@ mod tests {
         let new_send = fixture.send(2);
         let error = fixture
             .store
-            .payment_requires_boundary_freeze(&fixture.context, &new_send, 0)
+            .payment_requires_epoch_registration(&fixture.context, &new_send, 0)
             .unwrap_err();
         assert!(format!("{error:#}").contains("payment capacity"));
         let error = rejected_payment(fixture.store.accept_send(
@@ -2722,7 +2862,7 @@ mod tests {
     }
 
     #[test]
-    fn payment_validation_rejects_sql_domain_overflow_before_boundary_freeze() {
+    fn payment_validation_rejects_sql_domain_overflow_before_epoch_registration() {
         assert_payment_domain_rejected(
             |fixture| {
                 let payer = fixture.payer.public_key();
@@ -2806,9 +2946,9 @@ mod tests {
     fn deposit_balance_domain_is_checked_before_mutation() {
         let identities = identities();
         let identity = &identities[0];
-        let opening_liability = u64::try_from(identities.len()).unwrap() * INITIAL_BALANCE;
-        let expected = payment_context(opening_liability, DepositBatch::empty());
-        let replacement = deposit_context(identity.key.clone(), 1, opening_liability);
+        let predecessor_liability = u64::try_from(identities.len()).unwrap() * INITIAL_BALANCE;
+        let expected = payment_context(predecessor_liability, DepositBatch::empty());
+        let replacement = deposit_context(identity.key.clone(), 1, predecessor_liability);
         let mut store = Store::in_memory(&identities).unwrap();
         store.ensure_current_context(&expected).unwrap();
         store
@@ -2878,7 +3018,7 @@ mod tests {
         let account = identities[0].key.clone();
         let signer = SigningKey::from_seed(101);
         assert_eq!(signer.public_key(), account);
-        let opening_liability = u64::try_from(identities.len()).unwrap() * INITIAL_BALANCE;
+        let predecessor_liability = u64::try_from(identities.len()).unwrap() * INITIAL_BALANCE;
         let request = SignedWithdrawal::sign(
             deployment(),
             Sha256::hash(&[b"store-close-safety-root"]),
@@ -2891,12 +3031,17 @@ mod tests {
             0,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
-            opening_liability,
+            predecessor_liability,
         )
         .unwrap();
         let withdrawals = WithdrawalBatch::new(vec![request.clone()]).unwrap();
-        let replacement =
-            epoch_context(0, &DepositBatch::empty(), &withdrawals, opening_liability).unwrap();
+        let replacement = epoch_context(
+            0,
+            &DepositBatch::empty(),
+            &withdrawals,
+            predecessor_liability,
+        )
+        .unwrap();
         let mut store = Store::in_memory(&identities).unwrap();
         store.ensure_current_context(expected.payment()).unwrap();
 
@@ -2904,7 +3049,7 @@ mod tests {
             .stage_withdrawal(&request, expected.payment(), replacement.payment())
             .unwrap();
         assert_eq!(staged.action, WithdrawalAction::Close);
-        assert_eq!(store.current_liability().unwrap(), opening_liability);
+        assert_eq!(store.current_liability().unwrap(), predecessor_liability);
         assert_eq!(
             store
                 .current_account(&account)
@@ -2938,7 +3083,7 @@ mod tests {
         );
         drop(statement);
 
-        let successor_liability = opening_liability - INITIAL_BALANCE;
+        let successor_liability = predecessor_liability - INITIAL_BALANCE;
         assert_eq!(store.successor_liability().unwrap(), successor_liability);
         let successor = epoch_context(
             1,

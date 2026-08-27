@@ -2,14 +2,16 @@
 
 use crate::{
     operator::{CloseEvent, Operator},
-    protocol::{DepositEvent, Key, Payment},
+    protocol::{DepositEvent, Key, MAX_ACCOUNTS, Payment},
     rpc,
     store::MAX_DESTINATION_BYTES,
 };
 use anyhow::{Context, Result, bail};
 use bytes::{Buf, BufMut, Bytes};
+#[cfg(test)]
+use commonware_clearing::bajillion::boundary::WithdrawalAction;
 use commonware_clearing::bajillion::{
-    boundary::{SignedWithdrawal, WithdrawalAction},
+    boundary::SignedWithdrawal,
     challenge::StateOpening,
     commitment::VectorRoot,
     payment::{PaymentContext, SignedSend},
@@ -19,7 +21,7 @@ use commonware_clearing::bajillion::{
 use commonware_codec::{
     DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
-use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::Network;
 use std::net::SocketAddr;
 
@@ -39,6 +41,7 @@ pub(crate) const METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT: u8 = 11;
 const MAX_CLOSE_HEADER_BYTES: usize = 64;
 const MAX_CLOSE_ERROR_BYTES: usize = 1_024;
 const MAX_ERROR_BYTES: usize = 1_024;
+const WITHDRAWAL_ACK_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_APPLIED_WITHDRAWAL_REQUEST";
 
 macro_rules! empty_request {
     ($name:ident) => {
@@ -271,18 +274,25 @@ impl Read for StatusResponse {
 pub(crate) struct PaymentQuoteResponse {
     pub(crate) context: PaymentContext<Key, Digest>,
     pub(crate) state: AccountState,
+    pub(crate) root: VectorRoot<Digest>,
+    pub(crate) opening: StateOpening<Key, Digest>,
 }
 
 impl Write for PaymentQuoteResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
         self.state.write(buf);
+        self.root.write(buf);
+        self.opening.write(buf);
     }
 }
 
 impl EncodeSize for PaymentQuoteResponse {
     fn encode_size(&self) -> usize {
-        self.context.encode_size() + self.state.encode_size()
+        self.context.encode_size()
+            + self.state.encode_size()
+            + self.root.encode_size()
+            + self.opening.encode_size()
     }
 }
 
@@ -290,10 +300,19 @@ impl Read for PaymentQuoteResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
+        let response = Self {
             context: PaymentContext::read(buf)?,
             state: AccountState::read(buf)?,
-        })
+            root: VectorRoot::read(buf)?,
+            opening: StateOpening::read(buf)?,
+        };
+        if response.opening.proof.proof.leaf_count > MAX_ACCOUNTS as u32 {
+            return Err(CodecError::Invalid(
+                "clearing_terminal::PaymentQuoteResponse",
+                "payer opening exceeds the terminal account bound",
+            ));
+        }
+        Ok(response)
     }
 }
 
@@ -337,14 +356,14 @@ impl Read for AcceptedPaymentResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AppliedDepositResponse {
+pub(crate) struct DepositAck {
     pub(crate) epoch: u64,
     pub(crate) id: Digest,
     pub(crate) account: Key,
     pub(crate) amount: u64,
 }
 
-impl Write for AppliedDepositResponse {
+impl Write for DepositAck {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.id.write(buf);
@@ -353,7 +372,7 @@ impl Write for AppliedDepositResponse {
     }
 }
 
-impl EncodeSize for AppliedDepositResponse {
+impl EncodeSize for DepositAck {
     fn encode_size(&self) -> usize {
         self.epoch.encode_size()
             + self.id.encode_size()
@@ -362,7 +381,7 @@ impl EncodeSize for AppliedDepositResponse {
     }
 }
 
-impl Read for AppliedDepositResponse {
+impl Read for DepositAck {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
@@ -406,54 +425,58 @@ impl Read for WithdrawalOpeningResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AppliedWithdrawalResponse {
+pub(crate) struct WithdrawalAck {
     pub(crate) epoch: u64,
-    pub(crate) account: Key,
-    pub(crate) action: WithdrawalAction,
+    pub(crate) digest: Digest,
 }
 
-impl Write for AppliedWithdrawalResponse {
+impl Write for WithdrawalAck {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
-        self.account.write(buf);
-        self.action.write(buf);
+        self.digest.write(buf);
     }
 }
 
-impl EncodeSize for AppliedWithdrawalResponse {
+impl EncodeSize for WithdrawalAck {
     fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.account.encode_size() + self.action.encode_size()
+        self.epoch.encode_size() + self.digest.encode_size()
     }
 }
 
-impl Read for AppliedWithdrawalResponse {
+impl Read for WithdrawalAck {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             epoch: u64::read(buf)?,
-            account: Key::read(buf)?,
-            action: WithdrawalAction::read(buf)?,
+            digest: Digest::read(buf)?,
         })
     }
+}
+
+pub(crate) fn withdrawal_digest(request: &SignedWithdrawal<Key, Digest>) -> Digest {
+    let encoded = request.encode();
+    Sha256::hash(&[WITHDRAWAL_ACK_NAMESPACE, encoded.as_ref()])
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalEvidenceResponse {
     pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) claim: WithdrawalClaim<Key, Digest>,
+    pub(crate) account: Key,
+    pub(crate) claim: WithdrawalClaim<Digest>,
 }
 
 impl Write for WithdrawalEvidenceResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.batch_id.write(buf);
+        self.account.write(buf);
         self.claim.write(buf);
     }
 }
 
 impl EncodeSize for WithdrawalEvidenceResponse {
     fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.claim.encode_size()
+        self.batch_id.encode_size() + self.account.encode_size() + self.claim.encode_size()
     }
 }
 
@@ -463,6 +486,7 @@ impl Read for WithdrawalEvidenceResponse {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             batch_id: BatchId::read(buf)?,
+            account: Key::read(buf)?,
             claim: WithdrawalClaim::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
         })
     }
@@ -769,6 +793,8 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result
             Ok(PaymentQuoteResponse {
                 context: quote.context,
                 state: quote.state,
+                root: quote.root,
+                opening: quote.opening,
             }
             .encode())
         }
@@ -786,7 +812,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result
         }
         OperatorRequest::ApplyDeposit(request) => {
             let staged = operator.apply_deposit(request).context("apply deposit")?;
-            Ok(AppliedDepositResponse {
+            Ok(DepositAck {
                 epoch: staged.epoch,
                 id: staged.id,
                 account: staged.account,
@@ -805,13 +831,19 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result
             .encode())
         }
         OperatorRequest::ApplyWithdrawal(request) => {
+            let account = request.request.account().clone();
+            let action = *request.request.body().action();
+            let digest = withdrawal_digest(&request.request);
             let staged = operator
                 .apply_withdrawal(request.request)
                 .context("apply withdrawal")?;
-            Ok(AppliedWithdrawalResponse {
+            anyhow::ensure!(
+                staged.account == account && staged.action == action,
+                "operator staged another withdrawal"
+            );
+            Ok(WithdrawalAck {
                 epoch: staged.epoch,
-                account: staged.account,
-                action: staged.action,
+                digest,
             }
             .encode())
         }
@@ -834,6 +866,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result
                 .context("read withdrawal evidence")?;
             Ok(WithdrawalEvidenceResponse {
                 batch_id: evidence.batch_id,
+                account: evidence.account,
                 claim: evidence.claim,
             }
             .encode())
@@ -886,7 +919,7 @@ pub(crate) fn acknowledge_withdrawal_confirmed(
     request: &AcknowledgeWithdrawalRequest,
 ) -> rpc::Response {
     match operator
-        .acknowledge_withdrawal_claim(request.batch_id, &request.claim)
+        .acknowledge_withdrawal_claim(request.batch_id, &request.account, &request.claim)
         .context("acknowledge withdrawal claim")
     {
         Ok(()) => rpc::Response::Success { body: Bytes::new() },
@@ -958,11 +991,9 @@ pub(crate) async fn apply_deposit<E: Network>(
     network: &E,
     address: SocketAddr,
     request: ApplyDepositRequest,
-) -> Result<AppliedDepositResponse> {
-    AppliedDepositResponse::decode(
-        invoke(network, address, METHOD_APPLY_DEPOSIT, request.encode()).await?,
-    )
-    .context("decode applied deposit")
+) -> Result<DepositAck> {
+    DepositAck::decode(invoke(network, address, METHOD_APPLY_DEPOSIT, request.encode()).await?)
+        .context("decode applied deposit")
 }
 
 pub(crate) async fn withdrawal_opening<E: Network>(
@@ -986,8 +1017,8 @@ pub(crate) async fn apply_withdrawal<E: Network>(
     network: &E,
     address: SocketAddr,
     request: ApplyWithdrawalRequest,
-) -> Result<AppliedWithdrawalResponse> {
-    AppliedWithdrawalResponse::decode(
+) -> Result<WithdrawalAck> {
+    WithdrawalAck::decode(
         invoke(network, address, METHOD_APPLY_WITHDRAWAL, request.encode()).await?,
     )
     .context("decode applied withdrawal")
@@ -1098,6 +1129,7 @@ mod tests {
     use super::*;
     use crate::protocol::{Protocol, identities, wallets};
     use bytes::BytesMut;
+    use commonware_codec::Decode as _;
     use commonware_cryptography::{Hasher, Sha256};
     use std::{
         num::{NonZeroU64, NonZeroUsize},
@@ -1115,6 +1147,97 @@ mod tests {
             method,
             body: body.into(),
         }
+    }
+
+    #[test]
+    fn withdrawal_ack_binds_the_complete_signed_request() {
+        let wallets = wallets();
+        let payer = &wallets[0];
+        let deployment = Sha256::hash(&[b"withdrawal-ack-deployment"]);
+        let state_root = Sha256::hash(&[b"withdrawal-ack-state"]);
+        let amount = WithdrawalAction::Amount(NonZeroU64::new(7).unwrap());
+        let baseline = SignedWithdrawal::sign(
+            deployment,
+            state_root,
+            Bytes::from_static(b"destination"),
+            amount,
+            50,
+            payer.signer(),
+        );
+        let mut variants = vec![
+            SignedWithdrawal::sign(
+                Sha256::hash(&[b"another-deployment"]),
+                state_root,
+                Bytes::from_static(b"destination"),
+                amount,
+                50,
+                payer.signer(),
+            ),
+            SignedWithdrawal::sign(
+                deployment,
+                Sha256::hash(&[b"another-state-root"]),
+                Bytes::from_static(b"destination"),
+                amount,
+                50,
+                payer.signer(),
+            ),
+            SignedWithdrawal::sign(
+                deployment,
+                state_root,
+                Bytes::from_static(b"another-destination"),
+                amount,
+                50,
+                payer.signer(),
+            ),
+            SignedWithdrawal::sign(
+                deployment,
+                state_root,
+                Bytes::from_static(b"destination"),
+                WithdrawalAction::Close,
+                50,
+                payer.signer(),
+            ),
+            SignedWithdrawal::sign(
+                deployment,
+                state_root,
+                Bytes::from_static(b"destination"),
+                amount,
+                51,
+                payer.signer(),
+            ),
+            SignedWithdrawal::sign(
+                deployment,
+                state_root,
+                Bytes::from_static(b"destination"),
+                amount,
+                50,
+                wallets[1].signer(),
+            ),
+        ];
+        let mut changed_signature = baseline.encode().to_vec();
+        *changed_signature.last_mut().unwrap() ^= 1;
+        variants.push(
+            SignedWithdrawal::decode_cfg(
+                Bytes::from(changed_signature),
+                &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
+            )
+            .unwrap(),
+        );
+
+        let digest = withdrawal_digest(&baseline);
+        for variant in variants {
+            assert_ne!(withdrawal_digest(&variant), digest);
+        }
+
+        let ack = WithdrawalAck { epoch: 9, digest };
+        let encoded = ack.encode();
+        assert_eq!(WithdrawalAck::decode(encoded.clone()).unwrap(), ack);
+        for end in 0..encoded.len() {
+            assert!(WithdrawalAck::decode(encoded.slice(..end)).is_err());
+        }
+        let mut trailing = encoded.to_vec();
+        trailing.push(0);
+        assert!(WithdrawalAck::decode(Bytes::from(trailing)).is_err());
     }
 
     fn success_body(response: rpc::Response) -> Bytes {
@@ -1235,7 +1358,7 @@ mod tests {
             account: payer_key.clone(),
             amount: 10,
         };
-        let applied = AppliedDepositResponse::decode(success_body(handle(
+        let applied = DepositAck::decode(success_body(handle(
             &mut operator,
             request(METHOD_APPLY_DEPOSIT, deposit.encode()),
         )))
@@ -1266,7 +1389,8 @@ mod tests {
             100,
             payer.signer(),
         );
-        let applied = AppliedWithdrawalResponse::decode(success_body(handle(
+        let expected_digest = withdrawal_digest(&withdrawal);
+        let applied = WithdrawalAck::decode(success_body(handle(
             &mut operator,
             request(
                 METHOD_APPLY_WITHDRAWAL,
@@ -1278,11 +1402,7 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(applied.epoch, 0);
-        assert_eq!(applied.account, payer_key);
-        assert_eq!(
-            applied.action,
-            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap())
-        );
+        assert_eq!(applied.digest, expected_digest);
 
         let close_account = wallets[0].public_key();
         let close_opening = WithdrawalOpeningResponse::decode(success_body(handle(
@@ -1304,7 +1424,8 @@ mod tests {
             100,
             wallets[0].signer(),
         );
-        let applied_close = AppliedWithdrawalResponse::decode(success_body(handle(
+        let close_digest = withdrawal_digest(&close);
+        let applied_close = WithdrawalAck::decode(success_body(handle(
             &mut operator,
             request(
                 METHOD_APPLY_WITHDRAWAL,
@@ -1312,8 +1433,7 @@ mod tests {
             ),
         )))
         .unwrap();
-        assert_eq!(applied_close.account, close_account);
-        assert_eq!(applied_close.action, WithdrawalAction::Close);
+        assert_eq!(applied_close.digest, close_digest);
         assert_eq!(
             operator
                 .payment_quote(&close_account)
@@ -1404,7 +1524,12 @@ mod tests {
             ),
         )))
         .unwrap();
-        assert_eq!(evidence.claim.request().account(), &payer_key);
+        assert_eq!(evidence.account, payer_key);
+        assert_eq!(evidence.claim.output().amount(), 7);
+        assert_eq!(
+            evidence.claim.output().destination().as_ref(),
+            b"wallet-destination"
+        );
     }
 
     #[test]
@@ -1419,6 +1544,7 @@ mod tests {
         let evidence = operator.withdrawal_evidence(&account).unwrap();
         let acknowledgement = AcknowledgeWithdrawalRequest {
             batch_id: evidence.batch_id,
+            account: evidence.account,
             claim: evidence.claim,
         };
 

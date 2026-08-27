@@ -4,10 +4,12 @@
 use crate::bajillion::transition::EpochContext;
 use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
-    credit::{self, CreditRoot, ShardLookup},
-    payment::{Payment, PaymentError, receipt_range_is_feasible},
-    state::{AccountRow, StateLeaf},
-    transition::{self, BatchId, CloseContext, Header, RootBundle},
+    credit::{self, CreditTipLookup},
+    payment::{
+        Payment, PaymentError, PaymentWitness, PaymentWitnessParts, receipt_range_is_feasible,
+    },
+    state::{AccountChange, AccountState, ChangeGuard, ChangeValue, ChangeValueCore, StateLeaf},
+    transition::{self, CloseContext, Header, RootBundle},
 };
 use alloc::boxed::Box;
 use bytes::{Buf, BufMut};
@@ -18,50 +20,49 @@ use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::{Sequential, Strategy};
 use thiserror::Error;
 
-/// One changed row and its opening under the change root.
+/// One account-relative change value and the membership opening for its compact guard.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RowOpening<P: PublicKey, D: Digest> {
-    /// Authenticated changed-account row.
-    pub row: AccountRow<P, D>,
+pub struct ChangeOpening<D: Digest> {
+    /// Account-relative compact changed-account value.
+    pub value: ChangeValue<D>,
     /// Position and BMT authentication path.
     pub proof: commitment::Opening<D>,
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for RowOpening<P, D>
+impl<D> arbitrary::Arbitrary<'_> for ChangeOpening<D>
 where
-    P: PublicKey,
     D: Digest,
-    AccountRow<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    ChangeValue<D>: for<'a> arbitrary::Arbitrary<'a>,
     commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            row: u.arbitrary()?,
+            value: u.arbitrary()?,
             proof: u.arbitrary()?,
         })
     }
 }
 
-impl<P: PublicKey, D: Digest> Write for RowOpening<P, D> {
+impl<D: Digest> Write for ChangeOpening<D> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.row.write(buf);
+        self.value.write(buf);
         self.proof.write(buf);
     }
 }
 
-impl<P: PublicKey, D: Digest> EncodeSize for RowOpening<P, D> {
+impl<D: Digest> EncodeSize for ChangeOpening<D> {
     fn encode_size(&self) -> usize {
-        self.row.encode_size() + self.proof.encode_size()
+        self.value.encode_size() + self.proof.encode_size()
     }
 }
 
-impl<P: PublicKey, D: Digest> Read for RowOpening<P, D> {
+impl<D: Digest> Read for ChangeOpening<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            row: AccountRow::read(buf)?,
+            value: ChangeValue::read(buf)?,
             proof: commitment::Opening::read(buf)?,
         })
     }
@@ -76,20 +77,35 @@ pub struct StateOpening<P: PublicKey, D: Digest> {
     pub proof: commitment::Opening<D>,
 }
 
+/// Account-relative state value and its membership opening.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateValueOpening<D: Digest> {
+    /// State for the account supplied by the lookup target.
+    pub state: AccountState,
+    /// Position and BMT authentication path.
+    pub proof: commitment::Opening<D>,
+}
+
+/// Adjacent state leaves and one shared proof authenticating state absence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateAbsence<P: PublicKey, D: Digest> {
+    /// Immediate predecessor, or `None` at the beginning of the vector.
+    pub predecessor: Option<StateLeaf<P>>,
+    /// Immediate successor, or `None` at the end of the vector.
+    pub successor: Option<StateLeaf<P>>,
+    /// One shared opening for the adjacent disclosed neighbors.
+    pub opening: commitment::RangeOpening<D>,
+}
+
 /// Authenticated membership or ordered nonmembership under one state root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StateLookup<P: PublicKey, D: Digest> {
     /// The requested account is a live state member.
-    Present(Box<StateOpening<P, D>>),
+    Present(Box<StateValueOpening<D>>),
     /// The requested account is absent, authenticated by its adjacent live leaves.
     ///
     /// One neighbor is absent at a state boundary, and both are absent for an empty state.
-    Absent {
-        /// Immediate state predecessor, if any.
-        predecessor: Option<Box<StateOpening<P, D>>>,
-        /// Immediate state successor, if any.
-        successor: Option<Box<StateOpening<P, D>>>,
-    },
+    Absent(StateAbsence<P, D>),
 }
 
 #[cfg(feature = "arbitrary")]
@@ -97,16 +113,14 @@ impl<P, D> arbitrary::Arbitrary<'_> for StateLookup<P, D>
 where
     P: PublicKey,
     D: Digest,
-    StateOpening<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    StateValueOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+    StateAbsence<P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         if u.arbitrary()? {
             Ok(Self::Present(Box::new(u.arbitrary()?)))
         } else {
-            Ok(Self::Absent {
-                predecessor: u.arbitrary::<Option<StateOpening<P, D>>>()?.map(Box::new),
-                successor: u.arbitrary::<Option<StateOpening<P, D>>>()?.map(Box::new),
-            })
+            Ok(Self::Absent(u.arbitrary()?))
         }
     }
 }
@@ -120,88 +134,108 @@ impl<P: PublicKey, D: Digest> StateLookup<P, D> {
     ) -> Result<Option<crate::bajillion::state::AccountState>, ChallengeError> {
         match self {
             Self::Present(opening) => {
-                if &opening.leaf.account != account {
-                    return Err(ChallengeError::LookupKey);
-                }
-                opening.proof.verify::<H>(
-                    VectorKind::State,
-                    root,
-                    opening.leaf.encode().as_ref(),
-                )?;
-                Ok(Some(opening.leaf.state))
+                let leaf = StateLeaf {
+                    account: account.clone(),
+                    state: opening.state,
+                };
+                opening
+                    .proof
+                    .verify::<H>(VectorKind::State, root, leaf.encode().as_ref())?;
+                Ok(Some(opening.state))
             }
-            Self::Absent {
-                predecessor,
-                successor,
-            } => {
-                let len = predecessor
-                    .as_ref()
-                    .or(successor.as_ref())
-                    .map_or(0, |opening| opening.proof.proof.leaf_count);
-                if len == 0 {
-                    if predecessor.is_some()
-                        || successor.is_some()
-                        || *root != commitment::empty_root::<H>(VectorKind::State)
-                    {
-                        return Err(ChallengeError::LookupOrder);
-                    }
-                } else {
-                    for opening in predecessor.iter().chain(successor.iter()) {
-                        opening.proof.verify::<H>(
-                            VectorKind::State,
-                            root,
-                            opening.leaf.encode().as_ref(),
-                        )?;
-                    }
-                    let insertion = successor
-                        .as_ref()
-                        .map_or(len, |opening| opening.proof.position);
-                    match predecessor {
-                        None if insertion == 0 => {}
-                        Some(opening)
-                            if opening.proof.position.checked_add(1) == Some(insertion)
-                                && opening.leaf.account < *account => {}
-                        _ => return Err(ChallengeError::LookupOrder),
-                    }
-                    match successor {
-                        None if insertion == len => {}
-                        Some(opening)
-                            if opening.proof.position == insertion
-                                && opening.leaf.account > *account => {}
-                        _ => return Err(ChallengeError::LookupOrder),
-                    }
-                }
+            Self::Absent(absence) => {
+                absence.resolve::<H>(root, account)?;
                 Ok(None)
             }
         }
     }
 }
 
-fn write_optional_state<P: PublicKey, D: Digest>(
-    buf: &mut impl BufMut,
-    value: Option<&StateOpening<P, D>>,
-) {
-    match value {
-        None => 0_u8.write(buf),
-        Some(value) => {
-            1_u8.write(buf);
-            value.write(buf);
+impl<P: PublicKey, D: Digest> StateAbsence<P, D> {
+    fn resolve<H: Hasher<Digest = D>>(
+        &self,
+        root: &VectorRoot<D>,
+        account: &P,
+    ) -> Result<(), ChallengeError> {
+        let len = self.opening.proof.leaf_count;
+        let insertion = self
+            .opening
+            .start
+            .checked_add(u32::from(self.predecessor.is_some()))
+            .ok_or(ChallengeError::LookupOrder)?;
+        if self.predecessor.is_some() != (insertion > 0)
+            || self.successor.is_some() != (insertion < len)
+            || self
+                .predecessor
+                .as_ref()
+                .is_some_and(|leaf| leaf.account >= *account)
+            || self
+                .successor
+                .as_ref()
+                .is_some_and(|leaf| leaf.account <= *account)
+        {
+            return Err(ChallengeError::LookupOrder);
         }
+        let encoded = self
+            .predecessor
+            .iter()
+            .chain(self.successor.iter())
+            .map(Encode::encode)
+            .collect::<alloc::vec::Vec<_>>();
+        self.opening
+            .verify::<H, _>(VectorKind::State, root, &encoded)?;
+        Ok(())
     }
 }
 
-fn read_optional_state<P: PublicKey, D: Digest>(
-    buf: &mut impl Buf,
-) -> Result<Option<Box<StateOpening<P, D>>>, CodecError> {
-    match u8::read(buf)? {
-        0 => Ok(None),
-        1 => Ok(Some(Box::new(StateOpening::read(buf)?))),
-        tag => Err(CodecError::InvalidEnum(tag)),
+impl<D: Digest> Write for StateValueOpening<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.state.write(buf);
+        self.proof.write(buf);
     }
 }
 
-fn optional_state_size<P: PublicKey, D: Digest>(value: Option<&StateOpening<P, D>>) -> usize {
-    u8::SIZE + value.map_or(0, EncodeSize::encode_size)
+impl<D: Digest> EncodeSize for StateValueOpening<D> {
+    fn encode_size(&self) -> usize {
+        self.state.encode_size() + self.proof.encode_size()
+    }
+}
+
+impl<D: Digest> Read for StateValueOpening<D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            state: AccountState::read(buf)?,
+            proof: commitment::Opening::read(buf)?,
+        })
+    }
+}
+
+impl<P: PublicKey, D: Digest> Write for StateAbsence<P, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.predecessor.write(buf);
+        self.successor.write(buf);
+        self.opening.write(buf);
+    }
+}
+
+impl<P: PublicKey, D: Digest> EncodeSize for StateAbsence<P, D> {
+    fn encode_size(&self) -> usize {
+        self.predecessor.encode_size() + self.successor.encode_size() + self.opening.encode_size()
+    }
+}
+
+impl<P: PublicKey, D: Digest> Read for StateAbsence<P, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            predecessor: Option::<StateLeaf<P>>::read(buf)?,
+            successor: Option::<StateLeaf<P>>::read(buf)?,
+            opening: commitment::RangeOpening::read_bounded(buf, 2, usize::MAX)?,
+        })
+    }
 }
 
 impl<P: PublicKey, D: Digest> Write for StateLookup<P, D> {
@@ -211,13 +245,9 @@ impl<P: PublicKey, D: Digest> Write for StateLookup<P, D> {
                 1_u8.write(buf);
                 opening.write(buf);
             }
-            Self::Absent {
-                predecessor,
-                successor,
-            } => {
+            Self::Absent(absence) => {
                 2_u8.write(buf);
-                write_optional_state(buf, predecessor.as_deref());
-                write_optional_state(buf, successor.as_deref());
+                absence.write(buf);
             }
         }
     }
@@ -227,14 +257,7 @@ impl<P: PublicKey, D: Digest> EncodeSize for StateLookup<P, D> {
     fn encode_size(&self) -> usize {
         match self {
             Self::Present(opening) => u8::SIZE + opening.encode_size(),
-            Self::Absent {
-                predecessor,
-                successor,
-            } => {
-                u8::SIZE
-                    + optional_state_size(predecessor.as_deref())
-                    + optional_state_size(successor.as_deref())
-            }
+            Self::Absent(absence) => u8::SIZE + absence.encode_size(),
         }
     }
 }
@@ -244,13 +267,40 @@ impl<P: PublicKey, D: Digest> Read for StateLookup<P, D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            1 => Ok(Self::Present(Box::new(StateOpening::read(buf)?))),
-            2 => Ok(Self::Absent {
-                predecessor: read_optional_state(buf)?,
-                successor: read_optional_state(buf)?,
-            }),
+            1 => Ok(Self::Present(Box::new(StateValueOpening::read(buf)?))),
+            2 => Ok(Self::Absent(StateAbsence::read(buf)?)),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<D> arbitrary::Arbitrary<'_> for StateValueOpening<D>
+where
+    D: Digest,
+    commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            state: u.arbitrary()?,
+            proof: u.arbitrary()?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P, D> arbitrary::Arbitrary<'_> for StateAbsence<P, D>
+where
+    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+    D: Digest,
+    commitment::RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            predecessor: u.arbitrary()?,
+            successor: u.arbitrary()?,
+            opening: u.arbitrary()?,
+        })
     }
 }
 
@@ -293,160 +343,367 @@ impl<P: PublicKey, D: Digest> Read for StateOpening<P, D> {
     }
 }
 
-/// Authenticated resolution of an account against the exact change vector.
+/// Adjacent compact leaves and one shared proof authenticating change-vector absence.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AccountLookup<P: PublicKey, D: Digest> {
-    /// The account changed and has one committed row.
-    Present(Box<RowOpening<P, D>>),
-    /// The account is absent from the change vector and therefore unchanged.
-    Absent {
-        /// Opening-state membership or ordered-nonmembership proof.
-        state: Box<StateLookup<P, D>>,
-        /// Immediate changed-row predecessor, if any.
-        predecessor: Option<Box<RowOpening<P, D>>>,
-        /// Immediate changed-row successor, if any.
-        successor: Option<Box<RowOpening<P, D>>>,
-    },
+pub struct ChangeAbsence<P: PublicKey, D: Digest> {
+    /// Immediate predecessor, or `None` at the beginning of the vector.
+    pub predecessor: Option<ChangeGuard<P, D>>,
+    /// Immediate successor, or `None` at the end of the vector.
+    pub successor: Option<ChangeGuard<P, D>>,
+    /// One contiguous proof for the disclosed adjacent leaves.
+    pub opening: commitment::RangeOpening<D>,
+}
+
+impl<P: PublicKey, D: Digest> ChangeAbsence<P, D> {
+    fn resolve<H: Hasher<Digest = D>>(
+        &self,
+        root: &VectorRoot<D>,
+        account: &P,
+    ) -> Result<(), ChallengeError> {
+        let insertion = self
+            .opening
+            .start
+            .checked_add(u32::from(self.predecessor.is_some()))
+            .ok_or(ChallengeError::LookupOrder)?;
+        if self.predecessor.is_some() != (insertion > 0)
+            || self.successor.is_some() != (insertion < self.opening.proof.leaf_count)
+            || self
+                .predecessor
+                .as_ref()
+                .is_some_and(|leaf| leaf.account() >= account)
+            || self
+                .successor
+                .as_ref()
+                .is_some_and(|leaf| leaf.account() <= account)
+        {
+            return Err(ChallengeError::LookupOrder);
+        }
+        let encoded = self
+            .predecessor
+            .iter()
+            .chain(self.successor.iter())
+            .map(Encode::encode)
+            .collect::<alloc::vec::Vec<_>>();
+        self.opening
+            .verify::<H, _>(VectorKind::Change, root, &encoded)?;
+        Ok(())
+    }
+}
+
+impl<P: PublicKey, D: Digest> Write for ChangeAbsence<P, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.predecessor.write(buf);
+        self.successor.write(buf);
+        self.opening.write(buf);
+    }
+}
+
+impl<P: PublicKey, D: Digest> EncodeSize for ChangeAbsence<P, D> {
+    fn encode_size(&self) -> usize {
+        self.predecessor.encode_size() + self.successor.encode_size() + self.opening.encode_size()
+    }
+}
+
+impl<P: PublicKey, D: Digest> Read for ChangeAbsence<P, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            predecessor: Option::<ChangeGuard<P, D>>::read(buf)?,
+            successor: Option::<ChangeGuard<P, D>>::read(buf)?,
+            opening: commitment::RangeOpening::read_bounded(buf, 2, usize::MAX)?,
+        })
+    }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for AccountLookup<P, D>
+impl<P, D> arbitrary::Arbitrary<'_> for ChangeAbsence<P, D>
 where
     P: PublicKey,
     D: Digest,
-    RowOpening<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    StateLookup<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    ChangeGuard<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    commitment::RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            predecessor: u.arbitrary()?,
+            successor: u.arbitrary()?,
+            opening: u.arbitrary()?,
+        })
+    }
+}
+
+fn resolve_change_opening<H, P, D>(
+    opening: &ChangeOpening<D>,
+    root: &VectorRoot<D>,
+    account: &P,
+) -> Result<AccountChange<P, D>, ChallengeError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    let guard = ChangeGuard::from_value::<H>(account.clone(), &opening.value);
+    opening
+        .proof
+        .verify::<H>(VectorKind::Change, root, guard.encode().as_ref())?;
+    Ok(AccountChange::from_value(
+        account.clone(),
+        opening.value.clone(),
+    ))
+}
+
+/// Compact changed-account membership or ordered absence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChangeLookup<P: PublicKey, D: Digest> {
+    /// The account has one compact changed-account leaf.
+    Present(Box<ChangeOpening<D>>),
+    /// The account is absent from the change vector.
+    Absent(ChangeAbsence<P, D>),
+}
+
+impl<P: PublicKey, D: Digest> ChangeLookup<P, D> {
+    /// Verifies the lookup against the exact change root.
+    pub fn resolve<H: Hasher<Digest = D>>(
+        &self,
+        root: &VectorRoot<D>,
+        account: &P,
+    ) -> Result<Option<AccountChange<P, D>>, ChallengeError> {
+        match self {
+            Self::Present(opening) => {
+                resolve_change_opening::<H, P, D>(opening, root, account).map(Some)
+            }
+            Self::Absent(absence) => {
+                absence.resolve::<H>(root, account)?;
+                Ok(None)
+            }
+        }
+    }
+}
+
+impl<P: PublicKey, D: Digest> Write for ChangeLookup<P, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Present(opening) => {
+                1_u8.write(buf);
+                opening.write(buf);
+            }
+            Self::Absent(absence) => {
+                2_u8.write(buf);
+                absence.write(buf);
+            }
+        }
+    }
+}
+
+impl<P: PublicKey, D: Digest> EncodeSize for ChangeLookup<P, D> {
+    fn encode_size(&self) -> usize {
+        u8::SIZE
+            + match self {
+                Self::Present(opening) => opening.encode_size(),
+                Self::Absent(absence) => absence.encode_size(),
+            }
+    }
+}
+
+impl<P: PublicKey, D: Digest> Read for ChangeLookup<P, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            1 => Ok(Self::Present(Box::new(ChangeOpening::read(buf)?))),
+            2 => Ok(Self::Absent(ChangeAbsence::read(buf)?)),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P, D> arbitrary::Arbitrary<'_> for ChangeLookup<P, D>
+where
+    P: PublicKey,
+    D: Digest,
+    ChangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+    ChangeAbsence<P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         if u.arbitrary()? {
             Ok(Self::Present(Box::new(u.arbitrary()?)))
         } else {
-            Ok(Self::Absent {
-                state: Box::new(u.arbitrary()?),
-                predecessor: u.arbitrary::<Option<RowOpening<P, D>>>()?.map(Box::new),
-                successor: u.arbitrary::<Option<RowOpening<P, D>>>()?.map(Box::new),
-            })
+            Ok(Self::Absent(u.arbitrary()?))
         }
     }
 }
 
-/// Account state and optional committed row resolved from an [`AccountLookup`].
+/// Composed recipient and receive-shard proof for a higher-tip challenge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HigherShardTipLookup<P: PublicKey, D: Digest> {
+    /// The recipient changed, so its child proof reconstructs the omitted credit-tip root.
+    Present {
+        /// Change value fields preceding the reconstructed child root.
+        value: ChangeValueCore<D>,
+        /// Membership opening under the change root.
+        proof: commitment::Opening<D>,
+        /// Membership or ordered absence under the reconstructed credit-tip root.
+        shard: CreditTipLookup<D>,
+    },
+    /// The recipient is absent from the change vector and therefore has no terminal credit tip.
+    Absent(ChangeAbsence<P, D>),
+}
+
+impl<P: PublicKey, D: Digest> HigherShardTipLookup<P, D> {
+    /// Verifies the composed lookup and returns the public terminal shard tip, if present.
+    pub fn resolve<H: Hasher<Digest = D>>(
+        &self,
+        change_root: &VectorRoot<D>,
+        recipient: &P,
+        shard: u64,
+    ) -> Result<Option<credit::CreditTip>, ChallengeError> {
+        match self {
+            Self::Present {
+                value,
+                proof,
+                shard: lookup,
+            } => {
+                let (credit_tip_root, tip) = lookup.reconstruct::<H>(shard)?;
+                let value = ChangeValue::from_core(*value, credit_tip_root);
+                let guard = ChangeGuard::from_value::<H>(recipient.clone(), &value);
+                proof.verify::<H>(VectorKind::Change, change_root, guard.encode().as_ref())?;
+                Ok(tip)
+            }
+            Self::Absent(absence) => {
+                absence.resolve::<H>(change_root, recipient)?;
+                Ok(None)
+            }
+        }
+    }
+}
+
+impl<P: PublicKey, D: Digest> Write for HigherShardTipLookup<P, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Present {
+                value,
+                proof,
+                shard,
+            } => {
+                1_u8.write(buf);
+                value.write(buf);
+                proof.write(buf);
+                shard.write(buf);
+            }
+            Self::Absent(absence) => {
+                2_u8.write(buf);
+                absence.write(buf);
+            }
+        }
+    }
+}
+
+impl<P: PublicKey, D: Digest> EncodeSize for HigherShardTipLookup<P, D> {
+    fn encode_size(&self) -> usize {
+        u8::SIZE
+            + match self {
+                Self::Present {
+                    value,
+                    proof,
+                    shard,
+                } => value.encode_size() + proof.encode_size() + shard.encode_size(),
+                Self::Absent(absence) => absence.encode_size(),
+            }
+    }
+}
+
+impl<P: PublicKey, D: Digest> Read for HigherShardTipLookup<P, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            1 => Ok(Self::Present {
+                value: ChangeValueCore::read(buf)?,
+                proof: commitment::Opening::read(buf)?,
+                shard: CreditTipLookup::read(buf)?,
+            }),
+            2 => Ok(Self::Absent(ChangeAbsence::read(buf)?)),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P, D> arbitrary::Arbitrary<'_> for HigherShardTipLookup<P, D>
+where
+    P: PublicKey,
+    D: Digest,
+    ChangeValueCore<D>: for<'a> arbitrary::Arbitrary<'a>,
+    commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
+    CreditTipLookup<D>: for<'a> arbitrary::Arbitrary<'a>,
+    ChangeAbsence<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        if u.arbitrary()? {
+            Ok(Self::Present {
+                value: u.arbitrary()?,
+                proof: u.arbitrary()?,
+                shard: u.arbitrary()?,
+            })
+        } else {
+            Ok(Self::Absent(u.arbitrary()?))
+        }
+    }
+}
+
+/// Compact debit resolution, retaining predecessor state only for an unchanged account.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AccountLookup<P: PublicKey, D: Digest> {
+    /// The account changed and exposes its compact terminal debit projection.
+    Present(Box<ChangeOpening<D>>),
+    /// The account is unchanged and its predecessor debit remains authoritative.
+    Absent {
+        /// Predecessor-state membership or ordered-nonmembership proof.
+        state: Box<StateLookup<P, D>>,
+        /// Ordered proof that the account is absent from the change vector.
+        change: ChangeAbsence<P, D>,
+    },
+}
+
+/// Public debit endpoint resolved from an [`AccountLookup`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedAccount<P: PublicKey, D: Digest> {
-    /// State at the opening root.
-    pub opening: crate::bajillion::state::AccountState,
-    /// State at the closing root.
-    pub closing: crate::bajillion::state::AccountState,
-    /// Committed row when the account changed.
-    pub row: Option<AccountRow<P, D>>,
+    /// Public terminal cumulative debit.
+    pub terminal_debit: u64,
+    /// Compact changed-account leaf, when one exists.
+    pub leaf: Option<AccountChange<P, D>>,
 }
 
 impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
-    /// Verifies membership or ordered absence for `account`.
+    /// Verifies changed membership or unchanged predecessor-state resolution for `account`.
     pub fn resolve<H: Hasher<Digest = D>>(
         &self,
-        opening_root: &VectorRoot<D>,
+        predecessor_root: &VectorRoot<D>,
         change_root: &VectorRoot<D>,
         account: &P,
     ) -> Result<ResolvedAccount<P, D>, ChallengeError> {
         match self {
             Self::Present(opening) => {
-                if &opening.row.account != account {
-                    return Err(ChallengeError::LookupKey);
-                }
-                opening.proof.verify::<H>(
-                    VectorKind::Change,
-                    change_root,
-                    opening.row.encode().as_ref(),
-                )?;
+                let leaf = resolve_change_opening::<H, P, D>(opening, change_root, account)?;
                 Ok(ResolvedAccount {
-                    opening: opening.row.opening,
-                    closing: opening.row.closing,
-                    row: Some(opening.row.clone()),
+                    terminal_debit: leaf.terminal_debit(),
+                    leaf: Some(leaf),
                 })
             }
-            Self::Absent {
-                state,
-                predecessor,
-                successor,
-            } => {
+            Self::Absent { state, change } => {
+                change.resolve::<H>(change_root, account)?;
                 let state = state
-                    .resolve::<H>(opening_root, account)?
+                    .resolve::<H>(predecessor_root, account)?
                     .unwrap_or_default();
-
-                let change_len = predecessor
-                    .as_ref()
-                    .or(successor.as_ref())
-                    .map_or(0, |opening| opening.proof.proof.leaf_count);
-                if change_len == 0 {
-                    if predecessor.is_some()
-                        || successor.is_some()
-                        || *change_root != commitment::empty_root::<H>(VectorKind::Change)
-                    {
-                        return Err(ChallengeError::LookupOrder);
-                    }
-                } else {
-                    for opening in predecessor.iter().chain(successor.iter()) {
-                        opening.proof.verify::<H>(
-                            VectorKind::Change,
-                            change_root,
-                            opening.row.encode().as_ref(),
-                        )?;
-                    }
-                    let insertion = successor
-                        .as_ref()
-                        .map_or(change_len, |opening| opening.proof.position);
-                    match predecessor {
-                        None if insertion == 0 => {}
-                        Some(opening)
-                            if opening.proof.position.checked_add(1) == Some(insertion)
-                                && opening.row.account < *account => {}
-                        _ => return Err(ChallengeError::LookupOrder),
-                    }
-                    match successor {
-                        None if insertion == change_len => {}
-                        Some(opening)
-                            if opening.proof.position == insertion
-                                && opening.row.account > *account => {}
-                        _ => return Err(ChallengeError::LookupOrder),
-                    }
-                }
-
                 Ok(ResolvedAccount {
-                    opening: state,
-                    closing: state,
-                    row: None,
+                    terminal_debit: state.cumulative_debit,
+                    leaf: None,
                 })
             }
         }
     }
-}
-
-fn write_optional_row<P: PublicKey, D: Digest>(
-    buf: &mut impl BufMut,
-    value: Option<&RowOpening<P, D>>,
-) {
-    match value {
-        None => 0_u8.write(buf),
-        Some(value) => {
-            1_u8.write(buf);
-            value.write(buf);
-        }
-    }
-}
-
-fn read_optional_row<P: PublicKey, D: Digest>(
-    buf: &mut impl Buf,
-) -> Result<Option<Box<RowOpening<P, D>>>, CodecError> {
-    match u8::read(buf)? {
-        0 => Ok(None),
-        1 => Ok(Some(Box::new(RowOpening::read(buf)?))),
-        tag => Err(CodecError::InvalidEnum(tag)),
-    }
-}
-
-fn optional_row_size<P: PublicKey, D: Digest>(value: Option<&RowOpening<P, D>>) -> usize {
-    u8::SIZE + value.map_or(0, EncodeSize::encode_size)
 }
 
 impl<P: PublicKey, D: Digest> Write for AccountLookup<P, D> {
@@ -456,15 +713,10 @@ impl<P: PublicKey, D: Digest> Write for AccountLookup<P, D> {
                 1_u8.write(buf);
                 opening.write(buf);
             }
-            Self::Absent {
-                state,
-                predecessor,
-                successor,
-            } => {
+            Self::Absent { state, change } => {
                 2_u8.write(buf);
                 state.write(buf);
-                write_optional_row(buf, predecessor.as_deref());
-                write_optional_row(buf, successor.as_deref());
+                change.write(buf);
             }
         }
     }
@@ -472,19 +724,11 @@ impl<P: PublicKey, D: Digest> Write for AccountLookup<P, D> {
 
 impl<P: PublicKey, D: Digest> EncodeSize for AccountLookup<P, D> {
     fn encode_size(&self) -> usize {
-        match self {
-            Self::Present(opening) => u8::SIZE + opening.encode_size(),
-            Self::Absent {
-                state,
-                predecessor,
-                successor,
-            } => {
-                u8::SIZE
-                    + state.encode_size()
-                    + optional_row_size(predecessor.as_deref())
-                    + optional_row_size(successor.as_deref())
+        u8::SIZE
+            + match self {
+                Self::Present(opening) => opening.encode_size(),
+                Self::Absent { state, change } => state.encode_size() + change.encode_size(),
             }
-        }
     }
 }
 
@@ -493,32 +737,328 @@ impl<P: PublicKey, D: Digest> Read for AccountLookup<P, D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            1 => Ok(Self::Present(Box::new(RowOpening::read(buf)?))),
+            1 => Ok(Self::Present(Box::new(ChangeOpening::read(buf)?))),
             2 => Ok(Self::Absent {
                 state: Box::new(StateLookup::read(buf)?),
-                predecessor: read_optional_row(buf)?,
-                successor: read_optional_row(buf)?,
+                change: ChangeAbsence::read(buf)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
 }
 
-/// Lower endpoint for an inconsistent-range challenge.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RangeLower<P: PublicKey, D: Digest> {
-    /// Canonical `(credit,index)=(0,0)` shard opening.
-    ShardStart,
-    /// Earlier linked payment in the same receive shard.
-    Payment(Box<Payment<P, D>>),
-}
-
 #[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for RangeLower<P, D>
+impl<P, D> arbitrary::Arbitrary<'_> for AccountLookup<P, D>
 where
     P: PublicKey,
     D: Digest,
-    Payment<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    ChangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
+    StateLookup<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    ChangeAbsence<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        if u.arbitrary()? {
+            Ok(Self::Present(Box::new(u.arbitrary()?)))
+        } else {
+            Ok(Self::Absent {
+                state: Box::new(u.arbitrary()?),
+                change: u.arbitrary()?,
+            })
+        }
+    }
+}
+
+/// Linked payment fields whose recipient and receive shard are shared by a range endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScopedPaymentWitness<P: PublicKey> {
+    payer: P,
+    amount: u64,
+    cumulative_debit: u64,
+    payer_signature: P::Signature,
+    cumulative_shard_credit: u64,
+    index: u64,
+    operator_signature: P::Signature,
+}
+
+impl<P: PublicKey> ScopedPaymentWitness<P> {
+    /// Projects a linked payment relative to a separately encoded recipient and shard.
+    #[must_use]
+    pub fn from_payment<D: Digest>(payment: &Payment<P, D>) -> Self {
+        Self::from_witness(&PaymentWitness::from_payment(payment))
+    }
+
+    fn from_witness(payment: &PaymentWitness<P>) -> Self {
+        let parts = payment.parts();
+        Self {
+            payer: parts.payer,
+            amount: parts.amount,
+            cumulative_debit: parts.cumulative_debit,
+            payer_signature: parts.payer_signature,
+            cumulative_shard_credit: parts.cumulative_shard_credit,
+            index: parts.index,
+            operator_signature: parts.operator_signature,
+        }
+    }
+
+    fn with_scope(&self, recipient: P, shard: u64) -> PaymentWitness<P> {
+        PaymentWitness::from_parts(PaymentWitnessParts {
+            payer: self.payer.clone(),
+            recipient,
+            amount: self.amount,
+            cumulative_debit: self.cumulative_debit,
+            payer_signature: self.payer_signature.clone(),
+            shard,
+            cumulative_shard_credit: self.cumulative_shard_credit,
+            index: self.index,
+            operator_signature: self.operator_signature.clone(),
+        })
+    }
+}
+
+impl<P: PublicKey> Write for ScopedPaymentWitness<P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.payer.write(buf);
+        self.amount.write(buf);
+        self.cumulative_debit.write(buf);
+        self.payer_signature.write(buf);
+        self.cumulative_shard_credit.write(buf);
+        self.index.write(buf);
+        self.operator_signature.write(buf);
+    }
+}
+
+impl<P: PublicKey> FixedSize for ScopedPaymentWitness<P> {
+    const SIZE: usize = P::SIZE + u64::SIZE * 4 + P::Signature::SIZE * 2;
+}
+
+impl<P: PublicKey> Read for ScopedPaymentWitness<P> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            payer: P::read(buf)?,
+            amount: u64::read(buf)?,
+            cumulative_debit: u64::read(buf)?,
+            payer_signature: P::Signature::read(buf)?,
+            cumulative_shard_credit: u64::read(buf)?,
+            index: u64::read(buf)?,
+            operator_signature: P::Signature::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P> arbitrary::Arbitrary<'_> for ScopedPaymentWitness<P>
+where
+    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            payer: u.arbitrary()?,
+            amount: u.arbitrary()?,
+            cumulative_debit: u.arbitrary()?,
+            payer_signature: u.arbitrary()?,
+            cumulative_shard_credit: u.arbitrary()?,
+            index: u.arbitrary()?,
+            operator_signature: u.arbitrary()?,
+        })
+    }
+}
+
+/// Operator-signed receipt fields relative to one shared signed send.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiptWitness<P: PublicKey> {
+    shard: u64,
+    cumulative_shard_credit: u64,
+    index: u64,
+    operator_signature: P::Signature,
+}
+
+impl<P: PublicKey> ReceiptWitness<P> {
+    /// Projects the receipt-specific fields from a linked payment.
+    #[must_use]
+    pub fn from_payment<D: Digest>(payment: &Payment<P, D>) -> Self {
+        Self::from_witness(&PaymentWitness::from_payment(payment))
+    }
+
+    fn from_witness(payment: &PaymentWitness<P>) -> Self {
+        let parts = payment.parts();
+        Self {
+            shard: parts.shard,
+            cumulative_shard_credit: parts.cumulative_shard_credit,
+            index: parts.index,
+            operator_signature: parts.operator_signature,
+        }
+    }
+
+    fn with_send(&self, send: &PaymentWitness<P>) -> PaymentWitness<P> {
+        let mut parts = send.parts();
+        parts.shard = self.shard;
+        parts.cumulative_shard_credit = self.cumulative_shard_credit;
+        parts.index = self.index;
+        parts.operator_signature = self.operator_signature.clone();
+        PaymentWitness::from_parts(parts)
+    }
+}
+
+impl<P: PublicKey> Write for ReceiptWitness<P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.shard.write(buf);
+        self.cumulative_shard_credit.write(buf);
+        self.index.write(buf);
+        self.operator_signature.write(buf);
+    }
+}
+
+impl<P: PublicKey> FixedSize for ReceiptWitness<P> {
+    const SIZE: usize = u64::SIZE * 3 + P::Signature::SIZE;
+}
+
+impl<P: PublicKey> Read for ReceiptWitness<P> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            shard: u64::read(buf)?,
+            cumulative_shard_credit: u64::read(buf)?,
+            index: u64::read(buf)?,
+            operator_signature: P::Signature::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P> arbitrary::Arbitrary<'_> for ReceiptWitness<P>
+where
+    P: PublicKey,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            shard: u.arbitrary()?,
+            cumulative_shard_credit: u.arbitrary()?,
+            index: u.arbitrary()?,
+            operator_signature: u.arbitrary()?,
+        })
+    }
+}
+
+/// Linked payment fields relative to a shared recipient, shard, and receipt index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SameIndexPaymentWitness<P: PublicKey> {
+    payer: P,
+    amount: u64,
+    cumulative_debit: u64,
+    payer_signature: P::Signature,
+    cumulative_shard_credit: u64,
+    operator_signature: P::Signature,
+}
+
+impl<P: PublicKey> SameIndexPaymentWitness<P> {
+    /// Projects one linked payment relative to a separately encoded receipt index scope.
+    #[must_use]
+    pub fn from_payment<D: Digest>(payment: &Payment<P, D>) -> Self {
+        Self::from_witness(&PaymentWitness::from_payment(payment))
+    }
+
+    fn from_witness(payment: &PaymentWitness<P>) -> Self {
+        let parts = payment.parts();
+        Self {
+            payer: parts.payer,
+            amount: parts.amount,
+            cumulative_debit: parts.cumulative_debit,
+            payer_signature: parts.payer_signature,
+            cumulative_shard_credit: parts.cumulative_shard_credit,
+            operator_signature: parts.operator_signature,
+        }
+    }
+
+    fn with_index_scope(&self, recipient: P, shard: u64, index: u64) -> PaymentWitness<P> {
+        PaymentWitness::from_parts(PaymentWitnessParts {
+            payer: self.payer.clone(),
+            recipient,
+            amount: self.amount,
+            cumulative_debit: self.cumulative_debit,
+            payer_signature: self.payer_signature.clone(),
+            shard,
+            cumulative_shard_credit: self.cumulative_shard_credit,
+            index,
+            operator_signature: self.operator_signature.clone(),
+        })
+    }
+}
+
+impl<P: PublicKey> Write for SameIndexPaymentWitness<P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.payer.write(buf);
+        self.amount.write(buf);
+        self.cumulative_debit.write(buf);
+        self.payer_signature.write(buf);
+        self.cumulative_shard_credit.write(buf);
+        self.operator_signature.write(buf);
+    }
+}
+
+impl<P: PublicKey> FixedSize for SameIndexPaymentWitness<P> {
+    const SIZE: usize = P::SIZE + u64::SIZE * 3 + P::Signature::SIZE * 2;
+}
+
+impl<P: PublicKey> Read for SameIndexPaymentWitness<P> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            payer: P::read(buf)?,
+            amount: u64::read(buf)?,
+            cumulative_debit: u64::read(buf)?,
+            payer_signature: P::Signature::read(buf)?,
+            cumulative_shard_credit: u64::read(buf)?,
+            operator_signature: P::Signature::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P> arbitrary::Arbitrary<'_> for SameIndexPaymentWitness<P>
+where
+    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            payer: u.arbitrary()?,
+            amount: u.arbitrary()?,
+            cumulative_debit: u.arbitrary()?,
+            payer_signature: u.arbitrary()?,
+            cumulative_shard_credit: u.arbitrary()?,
+            operator_signature: u.arbitrary()?,
+        })
+    }
+}
+
+/// Lower endpoint for an inconsistent-range challenge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RangeLower<P: PublicKey> {
+    /// Canonical `(credit,index)=(0,0)` shard opening.
+    ShardStart,
+    /// Earlier linked payment in the same receive shard.
+    Payment(Box<ScopedPaymentWitness<P>>),
+}
+
+impl<P: PublicKey> RangeLower<P> {
+    /// Projects an earlier linked endpoint relative to the challenge's upper scope.
+    #[must_use]
+    pub fn from_payment<D: Digest>(payment: &Payment<P, D>) -> Self {
+        Self::Payment(Box::new(ScopedPaymentWitness::from_payment(payment)))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P> arbitrary::Arbitrary<'_> for RangeLower<P>
+where
+    P: PublicKey,
+    ScopedPaymentWitness<P>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         if u.arbitrary()? {
@@ -529,7 +1069,7 @@ where
     }
 }
 
-impl<P: PublicKey, D: Digest> Write for RangeLower<P, D> {
+impl<P: PublicKey> Write for RangeLower<P> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::ShardStart => 1_u8.write(buf),
@@ -541,7 +1081,7 @@ impl<P: PublicKey, D: Digest> Write for RangeLower<P, D> {
     }
 }
 
-impl<P: PublicKey, D: Digest> EncodeSize for RangeLower<P, D> {
+impl<P: PublicKey> EncodeSize for RangeLower<P> {
     fn encode_size(&self) -> usize {
         u8::SIZE
             + match self {
@@ -551,14 +1091,172 @@ impl<P: PublicKey, D: Digest> EncodeSize for RangeLower<P, D> {
     }
 }
 
-impl<P: PublicKey, D: Digest> Read for RangeLower<P, D> {
+impl<P: PublicKey> Read for RangeLower<P> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             1 => Ok(Self::ShardStart),
-            2 => Ok(Self::Payment(Box::new(Payment::read(buf)?))),
+            2 => Ok(Self::Payment(Box::new(ScopedPaymentWitness::read(buf)?))),
             tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
+/// Canonical relation-specific evidence for a receipt fork.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReceiptForkWitness<P: PublicKey> {
+    /// Both receipts share one exact signed send.
+    SameSend {
+        /// Canonically first complete linked payment.
+        left: Box<PaymentWitness<P>>,
+        /// Receipt fields for the second payment.
+        right: ReceiptWitness<P>,
+    },
+    /// Both receipts share one recipient-local shard index.
+    SameIndex {
+        /// Canonically first complete linked payment.
+        left: Box<PaymentWitness<P>>,
+        /// Second payment fields relative to the first receipt's index scope.
+        right: SameIndexPaymentWitness<P>,
+    },
+    /// Lossless fallback for forks that share only a transaction digest.
+    Full {
+        /// Canonically first linked payment.
+        left: Box<PaymentWitness<P>>,
+        /// Canonically second linked payment.
+        right: Box<PaymentWitness<P>>,
+    },
+}
+
+impl<P: PublicKey> ReceiptForkWitness<P> {
+    /// Projects two payments into their smallest canonical lossless fork relation.
+    #[must_use]
+    pub fn from_payments<D: Digest>(left: &Payment<P, D>, right: &Payment<P, D>) -> Self {
+        Self::from_witnesses(
+            PaymentWitness::from_payment(left),
+            PaymentWitness::from_payment(right),
+        )
+    }
+
+    fn same_send(left: &PaymentWitness<P>, right: &PaymentWitness<P>) -> bool {
+        let left = left.parts();
+        let right = right.parts();
+        left.payer == right.payer
+            && left.recipient == right.recipient
+            && left.amount == right.amount
+            && left.cumulative_debit == right.cumulative_debit
+            && left.payer_signature == right.payer_signature
+    }
+
+    fn same_index(left: &PaymentWitness<P>, right: &PaymentWitness<P>) -> bool {
+        left.recipient() == right.recipient()
+            && left.shard() == right.shard()
+            && left.parts().index == right.parts().index
+    }
+
+    fn from_witnesses(mut left: PaymentWitness<P>, mut right: PaymentWitness<P>) -> Self {
+        if left.encode() > right.encode() {
+            core::mem::swap(&mut left, &mut right);
+        }
+        if Self::same_send(&left, &right) {
+            let right = ReceiptWitness::from_witness(&right);
+            Self::SameSend {
+                left: Box::new(left),
+                right,
+            }
+        } else if Self::same_index(&left, &right) {
+            let right = SameIndexPaymentWitness::from_witness(&right);
+            Self::SameIndex {
+                left: Box::new(left),
+                right,
+            }
+        } else {
+            Self::Full {
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        }
+    }
+}
+
+impl<P: PublicKey> Write for ReceiptForkWitness<P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::SameSend { left, right } => {
+                1_u8.write(buf);
+                left.write(buf);
+                right.write(buf);
+            }
+            Self::SameIndex { left, right } => {
+                2_u8.write(buf);
+                left.write(buf);
+                right.write(buf);
+            }
+            Self::Full { left, right } => {
+                3_u8.write(buf);
+                left.write(buf);
+                right.write(buf);
+            }
+        }
+    }
+}
+
+impl<P: PublicKey> EncodeSize for ReceiptForkWitness<P> {
+    fn encode_size(&self) -> usize {
+        u8::SIZE
+            + match self {
+                Self::SameSend { left, right } => left.encode_size() + right.encode_size(),
+                Self::SameIndex { left, right } => left.encode_size() + right.encode_size(),
+                Self::Full { left, right } => left.encode_size() + right.encode_size(),
+            }
+    }
+}
+
+impl<P: PublicKey> Read for ReceiptForkWitness<P> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            1 => Ok(Self::SameSend {
+                left: Box::new(PaymentWitness::read(buf)?),
+                right: ReceiptWitness::read(buf)?,
+            }),
+            2 => Ok(Self::SameIndex {
+                left: Box::new(PaymentWitness::read(buf)?),
+                right: SameIndexPaymentWitness::read(buf)?,
+            }),
+            3 => Ok(Self::Full {
+                left: Box::new(PaymentWitness::read(buf)?),
+                right: Box::new(PaymentWitness::read(buf)?),
+            }),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P> arbitrary::Arbitrary<'_> for ReceiptForkWitness<P>
+where
+    P: PublicKey,
+    PaymentWitness<P>: for<'a> arbitrary::Arbitrary<'a>,
+    ReceiptWitness<P>: for<'a> arbitrary::Arbitrary<'a>,
+    SameIndexPaymentWitness<P>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        match u.int_in_range(1..=3)? {
+            1 => Ok(Self::SameSend {
+                left: Box::new(u.arbitrary()?),
+                right: u.arbitrary()?,
+            }),
+            2 => Ok(Self::SameIndex {
+                left: Box::new(u.arbitrary()?),
+                right: u.arbitrary()?,
+            }),
+            _ => Ok(Self::Full {
+                left: Box::new(u.arbitrary()?),
+                right: Box::new(u.arbitrary()?),
+            }),
         }
     }
 }
@@ -568,41 +1266,29 @@ impl<P: PublicKey, D: Digest> Read for RangeLower<P, D> {
 pub enum Challenge<P: PublicKey, D: Digest> {
     /// Acknowledged payer debit is above or conflicts with the public terminal debit.
     LatestAcknowledgedSend {
-        /// Admitted header identifier.
-        batch: BatchId<D>,
         /// Matching payer send and operator receipt.
-        payment: Box<Payment<P, D>>,
+        payment: Box<PaymentWitness<P>>,
         /// Payer-row membership or ordered-absence proof.
         payer: Box<AccountLookup<P, D>>,
     },
     /// Retained receipt is above the authenticated public tip of its shard.
     HigherShardTip {
-        /// Admitted header identifier.
-        batch: BatchId<D>,
         /// Matching payer send and operator receipt.
-        payment: Box<Payment<P, D>>,
-        /// Recipient-row membership or ordered-absence proof.
-        recipient: Box<AccountLookup<P, D>>,
-        /// Receive-shard membership or ordered-absence proof.
-        shard: Box<ShardLookup<P, D>>,
+        payment: Box<PaymentWitness<P>>,
+        /// Composed recipient-row and receive-shard proof.
+        recipient: Box<HigherShardTipLookup<P, D>>,
     },
     /// Two strictly ordered linked endpoints cannot be joined by positive payments.
     InconsistentReceiptRange {
-        /// Admitted header identifier.
-        batch: BatchId<D>,
         /// Later linked endpoint.
-        upper: Box<Payment<P, D>>,
+        upper: Box<PaymentWitness<P>>,
         /// Earlier linked endpoint or the canonical shard start.
-        lower: RangeLower<P, D>,
+        lower: RangeLower<P>,
     },
     /// Two distinct receipt bodies fork one shard index or payer transaction.
     ReceiptFork {
-        /// Admitted header identifier.
-        batch: BatchId<D>,
-        /// Canonically first linked payment encoding.
-        left: Box<Payment<P, D>>,
-        /// Canonically second linked payment encoding.
-        right: Box<Payment<P, D>>,
+        /// Canonical relation-specific linked payment evidence.
+        fork: Box<ReceiptForkWitness<P>>,
     },
 }
 
@@ -611,35 +1297,28 @@ impl<P, D> arbitrary::Arbitrary<'_> for Challenge<P, D>
 where
     P: PublicKey,
     D: Digest,
-    BatchId<D>: for<'a> arbitrary::Arbitrary<'a>,
-    Payment<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    PaymentWitness<P>: for<'a> arbitrary::Arbitrary<'a>,
     AccountLookup<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    ShardLookup<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    RangeLower<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    HigherShardTipLookup<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    RangeLower<P>: for<'a> arbitrary::Arbitrary<'a>,
+    ReceiptForkWitness<P>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let batch = u.arbitrary()?;
         match u.int_in_range(0..=3)? {
             0 => Ok(Self::LatestAcknowledgedSend {
-                batch,
                 payment: Box::new(u.arbitrary()?),
                 payer: Box::new(u.arbitrary()?),
             }),
             1 => Ok(Self::HigherShardTip {
-                batch,
                 payment: Box::new(u.arbitrary()?),
                 recipient: Box::new(u.arbitrary()?),
-                shard: Box::new(u.arbitrary()?),
             }),
             2 => Ok(Self::InconsistentReceiptRange {
-                batch,
                 upper: Box::new(u.arbitrary()?),
                 lower: u.arbitrary()?,
             }),
             _ => Ok(Self::ReceiptFork {
-                batch,
-                left: Box::new(u.arbitrary()?),
-                right: Box::new(u.arbitrary()?),
+                fork: Box::new(u.arbitrary()?),
             }),
         }
     }
@@ -648,30 +1327,9 @@ where
 impl<P: PublicKey, D: Digest> Challenge<P, D> {
     /// Constructs a receipt fork in canonical encoded order.
     #[must_use]
-    pub fn receipt_fork(batch: BatchId<D>, left: Payment<P, D>, right: Payment<P, D>) -> Self {
-        if left.encode() <= right.encode() {
-            Self::ReceiptFork {
-                batch,
-                left: Box::new(left),
-                right: Box::new(right),
-            }
-        } else {
-            Self::ReceiptFork {
-                batch,
-                left: Box::new(right),
-                right: Box::new(left),
-            }
-        }
-    }
-
-    /// Admitted header identifier bound by this challenge.
-    #[must_use]
-    pub const fn batch(&self) -> &BatchId<D> {
-        match self {
-            Self::LatestAcknowledgedSend { batch, .. }
-            | Self::HigherShardTip { batch, .. }
-            | Self::InconsistentReceiptRange { batch, .. }
-            | Self::ReceiptFork { batch, .. } => batch,
+    pub fn receipt_fork(left: Payment<P, D>, right: Payment<P, D>) -> Self {
+        Self::ReceiptFork {
+            fork: Box::new(ReceiptForkWitness::from_payments(&left, &right)),
         }
     }
 }
@@ -729,42 +1387,38 @@ where
     if now > context.challenge_deadline() {
         return Err(ChallengeError::Expired);
     }
-    if challenge.batch() != &header.batch_id::<H>() {
-        return Err(ChallengeError::WrongBatch);
-    }
     if transition::validate_header::<H, P, _>(context, header, roots).is_err() {
         return Err(ChallengeError::HeaderRoot);
     }
+    let predecessor_root = context.predecessor_root();
     let context = context.payment();
-    let opening_root = &roots.opening;
     let change_root = &roots.change;
     match challenge {
         Challenge::LatestAcknowledgedSend { payment, payer, .. } => {
-            let (_, resolved) = strategy.try_run(
+            let (payment, resolved) = strategy.try_run(
                 2,
                 || -> Result<_, ChallengeError> {
-                    payment.verify_linked_with_strategy::<H>(context, strategy)?;
+                    let reconstructed =
+                        payment.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?;
                     Ok((
-                        (),
-                        payer.resolve::<H>(opening_root, change_root, payment.payer())?,
+                        reconstructed,
+                        payer.resolve::<H>(predecessor_root, change_root, payment.payer())?,
                     ))
                 },
                 || {
                     let (payment, payer) = strategy.join(
-                        || payment.verify_linked_with_strategy::<H>(context, strategy),
-                        || payer.resolve::<H>(opening_root, change_root, payment.payer()),
+                        || payment.reconstruct_with_strategy::<H, H::Digest>(context, strategy),
+                        || payer.resolve::<H>(predecessor_root, change_root, payment.payer()),
                     );
-                    payment?;
-                    Ok(((), payer?))
+                    Ok((payment?, payer?))
                 },
             )?;
             let disclosed = payment.send().body().cumulative_debit();
-            let committed = resolved.closing.cumulative_debit;
-            let committed_payment = resolved.row.as_ref().and_then(|row| row.outgoing.as_ref());
-            let bodies_differ = committed_payment.is_none_or(|public| {
-                public.send().body() != payment.send().body()
-                    || public.receipt().body() != payment.receipt().body()
-            });
+            let committed = resolved.terminal_debit;
+            let bodies_differ = resolved
+                .leaf
+                .as_ref()
+                .is_none_or(|leaf| !leaf.matches_outgoing::<H>(&payment));
             Ok(
                 if disclosed > committed || (disclosed == committed && bodies_differ) {
                     Verdict::Proven(ChallengeKind::LatestAcknowledgedSend)
@@ -774,40 +1428,38 @@ where
             )
         }
         Challenge::HigherShardTip {
-            payment,
-            recipient,
-            shard,
-            ..
+            payment, recipient, ..
         } => {
-            let receipt = payment.receipt().body();
-            let (_, resolved) = strategy.try_run(
+            let (payment, resolved) = strategy.try_run(
                 2,
                 || -> Result<_, ChallengeError> {
-                    payment.verify_linked_with_strategy::<H>(context, strategy)?;
+                    let reconstructed =
+                        payment.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?;
                     Ok((
-                        (),
-                        recipient.resolve::<H>(opening_root, change_root, receipt.recipient())?,
+                        reconstructed,
+                        recipient.resolve::<H>(
+                            change_root,
+                            payment.recipient(),
+                            payment.shard(),
+                        )?,
                     ))
                 },
                 || {
                     let (payment, recipient) = strategy.join(
-                        || payment.verify_linked_with_strategy::<H>(context, strategy),
-                        || recipient.resolve::<H>(opening_root, change_root, receipt.recipient()),
+                        || payment.reconstruct_with_strategy::<H, H::Digest>(context, strategy),
+                        || {
+                            recipient.resolve::<H>(
+                                change_root,
+                                payment.recipient(),
+                                payment.shard(),
+                            )
+                        },
                     );
-                    payment?;
-                    Ok(((), recipient?))
+                    Ok((payment?, recipient?))
                 },
             )?;
-            let root: CreditRoot<H::Digest> = resolved.row.as_ref().map_or_else(
-                || credit::empty_credit_root::<H, P>(context.epoch(), receipt.recipient()),
-                |row| row.credit_root,
-            );
-            let public =
-                shard.resolve::<H>(context.epoch(), receipt.recipient(), &root, receipt.shard())?;
-            let (credit, index) = public.map_or((0, 0), |head| {
-                let body = head.payment.receipt().body().clone();
-                (body.cumulative_shard_credit(), body.index())
-            });
+            let receipt = payment.receipt().body();
+            let (credit, index) = resolved.map_or((0, 0), |tip| (tip.cumulative_credit, tip.index));
             Ok(
                 if receipt.cumulative_shard_credit() > credit || receipt.index() > index {
                     Verdict::Proven(ChallengeKind::HigherShardTip)
@@ -817,40 +1469,47 @@ where
             )
         }
         Challenge::InconsistentReceiptRange { upper, lower, .. } => {
-            let (lower_credit, lower_index) = match lower {
+            let (upper, lower_credit, lower_index) = match lower {
                 RangeLower::ShardStart => {
-                    upper.verify_linked_with_strategy::<H>(context, strategy)?;
-                    (0, 0)
+                    let upper =
+                        upper.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?;
+                    (upper, 0, 0)
                 }
                 RangeLower::Payment(lower) => {
-                    strategy.try_run(
+                    let lower = lower.with_scope(upper.recipient().clone(), upper.shard());
+                    let (upper, lower) = strategy.try_run(
                         2,
                         || -> Result<_, ChallengeError> {
-                            upper.verify_linked_with_strategy::<H>(context, strategy)?;
-                            lower.verify_linked_with_strategy::<H>(context, strategy)?;
-                            Ok(())
+                            Ok((
+                                upper
+                                    .reconstruct_with_strategy::<H, H::Digest>(context, strategy)?,
+                                lower
+                                    .reconstruct_with_strategy::<H, H::Digest>(context, strategy)?,
+                            ))
                         },
-                        || {
+                        || -> Result<_, ChallengeError> {
                             let (upper, lower) = strategy.join(
-                                || upper.verify_linked_with_strategy::<H>(context, strategy),
-                                || lower.verify_linked_with_strategy::<H>(context, strategy),
+                                || {
+                                    upper.reconstruct_with_strategy::<H, H::Digest>(
+                                        context, strategy,
+                                    )
+                                },
+                                || {
+                                    lower.reconstruct_with_strategy::<H, H::Digest>(
+                                        context, strategy,
+                                    )
+                                },
                             );
-                            upper?;
-                            lower?;
-                            Ok(())
+                            Ok((upper?, lower?))
                         },
                     )?;
                     let upper_receipt = upper.receipt().body();
                     let lower_receipt = lower.receipt().body();
-                    if lower_receipt.recipient() != upper_receipt.recipient()
-                        || lower_receipt.shard() != upper_receipt.shard()
-                    {
-                        return Err(ChallengeError::RangeScope);
-                    }
                     if upper_receipt.index() <= lower_receipt.index() {
                         return Err(ChallengeError::RangeOrder);
                     }
                     (
+                        upper,
                         lower_receipt.cumulative_shard_credit(),
                         lower_receipt.index(),
                     )
@@ -870,35 +1529,59 @@ where
                 Verdict::NoContradiction
             })
         }
-        Challenge::ReceiptFork { left, right, .. } => {
-            strategy.try_run(
+        Challenge::ReceiptFork { fork } => {
+            let (left, right, relation) = match fork.as_ref() {
+                ReceiptForkWitness::SameSend { left, right } => {
+                    (left.as_ref(), right.with_send(left), 1_u8)
+                }
+                ReceiptForkWitness::SameIndex { left, right } => {
+                    let parts = left.parts();
+                    (
+                        left.as_ref(),
+                        right.with_index_scope(parts.recipient, parts.shard, parts.index),
+                        2_u8,
+                    )
+                }
+                ReceiptForkWitness::Full { left, right } => {
+                    (left.as_ref(), right.as_ref().clone(), 3_u8)
+                }
+            };
+            let (left_payment, right_payment) = strategy.try_run(
                 2,
                 || -> Result<_, ChallengeError> {
-                    left.verify_linked_with_strategy::<H>(context, strategy)?;
-                    right.verify_linked_with_strategy::<H>(context, strategy)?;
-                    Ok(())
+                    Ok((
+                        left.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?,
+                        right.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?,
+                    ))
                 },
-                || {
+                || -> Result<_, ChallengeError> {
                     let (left, right) = strategy.join(
-                        || left.verify_linked_with_strategy::<H>(context, strategy),
-                        || right.verify_linked_with_strategy::<H>(context, strategy),
+                        || left.reconstruct_with_strategy::<H, H::Digest>(context, strategy),
+                        || right.reconstruct_with_strategy::<H, H::Digest>(context, strategy),
                     );
-                    left?;
-                    right?;
-                    Ok(())
+                    Ok((left?, right?))
                 },
             )?;
             if left.encode() > right.encode() {
                 return Err(ChallengeError::NonCanonicalFork);
             }
-            let left_receipt = left.receipt().body();
-            let right_receipt = right.receipt().body();
-            if left_receipt == right_receipt {
-                return Ok(Verdict::NoContradiction);
-            }
+            let left_receipt = left_payment.receipt().body();
+            let right_receipt = right_payment.receipt().body();
+            let same_send = left_payment.send() == right_payment.send();
             let same_index = left_receipt.recipient() == right_receipt.recipient()
                 && left_receipt.shard() == right_receipt.shard()
                 && left_receipt.index() == right_receipt.index();
+            if !match relation {
+                1 => same_send,
+                2 => !same_send && same_index,
+                3 => !same_send && !same_index,
+                _ => unreachable!("receipt-fork relation is a local enum tag"),
+            } {
+                return Err(ChallengeError::NonCanonicalFork);
+            }
+            if left_receipt == right_receipt {
+                return Ok(Verdict::NoContradiction);
+            }
             let same_transaction = left_receipt.tx_id() == right_receipt.tx_id();
             Ok(if same_index || same_transaction {
                 Verdict::Proven(ChallengeKind::ReceiptFork)
@@ -912,43 +1595,24 @@ where
 impl<P: PublicKey, D: Digest> Write for Challenge<P, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::LatestAcknowledgedSend {
-                batch,
-                payment,
-                payer,
-            } => {
+            Self::LatestAcknowledgedSend { payment, payer } => {
                 1_u8.write(buf);
-                batch.write(buf);
                 payment.write(buf);
                 payer.write(buf);
             }
-            Self::HigherShardTip {
-                batch,
-                payment,
-                recipient,
-                shard,
-            } => {
+            Self::HigherShardTip { payment, recipient } => {
                 2_u8.write(buf);
-                batch.write(buf);
                 payment.write(buf);
                 recipient.write(buf);
-                shard.write(buf);
             }
-            Self::InconsistentReceiptRange {
-                batch,
-                upper,
-                lower,
-            } => {
+            Self::InconsistentReceiptRange { upper, lower } => {
                 3_u8.write(buf);
-                batch.write(buf);
                 upper.write(buf);
                 lower.write(buf);
             }
-            Self::ReceiptFork { batch, left, right } => {
+            Self::ReceiptFork { fork } => {
                 4_u8.write(buf);
-                batch.write(buf);
-                left.write(buf);
-                right.write(buf);
+                fork.write(buf);
             }
         }
     }
@@ -957,21 +1621,17 @@ impl<P: PublicKey, D: Digest> Write for Challenge<P, D> {
 impl<P: PublicKey, D: Digest> EncodeSize for Challenge<P, D> {
     fn encode_size(&self) -> usize {
         u8::SIZE
-            + BatchId::<D>::SIZE
             + match self {
                 Self::LatestAcknowledgedSend { payment, payer, .. } => {
                     payment.encode_size() + payer.encode_size()
                 }
                 Self::HigherShardTip {
-                    payment,
-                    recipient,
-                    shard,
-                    ..
-                } => payment.encode_size() + recipient.encode_size() + shard.encode_size(),
+                    payment, recipient, ..
+                } => payment.encode_size() + recipient.encode_size(),
                 Self::InconsistentReceiptRange { upper, lower, .. } => {
                     upper.encode_size() + lower.encode_size()
                 }
-                Self::ReceiptFork { left, right, .. } => left.encode_size() + right.encode_size(),
+                Self::ReceiptFork { fork } => fork.encode_size(),
             }
     }
 }
@@ -981,28 +1641,21 @@ impl<P: PublicKey, D: Digest> Read for Challenge<P, D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let tag = u8::read(buf)?;
-        let batch = BatchId::read(buf)?;
         match tag {
             1 => Ok(Self::LatestAcknowledgedSend {
-                batch,
-                payment: Box::new(Payment::read(buf)?),
+                payment: Box::new(PaymentWitness::read(buf)?),
                 payer: Box::new(AccountLookup::read(buf)?),
             }),
             2 => Ok(Self::HigherShardTip {
-                batch,
-                payment: Box::new(Payment::read(buf)?),
-                recipient: Box::new(AccountLookup::read(buf)?),
-                shard: Box::new(ShardLookup::read(buf)?),
+                payment: Box::new(PaymentWitness::read(buf)?),
+                recipient: Box::new(HigherShardTipLookup::read(buf)?),
             }),
             3 => Ok(Self::InconsistentReceiptRange {
-                batch,
-                upper: Box::new(Payment::read(buf)?),
+                upper: Box::new(PaymentWitness::read(buf)?),
                 lower: RangeLower::read(buf)?,
             }),
             4 => Ok(Self::ReceiptFork {
-                batch,
-                left: Box::new(Payment::read(buf)?),
-                right: Box::new(Payment::read(buf)?),
+                fork: Box::new(ReceiptForkWitness::read(buf)?),
             }),
             _ => Err(CodecError::InvalidEnum(tag)),
         }
@@ -1026,24 +1679,15 @@ pub enum ChallengeError {
     /// Encoded challenge exceeds the caller's deployment bound.
     #[error("challenge exceeds the configured byte bound")]
     TooLarge,
-    /// Challenge names a different admitted header.
-    #[error("challenge binds another admitted header")]
-    WrongBatch,
     /// Inclusive challenge deadline has passed.
     #[error("challenge deadline has passed")]
     Expired,
     /// Supplied roots do not open the contextual header.
     #[error("challenge roots do not open the admitted header")]
     HeaderRoot,
-    /// Lookup is for another account or shard.
-    #[error("authenticated lookup is for another key")]
-    LookupKey,
     /// Account absence proof does not use adjacent ordered rows.
     #[error("account absence proof is not an adjacent ordered bracket")]
     LookupOrder,
-    /// Receipt-range endpoints name different recipients or shards.
-    #[error("receipt-range endpoints do not share one recipient and shard")]
-    RangeScope,
     /// Receipt-range endpoints are not strictly increasing by index.
     #[error("receipt-range endpoints are not strictly ordered")]
     RangeOrder,
@@ -1070,9 +1714,9 @@ mod tests {
     use crate::bajillion::{
         boundary::{DepositBatch, WithdrawalBatch},
         commitment::{Builder, Tree},
-        credit::{ShardHead, ShardSet},
+        credit::{CreditTip, ShardHead, ShardSet},
         payment::{PaymentContext, PaymentError, ReceiptBody, SendBody, SignedReceipt, SignedSend},
-        state::{AccountState, Prefix},
+        state::{AccountRow, AccountState, Prefix, SettlementOutput},
         transition::{Assignment, CloseLimits, StateCache},
     };
     use alloc::vec::Vec;
@@ -1159,11 +1803,10 @@ mod tests {
         context: CloseContext<VerifyingKey, ShaDigest>,
         header: Header<ShaDigest>,
         roots: RootBundle<ShaDigest>,
-        batch: BatchId<ShaDigest>,
         state_tree: Tree<ShaDigest>,
         change_tree: Tree<ShaDigest>,
         leaves: Vec<StateLeaf<VerifyingKey>>,
-        rows: Vec<AccountRow<VerifyingKey, ShaDigest>>,
+        change_leaves: Vec<AccountChange<VerifyingKey, ShaDigest>>,
         shards: Vec<ShardSet<VerifyingKey, ShaDigest>>,
         operator: SigningKey,
         payer: SigningKey,
@@ -1291,30 +1934,30 @@ mod tests {
             vec![ShardHead::new(0, accepted.clone())],
         )
         .unwrap();
-        let mut rows = vec![
+        let mut rows = [
             AccountRow {
                 account: payer.public_key(),
-                opening: state(100),
-                closing: AccountState {
+                predecessor: state(100),
+                successor: AccountState {
                     balance: 90,
                     cumulative_debit: 10,
                     ..state(100)
                 },
                 outgoing: Some(accepted.clone()),
-                credit_root: payer_shards.root::<Sha256>().unwrap(),
+                output: SettlementOutput::None,
                 prefix: Prefix::default(),
             },
             AccountRow {
                 account: recipient.public_key(),
-                opening: state(40),
-                closing: AccountState {
+                predecessor: state(40),
+                successor: AccountState {
                     balance: 50,
                     cumulative_credit: 10,
                     receipt_count: 1,
                     ..state(40)
                 },
                 outgoing: None,
-                credit_root: recipient_shards.root::<Sha256>().unwrap(),
+                output: SettlementOutput::None,
                 prefix: Prefix::default(),
             },
         ];
@@ -1323,24 +1966,31 @@ mod tests {
         shards.sort_unstable_by(|left, right| left.recipient().cmp(right.recipient()));
 
         let state_tree = tree(VectorKind::State, &leaves);
-        let change_tree = tree(VectorKind::Change, &rows);
+        let change_leaves = rows
+            .iter()
+            .zip(&shards)
+            .map(|(row, shards)| AccountChange::from_row::<Sha256>(row, shards).unwrap())
+            .collect::<Vec<_>>();
+        let change_guards = change_leaves
+            .iter()
+            .map(AccountChange::guard::<Sha256>)
+            .collect::<Vec<_>>();
+        let change_tree = tree(VectorKind::Change, &change_guards);
         let roots = RootBundle {
-            opening: state_tree.root(),
             change: change_tree.root(),
-            closing: state_tree.root(),
-            layout: commitment::empty_root::<Sha256>(VectorKind::Layout),
+            withdrawal_outputs: commitment::empty_root::<Sha256>(VectorKind::WithdrawalOutput),
+            successor: state_tree.root(),
+            coverage: commitment::empty_root::<Sha256>(VectorKind::Coverage),
         };
-        let header = Header::new::<Sha256, _>(context.payment(), &roots);
-        let batch = header.batch_id::<Sha256>();
+        let header = Header::new::<Sha256, _>(&context, &roots);
         Fixture {
             context,
             header,
             roots,
-            batch,
             state_tree,
             change_tree,
             leaves,
-            rows,
+            change_leaves,
             shards,
             operator,
             payer,
@@ -1350,36 +2000,105 @@ mod tests {
         }
     }
 
-    fn lookup(fixture: &Fixture, account: &VerifyingKey) -> TestLookup {
+    fn state_lookup(
+        fixture: &Fixture,
+        account: &VerifyingKey,
+    ) -> StateLookup<VerifyingKey, ShaDigest> {
         match fixture
-            .rows
-            .binary_search_by(|row| row.account.cmp(account))
+            .leaves
+            .binary_search_by(|leaf| leaf.account.cmp(account))
         {
-            Ok(position) => AccountLookup::Present(Box::new(RowOpening {
-                row: fixture.rows[position].clone(),
-                proof: fixture.change_tree.opening(position as u32).unwrap(),
+            Ok(position) => StateLookup::Present(Box::new(StateValueOpening {
+                state: fixture.leaves[position].state,
+                proof: fixture.state_tree.opening(position as u32).unwrap(),
             })),
             Err(insertion) => {
-                let state_position = fixture
-                    .leaves
-                    .binary_search_by(|leaf| leaf.account.cmp(account))
-                    .unwrap();
-                let row_opening = |position: usize| {
-                    Box::new(RowOpening {
-                        row: fixture.rows[position].clone(),
-                        proof: fixture.change_tree.opening(position as u32).unwrap(),
-                    })
-                };
-                AccountLookup::Absent {
-                    state: Box::new(StateLookup::Present(Box::new(StateOpening {
-                        leaf: fixture.leaves[state_position].clone(),
-                        proof: fixture.state_tree.opening(state_position as u32).unwrap(),
-                    }))),
-                    predecessor: insertion.checked_sub(1).map(row_opening),
-                    successor: (insertion < fixture.rows.len()).then(|| row_opening(insertion)),
-                }
+                let predecessor = insertion
+                    .checked_sub(1)
+                    .map(|position| fixture.leaves[position].clone());
+                let successor = fixture.leaves.get(insertion).cloned();
+                let start = insertion.saturating_sub(usize::from(predecessor.is_some()));
+                let count = usize::from(predecessor.is_some()) + usize::from(successor.is_some());
+                StateLookup::Absent(StateAbsence {
+                    predecessor,
+                    successor,
+                    opening: fixture
+                        .state_tree
+                        .range_opening(start as u32, count as u32)
+                        .unwrap(),
+                })
             }
         }
+    }
+
+    fn change_absence(
+        fixture: &Fixture,
+        account: &VerifyingKey,
+    ) -> ChangeAbsence<VerifyingKey, ShaDigest> {
+        let insertion = fixture
+            .change_leaves
+            .binary_search_by(|leaf| leaf.account().cmp(account))
+            .unwrap_err();
+        let predecessor = insertion
+            .checked_sub(1)
+            .map(|position| fixture.change_leaves[position].guard::<Sha256>());
+        let successor = fixture
+            .change_leaves
+            .get(insertion)
+            .map(AccountChange::guard::<Sha256>);
+        let start = insertion.saturating_sub(usize::from(predecessor.is_some()));
+        let count = usize::from(predecessor.is_some()) + usize::from(successor.is_some());
+        ChangeAbsence {
+            predecessor,
+            successor,
+            opening: fixture
+                .change_tree
+                .range_opening(start as u32, count as u32)
+                .unwrap(),
+        }
+    }
+
+    fn higher_shard_tip_lookup(
+        fixture: &Fixture,
+        account: &VerifyingKey,
+        shard: u64,
+    ) -> HigherShardTipLookup<VerifyingKey, ShaDigest> {
+        fixture
+            .change_leaves
+            .binary_search_by(|leaf| leaf.account().cmp(account))
+            .map_or_else(
+                |_| HigherShardTipLookup::Absent(change_absence(fixture, account)),
+                |position| {
+                    assert_eq!(fixture.shards[position].recipient(), account);
+                    HigherShardTipLookup::Present {
+                        value: fixture.change_leaves[position].value().core(),
+                        proof: fixture.change_tree.opening(position as u32).unwrap(),
+                        shard: fixture.shards[position].lookup::<Sha256>(shard).unwrap(),
+                    }
+                },
+            )
+    }
+
+    fn lookup(fixture: &Fixture, account: &VerifyingKey) -> TestLookup {
+        fixture
+            .change_leaves
+            .binary_search_by(|leaf| leaf.account().cmp(account))
+            .map_or_else(
+                |_| AccountLookup::Absent {
+                    state: Box::new(state_lookup(fixture, account)),
+                    change: change_absence(fixture, account),
+                },
+                |position| {
+                    AccountLookup::Present(Box::new(ChangeOpening {
+                        value: fixture.change_leaves[position].value(),
+                        proof: fixture.change_tree.opening(position as u32).unwrap(),
+                    }))
+                },
+            )
+    }
+
+    fn witness<P: PublicKey, D: Digest>(payment: &Payment<P, D>) -> Box<PaymentWitness<P>> {
+        Box::new(PaymentWitness::from_payment(payment))
     }
 
     fn adjudicate(fixture: &Fixture, challenge: &TestChallenge) -> Result<Verdict, ChallengeError> {
@@ -1440,6 +2159,22 @@ mod tests {
         )
     }
 
+    fn assert_invalid_payer_evidence(fixture: &Fixture, challenge: &TestChallenge) {
+        assert!(matches!(
+            adjudicate(fixture, challenge),
+            Err(ChallengeError::Payment(PaymentError::InvalidPayerSignature))
+        ));
+    }
+
+    fn assert_invalid_operator_evidence(fixture: &Fixture, challenge: &TestChallenge) {
+        assert!(matches!(
+            adjudicate(fixture, challenge),
+            Err(ChallengeError::Payment(
+                PaymentError::InvalidOperatorSignature
+            ))
+        ));
+    }
+
     fn counting_key(next_key: &mut u8) -> CountingKey {
         let key = CountingKey([*next_key]);
         *next_key = next_key.checked_add(1).unwrap();
@@ -1483,7 +2218,7 @@ mod tests {
             SendBody::from_raw_unchecked(
                 *fixture.context.payment().anchor(),
                 fixture.context.payment().epoch(),
-                payer.clone(),
+                payer,
                 recipient.clone(),
                 10,
                 10,
@@ -1504,44 +2239,38 @@ mod tests {
             fixture.payment.receipt().signature().clone(),
         );
         let payment = Payment::from_parts_unchecked(send, receipt);
-        let row = AccountRow {
-            account: payer,
-            opening: state(100),
-            closing: state(90),
-            outgoing: Some(payment.clone()),
-            credit_root: fixture.rows[0].credit_root,
-            prefix: Prefix::default(),
-        };
+        let value = fixture.change_leaves[0].value();
+        let shard = fixture
+            .shards
+            .iter()
+            .find(|set| set.recipient() == &fixture.recipient.public_key())
+            .unwrap()
+            .lookup::<Sha256>(0)
+            .unwrap();
         let challenge = Challenge::HigherShardTip {
-            batch: fixture.batch,
-            payment: Box::new(payment.clone()),
-            recipient: Box::new(AccountLookup::Present(Box::new(RowOpening {
-                row,
+            payment: witness(&payment),
+            recipient: Box::new(HigherShardTipLookup::Present {
+                value: value.core(),
                 proof: fixture.change_tree.opening(0).unwrap(),
-            }))),
-            shard: Box::new(ShardLookup::Present {
-                opening: Box::new(crate::bajillion::credit::ShardOpening {
-                    value: ShardHead::new(0, payment),
-                    proof: fixture.change_tree.opening(0).unwrap(),
-                }),
+                shard,
             }),
         };
         PUBLIC_KEY_WRITES.store(0, Ordering::Relaxed);
         let encoded = challenge.encode();
-        assert_eq!(PUBLIC_KEY_WRITES.load(Ordering::Relaxed), 10);
+        assert_eq!(PUBLIC_KEY_WRITES.load(Ordering::Relaxed), 2);
 
         PUBLIC_KEY_DECODE_ATTEMPTS.store(0, Ordering::Relaxed);
         PUBLIC_KEY_DECODE_SUCCESSES.store(0, Ordering::Relaxed);
         let decoded = Challenge::<CountingKey, ShaDigest>::decode(encoded.clone()).unwrap();
 
-        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 10);
-        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 10);
+        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 2);
+        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 2);
         assert_eq!(decoded.encode(), encoded);
         assert_eq!(decoded.encode_size(), encoded.len());
 
         Challenge::<CountingKey, ShaDigest>::decode(encoded).unwrap();
-        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 20);
-        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 20);
+        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 4);
+        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 4);
     }
 
     #[test]
@@ -1549,58 +2278,32 @@ mod tests {
         let fixture = fixture();
         let mut next_key = 1;
         let payment = counting_payment(&fixture, &mut next_key);
-        let state_key = counting_key(&mut next_key);
-        let predecessor_account = counting_key(&mut next_key);
-        let predecessor_payment = counting_payment(&fixture, &mut next_key);
-        let successor_account = counting_key(&mut next_key);
-        let successor_payment = counting_payment(&fixture, &mut next_key);
-        let predecessor_shard = counting_payment(&fixture, &mut next_key);
-        let successor_shard = counting_payment(&fixture, &mut next_key);
-        assert_eq!(next_key, 19);
+        assert_eq!(next_key, 4);
 
-        let row = |account, outgoing| {
-            Box::new(RowOpening {
-                row: AccountRow {
-                    account,
-                    opening: state(100),
-                    closing: state(90),
-                    outgoing: Some(outgoing),
-                    credit_root: fixture.rows[0].credit_root,
-                    prefix: Prefix::default(),
-                },
-                proof: fixture.change_tree.opening(0).unwrap(),
-            })
+        let tip = |shard| CreditTip {
+            shard,
+            cumulative_credit: 1,
+            index: 1,
         };
-        let shard = |payment| {
-            Box::new(crate::bajillion::credit::ShardOpening {
-                value: ShardHead::new(0, payment),
-                proof: fixture.change_tree.opening(0).unwrap(),
-            })
-        };
+        let tips = [tip(0), tip(2)];
+        let credit_tree = tree(VectorKind::CreditTip, &tips);
+        let value = fixture.change_leaves[0].value();
         let challenge = Challenge::HigherShardTip {
-            batch: fixture.batch,
-            payment: Box::new(payment),
-            recipient: Box::new(AccountLookup::Absent {
-                state: Box::new(StateLookup::Present(Box::new(StateOpening {
-                    leaf: StateLeaf {
-                        account: state_key,
-                        state: state(100),
-                    },
-                    proof: fixture.state_tree.opening(0).unwrap(),
-                }))),
-                predecessor: Some(row(predecessor_account, predecessor_payment)),
-                successor: Some(row(successor_account, successor_payment)),
-            }),
-            shard: Box::new(ShardLookup::Absent {
-                shard: 1,
-                predecessor: Some(shard(predecessor_shard)),
-                successor: Some(shard(successor_shard)),
+            payment: witness(&payment),
+            recipient: Box::new(HigherShardTipLookup::Present {
+                value: value.core(),
+                proof: fixture.change_tree.opening(0).unwrap(),
+                shard: CreditTipLookup::Absent {
+                    predecessor: Some(tips[0].clone()),
+                    successor: Some(tips[1].clone()),
+                    opening: credit_tree.range_opening(0, 2).unwrap(),
+                },
             }),
         };
 
         PUBLIC_KEY_WRITES.store(0, Ordering::Relaxed);
         let encoded = challenge.encode();
-        assert_eq!(PUBLIC_KEY_WRITES.load(Ordering::Relaxed), 18);
+        assert_eq!(PUBLIC_KEY_WRITES.load(Ordering::Relaxed), 2);
         assert_eq!(challenge.encode_size(), encoded.len());
 
         PUBLIC_KEY_DECODE_ATTEMPTS.store(0, Ordering::Relaxed);
@@ -1609,8 +2312,8 @@ mod tests {
             Challenge::<CountingKey, ShaDigest>::decode(encoded.clone()).unwrap(),
             challenge
         );
-        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 18);
-        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 18);
+        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 2);
+        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 2);
 
         for split in 0..=encoded.len() {
             PUBLIC_KEY_DECODE_ATTEMPTS.store(0, Ordering::Relaxed);
@@ -1622,8 +2325,8 @@ mod tests {
                 challenge,
                 "segmentation boundary {split}"
             );
-            assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 18);
-            assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 18);
+            assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 2);
+            assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 2);
         }
 
         for length in 0..encoded.len() {
@@ -1648,73 +2351,59 @@ mod tests {
         let fixture = fixture();
         let payer = fixture.payer.public_key();
         let recipient = fixture.recipient.public_key();
-        let recipient_position = fixture
-            .shards
-            .binary_search_by(|set| set.recipient().cmp(&recipient))
-            .unwrap();
-        let present_shard = fixture.shards[recipient_position]
-            .lookup::<Sha256>(0)
-            .unwrap();
-        let absent_shard = fixture.shards[recipient_position]
-            .lookup::<Sha256>(9)
-            .unwrap();
+        let empty_changes = Vec::<ChangeGuard<VerifyingKey, ShaDigest>>::new();
+        let empty_change_tree = tree(VectorKind::Change, &empty_changes);
         let no_neighbor_account = AccountLookup::Absent {
-            state: Box::new(StateLookup::Present(Box::new(StateOpening {
-                leaf: fixture.leaves[0].clone(),
-                proof: fixture.state_tree.opening(0).unwrap(),
-            }))),
+            state: Box::new(state_lookup(&fixture, &fixture.dormant.public_key())),
+            change: ChangeAbsence {
+                predecessor: None,
+                successor: None,
+                opening: empty_change_tree.range_opening(0, 0).unwrap(),
+            },
+        };
+        let no_neighbor_change = HigherShardTipLookup::Absent(ChangeAbsence {
             predecessor: None,
             successor: None,
-        };
-        let no_neighbor_shard = ShardLookup::Absent {
-            shard: 9,
-            predecessor: None,
-            successor: None,
-        };
+            opening: empty_change_tree.range_opening(0, 0).unwrap(),
+        });
         let challenges = vec![
             Challenge::LatestAcknowledgedSend {
-                batch: fixture.batch,
-                payment: Box::new(fixture.payment.clone()),
+                payment: witness(&fixture.payment),
                 payer: Box::new(lookup(&fixture, &payer)),
             },
             Challenge::LatestAcknowledgedSend {
-                batch: fixture.batch,
-                payment: Box::new(fixture.payment.clone()),
-                payer: Box::new(no_neighbor_account.clone()),
+                payment: witness(&fixture.payment),
+                payer: Box::new(no_neighbor_account),
             },
             Challenge::HigherShardTip {
-                batch: fixture.batch,
-                payment: Box::new(fixture.payment.clone()),
-                recipient: Box::new(lookup(&fixture, &recipient)),
-                shard: Box::new(present_shard),
+                payment: witness(&fixture.payment),
+                recipient: Box::new(higher_shard_tip_lookup(&fixture, &recipient, 0)),
             },
             Challenge::HigherShardTip {
-                batch: fixture.batch,
-                payment: Box::new(fixture.payment.clone()),
-                recipient: Box::new(lookup(&fixture, &fixture.dormant.public_key())),
-                shard: Box::new(absent_shard),
+                payment: witness(&fixture.payment),
+                recipient: Box::new(higher_shard_tip_lookup(&fixture, &recipient, 9)),
             },
             Challenge::HigherShardTip {
-                batch: fixture.batch,
-                payment: Box::new(fixture.payment.clone()),
-                recipient: Box::new(no_neighbor_account),
-                shard: Box::new(no_neighbor_shard),
+                payment: witness(&fixture.payment),
+                recipient: Box::new(higher_shard_tip_lookup(
+                    &fixture,
+                    &fixture.dormant.public_key(),
+                    9,
+                )),
+            },
+            Challenge::HigherShardTip {
+                payment: witness(&fixture.payment),
+                recipient: Box::new(no_neighbor_change),
             },
             Challenge::InconsistentReceiptRange {
-                batch: fixture.batch,
-                upper: Box::new(fixture.payment.clone()),
+                upper: witness(&fixture.payment),
                 lower: RangeLower::ShardStart,
             },
             Challenge::InconsistentReceiptRange {
-                batch: fixture.batch,
-                upper: Box::new(fixture.payment.clone()),
-                lower: RangeLower::Payment(Box::new(fixture.payment.clone())),
+                upper: witness(&fixture.payment),
+                lower: RangeLower::from_payment(&fixture.payment),
             },
-            Challenge::ReceiptFork {
-                batch: fixture.batch,
-                left: Box::new(fixture.payment.clone()),
-                right: Box::new(fixture.payment.clone()),
-            },
+            Challenge::receipt_fork(fixture.payment.clone(), fixture.payment.clone()),
         ];
 
         for challenge in challenges {
@@ -1726,18 +2415,429 @@ mod tests {
     }
 
     #[test]
+    fn paired_witness_sizes_and_relation_tags_are_exact() {
+        let fixture = fixture();
+        assert_eq!(VerifyingKey::SIZE, 32);
+        assert_eq!(Signature::SIZE, 64);
+
+        let range = Challenge::InconsistentReceiptRange {
+            upper: witness(&fixture.payment),
+            lower: RangeLower::from_payment(&fixture.payment),
+        };
+        assert_eq!(range.encode_size(), 426);
+
+        let same_send_payment = payment_with_endpoint(
+            fixture.context.payment(),
+            &fixture.operator,
+            fixture.payment.send().clone(),
+            0,
+            11,
+            1,
+        );
+        let same_send = Challenge::receipt_fork(fixture.payment.clone(), same_send_payment.clone());
+        assert!(matches!(
+            &same_send,
+            Challenge::ReceiptFork { fork }
+                if matches!(fork.as_ref(), ReceiptForkWitness::SameSend { .. })
+        ));
+        assert_eq!(same_send.encode_size(), 322);
+
+        let same_index_payment = payment(
+            fixture.context.payment(),
+            &fixture.operator,
+            &fixture.dormant,
+            fixture.recipient.public_key(),
+            10,
+            0,
+            0,
+            0,
+            0,
+        );
+        let same_index = Challenge::receipt_fork(fixture.payment.clone(), same_index_payment);
+        assert!(matches!(
+            &same_index,
+            Challenge::ReceiptFork { fork }
+                if matches!(fork.as_ref(), ReceiptForkWitness::SameIndex { .. })
+        ));
+        assert_eq!(same_index.encode_size(), 418);
+
+        let full_payment = payment(
+            fixture.context.payment(),
+            &fixture.operator,
+            &fixture.dormant,
+            fixture.recipient.public_key(),
+            10,
+            0,
+            4,
+            0,
+            1,
+        );
+        let full = Challenge::receipt_fork(fixture.payment.clone(), full_payment);
+        assert!(matches!(
+            &full,
+            Challenge::ReceiptFork { fork }
+                if matches!(fork.as_ref(), ReceiptForkWitness::Full { .. })
+        ));
+
+        for challenge in [&range, &same_send, &same_index, &full] {
+            let encoded = challenge.encode();
+            assert_eq!(challenge.encode_size(), encoded.len());
+            assert_eq!(TestChallenge::decode(encoded).unwrap(), *challenge);
+        }
+
+        for (challenge, relation) in [(&same_send, 2_u8), (&same_index, 3), (&full, 2)] {
+            let mut encoded = challenge.encode().to_vec();
+            encoded[u8::SIZE] = relation;
+            assert!(TestChallenge::decode(encoded.as_slice()).is_err());
+        }
+
+        let left = PaymentWitness::from_payment(&fixture.payment);
+        let right = PaymentWitness::from_payment(&same_send_payment);
+        let (left, right) = if left.encode() <= right.encode() {
+            (&fixture.payment, &same_send_payment)
+        } else {
+            (&same_send_payment, &fixture.payment)
+        };
+        let noncanonical = Challenge::ReceiptFork {
+            fork: Box::new(ReceiptForkWitness::SameIndex {
+                left: witness(left),
+                right: SameIndexPaymentWitness::from_payment(right),
+            }),
+        };
+        assert!(matches!(
+            adjudicate(&fixture, &noncanonical),
+            Err(ChallengeError::NonCanonicalFork)
+        ));
+    }
+
+    #[test]
+    fn paired_witnesses_verify_every_retained_signature_and_canonical_relation() {
+        let fixture = fixture();
+        let wrong = SigningKey::from_seed(99);
+
+        let invalid_payer = invalid_payer_signature(&fixture.payment, &wrong);
+        let invalid_operator = invalid_operator_signature(&fixture.payment, &wrong);
+        assert_invalid_payer_evidence(
+            &fixture,
+            &Challenge::InconsistentReceiptRange {
+                upper: witness(&fixture.payment),
+                lower: RangeLower::from_payment(&invalid_payer),
+            },
+        );
+        assert_invalid_operator_evidence(
+            &fixture,
+            &Challenge::InconsistentReceiptRange {
+                upper: witness(&fixture.payment),
+                lower: RangeLower::from_payment(&invalid_operator),
+            },
+        );
+
+        let same_send_right = payment_with_endpoint(
+            fixture.context.payment(),
+            &fixture.operator,
+            fixture.payment.send().clone(),
+            0,
+            11,
+            1,
+        );
+        assert_invalid_payer_evidence(
+            &fixture,
+            &Challenge::ReceiptFork {
+                fork: Box::new(ReceiptForkWitness::SameSend {
+                    left: witness(&invalid_payer),
+                    right: ReceiptWitness::from_payment(&same_send_right),
+                }),
+            },
+        );
+        assert_invalid_operator_evidence(
+            &fixture,
+            &Challenge::ReceiptFork {
+                fork: Box::new(ReceiptForkWitness::SameSend {
+                    left: witness(&invalid_operator),
+                    right: ReceiptWitness::from_payment(&same_send_right),
+                }),
+            },
+        );
+        let invalid_right_operator = invalid_operator_signature(&same_send_right, &wrong);
+        assert_invalid_operator_evidence(
+            &fixture,
+            &Challenge::ReceiptFork {
+                fork: Box::new(ReceiptForkWitness::SameSend {
+                    left: witness(&fixture.payment),
+                    right: ReceiptWitness::from_payment(&invalid_right_operator),
+                }),
+            },
+        );
+
+        let same_index_right = payment(
+            fixture.context.payment(),
+            &fixture.operator,
+            &fixture.dormant,
+            fixture.recipient.public_key(),
+            10,
+            0,
+            0,
+            0,
+            0,
+        );
+        let invalid_right_payer = invalid_payer_signature(&same_index_right, &wrong);
+        assert_invalid_payer_evidence(
+            &fixture,
+            &Challenge::ReceiptFork {
+                fork: Box::new(ReceiptForkWitness::SameIndex {
+                    left: witness(&fixture.payment),
+                    right: SameIndexPaymentWitness::from_payment(&invalid_right_payer),
+                }),
+            },
+        );
+        let invalid_right_operator = invalid_operator_signature(&same_index_right, &wrong);
+        assert_invalid_operator_evidence(
+            &fixture,
+            &Challenge::ReceiptFork {
+                fork: Box::new(ReceiptForkWitness::SameIndex {
+                    left: witness(&fixture.payment),
+                    right: SameIndexPaymentWitness::from_payment(&invalid_right_operator),
+                }),
+            },
+        );
+
+        let full_right = payment(
+            fixture.context.payment(),
+            &fixture.operator,
+            &fixture.dormant,
+            fixture.recipient.public_key(),
+            10,
+            0,
+            4,
+            0,
+            1,
+        );
+        let invalid_right_payer = invalid_payer_signature(&full_right, &wrong);
+        assert_invalid_payer_evidence(
+            &fixture,
+            &Challenge::ReceiptFork {
+                fork: Box::new(ReceiptForkWitness::Full {
+                    left: witness(&fixture.payment),
+                    right: witness(&invalid_right_payer),
+                }),
+            },
+        );
+        let invalid_right_operator = invalid_operator_signature(&full_right, &wrong);
+        assert_invalid_operator_evidence(
+            &fixture,
+            &Challenge::ReceiptFork {
+                fork: Box::new(ReceiptForkWitness::Full {
+                    left: witness(&fixture.payment),
+                    right: witness(&invalid_right_operator),
+                }),
+            },
+        );
+
+        for right in [&same_send_right, &same_index_right] {
+            let mut left = PaymentWitness::from_payment(&fixture.payment);
+            let mut right = PaymentWitness::from_payment(right);
+            if left.encode() > right.encode() {
+                core::mem::swap(&mut left, &mut right);
+            }
+            let noncanonical = Challenge::ReceiptFork {
+                fork: Box::new(ReceiptForkWitness::Full {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }),
+            };
+            assert!(matches!(
+                adjudicate(&fixture, &noncanonical),
+                Err(ChallengeError::NonCanonicalFork)
+            ));
+        }
+
+        let mut first = PaymentWitness::from_payment(&fixture.payment);
+        let mut second = PaymentWitness::from_payment(&same_index_right);
+        if first.encode() < second.encode() {
+            core::mem::swap(&mut first, &mut second);
+        }
+        let reversed = Challenge::ReceiptFork {
+            fork: Box::new(ReceiptForkWitness::SameIndex {
+                left: Box::new(first),
+                right: SameIndexPaymentWitness::from_witness(&second),
+            }),
+        };
+        assert!(matches!(
+            adjudicate(&fixture, &reversed),
+            Err(ChallengeError::NonCanonicalFork)
+        ));
+    }
+
+    #[test]
+    fn higher_shard_tip_present_roundtrips_and_omits_reconstructed_root() {
+        let fixture = fixture();
+        let recipient = fixture.recipient.public_key();
+        let position = fixture
+            .change_leaves
+            .binary_search_by(|leaf| leaf.account().cmp(&recipient))
+            .unwrap();
+        let value = fixture.change_leaves[position].value();
+        let proof = fixture.change_tree.opening(position as u32).unwrap();
+        let shard = fixture.shards[position].lookup::<Sha256>(0).unwrap();
+        let old = ChangeLookup::<VerifyingKey, ShaDigest>::Present(Box::new(ChangeOpening {
+            value: value.clone(),
+            proof: proof.clone(),
+        }));
+        let composed = HigherShardTipLookup::Present {
+            value: value.core(),
+            proof,
+            shard: shard.clone(),
+        };
+
+        let encoded = composed.encode();
+        assert_eq!(composed.encode_size(), encoded.len());
+        assert_eq!(
+            HigherShardTipLookup::<VerifyingKey, ShaDigest>::decode(encoded).unwrap(),
+            composed
+        );
+        assert_eq!(
+            composed.encode_size() + ShaDigest::SIZE,
+            old.encode_size() + shard.encode_size()
+        );
+        assert_eq!(
+            composed
+                .resolve::<Sha256>(&fixture.roots.change, &recipient, 0)
+                .unwrap(),
+            Some(CreditTip {
+                shard: 0,
+                cumulative_credit: 10,
+                index: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn higher_shard_tip_parent_absence_omits_child_and_empty_child_stays_present() {
+        let fixture = fixture();
+        let dormant = fixture.dormant.public_key();
+        let absence = change_absence(&fixture, &dormant);
+        let old = ChangeLookup::<VerifyingKey, ShaDigest>::Absent(absence.clone());
+        let absent = HigherShardTipLookup::<VerifyingKey, ShaDigest>::Absent(absence);
+
+        assert_eq!(absent.encode(), old.encode());
+        assert_eq!(
+            absent
+                .resolve::<Sha256>(&fixture.roots.change, &dormant, 0)
+                .unwrap(),
+            None
+        );
+
+        let recipient = fixture.recipient.public_key();
+        let position = fixture
+            .shards
+            .binary_search_by(|set| set.recipient().cmp(&recipient))
+            .unwrap();
+        let child = fixture.shards[position].lookup::<Sha256>(0).unwrap();
+        let child_encoded = child.encode();
+        let mut with_child = absent.encode().to_vec();
+        with_child.extend_from_slice(child_encoded.as_ref());
+        assert!(matches!(
+            HigherShardTipLookup::<VerifyingKey, ShaDigest>::decode(with_child.as_slice()),
+            Err(CodecError::ExtraData(remaining)) if remaining == child_encoded.len()
+        ));
+
+        let payer = fixture.payer.public_key();
+        let empty_child = higher_shard_tip_lookup(&fixture, &payer, 7);
+        let decoded =
+            HigherShardTipLookup::<VerifyingKey, ShaDigest>::decode(empty_child.encode()).unwrap();
+        assert!(matches!(
+            &decoded,
+            HigherShardTipLookup::Present {
+                shard: CreditTipLookup::Absent {
+                    predecessor: None,
+                    successor: None,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            decoded
+                .resolve::<Sha256>(&fixture.roots.change, &payer, 7)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn higher_shard_tip_rejects_tampered_parent_and_child_evidence() {
+        let fixture = fixture();
+        let recipient = fixture.recipient.public_key();
+        let position = fixture
+            .change_leaves
+            .binary_search_by(|leaf| leaf.account().cmp(&recipient))
+            .unwrap();
+        let composed = higher_shard_tip_lookup(&fixture, &recipient, 0);
+        assert!(
+            composed
+                .resolve::<Sha256>(&fixture.roots.change, &recipient, 0)
+                .is_ok()
+        );
+
+        let rejects = |lookup: &HigherShardTipLookup<VerifyingKey, ShaDigest>| {
+            assert!(
+                lookup
+                    .resolve::<Sha256>(&fixture.roots.change, &recipient, 0)
+                    .is_err()
+            );
+        };
+
+        let mut child_value = composed.clone();
+        let HigherShardTipLookup::Present {
+            shard: CreditTipLookup::Present { value, .. },
+            ..
+        } = &mut child_value
+        else {
+            panic!("fixture shard must be present");
+        };
+        value.cumulative_credit = value.cumulative_credit.checked_add(1).unwrap();
+        rejects(&child_value);
+
+        let mut child_proof = composed.clone();
+        let HigherShardTipLookup::Present {
+            shard: CreditTipLookup::Present { opening, .. },
+            ..
+        } = &mut child_proof
+        else {
+            panic!("fixture shard must be present");
+        };
+        *opening = fixture.change_tree.opening(position as u32).unwrap();
+        rejects(&child_proof);
+
+        let other_position = usize::from(position == 0);
+        let mut parent_value = composed.clone();
+        let HigherShardTipLookup::Present { value, .. } = &mut parent_value else {
+            panic!("fixture recipient must be present");
+        };
+        let other_value = fixture.change_leaves[other_position].value().core();
+        assert_ne!(*value, other_value);
+        *value = other_value;
+        rejects(&parent_value);
+
+        let mut parent_proof = composed;
+        let HigherShardTipLookup::Present { proof, .. } = &mut parent_proof else {
+            panic!("fixture recipient must be present");
+        };
+        *proof = fixture.change_tree.opening(other_position as u32).unwrap();
+        rejects(&parent_proof);
+    }
+
+    #[test]
     fn wire_errors_keep_field_and_tag_precedence() {
         let fixture = fixture();
         let challenge = Challenge::LatestAcknowledgedSend {
-            batch: fixture.batch,
-            payment: Box::new(fixture.payment.clone()),
+            payment: witness(&fixture.payment),
             payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
         };
         let mut invalid_tag = challenge.encode().to_vec();
         invalid_tag[0] = 99;
-        let batch_end = u8::SIZE + BatchId::<ShaDigest>::SIZE;
         assert!(matches!(
-            TestChallenge::decode(&invalid_tag[..batch_end - 1]),
+            TestChallenge::decode(&invalid_tag[..0]),
             Err(CodecError::EndOfBuffer)
         ));
         assert!(matches!(
@@ -1745,46 +2845,67 @@ mod tests {
             Err(CodecError::InvalidEnum(99))
         ));
 
-        let mut row = fixture.rows[0].encode().to_vec();
-        row[VerifyingKey::SIZE + AccountState::SIZE * 2] = 2;
+        let state = state_lookup(&fixture, &fixture.dormant.public_key());
+        let optional_change_offset = u8::SIZE + state.encode_size();
+        let mut account_lookup = AccountLookup::<VerifyingKey, ShaDigest>::Absent {
+            state: Box::new(state),
+            change: change_absence(&fixture, &fixture.dormant.public_key()),
+        }
+        .encode()
+        .to_vec();
+        account_lookup[optional_change_offset] = 3;
         assert!(matches!(
-            AccountRow::<VerifyingKey, ShaDigest>::decode(row.as_slice()),
+            TestLookup::decode(account_lookup.as_slice()),
             Err(CodecError::InvalidBool)
         ));
 
-        let state = StateOpening {
-            leaf: fixture.leaves[0].clone(),
-            proof: fixture.state_tree.opening(0).unwrap(),
-        };
-        let optional_row_offset = u8::SIZE * 2 + state.encode_size();
-        let mut account_lookup = AccountLookup::<VerifyingKey, ShaDigest>::Absent {
-            state: Box::new(StateLookup::Present(Box::new(state))),
+        let empty_tips = Vec::<CreditTip>::new();
+        let empty_credit_tree = tree(VectorKind::CreditTip, &empty_tips);
+        let mut shard_lookup = CreditTipLookup::<ShaDigest>::Absent {
             predecessor: None,
             successor: None,
+            opening: empty_credit_tree.range_opening(0, 0).unwrap(),
         }
         .encode()
         .to_vec();
-        account_lookup[optional_row_offset] = 3;
+        shard_lookup[u8::SIZE] = 4;
         assert!(matches!(
-            TestLookup::decode(account_lookup.as_slice()),
-            Err(CodecError::InvalidEnum(3))
+            CreditTipLookup::<ShaDigest>::decode(shard_lookup.as_slice()),
+            Err(CodecError::InvalidBool)
+        ));
+        assert!(matches!(
+            RangeLower::<VerifyingKey>::decode([9].as_slice()),
+            Err(CodecError::InvalidEnum(9))
+        ));
+    }
+
+    #[test]
+    fn payment_witness_decode_roundtrip_and_signature_tampering() {
+        let fixture = fixture();
+        let witness = PaymentWitness::from_payment(&fixture.payment);
+        let encoded = witness.encode();
+        assert_eq!(
+            PaymentWitness::<VerifyingKey>::decode(encoded.clone()).unwrap(),
+            witness
+        );
+        assert_eq!(encoded.len(), PaymentWitness::<VerifyingKey>::SIZE);
+
+        let payer_signature = VerifyingKey::SIZE * 2 + u64::SIZE * 2;
+        let mut tampered = encoded.to_vec();
+        tampered[payer_signature] ^= 1;
+        let tampered = PaymentWitness::<VerifyingKey>::decode(tampered.as_slice()).unwrap();
+        assert!(matches!(
+            tampered.reconstruct::<Sha256, ShaDigest>(fixture.context.payment()),
+            Err(PaymentError::InvalidPayerSignature)
         ));
 
-        let mut shard_lookup = ShardLookup::<VerifyingKey, ShaDigest>::Absent {
-            shard: 7,
-            predecessor: None,
-            successor: None,
-        }
-        .encode()
-        .to_vec();
-        shard_lookup[u8::SIZE + u64::SIZE] = 4;
+        let operator_signature = VerifyingKey::SIZE * 2 + u64::SIZE * 5 + Signature::SIZE;
+        let mut tampered = encoded.to_vec();
+        tampered[operator_signature] ^= 1;
+        let tampered = PaymentWitness::<VerifyingKey>::decode(tampered.as_slice()).unwrap();
         assert!(matches!(
-            ShardLookup::<VerifyingKey, ShaDigest>::decode(shard_lookup.as_slice()),
-            Err(CodecError::InvalidEnum(4))
-        ));
-        assert!(matches!(
-            RangeLower::<VerifyingKey, ShaDigest>::decode([9].as_slice()),
-            Err(CodecError::InvalidEnum(9))
+            tampered.reconstruct::<Sha256, ShaDigest>(fixture.context.payment()),
+            Err(PaymentError::InvalidOperatorSignature)
         ));
     }
 
@@ -1793,40 +2914,21 @@ mod tests {
         let fixture = fixture();
         let rayon = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
         let recipient = fixture.recipient.public_key();
-        let recipient_position = fixture
-            .shards
-            .binary_search_by(|set| set.recipient().cmp(&recipient))
-            .unwrap();
-        let shard = || {
-            Box::new(
-                fixture.shards[recipient_position]
-                    .lookup::<Sha256>(0)
-                    .unwrap(),
-            )
-        };
 
         let valid = [
             Challenge::LatestAcknowledgedSend {
-                batch: fixture.batch,
-                payment: Box::new(fixture.payment.clone()),
+                payment: witness(&fixture.payment),
                 payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
             },
             Challenge::HigherShardTip {
-                batch: fixture.batch,
-                payment: Box::new(fixture.payment.clone()),
-                recipient: Box::new(lookup(&fixture, &recipient)),
-                shard: shard(),
+                payment: witness(&fixture.payment),
+                recipient: Box::new(higher_shard_tip_lookup(&fixture, &recipient, 0)),
             },
             Challenge::InconsistentReceiptRange {
-                batch: fixture.batch,
-                upper: Box::new(fixture.payment.clone()),
+                upper: witness(&fixture.payment),
                 lower: RangeLower::ShardStart,
             },
-            Challenge::receipt_fork(
-                fixture.batch,
-                fixture.payment.clone(),
-                fixture.payment.clone(),
-            ),
+            Challenge::receipt_fork(fixture.payment.clone(), fixture.payment.clone()),
         ];
         for challenge in &valid {
             assert_eq!(
@@ -1840,25 +2942,22 @@ mod tests {
         let invalid_payer = invalid_payer_signature(&fixture.payment, &wrong);
         let malformed = [
             Challenge::LatestAcknowledgedSend {
-                batch: fixture.batch,
-                payment: Box::new(invalid_operator.clone()),
+                payment: witness(&invalid_operator),
                 payer: Box::new(lookup(&fixture, &recipient)),
             },
             Challenge::HigherShardTip {
-                batch: fixture.batch,
-                payment: Box::new(invalid_operator.clone()),
-                recipient: Box::new(lookup(&fixture, &fixture.payer.public_key())),
-                shard: shard(),
+                payment: witness(&invalid_operator),
+                recipient: Box::new(higher_shard_tip_lookup(&fixture, &recipient, 0)),
             },
             Challenge::InconsistentReceiptRange {
-                batch: fixture.batch,
-                upper: Box::new(invalid_operator.clone()),
-                lower: RangeLower::Payment(Box::new(invalid_payer.clone())),
+                upper: witness(&invalid_operator),
+                lower: RangeLower::from_payment(&invalid_payer),
             },
             Challenge::ReceiptFork {
-                batch: fixture.batch,
-                left: Box::new(invalid_operator),
-                right: Box::new(invalid_payer),
+                fork: Box::new(ReceiptForkWitness::SameIndex {
+                    left: witness(&invalid_operator),
+                    right: SameIndexPaymentWitness::from_payment(&invalid_payer),
+                }),
             },
         ];
         for challenge in &malformed {
@@ -1870,12 +2969,8 @@ mod tests {
             ));
         }
 
-        let mut expired = malformed[0].clone();
-        if let Challenge::LatestAcknowledgedSend { batch, .. } = &mut expired {
-            *batch = BatchId::new(Sha256::hash(&[b"wrong-batch"]));
-        }
         assert!(matches!(
-            adjudicate_strategies(&fixture, 101, &expired, &rayon),
+            adjudicate_strategies(&fixture, 101, &malformed[0], &rayon),
             Err(ChallengeError::Expired)
         ));
     }
@@ -1895,8 +2990,7 @@ mod tests {
             1,
         );
         let challenge = Challenge::LatestAcknowledgedSend {
-            batch: fixture.batch,
-            payment: Box::new(later),
+            payment: witness(&later),
             payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
         };
         assert_eq!(
@@ -1916,8 +3010,7 @@ mod tests {
             0,
         );
         let challenge = Challenge::LatestAcknowledgedSend {
-            batch: fixture.batch,
-            payment: Box::new(omitted),
+            payment: witness(&omitted),
             payer: Box::new(lookup(&fixture, &fixture.dormant.public_key())),
         };
         assert_eq!(
@@ -1926,8 +3019,7 @@ mod tests {
         );
 
         let represented = Challenge::LatestAcknowledgedSend {
-            batch: fixture.batch,
-            payment: Box::new(fixture.payment.clone()),
+            payment: witness(&fixture.payment),
             payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
         };
         assert_eq!(
@@ -1951,8 +3043,7 @@ mod tests {
             0,
         );
         let challenge = Challenge::LatestAcknowledgedSend {
-            batch: fixture.batch,
-            payment: Box::new(conflict),
+            payment: witness(&conflict),
             payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
         };
         assert_eq!(
@@ -1976,19 +3067,9 @@ mod tests {
             1,
         );
         let recipient = fixture.recipient.public_key();
-        let recipient_position = fixture
-            .shards
-            .binary_search_by(|set| set.recipient().cmp(&recipient))
-            .unwrap();
         let challenge = Challenge::HigherShardTip {
-            batch: fixture.batch,
-            payment: Box::new(later),
-            recipient: Box::new(lookup(&fixture, &recipient)),
-            shard: Box::new(
-                fixture.shards[recipient_position]
-                    .lookup::<Sha256>(0)
-                    .unwrap(),
-            ),
+            payment: witness(&later),
+            recipient: Box::new(higher_shard_tip_lookup(&fixture, &recipient, 0)),
         };
         assert_eq!(
             adjudicate(&fixture, &challenge).unwrap(),
@@ -2013,14 +3094,8 @@ mod tests {
                 index,
             );
             let challenge = Challenge::HigherShardTip {
-                batch: fixture.batch,
-                payment: Box::new(retained),
-                recipient: Box::new(lookup(&fixture, &recipient)),
-                shard: Box::new(
-                    fixture.shards[recipient_position]
-                        .lookup::<Sha256>(0)
-                        .unwrap(),
-                ),
+                payment: witness(&retained),
+                recipient: Box::new(higher_shard_tip_lookup(&fixture, &recipient, 0)),
             };
             assert_eq!(
                 adjudicate(&fixture, &challenge).unwrap(),
@@ -2040,14 +3115,8 @@ mod tests {
             0,
         );
         let challenge = Challenge::HigherShardTip {
-            batch: fixture.batch,
-            payment: Box::new(absent_shard),
-            recipient: Box::new(lookup(&fixture, &recipient)),
-            shard: Box::new(
-                fixture.shards[recipient_position]
-                    .lookup::<Sha256>(9)
-                    .unwrap(),
-            ),
+            payment: witness(&absent_shard),
+            recipient: Box::new(higher_shard_tip_lookup(&fixture, &recipient, 9)),
         };
         assert_eq!(
             adjudicate(&fixture, &challenge).unwrap(),
@@ -2069,9 +3138,8 @@ mod tests {
         let impossible =
             payment_with_endpoint(fixture.context.payment(), &fixture.operator, send, 0, 14, 2);
         let challenge = Challenge::InconsistentReceiptRange {
-            batch: fixture.batch,
-            upper: Box::new(impossible),
-            lower: RangeLower::Payment(Box::new(fixture.payment.clone())),
+            upper: witness(&impossible),
+            lower: RangeLower::from_payment(&fixture.payment),
         };
         assert_eq!(
             adjudicate(&fixture, &challenge).unwrap(),
@@ -2094,8 +3162,7 @@ mod tests {
             1,
         );
         let challenge = Challenge::InconsistentReceiptRange {
-            batch: fixture.batch,
-            upper: Box::new(impossible),
+            upper: witness(&impossible),
             lower: RangeLower::ShardStart,
         };
         assert_eq!(
@@ -2104,8 +3171,7 @@ mod tests {
         );
 
         let feasible = Challenge::InconsistentReceiptRange {
-            batch: fixture.batch,
-            upper: Box::new(fixture.payment.clone()),
+            upper: witness(&fixture.payment),
             lower: RangeLower::ShardStart,
         };
         assert_eq!(
@@ -2126,8 +3192,7 @@ mod tests {
             0,
         );
         let challenge = Challenge::InconsistentReceiptRange {
-            batch: fixture.batch,
-            upper: Box::new(zero_endpoint),
+            upper: witness(&zero_endpoint),
             lower: RangeLower::ShardStart,
         };
 
@@ -2155,7 +3220,7 @@ mod tests {
             0,
             0,
         );
-        let challenge = Challenge::receipt_fork(fixture.batch, fixture.payment.clone(), other);
+        let challenge = Challenge::receipt_fork(fixture.payment.clone(), other);
         assert_eq!(
             adjudicate(&fixture, &challenge).unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
@@ -2169,17 +3234,13 @@ mod tests {
             10,
             1,
         );
-        let challenge = Challenge::receipt_fork(fixture.batch, fixture.payment.clone(), reused);
+        let challenge = Challenge::receipt_fork(fixture.payment.clone(), reused);
         assert_eq!(
             adjudicate(&fixture, &challenge).unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
 
-        let duplicate = Challenge::receipt_fork(
-            fixture.batch,
-            fixture.payment.clone(),
-            fixture.payment.clone(),
-        );
+        let duplicate = Challenge::receipt_fork(fixture.payment.clone(), fixture.payment.clone());
         assert_eq!(
             adjudicate(&fixture, &duplicate).unwrap(),
             Verdict::NoContradiction
@@ -2187,11 +3248,10 @@ mod tests {
     }
 
     #[test]
-    fn challenges_are_batch_bound_deadline_inclusive_and_bounded() {
+    fn challenges_are_deadline_inclusive_bounded_and_header_bound() {
         let fixture = fixture();
         let challenge = Challenge::LatestAcknowledgedSend {
-            batch: fixture.batch,
-            payment: Box::new(fixture.payment.clone()),
+            payment: witness(&fixture.payment),
             payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
         };
         let encoded = challenge.encode();
@@ -2215,19 +3275,7 @@ mod tests {
             Err(ChallengeError::Expired)
         ));
         let mut other_roots = fixture.roots;
-        other_roots.closing.digest = Sha256::hash(&[b"other-closing"]);
-        let other_header = Header::new::<Sha256, _>(fixture.context.payment(), &other_roots);
-        assert!(matches!(
-            super::adjudicate::<Sha256, _>(
-                &fixture.context,
-                &other_header,
-                &other_roots,
-                100,
-                &challenge,
-            ),
-            Err(ChallengeError::WrongBatch)
-        ));
-
+        other_roots.successor.digest = Sha256::hash(&[b"other-successor"]);
         assert!(matches!(
             super::adjudicate::<Sha256, _>(
                 &fixture.context,
@@ -2241,35 +3289,7 @@ mod tests {
     }
 
     #[test]
-    fn adjudication_rejects_batch_id_mixed_with_another_header() {
-        let fixture = fixture();
-        let mut roots_a = fixture.roots;
-        roots_a.closing.digest = Sha256::hash(&[b"header-a-closing"]);
-        let header_a = Header::new::<Sha256, _>(fixture.context.payment(), &roots_a);
-        let header_b = fixture.header;
-        let batch_a = header_a.batch_id::<Sha256>();
-        assert_ne!(batch_a, header_b.batch_id::<Sha256>());
-
-        let challenge = Challenge::LatestAcknowledgedSend {
-            batch: batch_a,
-            payment: Box::new(fixture.payment.clone()),
-            payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
-        };
-        let result = super::adjudicate::<Sha256, _>(
-            &fixture.context,
-            &header_b,
-            &fixture.roots,
-            fixture.context.challenge_deadline(),
-            &challenge,
-        );
-        assert!(
-            matches!(&result, Err(ChallengeError::WrongBatch)),
-            "a batch ID from header A must not authorize header B inputs: {result:?}"
-        );
-    }
-
-    #[test]
-    fn adjudication_rejects_another_same_liability_opening_root() {
+    fn adjudication_rejects_another_same_liability_predecessor_root() {
         let fixture = fixture();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
@@ -2296,14 +3316,12 @@ mod tests {
         .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
         .unwrap();
         assert_eq!(other.payment(), fixture.context.payment());
-        assert_ne!(other.opening_root(), fixture.context.opening_root());
+        assert_ne!(other.predecessor_root(), fixture.context.predecessor_root());
 
-        let mut roots = fixture.roots;
-        roots.opening = *other.opening_root();
-        let header = Header::new::<Sha256, _>(other.payment(), &roots);
+        let roots = fixture.roots;
+        let header = Header::new::<Sha256, _>(&other, &roots);
         let challenge = Challenge::LatestAcknowledgedSend {
-            batch: header.batch_id::<Sha256>(),
-            payment: Box::new(fixture.payment.clone()),
+            payment: witness(&fixture.payment),
             payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
         };
         let result = super::adjudicate::<Sha256, _>(
@@ -2315,7 +3333,7 @@ mod tests {
         );
         assert!(
             matches!(result, Err(ChallengeError::HeaderRoot)),
-            "a header from another bound opening root was accepted: {result:?}"
+            "a header from another bound predecessor root was accepted: {result:?}"
         );
     }
 
@@ -2323,14 +3341,14 @@ mod tests {
     fn lookup_rejects_nonadjacent_absence_brackets() {
         let fixture = fixture();
         let mut lookup = lookup(&fixture, &fixture.dormant.public_key());
-        let AccountLookup::Absent {
+        let AccountLookup::Absent { change, .. } = &mut lookup else {
+            panic!("dormant account must be absent from the change vector");
+        };
+        let ChangeAbsence {
             predecessor,
             successor,
             ..
-        } = &mut lookup
-        else {
-            panic!("dormant account must be absent from the change vector");
-        };
+        } = change;
         if predecessor.is_some() {
             *predecessor = None;
         } else {
@@ -2338,7 +3356,7 @@ mod tests {
         }
         assert!(matches!(
             lookup.resolve::<Sha256>(
-                &fixture.roots.opening,
+                fixture.context.predecessor_root(),
                 &fixture.roots.change,
                 &fixture.dormant.public_key(),
             ),
@@ -2349,6 +3367,23 @@ mod tests {
     #[test]
     fn state_lookup_proves_ordered_nonmembership() {
         let fixture = fixture();
+        let payer = fixture.payer.public_key();
+        let present = state_lookup(&fixture, &payer);
+        assert_eq!(
+            present
+                .resolve::<Sha256>(fixture.context.predecessor_root(), &payer)
+                .unwrap(),
+            Some(state(100))
+        );
+        assert!(
+            present
+                .resolve::<Sha256>(
+                    fixture.context.predecessor_root(),
+                    &fixture.recipient.public_key(),
+                )
+                .is_err()
+        );
+
         let account = (1_000..)
             .map(|seed| SigningKey::from_seed(seed).public_key())
             .find(|account| {
@@ -2358,36 +3393,25 @@ mod tests {
                     .is_err()
             })
             .unwrap();
-        let insertion = fixture
-            .leaves
-            .binary_search_by(|leaf| leaf.account.cmp(&account))
-            .unwrap_err();
-        let opening = |position: usize| {
-            Box::new(StateOpening {
-                leaf: fixture.leaves[position].clone(),
-                proof: fixture.state_tree.opening(position as u32).unwrap(),
-            })
-        };
-        let lookup = StateLookup::Absent {
-            predecessor: insertion.checked_sub(1).map(opening),
-            successor: (insertion < fixture.leaves.len()).then(|| opening(insertion)),
-        };
+        let mut lookup = state_lookup(&fixture, &account);
 
         assert_eq!(
             lookup
-                .resolve::<Sha256>(&fixture.roots.opening, &account)
+                .resolve::<Sha256>(fixture.context.predecessor_root(), &account)
                 .unwrap(),
             None
         );
 
-        let mut nonadjacent = lookup;
-        match &mut nonadjacent {
-            StateLookup::Absent { predecessor, .. } if predecessor.is_some() => *predecessor = None,
-            StateLookup::Absent { successor, .. } if successor.is_some() => *successor = None,
-            _ => panic!("a nonempty state tree has an absence guard"),
+        let StateLookup::Absent(absence) = &mut lookup else {
+            panic!("the generated account is absent from the state tree");
+        };
+        if absence.predecessor.is_some() {
+            absence.predecessor = None;
+        } else {
+            absence.successor = None;
         }
         assert!(matches!(
-            nonadjacent.resolve::<Sha256>(&fixture.roots.opening, &account),
+            lookup.resolve::<Sha256>(fixture.context.predecessor_root(), &account),
             Err(ChallengeError::LookupOrder)
         ));
     }
