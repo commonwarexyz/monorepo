@@ -128,24 +128,22 @@ impl Spinner {
     }
 
     /// Spin for up to `budget` iterations, checking `condition` each time.
-    /// Returns `true` if the condition was met (hit), `false` if the budget
-    /// expired (miss). Adapts the budget internally based on the outcome.
-    /// Returns `false` immediately without calling `condition` or adapting
-    /// state when the budget is zero (spinning disabled).
+    /// Adapts the budget internally based on whether the condition was met
+    /// (hit) or the budget expired (miss). Returns immediately without calling
+    /// `condition` or adapting state when the budget is zero (spinning disabled).
     #[inline]
-    pub fn spin(&mut self, mut condition: impl FnMut() -> bool) -> bool {
+    pub fn spin(&mut self, mut condition: impl FnMut() -> bool) {
         if self.budget == 0 {
-            return false;
+            return;
         }
         for _ in 0..self.budget {
             if condition() {
                 self.on_hit();
-                return true;
+                return;
             }
             core::hint::spin_loop();
         }
         self.on_miss();
-        false
     }
 
     /// Work arrived during spin. Reward by growing the budget.
@@ -227,26 +225,13 @@ mod tests {
     }
 
     #[test]
-    fn test_spin_immediate_hit() {
-        let mut s = Spinner::new(&cfg(), || false);
-        assert!(s.spin(|| true));
-    }
-
-    #[test]
-    fn test_spin_miss() {
-        let mut s = Spinner::new(&cfg(), || false);
-        assert!(!s.spin(|| false));
-    }
-
-    #[test]
     fn test_spin_delayed_hit() {
         let mut s = Spinner::new(&cfg(), || false);
         let mut count = 0usize;
-        let hit = s.spin(|| {
+        s.spin(|| {
             count += 1;
             count >= 50
         });
-        assert!(hit);
         assert_eq!(count, 50);
     }
 
@@ -346,6 +331,6 @@ mod tests {
             || panic!("disabled spinner calibrated"),
         );
         s.on_wake(Duration::ZERO);
-        assert!(!s.spin(|| panic!("disabled spinner condition invoked")));
+        s.spin(|| panic!("disabled spinner condition invoked"));
     }
 }
