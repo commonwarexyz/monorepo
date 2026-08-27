@@ -32,13 +32,6 @@ use std::time::{Duration, Instant};
 /// sizes are rounded up to the next power of two before validation.
 pub const MAX_RING_SIZE: u32 = 32_768;
 
-/// Largest relative wait representable by Linux's signed nanosecond clock.
-///
-/// Longer user-space deadlines remain intact. The event loop wakes at this
-/// boundary and recomputes their remaining duration instead of overflowing
-/// the kernel timespec conversion.
-const MAX_KERNEL_WAIT: Duration = Duration::from_nanos(i64::MAX as u64);
-
 /// Round and validate a requested submission queue size before any
 /// size-proportional driver state is allocated.
 fn validated_ring_size(size: u32) -> u32 {
@@ -61,11 +54,6 @@ pub(crate) fn validate_ring_config(cfg: &RingConfig, max_request_timeout: Durati
     TimeoutWheel::validate_layout(max_request_timeout, cfg.timeout_wheel_tick);
     Spinner::validate_config(&cfg.idle_spinner);
     size
-}
-
-/// Bound one relative kernel wait without changing its user-space deadline.
-fn bounded_kernel_wait(timeout: Duration) -> Duration {
-    timeout.min(MAX_KERNEL_WAIT)
 }
 
 /// Packed `io_uring` `user_data` value.
@@ -906,7 +894,6 @@ impl IoUringLoop {
         let result = timeout.map_or_else(
             || ring.submit_and_wait(want).map(|_| ()),
             |timeout| {
-                let timeout = bounded_kernel_wait(timeout);
                 let ts = Timespec::new()
                     .sec(timeout.as_secs())
                     .nsec(timeout.subsec_nanos());

@@ -48,36 +48,6 @@ fn test_ring_size_rejects_rounded_size_above_linux_limit() {
 }
 
 #[test]
-fn test_kernel_wait_bounds_duration_max() {
-    assert_eq!(bounded_kernel_wait(Duration::MAX), MAX_KERNEL_WAIT);
-    assert_eq!(bounded_kernel_wait(MAX_KERNEL_WAIT), MAX_KERNEL_WAIT);
-    assert_eq!(
-        bounded_kernel_wait(Duration::from_millis(1)),
-        Duration::from_millis(1)
-    );
-
-    let mut registry = Registry::default();
-    let (mut ring, _handle, ioloop) = IoUringLoop::new(
-        RingConfig::default(),
-        Duration::from_secs(60),
-        &mut registry,
-    )
-    .expect("io_uring creation should succeed");
-    let entry = io_uring::opcode::Nop::new().build();
-    // SAFETY: the NOP references no external memory, and `entry` remains
-    // alive until the submission queue has copied it.
-    unsafe {
-        ring.submission()
-            .push(&entry)
-            .expect("ring should have submission capacity");
-    }
-    ioloop
-        .submit_and_wait(&mut ring, 1, Some(Duration::MAX))
-        .expect("bounded Duration::MAX wait should reach the kernel");
-    assert_eq!(ring.completion().count(), 1);
-}
-
-#[test]
 fn test_submit_and_wait_non_etime_error_is_not_misclassified() {
     // Verify only ETIME maps to a timed-out wait: other errno values from
     // `io_uring_enter` must propagate as real errors rather than being
