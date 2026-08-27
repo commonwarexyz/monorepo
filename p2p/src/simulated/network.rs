@@ -911,8 +911,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.process_completions(completions);
             },
             Some(message) = self.ingress.recv() else break => {
-                self.handle_ordered_ingress(message, &mut high, &mut low)
-                    .await;
+                self.handle_ordered_ingress(message, &mut high, &mut low).await;
             },
         }
     }
@@ -1321,7 +1320,8 @@ impl<P: PublicKey> Peer<P> {
                 context,
                 on_stopped => {},
                 // Listen for control messages, which are used to register channels
-                Some((channel, guard, result_tx)) = control_receiver.recv() else break => {
+                Some((channel, guard, result_tx)) =
+                    control_receiver.recv() else break => {
                     // Register channel
                     let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
                     if mailboxes.insert(channel, (receiver_tx, guard)).is_some() {
@@ -1329,7 +1329,6 @@ impl<P: PublicKey> Peer<P> {
                     }
                     result_tx.send(receiver_rx).unwrap();
                 },
-
                 // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
                 Some((channel, message)) = inbox_receiver.recv() else break => {
                     // Send message to mailbox

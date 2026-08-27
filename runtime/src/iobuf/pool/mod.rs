@@ -2749,10 +2749,10 @@ mod tests {
                     .with_alignment(NZUsize!(cache_line))
                     .with_max_per_class(NZU32!(32));
             } else {
-                let storage_config =
-                    BufferPoolConfig::for_storage().with_alignment(NZUsize!(page));
-                let network_config =
-                    BufferPoolConfig::for_network().with_alignment(NZUsize!(cache_line));
+                let storage_config = BufferPoolConfig::for_storage()
+                    .with_alignment(NZUsize!(page));
+                let network_config = BufferPoolConfig::for_network()
+                    .with_alignment(NZUsize!(cache_line));
             }
         }
 

@@ -69,11 +69,9 @@ stability_scope!(EPSILON {
     const fn scope_level_4_fn() -> u8 {
         44
     }
-
     struct ScopeLevel4Struct {
         value: u32,
     }
-
     impl ScopeLevel4Struct {
         const fn new() -> Self {
             Self { value: 444 }
@@ -97,11 +95,9 @@ mod stability_scope_level_2_tests {
         pub const fn scope_level_2_fn() -> u8 {
             22
         }
-
         pub struct ScopeLevel2Struct {
             pub value: u32,
         }
-
         impl ScopeLevel2Struct {
             pub const fn new() -> Self {
                 Self { value: 222 }
@@ -122,11 +118,9 @@ stability_scope!(EPSILON, cfg(test) {
     const fn cfg_scope_fn() -> u8 {
         55
     }
-
     struct CfgScopeStruct {
         value: u32,
     }
-
     impl CfgScopeStruct {
         const fn new() -> Self {
             Self { value: 555 }

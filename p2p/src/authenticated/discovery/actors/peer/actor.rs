@@ -202,7 +202,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     _ = context.sleep_until(deadline) => {
                         // Get latest bitset from tracker (also used as ping)
                         tracker.construct(peer.clone());
-
                         // Reset ticker
                         deadline = context.current() + self.gossip_bit_vec_frequency;
                     },
@@ -229,10 +228,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             &rate_limits,
                             &self.sent_messages,
                         )?;
-                        conn_sender
-                            .send_many(batch.drain(..))
-                            .await
-                            .map_err(Error::SendFailed)?;
+                        conn_sender.send_many(batch.drain(..)).await.map_err(Error::SendFailed)?;
                     },
                 }
 

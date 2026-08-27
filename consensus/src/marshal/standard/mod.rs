@@ -28,10 +28,8 @@
 commonware_macros::stability_scope!(ALPHA {
     mod deferred;
     pub use deferred::Deferred;
-
     mod inline;
     pub use inline::Inline;
-
     mod relay;
     mod validation;
 });

@@ -764,7 +764,6 @@ commonware_macros::stability_scope!(ALPHA {
         use crate::fields::goldilocks::F;
         use arbitrary::{Arbitrary, Unstructured};
         use commonware_parallel::Sequential;
-
         #[derive(Debug, Arbitrary)]
         pub enum Plan {
             ExpOne(F),
@@ -776,7 +775,6 @@ commonware_macros::stability_scope!(ALPHA {
             Scale(F, u32, u32),
             Msm2([F; 2], [F; 2]),
         }
-
         impl Plan {
             pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
                 match self {
@@ -816,7 +814,6 @@ commonware_macros::stability_scope!(ALPHA {
                 Ok(())
             }
         }
-
         #[test]
         fn test_fuzz() {
             commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));

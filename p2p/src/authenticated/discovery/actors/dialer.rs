@@ -183,7 +183,6 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                     self.queue.shuffle(self.context.as_mut());
                     next_query_at = dialable.next_query_at;
                 }
-
                 // Set next deadline.
                 dial_deadline = if self.queue.is_empty() {
                     let min = now + self.dial_frequency;
@@ -192,7 +191,6 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                 } else {
                     now + self.dial_frequency
                 };
-
                 // Pop through peers until we can reserve and dial one.
                 while let Some(peer) = self.queue.pop() {
                     if let Some(reservation) = tracker.dial(peer).await {
@@ -284,7 +282,9 @@ mod tests {
             let deadline = start + dial_timeout * 2;
             let message = select! {
                 message = releases.recv() => message.expect("Releaser mailbox closed"),
-                _ = context.sleep_until(deadline) => panic!("Dial reservation was not released"),
+                _ = context.sleep_until(deadline) => {
+                    panic!("Dial reservation was not released")
+                },
             };
             let tracker::Message::Release { metadata } = message else {
                 panic!("Unexpected releaser message");
@@ -349,25 +349,25 @@ mod tests {
             let deadline = context.current() + dial_frequency * 3;
             loop {
                 select! {
-                    msg = tracker_rx.recv() => match msg {
-                        Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(Dialable {
-                                peers: peers.clone(),
-                                next_query_at: Some(context.current()),
-                            });
+                    msg = tracker_rx.recv() => {
+                        match msg {
+                            Some(tracker::Message::Dialable { responder }) => {
+                                let _ = responder
+                                    .send(Dialable {
+                                        peers: peers.clone(),
+                                        next_query_at: Some(context.current()),
+                                    });
+                            }
+                            Some(tracker::Message::Dial { public_key, reservation }) => {
+                                dial_count += 1;
+                                let ingress: Ingress = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000)
+                                    .into();
+                                let metadata = Metadata::Dialer(public_key, ingress);
+                                let res = tracker::Reservation::new(metadata, releaser.clone());
+                                let _ = reservation.send(Some(res));
+                            }
+                            _ => {}
                         }
-                        Some(tracker::Message::Dial {
-                            public_key,
-                            reservation,
-                        }) => {
-                            dial_count += 1;
-                            let ingress: Ingress =
-                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                            let metadata = Metadata::Dialer(public_key, ingress);
-                            let res = tracker::Reservation::new(metadata, releaser.clone());
-                            let _ = reservation.send(Some(res));
-                        }
-                        _ => {}
                     },
                     _ = context.sleep_until(deadline) => break,
                 }
@@ -424,10 +424,11 @@ mod tests {
                     msg = tracker_rx.recv() => {
                         if let Some(tracker::Message::Dialable { responder }) = msg {
                             refresh_count += 1;
-                            let _ = responder.send(Dialable {
-                                peers: Vec::new(),
-                                next_query_at: Some(context.current() + Duration::from_millis(100)),
-                            });
+                            let _ = responder
+                                .send(Dialable {
+                                    peers: Vec::new(),
+                                    next_query_at: Some(context.current() + Duration::from_millis(100)),
+                                });
                         }
                     },
                     _ = context.sleep_until(deadline) => break,
@@ -489,25 +490,25 @@ mod tests {
             let deadline = context.current() + Duration::from_millis(250);
             loop {
                 select! {
-                    msg = tracker_rx.recv() => match msg {
-                        Some(tracker::Message::Dialable { responder }) => {
-                            let _ = responder.send(Dialable {
-                                peers: peers.clone(),
-                                next_query_at: None,
-                            });
+                    msg = tracker_rx.recv() => {
+                        match msg {
+                            Some(tracker::Message::Dialable { responder }) => {
+                                let _ = responder
+                                    .send(Dialable {
+                                        peers: peers.clone(),
+                                        next_query_at: None,
+                                    });
+                            }
+                            Some(tracker::Message::Dial { public_key, reservation }) => {
+                                dial_count += 1;
+                                let ingress: Ingress = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000)
+                                    .into();
+                                let metadata = Metadata::Dialer(public_key, ingress);
+                                let res = tracker::Reservation::new(metadata, releaser.clone());
+                                let _ = reservation.send(Some(res));
+                            }
+                            _ => {}
                         }
-                        Some(tracker::Message::Dial {
-                            public_key,
-                            reservation,
-                        }) => {
-                            dial_count += 1;
-                            let ingress: Ingress =
-                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                            let metadata = Metadata::Dialer(public_key, ingress);
-                            let res = tracker::Reservation::new(metadata, releaser.clone());
-                            let _ = reservation.send(Some(res));
-                        }
-                        _ => {}
                     },
                     _ = context.sleep_until(deadline) => break,
                 }
@@ -560,10 +561,11 @@ mod tests {
                     msg = tracker_rx.recv() => {
                         if let Some(tracker::Message::Dialable { responder }) = msg {
                             refresh_count += 1;
-                            let _ = responder.send(Dialable {
-                                peers: Vec::new(),
-                                next_query_at: None,
-                            });
+                            let _ = responder
+                                .send(Dialable {
+                                    peers: Vec::new(),
+                                    next_query_at: None,
+                                });
                         }
                     },
                     _ = context.sleep_until(deadline) => break,

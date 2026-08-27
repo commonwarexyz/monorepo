@@ -594,10 +594,11 @@ where
             self.context,
             on_start => {
                 // Clean up closed subscriptions.
-                self.block_subscriptions.retain(|_, subscribers| {
-                    subscribers.retain(|tx| !tx.is_closed());
-                    !subscribers.is_empty()
-                });
+                self.block_subscriptions
+                    .retain(|_, subscribers| {
+                        subscribers.retain(|tx| !tx.is_closed());
+                        !subscribers.is_empty()
+                    });
                 self.assigned_shard_verified_subscriptions
                     .retain(|_, subscribers| {
                         subscribers.retain(|tx| !tx.is_closed());
@@ -622,25 +623,17 @@ where
                 if message.response_closed() {
                     continue;
                 }
-
                 match message {
                     Message::Proposed { block, round } => {
                         self.broadcast_shards(&mut sender, round, block);
                     }
-                    Message::Discovered {
-                        commitment,
-                        leader,
-                        round,
-                    } => {
+                    Message::Discovered { commitment, leader, round } => {
                         self.handle_external_proposal(&mut sender, commitment, leader, round);
                     }
                     Message::Notarized { commitment, round } => {
                         self.handle_notarized_commitment(&mut sender, commitment, round);
                     }
-                    Message::GetByCommitment {
-                        commitment,
-                        response,
-                    } => {
+                    Message::GetByCommitment { commitment, response } => {
                         let block = self
                             .records
                             .get(&commitment)
@@ -649,22 +642,19 @@ where
                         response.send_lossy(block);
                     }
                     Message::GetByDigest { digest, response } => {
-                        let block = self.records.values().find_map(|record| {
-                            let block = record.block()?;
-                            (block.digest() == digest).then(|| Arc::clone(block))
-                        });
+                        let block = self
+                            .records
+                            .values()
+                            .find_map(|record| {
+                                let block = record.block()?;
+                                (block.digest() == digest).then(|| Arc::clone(block))
+                            });
                         response.send_lossy(block);
                     }
-                    Message::SubscribeAssignedShardVerified {
-                        commitment,
-                        response,
-                    } => {
+                    Message::SubscribeAssignedShardVerified { commitment, response } => {
                         self.handle_assigned_shard_verified_subscription(commitment, response);
                     }
-                    Message::SubscribeByCommitment {
-                        commitment,
-                        response,
-                    } => {
+                    Message::SubscribeByCommitment { commitment, response } => {
                         self.handle_block_subscription(
                             BlockSubscriptionKey::Commitment(commitment),
                             response,
@@ -2438,7 +2428,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("shard subscription did not resolve after local proposal cache");
-                }
+                },
             }
 
             let block_by_commitment = select! {
@@ -2447,7 +2437,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("block subscription by commitment did not resolve after local proposal cache");
-                }
+                },
             };
             assert_eq!(block_by_commitment.commitment(), commitment);
             assert_eq!(block_by_commitment.height(), coded_block.height());
@@ -2458,7 +2448,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("block subscription by digest did not resolve after local proposal cache");
-                }
+                },
             };
             assert_eq!(block_by_digest.commitment(), commitment);
             assert_eq!(block_by_digest.height(), coded_block.height());
@@ -3582,8 +3572,8 @@ mod tests {
 
                 select! {
                     result = live_sub => {
-                        let reconstructed =
-                            result.expect("later-round reconstruction should remain live");
+                        let reconstructed = result
+                            .expect("later-round reconstruction should remain live");
                         assert_eq!(reconstructed.commitment(), live_commitment);
                     },
                     _ = context.sleep(config.link.latency * 10) => {
@@ -5321,8 +5311,8 @@ mod tests {
 
                 select! {
                     result = certifiable_sub => {
-                        let reconstructed_b =
-                            result.expect("certifiable commitment should remain recoverable");
+                        let reconstructed_b = result
+                            .expect("certifiable commitment should remain recoverable");
                         assert_eq!(reconstructed_b.commitment(), commitment_b);
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {

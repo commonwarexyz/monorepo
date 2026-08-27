@@ -236,11 +236,11 @@ fn fuzz(input: FuzzInput) {
                                 let Ok((sender_pk, message)) = result else {
                                     continue; // Receive error
                                 };
-
                                 // Find the expected queue for this sender-receiver-channel tuple
                                 let expected_msgs_key = (to_idx, sender_pk.clone(), channel_id);
-                                let queue = expected_msgs.get_mut(&expected_msgs_key).expect("Expected queue not found");
-
+                                let queue = expected_msgs
+                                    .get_mut(&expected_msgs_key)
+                                    .expect("Expected queue not found");
                                 // Find message in expected queue
                                 // Messages can be dropped, but if received they must be in order
                                 if let Some(pos) = queue.iter().position(|m| *m == message) {
@@ -249,7 +249,6 @@ fn fuzz(input: FuzzInput) {
                                     for _ in 0..=pos {
                                         queue.pop_front();
                                     }
-
                                     // Clean up empty queue
                                     if queue.is_empty() {
                                         expected_msgs.remove(&expected_msgs_key);
@@ -261,9 +260,10 @@ fn fuzz(input: FuzzInput) {
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
+                            _ = context
+                                .sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
-                            }
+                            },
                         }
                     }
                 }

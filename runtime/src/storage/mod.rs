@@ -58,10 +58,8 @@ stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouri
 });
 stability_scope!(BETA {
     pub mod metered;
-
     mod header;
     pub(crate) use header::{Header, Layout};
-
     /// Validate that a partition name contains only allowed characters.
     ///
     /// Partition names must only contain alphanumeric characters, dashes ('-'),

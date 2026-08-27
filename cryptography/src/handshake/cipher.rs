@@ -47,16 +47,13 @@ impl CounterNonce {
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
         use aws_lc_rs::aead::{self, CHACHA20_POLY1305, LessSafeKey, UnboundKey};
-
         struct Cipher(LessSafeKey);
-
         impl Cipher {
             fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self {
                 let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key)
                     .expect("key size should match algorithm");
                 Self(LessSafeKey::new(unbound_key))
             }
-
             fn encrypt_in_place(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
@@ -69,7 +66,6 @@ cfg_if::cfg_if! {
                     .map_err(|_| Error::EncryptionFailed)?;
                 Ok(tag.as_ref().try_into().expect("tag size mismatch"))
             }
-
             fn decrypt_in_place(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
@@ -84,14 +80,11 @@ cfg_if::cfg_if! {
         }
     } else {
         use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, aead::AeadInOut};
-
         struct Cipher(ChaCha20Poly1305);
-
         impl Cipher {
             fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self {
                 Self(ChaCha20Poly1305::new(key.into()))
             }
-
             fn encrypt_in_place(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
@@ -103,7 +96,6 @@ cfg_if::cfg_if! {
                     .map_err(|_| Error::EncryptionFailed)?;
                 Ok(tag.into())
             }
-
             fn decrypt_in_place(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],

@@ -556,14 +556,12 @@ cfg_if::cfg_if! {
         use crate::types::Round;
         use commonware_cryptography::PublicKey;
         use commonware_p2p::Recipients;
-
         mod actors;
         pub mod config;
         pub use config::{Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
-
         /// The window of views an actor tracks, bounded below by retention
         /// and above by admission policy.
         #[derive(Clone, Copy)]
@@ -577,13 +575,11 @@ cfg_if::cfg_if! {
             /// Term geometry bounding admitted future views.
             pub lookahead: Lookahead,
         }
-
         impl Viewport {
             /// Returns the lowest view retained (genesis is never tracked).
             pub const fn floor(&self) -> View {
                 self.finalized.saturating_sub(self.view_retention)
             }
-
             /// Returns whether `view` is retained: at or above the activity
             /// floor and not genesis. Views up to `view_retention` below
             /// `finalized` are kept so late votes are still reported (even
@@ -591,7 +587,6 @@ cfg_if::cfg_if! {
             pub const fn retains(&self, view: View) -> bool {
                 !view.is_zero() && view.get() >= self.floor().get()
             }
-
             /// Returns whether a vote at `pending` is tracked: retained and no
             /// further ahead than the next view, the first view of the next
             /// term, or a bounded same-term optimistic lookahead view,
@@ -600,7 +595,6 @@ cfg_if::cfg_if! {
             pub fn admits_vote(&self, pending: View) -> bool {
                 self.retains(pending) && self.lookahead.admits(self.current, pending)
             }
-
             /// Returns whether a certificate at `pending` is tracked:
             /// certificates are self-certifying and may arrive from arbitrarily
             /// far ahead (letting a lagging participant fast-forward), so only
@@ -609,7 +603,6 @@ cfg_if::cfg_if! {
                 self.retains(pending)
             }
         }
-
         /// Describes how a payload should be broadcast to the network.
         pub enum Plan<P: PublicKey> {
             /// Initial broadcast of a newly proposed block to all participants.

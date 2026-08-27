@@ -523,12 +523,8 @@ impl crate::Runner for Runner {
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(
-                        config,
-                        &mut iouring_registry,
-                        network_buffer_pool.clone(),
-                    )
-                    .unwrap(),
+                    IoUringNetwork::start(config, &mut iouring_registry, network_buffer_pool.clone())
+                        .unwrap(),
                     &mut runtime_registry,
                 );
             } else {

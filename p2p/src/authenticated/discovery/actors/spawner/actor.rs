@@ -87,70 +87,65 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sink, I: Stream
                 break;
             } => {
                 match msg {
-                    Message::Spawn {
-                        peer,
-                        connection,
-                        reservation,
-                    } => {
+                    Message::Spawn { peer, connection, reservation } => {
                         // Spawn peer
-                        self.context.child("peer").spawn({
-                            let sent_messages = self.sent_messages.clone();
-                            let received_messages = self.received_messages.clone();
-                            let rate_limited = self.rate_limited.clone();
-                            let tracker = tracker.clone();
-                            let router = router.clone();
-                            let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
-                            let info_verifier = self.info_verifier.clone();
-                            move |context| async move {
-                                // Create peer
-                                debug!(?peer, "peer started");
-                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                                    context,
-                                    peer::Config {
-                                        sent_messages,
-                                        received_messages,
-                                        rate_limited,
-                                        mailbox_size: self.mailbox_size,
-                                        send_batch_size: self.send_batch_size,
-                                        gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
-                                        max_peer_set_size: self.max_peer_set_size,
-                                        peer_gossip_max_count: self.peer_gossip_max_count,
-                                        info_verifier,
-                                    },
-                                );
-
-                                // Get greeting from tracker (returns None if not eligible)
-                                let Some(greeting) =
-                                    tracker.connect(peer.clone(), peer_mailbox, is_dialer).await
-                                else {
-                                    debug!(?peer, "peer not eligible");
+                        self.context
+                            .child("peer")
+                            .spawn({
+                                let sent_messages = self.sent_messages.clone();
+                                let received_messages = self.received_messages.clone();
+                                let rate_limited = self.rate_limited.clone();
+                                let tracker = tracker.clone();
+                                let router = router.clone();
+                                let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
+                                let info_verifier = self.info_verifier.clone();
+                                move |context| async move {
+                                    // Create peer
+                                    debug!(?peer, "peer started");
+                                    let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                                        context,
+                                        peer::Config {
+                                            sent_messages,
+                                            received_messages,
+                                            rate_limited,
+                                            mailbox_size: self.mailbox_size,
+                                            send_batch_size: self.send_batch_size,
+                                            gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
+                                            max_peer_set_size: self.max_peer_set_size,
+                                            peer_gossip_max_count: self.peer_gossip_max_count,
+                                            info_verifier,
+                                        },
+                                    );
+                                    // Get greeting from tracker (returns None if not eligible)
+                                    let Some(greeting) = tracker
+                                        .connect(peer.clone(), peer_mailbox, is_dialer)
+                                        .await else {
+                                        debug!(?peer, "peer not eligible");
+                                        drop(reservation);
+                                        return;
+                                    };
+                                    // Register peer with the router (may fail during shutdown)
+                                    let Some(channels) = router
+                                        .ready(peer.clone(), messenger)
+                                        .await else {
+                                        debug!(?peer, "router shut down during peer setup");
+                                        drop(reservation);
+                                        return;
+                                    };
+                                    // Run peer (greeting is sent first before main loop)
+                                    let result = peer_actor
+                                        .run(peer.clone(), greeting, connection, tracker, channels)
+                                        .await;
+                                    // Let the router know the peer has exited
+                                    match result {
+                                        Ok(()) => debug!(?peer, "peer shutdown gracefully"),
+                                        Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
+                                    }
+                                    let _ = router.release(peer);
+                                    // Release the reservation
                                     drop(reservation);
-                                    return;
-                                };
-
-                                // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await
-                                else {
-                                    debug!(?peer, "router shut down during peer setup");
-                                    drop(reservation);
-                                    return;
-                                };
-
-                                // Run peer (greeting is sent first before main loop)
-                                let result = peer_actor
-                                    .run(peer.clone(), greeting, connection, tracker, channels)
-                                    .await;
-
-                                // Let the router know the peer has exited
-                                match result {
-                                    Ok(()) => debug!(?peer, "peer shutdown gracefully"),
-                                    Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
                                 }
-                                let _ = router.release(peer);
-                                // Release the reservation
-                                drop(reservation);
-                            }
-                        });
+                            });
                     }
                 }
             },

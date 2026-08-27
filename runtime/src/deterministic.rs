@@ -261,10 +261,10 @@ impl Config {
                     .with_max_per_class(commonware_utils::NZU32!(32))
                     .with_thread_cache_disabled();
             } else {
-                let network_buffer_pool_cfg =
-                    BufferPoolConfig::for_network().with_thread_cache_disabled();
-                let storage_buffer_pool_cfg =
-                    BufferPoolConfig::for_storage().with_thread_cache_disabled();
+                let network_buffer_pool_cfg = BufferPoolConfig::for_network()
+                    .with_thread_cache_disabled();
+                let storage_buffer_pool_cfg = BufferPoolConfig::for_storage()
+                    .with_thread_cache_disabled();
             }
         }
 

@@ -29,7 +29,6 @@ commonware_macros::stability_scope!(ALPHA {
     #[cfg(feature = "fuzz")]
     pub mod fuzz {
         use arbitrary::{Arbitrary, Unstructured};
-
         #[derive(Debug, Arbitrary)]
         pub enum Plan {
             Poly(crate::poly::fuzz::Plan),
@@ -39,7 +38,6 @@ commonware_macros::stability_scope!(ALPHA {
             Ntt(crate::ntt::fuzz::Plan),
             Synthetic(crate::synthetic::fuzz::Plan),
         }
-
         impl Plan {
             pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
                 match self {

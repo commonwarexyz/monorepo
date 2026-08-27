@@ -77,7 +77,6 @@ where
             self.context,
             on_start => {
                 self.floor_subscribers.retain(|s| !s.is_closed());
-
                 // Hand off to service once a marshal is attached and no floor seeker is left
                 // waiting. Dropping all subscribers cancels discovery; if marshal is attached
                 // after that, the node becomes a source and serves without a cached floor. A
@@ -85,9 +84,10 @@ where
                 if marshal.is_some() && self.floor_subscribers.is_empty() {
                     break;
                 }
-
                 // Arm the retry timer only while actively searching for a floor.
-                let retry = if self.sample.floor().is_none() && !self.floor_subscribers.is_empty() {
+                let retry = if self.sample.floor().is_none()
+                    && !self.floor_subscribers.is_empty()
+                {
                     Either::Left(self.context.sleep_until(deadline))
                 } else {
                     Either::Right(future::pending())
@@ -100,22 +100,26 @@ where
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 return;
-            } => match message {
-                Message::Subscribe { response } => match self.sample.floor() {
-                    Some(floor) => {
-                        response.send_lossy(floor.clone());
-                    }
-                    None => {
-                        let should_request = self.floor_subscribers.is_empty();
-                        self.floor_subscribers.push(response);
-                        if should_request {
-                            self.request_latest(sender);
-                            deadline = self.context.current() + self.retry_timeout.get();
+            } => {
+                match message {
+                    Message::Subscribe { response } => {
+                        match self.sample.floor() {
+                            Some(floor) => {
+                                response.send_lossy(floor.clone());
+                            }
+                            None => {
+                                let should_request = self.floor_subscribers.is_empty();
+                                self.floor_subscribers.push(response);
+                                if should_request {
+                                    self.request_latest(sender);
+                                    deadline = self.context.current() + self.retry_timeout.get();
+                                }
+                            }
                         }
                     }
-                },
-                Message::Attach { marshal: attached } => {
-                    marshal = Some(attached);
+                    Message::Attach { marshal: attached } => {
+                        marshal = Some(attached);
+                    }
                 }
             },
             Ok((peer, message)) = receiver.recv() else {
@@ -128,7 +132,6 @@ where
                 if !self.sample.pending(&peer) {
                     continue;
                 }
-
                 let finalization = match self.decode_finalization(message) {
                     Ok(Some(finalization)) => finalization,
                     Ok(None) => continue,
@@ -142,7 +145,6 @@ where
                         continue;
                     }
                 };
-
                 let Some((peer, finalization)) = self.verify_finalization(peer, finalization)
                 else {
                     continue;

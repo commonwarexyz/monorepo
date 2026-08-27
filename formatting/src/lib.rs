@@ -13,15 +13,12 @@ commonware_macros::stability_mod!(BETA, pub mod hex_literal);
 
 commonware_macros::stability_scope!(BETA {
     extern crate alloc;
-
     use alloc::{string::String, vec::Vec};
     use core::fmt;
-
     /// Converts bytes to a lowercase hexadecimal [String].
     pub fn hex(bytes: &[u8]) -> String {
         const_hex::encode(bytes)
     }
-
     /// Converts a hexadecimal string to bytes, stripping ASCII whitespace
     /// and an optional `0x` / `0X` prefix.
     pub fn from_hex(s: &str) -> Option<Vec<u8>> {
@@ -30,7 +27,6 @@ commonware_macros::stability_scope!(BETA {
         let stripped = s.strip_prefix("0X").unwrap_or(&s);
         const_hex::decode(stripped).ok()
     }
-
     /// Display/Debug wrapper that renders bytes as lowercase hex without
     /// allocating an intermediate [String].
     ///
@@ -52,25 +48,21 @@ commonware_macros::stability_scope!(BETA {
     /// }
     /// ```
     pub struct Hex<T: AsRef<[u8]>>(pub T);
-
     impl<T: AsRef<[u8]>> From<T> for Hex<T> {
         fn from(value: T) -> Self {
             Self(value)
         }
     }
-
     impl<T: AsRef<[u8]>> fmt::Display for Hex<T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write_hex(self.0.as_ref(), f)
         }
     }
-
     impl<T: AsRef<[u8]>> fmt::Debug for Hex<T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write_hex(self.0.as_ref(), f)
         }
     }
-
     /// Writes `bytes` to the formatter as lowercase hex without heap allocation.
     ///
     /// Uses a fixed-size stack buffer per chunk to avoid bounding the input

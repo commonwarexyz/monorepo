@@ -200,7 +200,6 @@ impl Blob {
                     let _ = &cache;
                     let attempted_dont_cache = false;
                     assert!(flags.is_none(), "flags are only supported on Linux");
-
                     // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
                     // `io_slices` points to valid readable buffers held alive for this syscall.
                     let ret = unsafe {
@@ -341,13 +340,14 @@ impl crate::Blob for Blob {
                         fused.then_some(libc::RWF_DSYNC),
                     )?;
                     if sync && !fused {
-                        file.sync_data().map_err(|e| {
-                            Error::BlobSyncFailed(
-                                partition.expect("sync write has a partition"),
-                                hex(name.as_deref().expect("sync write has a name")),
-                                e.into(),
-                            )
-                        })?;
+                        file.sync_data()
+                            .map_err(|e| {
+                                Error::BlobSyncFailed(
+                                    partition.expect("sync write has a partition"),
+                                    hex(name.as_deref().expect("sync write has a name")),
+                                    e.into(),
+                                )
+                            })?;
                     }
                 } else {
                     Self::write_vectored_at(cache, &file, offset, bufs, None)?;

@@ -1552,26 +1552,32 @@ mod tests {
         let mut saw_finalization = false;
         while !(saw_notarization && saw_finalization) {
             select! {
-                output = voter_receiver.recv() => match output {
-                    Some(voter::Message::Proposal { proposal: p, .. }) => {
-                        assert_eq!(&p, proposal);
+                output = voter_receiver.recv() => {
+                    match output {
+                        Some(voter::Message::Proposal { proposal: p, .. }) => {
+                            assert_eq!(&p, proposal);
+                        }
+                        Some(
+                            voter::Message::Verified {
+                                certificate: Certificate::Notarization(n),
+                                ..
+                            },
+                        ) => {
+                            assert_eq!(&n.proposal, proposal);
+                            saw_notarization = true;
+                        }
+                        Some(
+                            voter::Message::Verified {
+                                certificate: Certificate::Finalization(f),
+                                ..
+                            },
+                        ) => {
+                            assert_eq!(&f.proposal, proposal);
+                            saw_finalization = true;
+                        }
+                        Some(_) => panic!("unexpected batcher output"),
+                        None => panic!("voter receiver closed"),
                     }
-                    Some(voter::Message::Verified {
-                        certificate: Certificate::Notarization(n),
-                        ..
-                    }) => {
-                        assert_eq!(&n.proposal, proposal);
-                        saw_notarization = true;
-                    }
-                    Some(voter::Message::Verified {
-                        certificate: Certificate::Finalization(f),
-                        ..
-                    }) => {
-                        assert_eq!(&f.proposal, proposal);
-                        saw_finalization = true;
-                    }
-                    Some(_) => panic!("unexpected batcher output"),
-                    None => panic!("voter receiver closed"),
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("timed out waiting for notarization and finalization");
@@ -4566,13 +4572,13 @@ mod tests {
                     Some(voter::Message::Proposal { proposal: p, .. }) => {
                         assert_eq!(p.view(), future_view);
                         assert_eq!(p.payload, proposal.payload);
-                    },
+                    }
                     Some(_) => panic!("expected forwarded optimistic future proposal"),
                     None => panic!("voter channel closed"),
                 },
                 _ = context.sleep(Duration::from_millis(250)) => {
                     panic!("expected forwarded optimistic future proposal for view {}", future_view)
-                }
+                },
             }
         });
     }
@@ -5950,7 +5956,9 @@ mod tests {
             select! {
                 msg = voter_receiver.recv() => match msg {
                     Some(voter::Message::Proposal { .. }) => {}
-                    Some(voter::Message::Verified { certificate: cert, .. }) if cert.view() == view2 => {
+                    Some(
+                        voter::Message::Verified { certificate: cert, .. },
+                    ) if cert.view() == view2 => {
                         panic!("should not receive any certificate for the finalized view");
                     }
                     _ => {}

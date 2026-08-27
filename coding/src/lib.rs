@@ -16,13 +16,10 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_parallel::Strategy;
     use std::{fmt::Debug, num::NonZeroU16};
     use thiserror::Error;
-
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
-
     mod zoda;
     pub use zoda::{Error as ZodaError, Zoda};
-
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Config {
@@ -35,36 +32,33 @@ commonware_macros::stability_scope!(ALPHA {
         /// rather than `N`, we avoid needing to check that `minimum_shards <= N`.
         pub extra_shards: NonZeroU16,
     }
-
     impl Config {
         /// Returns the total number of shards produced by this configuration.
         pub fn total_shards(&self) -> u32 {
             u32::from(self.minimum_shards.get()) + u32::from(self.extra_shards.get())
         }
     }
-
     impl FixedSize for Config {
         const SIZE: usize = 2 * <NonZeroU16 as FixedSize>::SIZE;
     }
-
     impl Write for Config {
         fn write(&self, buf: &mut impl bytes::BufMut) {
             self.minimum_shards.write(buf);
             self.extra_shards.write(buf);
         }
     }
-
     impl Read for Config {
         type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(
+            buf: &mut impl Buf,
+            cfg: &Self::Cfg,
+        ) -> Result<Self, commonware_codec::Error> {
             Ok(Self {
                 minimum_shards: NonZeroU16::read_cfg(buf, cfg)?,
                 extra_shards: NonZeroU16::read_cfg(buf, cfg)?,
             })
         }
     }
-
     #[cfg(feature = "arbitrary")]
     impl<'a> arbitrary::Arbitrary<'a> for Config {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
@@ -76,7 +70,6 @@ commonware_macros::stability_scope!(ALPHA {
             })
         }
     }
-
     /// The configuration for decoding shard data.
     #[derive(Clone, Debug)]
     pub struct CodecConfig {
@@ -86,7 +79,6 @@ commonware_macros::stability_scope!(ALPHA {
         /// of shard data.
         pub maximum_shard_size: usize,
     }
-
     /// A scheme for encoding data into pieces, and recovering the data from those pieces.
     ///
     /// # Example
@@ -168,7 +160,6 @@ commonware_macros::stability_scope!(ALPHA {
         type CheckedShard: Clone + Send + Sync;
         /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
-
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
@@ -179,7 +170,6 @@ commonware_macros::stability_scope!(ALPHA {
             data: impl Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
-
         /// Check the integrity of a shard, producing a checked shard.
         ///
         /// This takes in an index, to make sure that the shard you're checking
@@ -190,7 +180,6 @@ commonware_macros::stability_scope!(ALPHA {
             index: u16,
             shard: &Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error>;
-
         /// Decode the data from shards received from other participants.
         ///
         /// The data must be decodeable with as few as `config.minimum_shards`,
@@ -216,7 +205,6 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error>;
     }
-
     /// A phased coding interface with separate local and forwarded shard handling.
     ///
     /// This trait models schemes where the initial distributor attaches extra
@@ -288,13 +276,25 @@ commonware_macros::stability_scope!(ALPHA {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;
         /// A strong shard of data, to be received by a participant.
-        type StrongShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        type StrongShard: Clone
+            + Debug
+            + Eq
+            + Codec<Cfg = CodecConfig>
+            + Send
+            + Sync
+            + 'static;
         /// A weak shard shared with other participants, to aid them in reconstruction.
         ///
         /// In most cases, this will be the same as `StrongShard`, but some schemes might
         /// have extra information in `StrongShard` that may not be necessary to reconstruct
         /// the data.
-        type WeakShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        type WeakShard: Clone
+            + Debug
+            + Eq
+            + Codec<Cfg = CodecConfig>
+            + Send
+            + Sync
+            + 'static;
         /// Data which can assist in checking shards.
         type CheckingData: Clone + Eq + Send + Sync;
         /// A shard that has been checked for inclusion in the commitment.
@@ -304,7 +304,6 @@ commonware_macros::stability_scope!(ALPHA {
         type CheckedShard: Clone + Send + Sync;
         /// The type of errors that can occur during encoding, weakening, checking, and decoding.
         type Error: std::fmt::Debug + Send;
-
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
@@ -320,7 +319,6 @@ commonware_macros::stability_scope!(ALPHA {
             data: impl Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
-
         /// Take your own shard, check it, and produce a [`PhasedScheme::WeakShard`] to forward to others.
         ///
         /// This takes in an index, which is the index you expect the shard to be.
@@ -340,7 +338,6 @@ commonware_macros::stability_scope!(ALPHA {
             index: u16,
             shard: Self::StrongShard,
         ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error>;
-
         /// Check the integrity of a weak shard, producing a checked shard.
         ///
         /// This requires the [`PhasedScheme::CheckingData`] produced by [`PhasedScheme::weaken`].
@@ -354,7 +351,6 @@ commonware_macros::stability_scope!(ALPHA {
             index: u16,
             weak_shard: Self::WeakShard,
         ) -> Result<Self::CheckedShard, Self::Error>;
-
         /// Decode the data from shards received from other participants.
         ///
         /// The data must be decodeable with as few as `config.minimum_shards`,
@@ -380,7 +376,6 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Result<Vec<u8>, Self::Error>;
     }
-
     /// An adapter that exposes a [`PhasedScheme`] through the [`Scheme`] trait.
     ///
     /// In most cases, this is not the most optimal way to use a [`PhasedScheme`],
@@ -389,14 +384,12 @@ commonware_macros::stability_scope!(ALPHA {
     /// cannot be used directly.
     #[derive(Clone, Copy, Debug, Default)]
     pub struct PhasedAsScheme<P>(core::marker::PhantomData<P>);
-
     /// A checked shard produced by adapting a phased scheme into [`Scheme`].
     #[derive(Clone)]
     pub struct PhasedCheckedShard<P: PhasedScheme> {
         checking_data: P::CheckingData,
         checked_shard: P::CheckedShard,
     }
-
     /// Errors returned by the [`PhasedAsScheme`] adapter.
     #[derive(Debug, Error)]
     pub enum PhasedAsSchemeError<E> {
@@ -407,19 +400,16 @@ commonware_macros::stability_scope!(ALPHA {
         #[error("insufficient shards {0} < {1}")]
         InsufficientShards(usize, usize),
     }
-
     impl<P: PhasedScheme> Debug for PhasedCheckedShard<P> {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("PhasedCheckedShard").finish_non_exhaustive()
         }
     }
-
     impl<P: PhasedScheme> Scheme for PhasedAsScheme<P> {
         type Commitment = P::Commitment;
         type Shard = P::StrongShard;
         type CheckedShard = PhasedCheckedShard<P>;
         type Error = PhasedAsSchemeError<P::Error>;
-
         fn encode(
             config: &Config,
             data: impl Buf,
@@ -427,22 +417,25 @@ commonware_macros::stability_scope!(ALPHA {
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
             P::encode(b"", config, data, strategy).map_err(PhasedAsSchemeError::Scheme)
         }
-
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error> {
-            let (checking_data, checked_shard, _) =
-                P::weaken(b"", config, commitment, index, shard.clone())
-                    .map_err(PhasedAsSchemeError::Scheme)?;
+            let (checking_data, checked_shard, _) = P::weaken(
+                    b"",
+                    config,
+                    commitment,
+                    index,
+                    shard.clone(),
+                )
+                .map_err(PhasedAsSchemeError::Scheme)?;
             Ok(PhasedCheckedShard {
                 checking_data,
                 checked_shard,
             })
         }
-
         fn decode<'a>(
             config: &Config,
             commitment: &Self::Commitment,
@@ -451,31 +444,32 @@ commonware_macros::stability_scope!(ALPHA {
         ) -> Result<Vec<u8>, Self::Error> {
             let mut shards = shards.peekable();
             let Some(first) = shards.peek() else {
-                return Err(PhasedAsSchemeError::InsufficientShards(
-                    0,
-                    usize::from(config.minimum_shards.get()),
-                ));
+                return Err(
+                    PhasedAsSchemeError::InsufficientShards(
+                        0,
+                        usize::from(config.minimum_shards.get()),
+                    ),
+                );
             };
             let checking_data = first.checking_data.clone();
             P::decode(
-                config,
-                commitment,
-                checking_data.clone(),
-                shards
-                    .map(|shard| {
-                        if shard.checking_data != checking_data {
-                            return Err(PhasedAsSchemeError::InconsistentCheckingData);
-                        }
-                        Ok(&shard.checked_shard)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter(),
-                strategy,
-            )
-            .map_err(PhasedAsSchemeError::Scheme)
+                    config,
+                    commitment,
+                    checking_data.clone(),
+                    shards
+                        .map(|shard| {
+                            if shard.checking_data != checking_data {
+                                return Err(PhasedAsSchemeError::InconsistentCheckingData);
+                            }
+                            Ok(&shard.checked_shard)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter(),
+                    strategy,
+                )
+                .map_err(PhasedAsSchemeError::Scheme)
         }
     }
-
     /// A marker trait indicating that [`Scheme::check`] or [`PhasedScheme::check`] proves validity of the encoding.
     ///
     /// In more detail, this means that upon a successful call to [`Scheme::check`],

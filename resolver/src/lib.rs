@@ -10,13 +10,11 @@ commonware_macros::stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_utils::{Span, channel::oneshot, vec::NonEmptyVec};
     use core::cmp::Ordering;
-
     pub mod delivery;
     mod ingress;
     pub mod opaque;
     pub mod p2p;
     mod subscribers;
-
     /// A key to fetch data for a subscriber.
     #[derive(Clone, Debug)]
     pub struct Fetch<K, S = ()> {
@@ -27,15 +25,12 @@ commonware_macros::stability_scope!(BETA {
         /// Trace span carried from issuance to delivery.
         pub span: tracing::Span,
     }
-
     impl<K: PartialEq, S: PartialEq> PartialEq for Fetch<K, S> {
         fn eq(&self, other: &Self) -> bool {
             self.key == other.key && self.subscriber == other.subscriber
         }
     }
-
     impl<K: Eq, S: Eq> Eq for Fetch<K, S> {}
-
     impl<K: PartialOrd, S: PartialOrd> PartialOrd for Fetch<K, S> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             match self.key.partial_cmp(&other.key)? {
@@ -44,15 +39,11 @@ commonware_macros::stability_scope!(BETA {
             }
         }
     }
-
     impl<K: Ord, S: Ord> Ord for Fetch<K, S> {
         fn cmp(&self, other: &Self) -> Ordering {
-            self.key
-                .cmp(&other.key)
-                .then_with(|| self.subscriber.cmp(&other.subscriber))
+            self.key.cmp(&other.key).then_with(|| self.subscriber.cmp(&other.subscriber))
         }
     }
-
     impl<K, S: Default> From<K> for Fetch<K, S> {
         fn from(key: K) -> Self {
             Self {
@@ -62,7 +53,6 @@ commonware_macros::stability_scope!(BETA {
             }
         }
     }
-
     /// Data delivered for a resolved fetch.
     #[derive(Clone, Debug)]
     pub struct Delivery<K, S> {
@@ -72,11 +62,9 @@ commonware_macros::stability_scope!(BETA {
         /// paired with the trace span of the fetch that requested it.
         pub subscribers: NonEmptyVec<(S, tracing::Span)>,
     }
-
     impl<K: PartialEq, S: PartialEq> PartialEq for Delivery<K, S> {
         fn eq(&self, other: &Self) -> bool {
-            self.key == other.key
-                && self.subscribers.len() == other.subscribers.len()
+            self.key == other.key && self.subscribers.len() == other.subscribers.len()
                 && self
                     .subscribers
                     .iter()
@@ -84,33 +72,34 @@ commonware_macros::stability_scope!(BETA {
                     .all(|((a, _), (b, _))| a == b)
         }
     }
-
     impl<K: Eq, S: Eq> Eq for Delivery<K, S> {}
-
     impl<K: PartialOrd, S: PartialOrd> PartialOrd for Delivery<K, S> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             match self.key.partial_cmp(&other.key)? {
-                Ordering::Equal => self
-                    .subscribers
-                    .iter()
-                    .map(|(subscriber, _)| subscriber)
-                    .partial_cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber)),
+                Ordering::Equal => {
+                    self.subscribers
+                        .iter()
+                        .map(|(subscriber, _)| subscriber)
+                        .partial_cmp(
+                            other.subscribers.iter().map(|(subscriber, _)| subscriber),
+                        )
+                }
                 ordering => Some(ordering),
             }
         }
     }
-
     impl<K: Ord, S: Ord> Ord for Delivery<K, S> {
         fn cmp(&self, other: &Self) -> Ordering {
-            self.key.cmp(&other.key).then_with(|| {
-                self.subscribers
-                    .iter()
-                    .map(|(subscriber, _)| subscriber)
-                    .cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber))
-            })
+            self.key
+                .cmp(&other.key)
+                .then_with(|| {
+                    self.subscribers
+                        .iter()
+                        .map(|(subscriber, _)| subscriber)
+                        .cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber))
+                })
         }
     }
-
     /// Consumer disposition for a delivered response.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Outcome {
@@ -118,48 +107,39 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Network resolvers may penalize the serving peer before retrying.
         Invalid,
-
         /// The response is valid and satisfies every delivered subscriber.
         Complete,
-
         /// The peer-visible key admits multiple valid responses, and this response does not
         /// satisfy every delivered subscriber.
         ///
         /// The resolver retries the key without penalizing the serving peer so another response
         /// can be tried.
         Ambiguous,
-
         /// The consumer no longer needs the key, so the response does not need to be validated.
         ///
         /// The resolver retires the key and all of its subscribers without retrying or
         /// attributing the response to its source.
         Ignored,
     }
-
     impl From<bool> for Outcome {
         fn from(valid: bool) -> Self {
             if valid { Self::Complete } else { Self::Invalid }
         }
     }
-
     /// Determines the disposition of data returned for a fetch.
     pub trait Consumer: Clone + Send + 'static {
         /// Type used to key data requested from peers.
         type Key: Span;
-
         /// Type of data to retrieve.
         type Value;
-
         /// Type used to track subscribers on fetch keys.
         type Subscriber: Clone + Eq + Send + 'static;
-
         /// Delivery disposition returned after validation.
         ///
         /// Consumers that only distinguish valid and invalid data may use
         /// `bool`, which maps to [`crate::Outcome::Complete`] and
         /// [`crate::Outcome::Invalid`].
         type Outcome: Into<crate::Outcome> + Send + 'static;
-
         /// Deliver data to the consumer.
         ///
         /// Returns a receiver that reports whether the response completes the
@@ -182,18 +162,15 @@ commonware_macros::stability_scope!(BETA {
             value: Self::Value,
         ) -> oneshot::Receiver<Self::Outcome>;
     }
-
     /// Responsible for fetching data and notifying a `Consumer`.
     pub trait Resolver: Clone + Send + 'static {
         /// Type used to key data requested from peers.
         type Key: Span;
-
         /// Type used to track subscribers on fetch keys.
         ///
         /// Implementations that also own the [`Consumer`] should supply subscribers to
         /// [`Consumer::deliver`] when a fetch resolves.
         type Subscriber: Clone + Eq + Send + 'static;
-
         /// Initiate a fetch.
         ///
         /// The resolver fetches and delivers the key. The subscriber is
@@ -206,12 +183,10 @@ commonware_macros::stability_scope!(BETA {
         fn fetch<F>(&mut self, key: F) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
-
         /// Initiate fetches for a batch of keys.
         fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
-
         /// Retain only fetch subscribers satisfying the predicate.
         ///
         /// The predicate receives the peer-visible key and subscriber.
@@ -224,12 +199,10 @@ commonware_macros::stability_scope!(BETA {
             predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback;
     }
-
     /// Extension for resolvers that accept target peer hints.
     pub trait TargetedResolver: Resolver {
         /// Type used to identify peers for targeted fetch hints.
         type PublicKey: PublicKey;
-
         /// Initiate a fetch with target peer hints.
         ///
         /// Implementations define whether target hints persist through retries,
@@ -239,7 +212,6 @@ commonware_macros::stability_scope!(BETA {
             fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback;
-
         /// Initiate fetches for multiple keys, each with their own target hints.
         ///
         /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.

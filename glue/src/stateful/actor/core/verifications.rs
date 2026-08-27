@@ -132,15 +132,23 @@ where
         self.jobs.push(
             async move {
                 select! {
-                    _ = invalidated => JobResult::Invalidated { id, request },
-                    valid = verifier.run(
-                        &request.context.0,
-                        marshal,
-                        request.context.1.clone(),
-                        ancestry,
-                        &progress,
-                        &mut request.verification,
-                    ) => JobResult::Finished { id, request, valid },
+                    _ = invalidated => JobResult::Invalidated {
+                        id,
+                        request,
+                    },
+                    valid = verifier
+                        .run(
+                            &request.context.0,
+                            marshal,
+                            request.context.1.clone(),
+                            ancestry,
+                            &progress,
+                            &mut request.verification,
+                        ) => JobResult::Finished {
+                        id,
+                        request,
+                        valid,
+                    },
                 }
             }
             .instrument(process),

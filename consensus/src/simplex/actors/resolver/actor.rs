@@ -907,7 +907,9 @@ mod tests {
                 View::new(2),
             )));
             let (requester_key, _) = select! {
-                request = silent_receiver.recv() => request.expect("silent peer channel closed"),
+                request = silent_receiver.recv() => {
+                    request.expect("silent peer channel closed")
+                },
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("background request did not reach silent peer");
                 },
@@ -949,7 +951,9 @@ mod tests {
                 .unwrap();
 
             let recovered = select! {
-                message = requester_voter_receiver.recv() => message.expect("voter mailbox closed"),
+                message = requester_voter_receiver.recv() => {
+                    message.expect("voter mailbox closed")
+                },
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("unrestricted fetch was narrowed by the targeted request");
                 },

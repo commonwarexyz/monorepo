@@ -178,10 +178,11 @@ where
         select_loop! {
             self.context,
             on_start => {
-                self.pending.retain(|_, subs| {
-                    subs.retain(|s| !s.is_closed());
-                    !subs.is_empty()
-                });
+                self.pending
+                    .retain(|_, subs| {
+                        subs.retain(|s| !s.is_closed());
+                        !subs.is_empty()
+                    });
                 let mailbox_message = async {
                     match self.mailbox_rx.recv().await {
                         Some(message) => Some(message),
@@ -209,11 +210,7 @@ where
             Some(message) = handler_rx.recv() else {
                 return;
             } => match message {
-                handler::EngineMessage::Deliver {
-                    key,
-                    value,
-                    response,
-                } => {
+                handler::EngineMessage::Deliver { key, value, response } => {
                     self.handle_deliver(key, value, response).await;
                 }
                 handler::EngineMessage::Produce { key, response } => {

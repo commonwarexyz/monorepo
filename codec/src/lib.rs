@@ -217,7 +217,6 @@
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
-
     pub mod codec;
     pub mod config;
     pub mod error;
@@ -226,7 +225,6 @@ commonware_macros::stability_scope!(BETA {
     pub mod types;
     pub mod util;
     pub mod varint;
-
     // Re-export main types and traits
     pub use codec::*;
     pub use commonware_codec_macros::FixedArray;
@@ -239,7 +237,6 @@ commonware_macros::stability_scope!(BETA {
 commonware_macros::stability_scope!(ALPHA {
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
-
     // Re-export paste for use in conformance macros
     #[cfg(feature = "arbitrary")]
     #[doc(hidden)]

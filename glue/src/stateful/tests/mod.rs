@@ -1411,9 +1411,10 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         select! {
             _ = async {
                 loop {
-                    let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<
+                    let committed = <SingleDatabaseSet<
                         DelayedContext,
-                    >>::committed_targets(&databases).await;
+                    > as DatabaseSet<DelayedContext>>::committed_targets(&databases)
+                        .await;
                     if committed == expected {
                         break;
                     }
@@ -1854,7 +1855,8 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 acknowledgement,
             ));
             select! {
-                result = waiter => result.expect("priming finalization should be durable"),
+                result =
+                    waiter => result.expect("priming finalization should be durable"),
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("priming finalization did not become durable");
                 },

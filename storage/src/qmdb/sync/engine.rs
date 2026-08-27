@@ -83,14 +83,16 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
     let batch_result_fut = outstanding_requests.next_completed();
 
     select! {
-        finish = finish_fut => finish.map_or_else(
-            || Some(Event::FinishChannelClosed),
-            |_| Some(Event::FinishRequested)
-        ),
-        target = target_update_fut => target.map_or_else(
-            || Some(Event::UpdateChannelClosed),
-            |target| Some(Event::TargetUpdate(target))
-        ),
+        finish = finish_fut => finish
+            .map_or_else(
+                || Some(Event::FinishChannelClosed),
+                |_| Some(Event::FinishRequested),
+            ),
+        target = target_update_fut => target
+            .map_or_else(
+                || Some(Event::UpdateChannelClosed),
+                |target| Some(Event::TargetUpdate(target)),
+            ),
         result = batch_result_fut => Some(Event::BatchReceived(result)),
     }
 }

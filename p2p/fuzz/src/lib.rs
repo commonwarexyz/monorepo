@@ -560,18 +560,15 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                 let Ok((sender_pk, message)) = result else {
                                     continue; // Receive error
                                 };
-
                                 // Identify the sender by their public key
                                 let Some(&from_idx) = topology.pk_to_id.get(&sender_pk) else {
                                     panic!("Received message from unknown sender: {sender_pk:?}");
                                 };
-
                                 // Find the expected queue for this sender-receiver pair
                                 let expected_msgs_key = (to_idx, from_idx);
                                 let Some(queue) = expected_msgs.get_mut(&expected_msgs_key) else {
                                     panic!("No expected messages for this sender-receiver pair");
                                 };
-
                                 // Find message in expected queue
                                 if let Some(pos) = queue.iter().position(|m| *m == message) {
                                     // Remove all messages up to and including this one
@@ -579,7 +576,6 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     for _ in 0..=pos {
                                         queue.pop_front();
                                     }
-
                                     // Clean up empty queue and update pending tracking
                                     if queue.is_empty() {
                                         expected_msgs.remove(&expected_msgs_key);
@@ -597,7 +593,8 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
+                            _ = context
+                                .sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             },
                         }

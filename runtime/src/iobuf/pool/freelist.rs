@@ -82,19 +82,13 @@ use std::{
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::{
-            cell::UnsafeCell,
-            sync::{
-                Mutex,
-                MutexGuard,
-                atomic::{AtomicBool, AtomicUsize},
-            },
+            cell::UnsafeCell, sync::{Mutex, MutexGuard, atomic::{AtomicBool, AtomicUsize}},
             thread,
         };
     } else {
         use commonware_utils::sync::{Mutex, MutexGuard};
         use std::{
-            cell::UnsafeCell,
-            sync::atomic::{AtomicBool, AtomicUsize},
+            cell::UnsafeCell, sync::atomic::{AtomicBool, AtomicUsize},
             thread,
         };
     }
@@ -577,9 +571,10 @@ impl Freelist {
             if #[cfg(not(feature = "loom"))] {
                 ptr::NonNull::new(owner.get()).expect("slot pointers are non-null")
             } else {
-                owner.with(|owner| {
-                    ptr::NonNull::new(owner.cast_mut()).expect("slot pointers are non-null")
-                })
+                owner
+                    .with(|owner| {
+                        ptr::NonNull::new(owner.cast_mut()).expect("slot pointers are non-null")
+                    })
             }
         }
     }

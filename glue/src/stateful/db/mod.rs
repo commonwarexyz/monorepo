@@ -860,15 +860,15 @@ where
                             return (current_anchor, current_target);
                         };
                         if !drain_single_tip_updates(
-                            &mut tip_updates,
-                            &target_tx,
-                            &mut current_anchor,
-                            &mut current_target,
-                        )
-                        .await
+                                &mut tip_updates,
+                                &target_tx,
+                                &mut current_anchor,
+                                &mut current_target,
+                            )
+                            .await
                         {
                             return (current_anchor, current_target);
-                        };
+                        }
                         if reached != current_target {
                             continue;
                         }
@@ -880,17 +880,18 @@ where
                             tip_updates = None;
                             continue;
                         };
-                        let target = update.record(|new_anchor, new_target| {
-                            if new_anchor.height <= current_anchor.height {
-                                return None;
-                            }
-                            current_anchor = new_anchor;
-                            if new_target == current_target {
-                                return None;
-                            }
-                            current_target = new_target.clone();
-                            Some(new_target)
-                        });
+                        let target = update
+                            .record(|new_anchor, new_target| {
+                                if new_anchor.height <= current_anchor.height {
+                                    return None;
+                                }
+                                current_anchor = new_anchor;
+                                if new_target == current_target {
+                                    return None;
+                                }
+                                current_target = new_target.clone();
+                                Some(new_target)
+                            });
                         let Some(new_target) = target else {
                             continue;
                         };
@@ -3252,9 +3253,7 @@ mod tests {
                 |finish_rx| futures::future::Either::Left(finish_rx.recv()),
             );
             select! {
-                _ = finish_signal => Ok(Self {
-                    final_target: target
-                }),
+                _ = finish_signal => Ok(Self { final_target: target }),
                 _ = context.sleep(Duration::from_millis(10)) => {
                     if let Some(reached_target) = reached_target.as_ref() {
                         let _ = reached_target.send(update).await;
@@ -3262,9 +3261,7 @@ mod tests {
                     if let Some(finish_rx) = finish.as_mut() {
                         let _ = finish_rx.recv().await;
                     }
-                    Ok(Self {
-                        final_target: update,
-                    })
+                    Ok(Self { final_target: update })
                 },
             }
         }

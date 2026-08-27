@@ -259,10 +259,12 @@ where
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let handle = self.strategy.spawn(move |_| {
-                    let result = V::decode_cfg(bytes.as_ref(), &config);
-                    (peer, result)
-                });
+                let handle = self
+                    .strategy
+                    .spawn(move |_| {
+                        let result = V::decode_cfg(bytes.as_ref(), &config);
+                        (peer, result)
+                    });
                 decode_pool.push(handle);
             },
         }

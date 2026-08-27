@@ -20,14 +20,12 @@ commonware_macros::stability_scope!(BETA {
         /// The endpoint is closed.
         Closed,
     }
-
     impl Feedback {
         /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
             matches!(self, Self::Ok | Self::Backoff)
         }
     }
-
     /// Feedback from endpoints that may reject work under backpressure.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Unreliable<T> {
@@ -36,23 +34,19 @@ commonware_macros::stability_scope!(BETA {
         /// The work was rejected by the endpoint.
         Rejected,
     }
-
     impl<T> Unreliable<T> {
         /// Wrap an outcome for an operation that may reject work.
         pub const fn new(outcome: T) -> Self {
             Self::Outcome(outcome)
         }
-
         /// Create a rejected result.
         pub const fn rejected() -> Self {
             Self::Rejected
         }
-
         /// Returns `true` when the operation was rejected before producing an outcome.
         pub const fn is_rejected(&self) -> bool {
             matches!(self, Self::Rejected)
         }
-
         /// Returns the outcome when the operation was not rejected.
         pub fn outcome(self) -> Option<T> {
             match self {
@@ -61,7 +55,6 @@ commonware_macros::stability_scope!(BETA {
             }
         }
     }
-
     impl Unreliable<Feedback> {
         /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
@@ -71,6 +64,5 @@ commonware_macros::stability_scope!(BETA {
             }
         }
     }
-
     pub mod mailbox;
 });

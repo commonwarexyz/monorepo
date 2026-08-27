@@ -851,7 +851,9 @@ mod tests {
             pin_mut!(sync);
 
             select! {
-                _ = sync.as_mut() => panic!("sync completed before explicit finish signal"),
+                _ = sync.as_mut() => {
+                    panic!("sync completed before explicit finish signal")
+                },
                 reached = reached_rx.recv() => assert_eq!(reached, Some(target.clone())),
             }
 

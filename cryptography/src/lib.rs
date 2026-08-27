@@ -52,15 +52,11 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod banderwagon;
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
-
     #[cfg(any(test, feature = "fuzz"))]
     pub mod fuzz;
-
     pub mod lthash;
     pub use crate::lthash::LtHash;
-
     pub mod reed_solomon;
-
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
@@ -70,13 +66,10 @@ commonware_macros::stability_scope!(BETA {
     use commonware_utils::Array;
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
-
     pub mod secret;
     pub use crate::secret::Secret;
-
     pub mod certificate;
     pub mod transcript;
-
     pub mod sha256;
     pub use crate::sha256::{CoreSha256, Sha256};
     pub mod blake3;
@@ -85,21 +78,16 @@ commonware_macros::stability_scope!(BETA {
     pub mod crc32;
     #[cfg(feature = "std")]
     pub use crate::crc32::Crc32;
-
     #[cfg(feature = "std")]
     pub mod handshake;
-
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
     pub trait Signer: Random + Send + Sync + Clone + 'static {
         /// The type of [Signature] produced by this [Signer].
         type Signature: Signature;
-
         /// The corresponding [PublicKey] type.
         type PublicKey: PublicKey<Signature = Self::Signature>;
-
         /// Returns the [PublicKey] corresponding to this [Signer].
         fn public_key(&self) -> Self::PublicKey;
-
         /// Sign a message with the given namespace.
         ///
         /// The message should not be hashed prior to calling this function. If a particular scheme
@@ -111,7 +99,6 @@ commonware_macros::stability_scope!(BETA {
         /// layer can't accidentally spend funds on the execution layer). See
         /// [commonware_utils::union_unique] for details.
         fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature;
-
         /// Create a [Signer] from a seed.
         ///
         /// # Warning
@@ -122,15 +109,12 @@ commonware_macros::stability_scope!(BETA {
             Self::random(ChaCha20Rng::seed_from_u64(seed))
         }
     }
-
     /// A [Signer] that can be serialized/deserialized.
     pub trait PrivateKey: Signer + Sized + ReadExt + Encode {}
-
     /// Verifies [Signature]s over messages.
     pub trait Verifier {
         /// The type of [Signature] that this verifier can verify.
         type Signature: Signature;
-
         /// Verify that a [Signature] is a valid over a given message.
         ///
         /// The message should not be hashed prior to calling this function. If a particular
@@ -140,18 +124,14 @@ commonware_macros::stability_scope!(BETA {
         /// match the namespace provided during signing.
         fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool;
     }
-
     /// A [PublicKey], able to verify [Signature]s.
     pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
-
     /// A [Signature] over a message.
     pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
-
     /// An extension of [Signature] that supports public key recovery.
     pub trait Recoverable: Signature {
         /// The type of [PublicKey] that can be recovered from this [Signature].
         type PublicKey: PublicKey<Signature = Self>;
-
         /// Recover the [PublicKey] of the signer that created this [Signature] over the given message.
         ///
         /// The message should not be hashed prior to calling this function. If a particular
@@ -160,18 +140,15 @@ commonware_macros::stability_scope!(BETA {
         /// Like when verifying a signature, the namespace must match what was used during signing exactly.
         fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey>;
     }
-
     /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
     pub trait BatchVerifier {
         /// The type of public keys that this verifier can accept.
         type PublicKey: PublicKey;
-
         /// Create a new batch verifier with capacity for at least `capacity` items.
         ///
         /// The capacity is a hint: more than `capacity` items may be added, and
         /// implementations may ignore it.
         fn new(capacity: usize) -> Self;
-
         /// Append item to the batch.
         ///
         /// The message should not be hashed prior to calling this function. If a particular scheme
@@ -188,7 +165,6 @@ commonware_macros::stability_scope!(BETA {
             public_key: &Self::PublicKey,
             signature: &<Self::PublicKey as Verifier>::Signature,
         ) -> bool;
-
         /// Verify all items added to the batch.
         ///
         /// Returns `false` if no items were added or any item is invalid.
@@ -204,7 +180,6 @@ commonware_macros::stability_scope!(BETA {
         /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
         fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
     }
-
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
     /// (which should be cheap to clone).
     ///
@@ -216,24 +191,20 @@ commonware_macros::stability_scope!(BETA {
         /// An empty (all-zero) digest.
         const EMPTY: Self;
     }
-
     /// An object that can be uniquely represented as a [Digest].
     pub trait Digestible: Clone + Sized + Send + Sync + 'static {
         /// The type of digest produced by this object.
         type Digest: Digest;
-
         /// Returns a unique representation of the object as a [Digest].
         ///
         /// If many objects with [Digest]s are related (map to some higher-level
         /// group [Digest]), you should also implement [Committable].
         fn digest(&self) -> Self::Digest;
     }
-
     /// An object that can produce a commitment of itself.
     pub trait Committable: Clone + Sized + Send + Sync + 'static {
         /// The type of commitment produced by this object.
         type Commitment: Digest;
-
         /// Returns the unique commitment of the object as a [Digest].
         ///
         /// For simple objects (like a block), this is often just the digest of the object
@@ -248,9 +219,7 @@ commonware_macros::stability_scope!(BETA {
         /// between commitment and digest.
         fn commitment(&self) -> Self::Commitment;
     }
-
     pub type DigestOf<H> = <H as Hasher>::Digest;
-
     /// Interface that commonware crates rely on for hashing.
     ///
     /// Hash functions in commonware primitives are not typically hardcoded
@@ -264,7 +233,6 @@ commonware_macros::stability_scope!(BETA {
     pub trait Hasher: Default + Send + Sync + 'static {
         /// Digest generated by the hasher.
         type Digest: Digest;
-
         /// Hash the concatenation of `parts` in a single shot.
         ///
         /// This is the preferred entrypoint for hashing data that is fully
@@ -272,16 +240,13 @@ commonware_macros::stability_scope!(BETA {
         /// small, fixed-shape inputs (e.g. hashing a pair of digests) to avoid
         /// the overhead of the streaming machinery.
         fn hash(parts: &[&[u8]]) -> Self::Digest;
-
         /// Hash two messages, each given as a concatenation of parts, in a
         /// single shot.
         ///
         /// Must be equivalent to hashing each message with [`Hasher::hash`].
         fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest);
-
         /// Append `bytes` to the hasher's running state.
         fn update(&mut self, bytes: &[u8]) -> &mut Self;
-
         /// Consume the hasher, returning a freshly-reset hasher alongside the
         /// digest of everything written so far.
         fn finalize(self) -> (Self, Self::Digest);

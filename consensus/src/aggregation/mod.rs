@@ -89,7 +89,6 @@ cfg_if::cfg_if! {
         pub use engine::Engine;
         mod metrics;
         mod safe_tip;
-
         #[cfg(test)]
         pub mod mocks;
     }

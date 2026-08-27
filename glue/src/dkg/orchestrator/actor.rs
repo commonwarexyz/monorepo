@@ -416,10 +416,7 @@ where
                 debug!("mailbox closed, shutting down orchestrator");
                 break;
             } => match message {
-                Message::Finalized {
-                    block,
-                    acknowledgement,
-                } => {
+                Message::Finalized { block, acknowledgement } => {
                     let keep_running = self
                         .handle_finalized(
                             &epocher,
