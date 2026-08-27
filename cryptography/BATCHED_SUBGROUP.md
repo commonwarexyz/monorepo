@@ -142,10 +142,22 @@ Three implementation choices carry most of the constant:
   reopens those same slots in the same random order a chunk later — long after
   the accumulator's read of them has been evicted. The hint is an intrinsic on
   x86_64 and inline assembly on aarch64, where the intrinsic is still unstable.
+- **Signed coefficients, folded buckets.** Coefficients are drawn from
+  `{-1,0,1}` rather than `{0,1,2}`, which leaves the `1/3` bound untouched (the
+  cofactor's order is odd and at least 3, so it divides neither difference a
+  three-element set admits) but lets a vector share a bucket with its negation:
+  negating an affine point is the sign of its `y`, so the point is stored
+  negated and the bucket count falls to `(3^m+1)/2`. Reading a bucket index as a
+  balanced-ternary *value* makes the canonical vectors exactly the non-negative
+  ones, so the bucket is `|value|` and the sign falls out of the residue the
+  sampler already draws. That halves the combine and the slot footprint, and
+  costs nothing per addition: negating the second operand negates the chord's
+  numerator, so taking its denominator the other way round cancels the sign.
 - **A shared collapse for the combine.** Recovering the `m` combinations one at
-  a time touches `2·3^(m-1)` bucket sums each, which caps `m` where the combine
-  costs more than the accumulation it saves. Summing away one digit at a time
-  instead (level `j+1` is level `j` with its lowest remaining digit collapsed)
+  a time touches most of the bucket sums each, which caps `m` where the combine
+  costs more than the accumulation it saves. Folding away one digit at a time
+  instead (level `j+1` is level `j` with its top remaining digit collapsed, as
+  `L[a] = S[a] + S[H+a] - S[H-a]`, whose three terms are all canonical)
   yields every digit's marginals for about two additions per bucket in total,
   and the marginals of all levels reduce together so a handful of inversions
   cover the whole combine. This is what makes `m = 9` affordable — and `m = 9`
@@ -215,20 +227,23 @@ exactly linear:
 
 | n         | per-point | previous engine | C serial            |
 |-----------|-----------|-----------------|---------------------|
-| 1 000     | 22.5 ms   | 6.81 ms (3.3×)  | 5.28 ms (4.3×)      |
-| 6 000     | 135 ms    | 24.0 ms (5.6×)  | 15.6 ms (8.7×)      |
-| 100 000   | 2.26 s    | 299 ms (7.5×)   | 154 ms (14.7×)      |
-| 1 000 000 | 22.6 s    | 3.19 s (7.0×)   | **1.30 s (17.3×)**  |
+| 1 000     | 22.3 ms   | 6.81 ms (3.3×)  | 4.90 ms (4.6×)      |
+| 6 000     | 133 ms    | 24.0 ms (5.6×)  | 14.3 ms (9.3×)      |
+| 100 000   | 2.22 s    | 299 ms (7.5×)   | 141 ms (15.7×)      |
+| 1 000 000 | 22.1 s    | 3.19 s (7.0×)   | **1.17 s (18.9×)**  |
 
 "Previous engine" is the single-combination-per-round implementation this
 strategy replaced, measured on the same batches in the same session. Run-to-run
 spread here is ±2%, tighter than the virtualized Xeon's ±5%.
 
-The million-point row is above the Xeon's ~15× because this machine's ratio of
-addition cost to check cost is slightly better and its cache holds a round's
-`3^9` slots more comfortably; the shape — flat below a thousand points, still
-climbing at a hundred thousand, flattening toward the nine-pass floor after a
-million — is the same on both.
+Every row is above the Xeon's, and the last two by more than the ratio of
+addition to check cost explains. Two of the choices above are worth more on a
+machine with this much cache: folding halves a round's slots, and the budget
+that bounds them is set here to admit width 11, which is the one step that buys
+a pass — eight rather than nine at a million points. On the Xeon both were left
+where its smaller L2 wants them. The shape is the same on both: flat below a
+thousand points, still climbing at a hundred thousand, flattening toward the
+pass floor after a million.
 
 ## What did not pay
 
@@ -256,6 +271,17 @@ against per-point checking.
   resident and the point array is read sequentially either way. Nine passes
   over a million points is 864 MB of sequential reads against ~1.3 s of
   arithmetic — under 2% of the time at this machine's bandwidth.
+- **Radix-partitioning the accumulation.** The proposal is to scatter points
+  into `3^k` contiguous ranges by their top digits first, so the random-access
+  working set becomes one partition's slots rather than the whole array, and
+  the width stops being bounded by cache. It is a real fix for a real problem,
+  but not one this machine has: raising the slot budget straight to 16 MiB —
+  an 8.5 MB slot array, four times what the old budget allowed — costs nothing
+  measurable per addition and buys 9% at a million points, so cache was not
+  what bounded the width. What bounds it is the combine, which grows as `3^m`
+  and which partitioning does not touch. The premise is worth re-testing on a
+  machine with a smaller last-level cache, where the Xeon's own numbers (8% per
+  addition one step past its 2 MiB, 15% two steps) suggest it would bind.
 
 ## Same-engine strategy comparison
 
