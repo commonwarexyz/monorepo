@@ -652,13 +652,11 @@ impl Tasks {
         };
 
         let mut first_panic = None;
-        for task in normal.into_iter().chain(event) {
-            capture_cleanup_panic(&mut first_panic, move || drop(task));
-        }
         for task in slots.into_iter().flatten() {
             capture_cleanup_panic(&mut first_panic, || task.clear());
-            capture_cleanup_panic(&mut first_panic, move || drop(task));
         }
+        drop(normal);
+        drop(event);
         if let Some(payload) = first_panic {
             std::panic::resume_unwind(payload);
         }
