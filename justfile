@@ -24,7 +24,14 @@ pre-pr: lint test-docs test
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mapfile -d '' -t source_files < <(find . -path ./target -prune -o -name '*.rs' -type f -print0)
+    if [ "${#source_files[@]}" -eq 0 ]; then
+        exit 0
+    fi
+    {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }} "${source_files[@]}"
+    cargo run --quiet -p commonware-fmt -- "${source_files[@]}"
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -36,7 +43,14 @@ check-toml-fmt:
 
 # Check the formatting of the workspace
 check-fmt:
-    just fix-fmt --check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mapfile -d '' -t source_files < <(find . -path ./target -prune -o -name '*.rs' -type f -print0)
+    if [ "${#source_files[@]}" -eq 0 ]; then
+        exit 0
+    fi
+    {{ rustfmt }} {{ nightly_version }} --edition 2024 --check "${source_files[@]}"
+    cargo run --quiet -p commonware-fmt -- --check "${source_files[@]}"
 
 # Run clippy lints
 clippy *args='':
