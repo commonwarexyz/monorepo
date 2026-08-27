@@ -1038,8 +1038,7 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 /// mutated for the duration of the iteration.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
-    /// Cached `bitmap.len()` at iterator construction. For layered bitmaps, `len()`
-    /// walks the layer chain, so caching this avoids that walk on every `next`.
+    /// Cached `bitmap.len()` at iterator construction.
     len: u64,
     /// Bit index of bit 0 of `word`. Always a 64-bit word boundary relative to the start
     /// of its chunk, except when the iterator is constructed exhausted (then `len`).

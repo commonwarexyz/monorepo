@@ -3663,10 +3663,9 @@ pub mod tests {
 
     /// Build a child batch from a still-live parent whose apply was followed by a prune, then
     /// merkleize and apply the child. The parent's overlays are read over the committed
-    /// bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the child is
-    /// merkleized, the internal `trim_committed` call must observe the advanced boundary and
-    /// produce correct child overlays; merkleize and apply must then produce
-    /// correct state for keys at and beyond the advanced floor.
+    /// bitmap, and `prune` mutates that bitmap's pruning boundary in place. The child's view
+    /// must reflect the advanced boundary; merkleize and apply must then produce correct state
+    /// for keys at and beyond the advanced floor, and a reopen must rebuild the same root.
     #[test_traced("INFO")]
     fn test_current_live_batch_child_after_prune() {
         let executor = deterministic::Runner::default();
@@ -3702,19 +3701,87 @@ pub mod tests {
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
 
-            // Extend `a` into `b` AFTER the prune. Merkleizing `b` trims `a`'s overlays against
-            // the committed bitmap, which must correctly see the advanced pruning boundary.
+            // Extend `a` into `b` AFTER the prune. `b`'s view over the committed bitmap must see
+            // the advanced pruning boundary.
             let b = a
                 .new_batch::<Sha256>()
                 .write(key(300), Some(val(300)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
+            let b_root = b.root();
 
             let (db, _) = db.apply_batch(b).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(249)).await.unwrap(), Some(val(10_249)));
             assert_eq!(db.get(&key(300)).await.unwrap(), Some(val(300)));
+
+            // `apply_batch` installs the batch's root unverified; a reopen recomputes it.
+            let db = db.commit().await.unwrap();
+            drop(db);
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.child("reopen"),
+                variable_config::<OneCap>("child-after-prune", &ctx),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), b_root);
+            assert_eq!(reopened.get(&key(300)).await.unwrap(), Some(val(300)));
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding onto an ancestor state keeps a live descendant on-chain, but its overlays were
+    /// built on the later committed bitmap. Merkleizing a child must refuse with `StaleRead`
+    /// rather than read those overlays over the rewound bitmap.
+    #[test_traced("INFO")]
+    fn test_current_child_merkleize_after_rewind_onto_ancestor_is_stale() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_config::<OneCap>("rewind-onto-ancestor", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // S0 <- A1 <- A2, both applied. `a1` stays alive so `p`'s chain records it.
+            let a1 = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(Arc::clone(&a1)).await.unwrap();
+            let a1_size = db.bounds().end;
+            let a2 = a1
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(Arc::clone(&a2)).await.unwrap();
+
+            // `p` is merkleized at A2, so its overlay was built on the post-A2 bitmap.
+            let p = a2
+                .new_batch::<Sha256>()
+                .write(key(2), Some(val(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Rewind onto A1: still one of `p`'s chain states, but not the one its overlay was
+            // built on.
+            let db = db.rewind(a1_size).await.unwrap();
+            let err = p
+                .new_batch::<Sha256>()
+                .write(key(3), Some(val(3)))
+                .merkleize(&db, None)
+                .await
+                .err();
+            assert!(matches!(err, Some(Error::StaleRead)));
 
             db.destroy().await.unwrap();
         });

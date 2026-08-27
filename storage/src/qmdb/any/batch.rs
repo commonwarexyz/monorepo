@@ -1674,9 +1674,9 @@ where
         let steps_bound = resolved_updates + existing_writes + 1;
 
         // Overlap the serial update resolution with the candidate prefetch: the
-        // committed-prefix candidate set depends only on the base floor, the candidate
-        // source, and the step bound, none of which depend on the resolution. The batch
-        // moves into the job, so its floor is captured first.
+        // committed-prefix candidate set depends only on the base floor, the bitmap, and the
+        // step bound, none of which depend on the resolution. The batch moves into the job,
+        // so its floor is captured first.
         let scan_from = self.batch.base.inactivity_floor_loc();
         let resolve = db
             .strategy()

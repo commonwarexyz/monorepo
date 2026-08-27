@@ -52,7 +52,8 @@ pub(crate) struct ChunkOverlay<const N: usize> {
 }
 
 /// Parent-bitmap dimensions captured once per overlay. `chunk_mut` needs them on every newly
-/// materialized chunk, so they are read once instead of per touched chunk.
+/// materialized chunk, so they are read once instead of per touched chunk. `len` also records
+/// the committed length the overlay was built on (see `BitmapView::trim_committed`).
 #[derive(Clone, Copy, Debug, Default)]
 struct Dimensions {
     len: u64,
@@ -492,7 +493,9 @@ where
         } = self;
 
         let db_any = inner.on_chain(&db.any)?;
-        let bitmap_parent = BitmapView::over(bitmap_parent, &db.any.bitmap).trim_committed();
+        let bitmap_parent = BitmapView::over(bitmap_parent, &db.any.bitmap)
+            .trim_committed()
+            .ok_or(Error::StaleRead)?;
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same bitmap the floor
@@ -559,7 +562,9 @@ where
             bitmap_parent,
         } = self;
         let db_any = inner.on_chain(&db.any)?;
-        let bitmap_parent = BitmapView::over(bitmap_parent, &db.any.bitmap).trim_committed();
+        let bitmap_parent = BitmapView::over(bitmap_parent, &db.any.bitmap)
+            .trim_committed()
+            .ok_or(Error::StaleRead)?;
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let inner = inner
             .merkleize_with_floor_scan(db_any, metadata, staged_updates, &bitmap_parent)
@@ -601,7 +606,9 @@ where
             bitmap_parent,
         } = self;
         let db_any = inner.on_chain(&db.any)?;
-        let bitmap_parent = BitmapView::over(bitmap_parent, &db.any.bitmap).trim_committed();
+        let bitmap_parent = BitmapView::over(bitmap_parent, &db.any.bitmap)
+            .trim_committed()
+            .ok_or(Error::StaleRead)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
             .merkleize_with_floor_scan(
@@ -649,7 +656,9 @@ where
             bitmap_parent,
         } = self;
         let db_any = inner.on_chain(&db.any)?;
-        let bitmap_parent = BitmapView::over(bitmap_parent, &db.any.bitmap).trim_committed();
+        let bitmap_parent = BitmapView::over(bitmap_parent, &db.any.bitmap)
+            .trim_committed()
+            .ok_or(Error::StaleRead)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
             .merkleize_with_floor_scan(
@@ -935,11 +944,20 @@ impl<'a, const N: usize> BitmapView<'a, N> {
         }
     }
 
-    /// Drop the overlays the committed bitmap already contains.
-    fn trim_committed(mut self) -> Self {
+    /// Drop the overlays the committed bitmap already contains. Returns `None` when the oldest
+    /// remaining overlay was not built on the committed bitmap: a rewind onto an ancestor state
+    /// removed an applied overlay from under it, so reads would mix two bitmaps.
+    fn trim_committed(mut self) -> Option<Self> {
         let committed = self.committed.len();
         self.overlays.retain(|overlay| overlay.len > committed);
-        self
+        if self
+            .overlays
+            .first()
+            .is_some_and(|overlay| overlay.parent.len != committed)
+        {
+            return None;
+        }
+        Some(self)
     }
 }
 
@@ -1797,7 +1815,7 @@ mod tests {
     #[test]
     fn trim_committed_already_base() {
         let committed = make_bitmap(&[true; 64]);
-        let result = make_view(&committed, &[]).trim_committed();
+        let result = make_view(&committed, &[]).trim_committed().unwrap();
         assert!(result.overlays.is_empty());
     }
 
@@ -1807,9 +1825,9 @@ mod tests {
     /// bitmap alone.
     #[test]
     fn trim_committed_all_committed() {
-        // `committed.len() == 64`; the single overlay's `len == 32 (<= 64)`, so it's committed.
+        // `committed.len() == 64`; the single overlay's `len == 64`, so it's committed.
         let committed = make_bitmap(&[true; 64]);
-        let result = make_view(&committed, &[32]).trim_committed();
+        let result = make_view(&committed, &[64]).trim_committed().unwrap();
         assert!(result.overlays.is_empty());
     }
 
@@ -1820,7 +1838,7 @@ mod tests {
     fn trim_committed_none_committed() {
         // `committed.len() == 32`; both overlays have `len > 32`, so neither is committed.
         let committed = make_bitmap(&[true; 32]);
-        let result = make_view(&committed, &[64, 96]).trim_committed();
+        let result = make_view(&committed, &[64, 96]).trim_committed().unwrap();
         assert_eq!(overlay_lens(&result), vec![64, 96]);
     }
 
@@ -1831,7 +1849,7 @@ mod tests {
     fn trim_committed_exactly_one_uncommitted() {
         // `committed.len() == 64`; committed overlay (`len == 64`) + uncommitted (`96`).
         let committed = make_bitmap(&[true; 64]);
-        let result = make_view(&committed, &[64, 96]).trim_committed();
+        let result = make_view(&committed, &[64, 96]).trim_committed().unwrap();
         assert_eq!(overlay_lens(&result), vec![96]);
     }
 
@@ -1841,7 +1859,24 @@ mod tests {
     fn trim_committed_multiple_uncommitted() {
         // `committed.len() == 64`; committed overlay (64), then two uncommitted (96, 128).
         let committed = make_bitmap(&[true; 64]);
-        let result = make_view(&committed, &[64, 96, 128]).trim_committed();
+        let result = make_view(&committed, &[64, 96, 128])
+            .trim_committed()
+            .unwrap();
         assert_eq!(overlay_lens(&result), vec![96, 128]);
+    }
+
+    /// The oldest kept overlay must have been built on the committed bitmap. Viewing overlays
+    /// built on a 64-bit bitmap over a 32-bit one is what a rewind onto an ancestor state looks
+    /// like, and must be refused.
+    #[test]
+    fn trim_committed_rejects_rewound_committed() {
+        let committed = make_bitmap(&[true; 64]);
+        let overlays = make_view(&committed, &[96]).overlays;
+        let rewound = make_bitmap(&[true; 32]);
+        assert!(
+            BitmapView::over(overlays, &rewound)
+                .trim_committed()
+                .is_none()
+        );
     }
 }

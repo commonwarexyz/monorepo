@@ -85,6 +85,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
+use commonware_utils::bitmap;
 use core::num::NonZeroUsize;
 use tracing::warn;
 
@@ -172,7 +173,7 @@ where
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
     cfg: Config<T, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
-    bitmap: Option<commonware_utils::bitmap::Prunable<N>>,
+    bitmap: Option<bitmap::Prunable<N>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
