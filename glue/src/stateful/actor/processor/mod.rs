@@ -34,7 +34,7 @@
 //!
 //! Every database mutation takes the databases out of the processor and puts
 //! them back only after the anchor reflects it. Steps run while the mutation is
-//! in flight, except two that park until the databases are back: a fork from
+//! in flight, except two that defer until the databases are back: a fork from
 //! the applied anchor, and a job whose batch storage refused
 //! ([`Stale`](crate::stateful::ExecutionError::Stale)) because it sat on the
 //! losing side of the apply. So no fork can straddle an apply, and a stale job
@@ -44,10 +44,14 @@
 //! fork taken after an apply but before the anchor moved would record the new
 //! commitment and pass its stale-read checks while the job believed its parent
 //! was the old anchor.
+//!
+//! A job waiting on another job's replay or deferred on the databases notices
+//! its caller's cancellation when it is resumed, bounded by one block apply or
+//! one mutation.
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
-    actor::metrics::Metrics as StatefulMetrics,
+    actor::{core::Request, metrics::Metrics as StatefulMetrics},
     db::{
         Anchor, Barrier, DatabaseSet, MerkleizedOf, Publisher, SnapshotsOf, SyncTargetsOf,
         UnmerkleizedOf,
@@ -55,33 +59,27 @@ use crate::stateful::{
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
-    marshal::{
-        ancestry::BoxedAncestry,
-        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
-    },
+    marshal::ancestry::BoxedAncestry,
     types::{Height, Round},
 };
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_cryptography::Digestible;
 use commonware_macros::select;
-use commonware_runtime::{
-    Clock, Metrics, Spawner,
-    telemetry::metrics::{GaugeExt, histogram::Timer},
-};
+use commonware_runtime::{Clock, Metrics, Spawner, telemetry::metrics::GaugeExt};
 use commonware_utils::{channel::oneshot, futures::Pool};
-use futures::FutureExt as _;
+use futures::{FutureExt as _, future};
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
+    iter::once,
     sync::Arc,
 };
 use tracing::{Instrument as _, Span, debug, info_span, warn};
 
 mod jobs;
 mod stages;
-pub(super) use jobs::Request;
-use jobs::{Caller, Failure, Job, Outcome, Stale};
-pub(super) use stages::Provider;
+use jobs::{Caller, Job, Outcome, Stale};
+pub(super) use stages::Marshal;
 
 pub(super) type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = MerkleizedOf<<A as Application<E>>::Databases, E>;
@@ -154,14 +152,23 @@ where
     compatible
 }
 
-/// Runs `stage` over `job` in the processor's pool, returning the job with its
-/// outcome.
+/// Runs `stage` over `job` in the processor's pool unless the caller drops its
+/// request, returning the job with its outcome.
+///
+/// `stage` may borrow fields of `job` but must not call `Job` methods: the
+/// cancellation arm holds `job.caller` while `stage` is built.
 macro_rules! dispatch {
     ($processor:expr, $job:ident, $stage:expr) => {{
         let span = $job.span.clone();
         $processor.jobs.push(
             async move {
-                let outcome = $stage.await;
+                let outcome = select! {
+                    _ = $job.caller.cancelled() => {
+                        debug!("caller dropped its request");
+                        Outcome::Cancelled
+                    },
+                    outcome = $stage => outcome,
+                };
                 ($job, outcome)
             }
             .instrument(span),
@@ -270,18 +277,6 @@ pub(super) struct Prune<T> {
     qmdb_target: T,
 }
 
-/// A finalization admitted by [`Processor::begin_finalize`].
-pub(super) struct Finalizing<A, E>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    block: Arc<A::Block>,
-    /// The block's cached state, or `None` when it has to be replayed.
-    batch: Option<PendingBatches<A, E>>,
-    timer: Timer,
-}
-
 /// Where a job's next batches come from.
 enum Fork<U> {
     Batches(U),
@@ -300,7 +295,9 @@ where
     app: A,
     /// The applied databases, taken out while a mutation runs.
     databases: Option<A::Databases>,
-    provider: P,
+    marshal: P,
+    /// Serves the latest snapshots of the applied state.
+    publisher: Publisher<SnapshotsOf<A::Databases, E>>,
     /// The stage each live job is running.
     jobs: Pool<(Job<E, A>, Outcome<E, A>)>,
     /// Whether a proposal job is live.
@@ -310,9 +307,9 @@ where
     /// Latest canonical anchor applied to the databases.
     last_processed: Anchor<PendingDigest<A, E>>,
     /// Replays in flight, keyed by the block being replayed, with the jobs
-    /// parked on each.
+    /// waiting on each.
     replays: BTreeMap<PendingDigest<A, E>, Vec<Job<E, A>>>,
-    /// Jobs parked until the databases are back from a mutation.
+    /// Jobs deferred until the databases are back from a mutation.
     deferred: Vec<Job<E, A>>,
     metrics: StatefulMetrics,
     pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
@@ -322,14 +319,15 @@ impl<E, A, P> Processor<E, A, P>
 where
     E: Rng + Spawner + Metrics + Clock + 'static,
     A: Application<E>,
-    P: Provider<Block = A::Block>,
+    P: Marshal<Block = A::Block>,
 {
     /// Create a processor over `databases`, applied through the anchor
     /// `last_processed`.
     pub(super) fn new(
         app: A,
         databases: A::Databases,
-        provider: P,
+        marshal: P,
+        publisher: Publisher<SnapshotsOf<A::Databases, E>>,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: StatefulMetrics,
         pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
@@ -337,7 +335,8 @@ where
         Self {
             app,
             databases: Some(databases),
-            provider,
+            marshal,
+            publisher,
             jobs: Pool::default(),
             proposing: false,
             pending: BTreeMap::new(),
@@ -366,7 +365,7 @@ where
     }
 
     /// Run `operation` while stepping the jobs that finish meanwhile.
-    pub(super) async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
+    async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
         futures::pin_mut!(operation);
         loop {
             select! {
@@ -377,121 +376,119 @@ where
     }
 
     /// Run one mutation of the databases, stepping jobs meanwhile. Forks from
-    /// the anchor and stale jobs park until it returns.
+    /// the anchor and stale jobs defer until it returns.
     async fn mutate<T, F>(&mut self, mutation: impl FnOnce(A::Databases) -> F) -> T
     where
         F: Future<Output = (A::Databases, T)>,
     {
-        let databases = self.databases.take().expect("one mutation at a time");
+        let databases = self.take_databases();
         let (databases, output) = self.drive(mutation(databases)).await;
         self.restore(databases);
         output
     }
 
-    /// Put the databases back and resume the jobs parked on them.
+    /// Take the databases for a mutation.
+    fn take_databases(&mut self) -> A::Databases {
+        assert!(!self.proposing, "no mutation runs while a proposal is live");
+        self.databases.take().expect("one mutation at a time")
+    }
+
+    /// Put the databases back and resume the jobs deferred on them.
     fn restore(&mut self, databases: A::Databases) {
         self.databases = Some(databases);
+        // Only verifications defer on the databases: no mutation overlaps a
+        // proposal.
         for job in std::mem::take(&mut self.deferred) {
-            match job.caller {
-                Caller::Verify(_) => self.classify(job),
-                Caller::Propose { .. } => self.advance(job),
-            }
+            self.classify(job);
         }
     }
 
-    /// Capture snapshots of the applied state and start persisting it.
-    pub(super) async fn sync(&mut self) -> (SnapshotsOf<A::Databases, E>, Barrier) {
-        self.mutate(|databases| async move {
-            let (databases, snapshots, barrier) = databases.finalize().await;
-            (databases, (snapshots, barrier))
-        })
-        .await
+    /// Capture snapshots of the applied state, serve them, and start
+    /// persisting them. Returns the height they were captured at and its
+    /// durability barrier.
+    pub(super) async fn sync(&mut self) -> (Height, Barrier) {
+        let (snapshots, barrier) = self
+            .mutate(|databases| async move {
+                let (databases, snapshots, barrier) = databases.finalize().await;
+                (databases, (snapshots, barrier))
+            })
+            .await;
+        // The snapshots serve immediately; peers verify what they fetch against
+        // a finalized root, so serving safely runs ahead of disk.
+        let height = self.last_processed.height;
+        self.publisher.publish(height, snapshots);
+        (height, barrier)
     }
 
-    /// Publish a fresh snapshot of the applied state.
-    pub(super) async fn publish_snapshot(
-        &mut self,
-        publisher: &mut Publisher<SnapshotsOf<A::Databases, E>>,
-    ) {
+    /// Serve a fresh snapshot of the applied state.
+    pub(super) async fn publish_snapshot(&mut self) {
         let snapshots = self.mutate(DatabaseSet::snapshot).await;
-        publisher.publish(self.last_processed.height, snapshots);
+        self.publisher
+            .publish(self.last_processed.height, snapshots);
     }
 
-    /// Prune the databases and `marshal` to `prune`'s targets.
+    /// Prune the databases and marshal to `prune`'s targets.
     ///
     /// # Invariant
     ///
     /// The databases must be durable through `prune.barrier_height`.
-    pub(super) async fn prune<S, V>(
-        &mut self,
-        prune: Prune<PendingSyncTargets<A, E>>,
-        marshal: &MarshalMailbox<S, V>,
-    ) where
-        S: Scheme,
-        V: MarshalVariant,
-    {
-        self.mutate(|databases| async move {
-            let databases = databases.prune(&prune.qmdb_target).await;
-            marshal.prune(prune.marshal_height);
-            (databases, ())
-        })
-        .await;
+    pub(super) async fn prune(&mut self, prune: Prune<PendingSyncTargets<A, E>>) {
+        let Prune {
+            marshal_height,
+            qmdb_target,
+            ..
+        } = prune;
+        self.mutate(|databases| async move { (databases.prune(&qmdb_target).await, ()) })
+            .await;
+        self.marshal.prune(marshal_height);
     }
 
-    /// Admit `block` for finalization.
+    /// Whether `block` is already reflected in the databases, which happens
+    /// when marshal reports it twice.
     ///
-    /// Returns [`None`] when the block was already applied, which happens when
-    /// marshal reports it twice.
-    pub(super) fn begin_finalize(
-        &self,
-        context: &E,
-        block: Arc<A::Block>,
-    ) -> Option<Finalizing<A, E>> {
+    /// Panics on a block below the anchor or a conflicting digest at its
+    /// height.
+    pub(super) fn processed(&self, block: &A::Block) -> bool {
         let (height, digest) = (block.height(), block.digest());
-        let last_processed = self.last_processed;
-        if height < last_processed.height {
+        let anchor = self.last_processed;
+        if height < anchor.height {
             panic!(
                 "received finalized block below processed height: finalized={} processed={}",
                 height.get(),
-                last_processed.height.get(),
+                anchor.height.get(),
             );
         }
-        if height == last_processed.height {
+        if height == anchor.height {
             assert_eq!(
-                digest, last_processed.digest,
+                digest, anchor.digest,
                 "received conflicting finalized block at processed height",
             );
-            return None;
+            return true;
         }
+        false
+    }
 
+    /// Apply `block`, replaying it when its state is not cached, and move the
+    /// anchor. Returns any prune now due.
+    pub(super) async fn finalize(
+        &mut self,
+        context: &E,
+        block: &A::Block,
+    ) -> Option<Prune<PendingSyncTargets<A, E>>> {
+        assert!(
+            !self.processed(block),
+            "finalize called on a processed block"
+        );
+        let timer = self.metrics.finalize_duration.timer(context);
+        let sync_targets = A::sync_targets(block);
         // Marshal finalization is ordered. A pending miss means the block can
         // be replayed on top of finalized state.
         let batch = self
             .pending
-            .get(&digest)
+            .get(&block.digest())
             .map(|entry| entry.merkleized.clone());
-        Some(Finalizing {
-            block,
-            batch,
-            timer: self.metrics.finalize_duration.timer(context),
-        })
-    }
-
-    /// Apply a finalization, replaying the block when its state is not cached,
-    /// and move the anchor. Returns any prune now due.
-    pub(super) async fn finalize(
-        &mut self,
-        context: &E,
-        finalizing: Finalizing<A, E>,
-    ) -> Option<Prune<PendingSyncTargets<A, E>>> {
-        let Finalizing {
-            block,
-            batch,
-            timer,
-        } = finalizing;
-        let sync_targets = A::sync_targets(&block);
         let mut app = self.app.clone();
-        let databases = self.databases.take().expect("one mutation at a time");
+        let databases = self.take_databases();
         let apply = async {
             let batch = match batch {
                 Some(batch) => batch,
@@ -500,7 +497,7 @@ where
                     let batch = match app
                         .apply(
                             (context.child("finalize_replay"), block.context()),
-                            &block,
+                            block,
                             batches,
                         )
                         .await
@@ -665,7 +662,11 @@ where
             timer,
             rebuild: None,
         };
-        dispatch!(self, job, stages::candidate(&mut job));
+        dispatch!(
+            self,
+            job,
+            stages::fetch(&mut job.ancestry).map(Outcome::Candidate)
+        );
     }
 
     /// Start a proposal job. The block and its merkleized state are cached in
@@ -680,6 +681,10 @@ where
         response: oneshot::Sender<Option<A::Block>>,
     ) {
         assert!(!self.proposing, "the actor runs one proposal at a time");
+        assert!(
+            self.databases.is_some(),
+            "no proposal starts while a mutation runs"
+        );
         self.proposing = true;
         let timer = self.metrics.propose_duration.timer(&context.0);
         let mut job = Job {
@@ -697,7 +702,11 @@ where
             timer,
             rebuild: None,
         };
-        dispatch!(self, job, stages::parent(&mut job));
+        dispatch!(
+            self,
+            job,
+            stages::fetch(&mut job.ancestry).map(Outcome::Parent)
+        );
     }
 
     /// Wait for the next job to finish a stage, and step it.
@@ -717,10 +726,32 @@ where
     fn step(&mut self, mut job: Job<E, A>, outcome: Outcome<E, A>) {
         match outcome {
             Outcome::Cancelled => self.retire(job),
-            Outcome::Candidate => self.classify(job),
-            Outcome::Parent => self.lookup(job),
-            Outcome::Declined | Outcome::Proposed(Ok(None)) => self.deliver(job, None),
-            Outcome::Classified(valid) => job.answer(valid),
+            Outcome::Candidate(Some(block)) => {
+                job.candidate = Some(block);
+                self.classify(job);
+            }
+            Outcome::Parent(Some(block)) => {
+                job.parent = Some(block);
+                self.lookup(job);
+            }
+            Outcome::Parent(None) if job.is_proposal() => self.deliver(job, None),
+            // Incomplete ancestry is not a verdict.
+            Outcome::Candidate(None) | Outcome::Parent(None) => {
+                debug!("verification request waiting on incomplete ancestry");
+                self.park(job);
+            }
+            Outcome::Canonical(None) => {
+                warn!(
+                    target_height = job.candidate().height().get(),
+                    processed_height = job.anchor.height.get(),
+                    "failed to fetch canonical block for a candidate below the processed height"
+                );
+                self.park(job);
+            }
+            Outcome::Canonical(Some(canonical)) => {
+                let canonical = canonical == job.candidate().digest();
+                job.answer(canonical);
+            }
             Outcome::Walked(Some(path)) => {
                 let _ = self.metrics.rebuild_pending_depth.try_set(path.len());
                 job.path = path.into();
@@ -728,11 +759,41 @@ where
             }
             Outcome::Walked(None) => self.invalid(job),
             Outcome::Replayed(result) => self.replayed(job, result),
-            Outcome::Verified(Ok(None)) => job.answer(false),
-            // Caching is retention, not part of the verdict. The execution
-            // matched the block's commitments on its own branch.
+            Outcome::Verified(Ok(None)) => {
+                warn!(
+                    parent_digest = ?job.parent().digest(),
+                    block_digest = ?job.candidate().digest(),
+                    "verification rejected: app.verify returned None"
+                );
+                job.answer(false);
+            }
             Outcome::Verified(Ok(Some(merkleized))) => {
+                let _job_span = job.span.clone().entered();
                 let (digest, parent) = (job.candidate().digest(), job.parent().digest());
+                let _span = info_span!(
+                    "stateful.processor.match_commitments",
+                    block = %digest,
+                    parent = %parent,
+                )
+                .entered();
+
+                // Application output is adversarial until it matches the
+                // commitments carried by the candidate block. Never retain it
+                // before this check.
+                if !A::Databases::matches_sync_targets(
+                    &merkleized,
+                    &A::sync_targets(job.candidate()),
+                ) {
+                    warn!(
+                        parent_digest = ?parent,
+                        block_digest = ?digest,
+                        "verification rejected: verified state must match block commitments"
+                    );
+                    return job.answer(false);
+                }
+
+                // Caching is retention, not part of the verdict. The execution
+                // matched the block's commitments on its own branch.
                 if !self.insert(
                     digest,
                     parent,
@@ -749,6 +810,7 @@ where
                 job.answer(true);
             }
             Outcome::Verified(Err(Stale)) | Outcome::Proposed(Err(Stale)) => self.stale(job),
+            Outcome::Proposed(Ok(None)) => self.deliver(job, None),
             Outcome::Proposed(Ok(Some(Proposed { block, merkleized }))) => {
                 assert!(
                     A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
@@ -769,11 +831,27 @@ where
         }
     }
 
-    /// Retire a job whose caller dropped its request.
+    /// Retire a job whose caller dropped its request. A replay owner hands its
+    /// replay to the jobs waiting on it.
     fn retire(&mut self, job: Job<E, A>) {
         if job.is_proposal() {
             self.proposing = false;
         }
+        if let Some(block) = job.path.front() {
+            let waiters = self
+                .replays
+                .remove(&block.digest())
+                .expect("a cancelled replay owner has an entry");
+            for waiter in waiters {
+                self.advance(waiter);
+            }
+        }
+    }
+
+    /// Hold a job on incomplete ancestry until its caller drops the request.
+    fn park(&mut self, mut job: Job<E, A>) {
+        debug_assert!(job.path.is_empty(), "only a replay owner carries a path");
+        dispatch!(self, job, future::pending::<Outcome<E, A>>());
     }
 
     /// Answer a proposal and retire its job.
@@ -785,13 +863,18 @@ where
     /// Decide a verification from the canonical chain, or go on to its parent.
     fn classify(&mut self, mut job: Job<E, A>) {
         job.anchor = self.last_processed;
+        job.path.clear();
         let (height, digest) = (job.candidate().height(), job.candidate().digest());
 
         // A finalized candidate cannot be re-executed against newer database
         // state. Prove it belongs to the canonical chain before accepting it.
         if height < job.anchor.height {
-            let provider = self.provider.clone();
-            return dispatch!(self, job, stages::canonical(&mut job, provider));
+            let provider = self.marshal.clone();
+            return dispatch!(
+                self,
+                job,
+                stages::canonical(provider, height).map(Outcome::Canonical)
+            );
         }
         if height == job.anchor.height {
             let canonical = digest == job.anchor.digest;
@@ -803,20 +886,29 @@ where
         if job.parent.is_some() {
             return self.lookup(job);
         }
-        dispatch!(self, job, stages::parent(&mut job));
+        dispatch!(
+            self,
+            job,
+            stages::fetch(&mut job.ancestry).map(Outcome::Parent)
+        );
     }
 
     /// Fork the parent's state, or start rebuilding it.
     fn lookup(&mut self, mut job: Job<E, A>) {
+        debug_assert!(job.path.is_empty(), "only a replay owner carries a path");
         job.anchor = self.last_processed;
-        job.path.clear();
         if self.known(&job.parent().digest()) {
             return self.advance(job);
         }
         job.rebuild = Some(self.metrics.rebuild_pending_duration.timer(&job.context.0));
         let known = self.pending.keys().copied().collect();
-        let provider = self.provider.clone();
-        dispatch!(self, job, stages::walk(&mut job, provider, known));
+        let provider = self.marshal.clone();
+        let (parent, anchor) = (Arc::clone(job.parent()), job.anchor);
+        dispatch!(
+            self,
+            job,
+            stages::walk(provider, parent, anchor, known).map(Outcome::Walked)
+        );
     }
 
     /// Replay the next missing block of the path, or execute on the parent
@@ -830,8 +922,8 @@ where
         {
             job.path.pop_front();
         }
-        let replaying = job.path.front().map(|block| block.digest());
-        let parent = match job.path.front() {
+        let replaying = job.path.front().map(Arc::clone);
+        let parent = match &replaying {
             Some(block) => block.parent(),
             None => {
                 if let Some(timer) = job.rebuild.take() {
@@ -841,8 +933,11 @@ where
             }
         };
 
-        // One job replays each block. The rest park on it.
-        if let Some(waiters) = replaying.and_then(|digest| self.replays.get_mut(&digest)) {
+        // One job replays each block. The rest wait on it.
+        if let Some(waiters) = replaying
+            .as_ref()
+            .and_then(|block| self.replays.get_mut(&block.digest()))
+        {
             return waiters.push(job);
         }
         let batches = match self.fork_from(&parent) {
@@ -852,51 +947,85 @@ where
         };
         let app = self.app.clone();
         match replaying {
-            Some(digest) => {
-                self.replays.insert(digest, Vec::new());
-                dispatch!(self, job, stages::replay(&mut job, app, batches));
+            Some(block) => {
+                self.replays.insert(block.digest(), Vec::new());
+                let context = job.context.0.child("replay_apply");
+                dispatch!(
+                    self,
+                    job,
+                    stages::replay(app, context, block, batches).map(Outcome::Replayed)
+                );
             }
             None if job.is_proposal() => {
-                dispatch!(self, job, stages::propose(&mut job, app, batches));
+                let Caller::Propose { input, .. } = &mut job.caller else {
+                    unreachable!("only proposals reach the propose stage")
+                };
+                let input = input.take().expect("a proposal builds once");
+                // The application takes the caller's runtime context by value.
+                // Keep a child as the clock for the proposal timer.
+                let clock = job.context.0.child("propose_timer");
+                let runtime_context = std::mem::replace(&mut job.context.0, clock);
+                let context = (runtime_context, job.context.1.clone());
+                let (parent, ancestry) = (Arc::clone(job.parent()), job.ancestry.clone());
+                dispatch!(
+                    self,
+                    job,
+                    stages::propose(app, context, parent, ancestry, batches, input)
+                        .map(Outcome::Proposed)
+                );
             }
-            None => dispatch!(self, job, stages::verify(&mut job, app, batches)),
+            None => {
+                let context = (
+                    job.context.0.child("application").child("verify_attempt"),
+                    job.context.1.clone(),
+                );
+                let (candidate, parent) = (Arc::clone(job.candidate()), Arc::clone(job.parent()));
+                let ancestry = job.ancestry.clone();
+                dispatch!(
+                    self,
+                    job,
+                    stages::verify(app, context, candidate, parent, ancestry, batches)
+                        .map(Outcome::Verified)
+                );
+            }
         }
     }
 
-    /// Retain a replayed block and resume the jobs parked on its replay.
-    fn replayed(&mut self, mut job: Job<E, A>, result: Result<PendingBatches<A, E>, Failure>) {
+    /// Retain a replayed block and resume the jobs waiting on its replay.
+    fn replayed(&mut self, job: Job<E, A>, result: Result<PendingBatches<A, E>, Stale>) {
         let block = job
             .path
             .front()
             .expect("a replay stage has a block to replay");
-        let (digest, parent, round) = (block.digest(), block.parent(), block.context().round());
-        let result = result.and_then(|merkleized| {
+        let digest = block.digest();
+        let retained = result.map(|merkleized| {
+            // Application output is adversarial until it matches the block's
+            // commitments. Never retain it before this check.
+            if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(block)) {
+                warn!(block = ?digest, "replayed state root must match block commitments");
+                return false;
+            }
             // Replayed state that the anchor already moved past is refused here.
-            self.insert(digest, parent, round, merkleized, Provenance::Applied)
-                .then_some(())
-                .ok_or(Failure::Invalid)
+            self.insert(
+                digest,
+                block.parent(),
+                block.context().round(),
+                merkleized,
+                Provenance::Applied,
+            )
         });
         let waiters = self
             .replays
             .remove(&digest)
             .expect("a replay owner has an entry");
 
-        // The owner goes first, so on its cancellation the first parked job
-        // takes the replay over and the rest park on it again.
-        match result {
-            Ok(()) => {
-                job.path.pop_front();
-                self.advance(job);
-            }
-            Err(Failure::Invalid) => self.invalid(job),
-            Err(Failure::Stale) => self.stale(job),
-            Err(Failure::Cancelled) => self.retire(job),
-        }
-        for waiter in waiters {
-            match result {
-                Ok(()) | Err(Failure::Cancelled) => self.advance(waiter),
-                Err(Failure::Invalid) => self.invalid(waiter),
-                Err(Failure::Stale) => self.stale(waiter),
+        // The owner goes first, so it registers the next replay before the
+        // waiters can wait on it.
+        for job in once(job).chain(waiters) {
+            match retained {
+                Ok(true) => self.advance(job),
+                Ok(false) => self.invalid(job),
+                Err(Stale) => self.stale(job),
             }
         }
     }
@@ -927,71 +1056,40 @@ where
     /// A finalization invalidated the job's batches. Re-classify once the
     /// anchor reflects it.
     fn stale(&mut self, job: Job<E, A>) {
-        match job.caller {
-            // The apply that refused the job has not returned the databases
-            // yet, so the anchor has not moved. Park until it has.
-            Caller::Verify(_) if self.databases.is_none() => self.deferred.push(job),
-            Caller::Verify(_) => {
-                debug_assert_ne!(
-                    job.anchor, self.last_processed,
-                    "an apply moves the anchor before it returns the databases",
-                );
-                self.classify(job);
-            }
-            // Unreachable, since the actor admits no finalization while a
-            // proposal runs (it becomes the FIFO barrier).
-            Caller::Propose { .. } => {
-                warn!(parent_digest = ?job.parent().digest(), "proposal went stale");
-                debug_assert!(false, "no finalization can interleave a proposal");
-                self.deliver(job, None);
-            }
+        assert!(
+            !job.is_proposal(),
+            "no mutation runs while a proposal is live"
+        );
+        debug!(
+            parent_digest = ?job.parent().digest(),
+            block_digest = ?job.candidate().digest(),
+            "verification went stale during execution"
+        );
+        // The apply that refused the job has not returned the databases yet,
+        // so the anchor has not moved. Defer until it has.
+        if self.databases.is_none() {
+            return self.deferred.push(job);
         }
+        debug_assert_ne!(
+            job.anchor, self.last_processed,
+            "an apply moves the anchor before it returns the databases",
+        );
+        self.classify(job);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Clock, Fork, Metrics, PendingDigest, Processor, Provenance, Provider, Prune, Pruning, Rng,
-        Spawner,
-        jobs::{Caller, Job, Outcome},
-        stages,
+        Clock, Fork, Marshal, Metrics, PendingDigest, Processor, Provenance, Prune, Pruning, Rng,
+        Spawner, stages,
     };
-
-    impl<E, A, P> Processor<E, A, P>
-    where
-        E: Rng + Spawner + Metrics + Clock + 'static,
-        A: Application<E>,
-        P: Provider<Block = A::Block>,
-    {
-        fn fork(&self, parent: &PendingDigest<A, E>) -> Option<UnmerkleizedOf<A::Databases, E>> {
-            match self.fork_from(parent) {
-                Fork::Batches(batches) => Some(batches),
-                Fork::Deferred | Fork::Unknown => None,
-            }
-        }
-
-        fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
-            self.last_processed
-        }
-
-        fn pending_contains(&self, digest: &PendingDigest<A, E>) -> bool {
-            self.pending.contains_key(digest)
-        }
-
-        fn clear_pending(&mut self) {
-            self.pending.clear();
-        }
-    }
     use crate::stateful::{
         Application, ExecutionError, Input, Proposed, PruneConfig,
-        actor::{
-            core::{Verification, WeakAncestry},
-            metrics::Metrics as StatefulMetrics,
-        },
+        actor::metrics::Metrics as StatefulMetrics,
         db::{
-            Anchor, Barrier, DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single,
-            SyncTargetsOf, UnmerkleizedOf,
+            Anchor, Barrier, DatabaseSet, Merkleized as _, MerkleizedOf, Publisher, ReadersOf,
+            Single, SyncTargetsOf, UnmerkleizedOf,
         },
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -1018,17 +1116,45 @@ mod tests {
     use commonware_utils::{
         NZU16, NZU64, NZUsize, channel::oneshot, non_empty_range, range::NonEmptyRange, sync::Mutex,
     };
-    use futures::{StreamExt, poll};
+    use futures::{Stream, StreamExt, poll};
     use std::{
         collections::{BTreeMap, BTreeSet, VecDeque},
         future::Future,
         num::NonZeroUsize,
+        pin::{Pin, pin},
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        task::{self, Poll},
         time::Duration,
     };
+
+    impl<E, A, P> Processor<E, A, P>
+    where
+        E: Rng + Spawner + Metrics + Clock + 'static,
+        A: Application<E>,
+        P: Marshal<Block = A::Block>,
+    {
+        fn fork(&self, parent: &PendingDigest<A, E>) -> Option<UnmerkleizedOf<A::Databases, E>> {
+            match self.fork_from(parent) {
+                Fork::Batches(batches) => Some(batches),
+                Fork::Deferred | Fork::Unknown => None,
+            }
+        }
+
+        fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
+            self.last_processed
+        }
+
+        fn pending_contains(&self, digest: &PendingDigest<A, E>) -> bool {
+            self.pending.contains_key(digest)
+        }
+
+        fn clear_pending(&mut self) {
+            self.pending.clear();
+        }
+    }
 
     async fn assert_durable(barrier: Barrier) {
         assert!(barrier.durable().await, "database sync must complete");
@@ -1149,6 +1275,45 @@ mod tests {
         }
     }
 
+    /// A block after `parent` with placeholder state. The walk reads only
+    /// heights and parent links.
+    fn linked_block(parent: &Block, view: View) -> Block {
+        Block {
+            context: consensus_context(parent.digest(), view),
+            parent: parent.digest(),
+            height: parent.height().next(),
+            state_root: Digest::EMPTY,
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
+    }
+
+    fn anchor_at(block: &Block) -> Anchor<Digest> {
+        Anchor {
+            height: block.height(),
+            round: block.context().round,
+            digest: block.digest(),
+        }
+    }
+
+    /// An ancestry that never yields, for requests cancelled before their
+    /// first read.
+    #[derive(Clone)]
+    struct PendingAncestry;
+
+    impl Stream for PendingAncestry {
+        type Item = Arc<Block>;
+
+        fn poll_next(self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    impl Ancestry<Block> for PendingAncestry {
+        fn peek(&self) -> Option<&Block> {
+            None
+        }
+    }
+
     fn u64_to_digest(value: u64) -> Digest {
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&value.to_be_bytes());
@@ -1225,6 +1390,7 @@ mod tests {
         finalized_observer: Option<Arc<Mutex<Vec<u64>>>>,
         finalized_probe: Option<ApplicationProbe>,
         verify_probe: Option<ApplicationProbe>,
+        apply_probe: Option<ApplicationProbe>,
     }
 
     impl ExecutionApp {
@@ -1234,6 +1400,7 @@ mod tests {
                 finalized_observer: None,
                 finalized_probe: None,
                 verify_probe: None,
+                apply_probe: None,
             }
         }
 
@@ -1245,6 +1412,7 @@ mod tests {
                     finalized_observer: Some(finalized_values.clone()),
                     finalized_probe: None,
                     verify_probe: None,
+                    apply_probe: None,
                 },
                 finalized_values,
             )
@@ -1336,6 +1504,9 @@ mod tests {
             block: &Self::Block,
             batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
         ) -> Result<MerkleizedOf<Self::Databases, deterministic::Context>, ExecutionError> {
+            if let Some(probe) = &self.apply_probe {
+                probe.call(block.digest()).await;
+            }
             Self::execute(block.height(), block.context.round.view(), batches).await
         }
 
@@ -1402,7 +1573,7 @@ mod tests {
         }
     }
 
-    impl Provider for MapProvider {
+    impl Marshal for MapProvider {
         async fn canonical(&self, height: Height) -> Option<Digest> {
             self.blocks
                 .lock()
@@ -1410,6 +1581,8 @@ mod tests {
                 .find(|block| block.height() == height)
                 .map(Digestible::digest)
         }
+
+        fn prune(&self, _: Height) {}
     }
 
     #[derive(Clone, Default)]
@@ -1494,16 +1667,19 @@ mod tests {
             app: ExecutionApp,
             prune_config: Option<PruneConfig>,
         ) -> Self {
+            provider.insert(Block::genesis());
             let databases =
                 DbSet::<deterministic::Context>::init(context.child("db_set"), config.clone())
                     .await;
             let metrics = StatefulMetrics::new(&context);
+            let (publisher, _) = Publisher::new(&context);
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
                     app,
                     databases,
                     provider.clone(),
+                    publisher,
                     Anchor {
                         height: Height::zero(),
                         round: Block::genesis().context().round,
@@ -1587,10 +1763,10 @@ mod tests {
             Option<Prune<SyncTargetsOf<DbSet<deterministic::Context>, deterministic::Context>>>,
         > {
             let context = self.context_cell.as_present();
-            let finalizing = self
-                .processor
-                .begin_finalize(context, Arc::new(block.clone()))?;
-            let prune = self.processor.finalize(context, finalizing).await;
+            if self.processor.processed(block) {
+                return None;
+            }
+            let prune = self.processor.finalize(context, block).await;
             let (_, barrier) = self.processor.sync().await;
             assert_durable(barrier).await;
             self.processor.notify_finalized(context, block).await;
@@ -1621,16 +1797,13 @@ mod tests {
         fn verify(&mut self, candidate: &Block, parent: &Block) -> oneshot::Receiver<bool> {
             let (response, receiver) = oneshot::channel();
             let context = self.context_cell.as_present();
-            let (_owner, ancestry) = WeakAncestry::new(from_iter([
-                Arc::new(candidate.clone()),
-                Arc::new(parent.clone()),
-            ]));
-            self.processor.schedule(super::Request {
-                span: tracing::Span::none(),
-                context: (context.child("verify"), candidate.context()),
-                ancestry,
-                verification: Verification { response },
-            });
+            let (_owner, request) = super::Request::new(
+                tracing::Span::none(),
+                (context.child("verify"), candidate.context()),
+                from_iter([Arc::new(candidate.clone()), Arc::new(parent.clone())]),
+                response,
+            );
+            self.processor.schedule(request);
             receiver
         }
 
@@ -1642,34 +1815,6 @@ mod tests {
                     _ = self.processor.step_next() => {},
                 }
             }
-        }
-
-        /// A job for `stages::walk` toward `target`, judged against the current anchor.
-        fn walk_job(
-            &self,
-            target: Arc<Block>,
-        ) -> (
-            Job<deterministic::Context, ExecutionApp>,
-            oneshot::Receiver<Option<Block>>,
-        ) {
-            let (response, receiver) = oneshot::channel();
-            let context = self.context_cell.as_present();
-            let job = Job {
-                span: tracing::Span::none(),
-                context: (context.child("walk"), target.context()),
-                ancestry: BoxedAncestry::new(from_iter(std::iter::empty::<Arc<Block>>())),
-                caller: Caller::Propose {
-                    response,
-                    input: None,
-                },
-                candidate: None,
-                parent: Some(target),
-                anchor: self.processor.last_processed(),
-                path: VecDeque::new(),
-                timer: self.processor.metrics.verify_duration.timer(context),
-                rebuild: None,
-            };
-            (job, receiver)
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
@@ -1995,11 +2140,7 @@ mod tests {
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(block.digest(), [gate]));
             let context = harness.context_cell.as_present();
-            let finalizing = harness
-                .processor
-                .begin_finalize(context, Arc::new(block.clone()))
-                .expect("finalized block should be newly applied");
-            harness.processor.finalize(context, finalizing).await;
+            harness.processor.finalize(context, &block).await;
             let mut notify = Box::pin(harness.processor.notify_finalized(context, &block));
             select! {
                 _ = &mut notify => {
@@ -2148,7 +2289,10 @@ mod tests {
     fn fork_rejects_unknown_parent() {
         deterministic::Runner::default().start(|context| async move {
             let harness = Harness::new(context).await;
-            assert!(harness.processor.fork(&u64_to_digest(999)).is_none());
+            assert!(matches!(
+                harness.processor.fork_from(&u64_to_digest(999)),
+                Fork::Unknown
+            ));
         });
     }
 
@@ -2214,43 +2358,22 @@ mod tests {
 
     #[test]
     fn walk_rejects_height_gap_to_processed_anchor() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context.child("harness")).await;
-            let genesis = Block::genesis();
-
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let applied = harness.finalize(block1.clone()).await;
-            assert!(applied);
-
-            let gap_height = Height::new(3);
-            let gap_view = View::new(3);
-            let batches = harness
-                .processor
-                .fork(&block1.digest())
-                .expect("processed anchor should be available");
-            let merkleized = ExecutionApp::execute(gap_height, gap_view, batches)
-                .await
-                .unwrap();
-            let gap_block = Block {
-                context: consensus_context(block1.digest(), gap_view),
-                parent: block1.digest(),
-                height: gap_height,
-                state_root: merkleized.root(),
-                range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
-            };
-
+        deterministic::Runner::default().start(|_| async move {
+            let block1 = linked_block(&Block::genesis(), View::new(1));
+            let mut gap_block = linked_block(&block1, View::new(3));
+            gap_block.height = Height::new(3);
             let provider = ScriptedParentProvider::default();
-            provider.push(&gap_block, [Some(block1)]);
+            provider.push(&gap_block, [Some(block1.clone())]);
 
-            let (mut job, _response) = harness.walk_job(Arc::new(gap_block));
+            let path = stages::walk(
+                provider,
+                Arc::new(gap_block),
+                anchor_at(&block1),
+                BTreeSet::new(),
+            )
+            .await;
             assert!(
-                matches!(
-                    stages::walk(&mut job, provider, BTreeSet::new()).await,
-                    Outcome::Walked(None)
-                ),
+                path.is_none(),
                 "the walk must reject non-contiguous ancestry above the processed anchor",
             );
         });
@@ -2258,27 +2381,24 @@ mod tests {
 
     #[test]
     fn walk_rejects_wrong_parent_digest() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context.child("harness")).await;
-            let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let applied = harness.finalize(block1.clone()).await;
-            assert!(applied);
-
-            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
-            let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+        deterministic::Runner::default().start(|_| async move {
+            let block1 = linked_block(&Block::genesis(), View::new(1));
+            let block2 = linked_block(&block1, View::new(2));
+            let block3 = linked_block(&block2, View::new(3));
             let mut wrong_parent = block2;
             wrong_parent.state_root = u64_to_digest(999);
             assert_ne!(wrong_parent.digest(), block3.parent());
-            harness.processor.clear_pending();
-
             let provider = ScriptedParentProvider::default();
             provider.push(&block3, [Some(wrong_parent)]);
-            let (mut job, _response) = harness.walk_job(Arc::new(block3));
-            assert!(matches!(
-                stages::walk(&mut job, provider.clone(), BTreeSet::new()).await,
-                Outcome::Walked(None)
-            ));
+
+            let path = stages::walk(
+                provider.clone(),
+                Arc::new(block3),
+                anchor_at(&block1),
+                BTreeSet::new(),
+            )
+            .await;
+            assert!(path.is_none());
             assert_eq!(provider.fetches(), 1);
         });
     }
@@ -2395,82 +2515,76 @@ mod tests {
     }
 
     #[test]
-    fn initial_ancestry_read_cancels_when_response_dropped() {
-        deterministic::Runner::default().start(|_context| async move {
-            let (response, receiver) = oneshot::channel::<Option<Block>>();
-            let mut caller = Caller::<Block, (), ()>::Propose {
+    fn proposal_cancelled_before_its_ancestry_arrives_is_retired() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let (response, receiver) = oneshot::channel();
+            let context = harness.context_cell.as_present();
+            harness.processor.propose(
+                tracing::Span::none(),
+                (
+                    context.child("propose"),
+                    consensus_context(Block::genesis().digest(), View::new(1)),
+                ),
+                BoxedAncestry::new(PendingAncestry),
+                Input {
+                    upstream: (),
+                    provider: (),
+                },
                 response,
-                input: None,
-            };
-            let mut ancestry = Box::pin(futures::stream::pending::<Block>());
+            );
             drop(receiver);
 
-            assert!(
-                stages::fetch_ancestor(&mut caller, &mut ancestry)
-                    .await
-                    .is_none()
-            );
+            harness.processor.step_next().await;
+            assert!(!harness.processor.proposing());
+            assert!(harness.processor.jobs.is_empty());
         });
     }
 
     #[test]
     fn walk_parks_when_parent_subscription_ends() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context.child("harness")).await;
-            let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let applied = harness.finalize(block1.clone()).await;
-            assert!(applied);
-
-            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
-            harness.processor.clear_pending();
-
+        deterministic::Runner::default().start(|_| async move {
+            let block1 = linked_block(&Block::genesis(), View::new(1));
+            let block2 = linked_block(&block1, View::new(2));
             let provider = ScriptedParentProvider::default();
             provider.push(&block2, [None]);
 
-            // Incomplete ancestry is not a verdict. The walk parks until the
-            // caller drops its request.
-            let (mut job, response) = harness.walk_job(Arc::new(block2));
-            let mut walk = Box::pin(stages::walk(&mut job, provider, BTreeSet::new()));
-            select! {
-                _ = &mut walk => panic!("incomplete ancestry must park the walk"),
-                _ = harness.context_cell.as_present().sleep(Duration::from_millis(10)) => {},
-            }
-
-            drop(response);
-            assert!(matches!(walk.await, Outcome::Cancelled));
+            // Incomplete ancestry is not a verdict. The walk parks until its
+            // caller drops the request.
+            let mut walk = pin!(stages::walk(
+                provider,
+                Arc::new(block2),
+                anchor_at(&block1),
+                BTreeSet::new(),
+            ));
+            assert!(
+                poll!(&mut walk).is_pending(),
+                "incomplete ancestry must park the walk"
+            );
         });
     }
 
     #[test]
     fn walk_does_not_retry_closed_provider_forever() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context.child("harness")).await;
-            let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let applied = harness.finalize(block1.clone()).await;
-            assert!(applied);
-
-            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
-            harness.processor.clear_pending();
-
+        deterministic::Runner::default().start(|_| async move {
+            let block1 = linked_block(&Block::genesis(), View::new(1));
+            let block2 = linked_block(&block1, View::new(2));
             let provider = ScriptedParentProvider::default();
             provider.push(&block2, [None, Some(block1.clone())]);
 
-            let (mut job, response) = harness.walk_job(Arc::new(block2));
-            let mut walk = Box::pin(stages::walk(&mut job, provider.clone(), BTreeSet::new()));
-            select! {
-                _ = &mut walk => panic!("incomplete ancestry must park the walk"),
-                _ = harness.context_cell.as_present().sleep(Duration::from_millis(10)) => {},
-            }
+            let mut walk = pin!(stages::walk(
+                provider.clone(),
+                Arc::new(block2),
+                anchor_at(&block1),
+                BTreeSet::new(),
+            ));
+            assert!(poll!(&mut walk).is_pending());
+            assert!(poll!(&mut walk).is_pending());
             assert_eq!(
                 provider.fetches(),
                 1,
                 "closed ancestry should not be retried"
             );
-
-            drop(response);
-            assert!(matches!(walk.await, Outcome::Cancelled));
         });
     }
 
@@ -2505,10 +2619,96 @@ mod tests {
         });
     }
 
-    /// A verification refused by storage while a mutation holds the databases
-    /// parks until they return, then answers from the canonical chain.
+    /// A job whose parent is the anchor defers while a finalization holds the
+    /// databases, then forks from the new anchor once they return.
     #[test]
-    fn stale_verification_parks_while_the_databases_are_out() {
+    fn anchor_fork_defers_until_the_databases_return() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let winner = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let (candidate, _) = harness.build_child(&winner, View::new(2)).await;
+            // Uncached, so the finalization replays the winner and holds there.
+            harness.processor.clear_pending();
+            let (gate, started, release) = apply_gate();
+            let probe = ApplicationProbe::new(winner.digest(), [gate]);
+            harness.processor.app.apply_probe = Some(probe.clone());
+
+            let mut verdict = harness.verify(&candidate, &winner);
+            {
+                let context = harness.context_cell.as_present();
+                let mut finalize = pin!(harness.processor.finalize(context, &winner));
+                assert!(poll!(&mut finalize).is_pending());
+                started.await.expect("the replay should start");
+
+                // The job walked to the anchor while the databases were out and
+                // deferred on its fork.
+                assert_eq!(harness.provider.fetches(), 1);
+                assert!(poll!(&mut verdict).is_pending());
+
+                release.send(()).expect("the replay should be held");
+                finalize.await;
+            }
+            assert!(harness.run_until(verdict).await);
+            assert_eq!(
+                probe.calls.load(Ordering::SeqCst),
+                1,
+                "the job never replays the applied winner"
+            );
+        });
+    }
+
+    /// A waiter whose caller dropped its request is retired when the replay it
+    /// waits on finishes, without executing.
+    #[test]
+    fn cancelled_waiter_is_retired_when_the_replay_finishes() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let (first, _) = harness.build_child(&block1, View::new(2)).await;
+            let (second, _) = harness.build_child(&block1, View::new(3)).await;
+            let (third, _) = harness.build_child(&block1, View::new(4)).await;
+            harness.processor.clear_pending();
+            let (gate, started, release) = apply_gate();
+            harness.processor.app.apply_probe =
+                Some(ApplicationProbe::new(block1.digest(), [gate]));
+            let verify_probe = ApplicationProbe::new(second.digest(), []);
+            harness.processor.app.verify_probe = Some(verify_probe.clone());
+
+            let owner = harness.verify(&first, &block1);
+            harness.run_until(started).await;
+            let cancelled = harness.verify(&second, &block1);
+            let live = harness.verify(&third, &block1);
+            harness.processor.step_ready();
+            assert_eq!(
+                harness.processor.replays[&block1.digest()].len(),
+                2,
+                "the siblings wait on the live replay"
+            );
+
+            drop(cancelled);
+            release.send(()).expect("the replay should be held");
+            assert!(harness.run_until(owner).await);
+            assert!(harness.run_until(live).await);
+            harness.processor.step_ready();
+            assert!(harness.processor.replays.is_empty());
+            assert!(
+                harness.processor.jobs.is_empty(),
+                "the cancelled waiter is retired"
+            );
+            assert_eq!(
+                verify_probe.calls.load(Ordering::SeqCst),
+                0,
+                "a cancelled waiter never executes"
+            );
+        });
+    }
+
+    /// A verification refused by storage while a mutation holds the databases
+    /// defers until they return, then answers from the canonical chain.
+    #[test]
+    fn stale_verification_defers_while_the_databases_are_out() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
@@ -2539,7 +2739,7 @@ mod tests {
             }
             assert!(
                 poll!(&mut verdict).is_pending(),
-                "a stale verification must park while the databases are out",
+                "a stale verification must defer while the databases are out",
             );
 
             finish.send(()).expect("the mutation should be pending");

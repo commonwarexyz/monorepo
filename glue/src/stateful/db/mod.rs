@@ -214,12 +214,12 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// This must match [`sync_target`](Self::sync_target) after opening an empty partition.
     fn initial_sync_target() -> Self::SyncTarget;
 
-    /// Create a new unmerkleized batch rooted at the database's applied
-    /// state.
+    /// Create a new unmerkleized batch rooted at `db`'s applied state.
     ///
-    /// The batch keeps a [`Reader`] over `db` and takes read access through it
-    /// on every read, so it stays valid across applies of compatible batches.
-    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized;
+    /// The batch keeps `reader` and takes read access through it on every
+    /// read, so it stays valid across applies of compatible batches. The set
+    /// takes the read access for `db` once; implementers never see the writer.
+    fn new_batch(db: &Self, reader: Reader<Self>) -> Self::Unmerkleized;
 
     /// Return true if a merkleized batch matches a sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
@@ -512,7 +512,8 @@ where
     }
 
     fn new_batches(&self) -> Self::Unmerkleized {
-        T::new_batch(&self.writer)
+        let reader = self.writer.reader();
+        self.writer.view(|db| T::new_batch(db, reader))
     }
 
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -891,7 +892,7 @@ macro_rules! impl_database_set {
             }
 
             fn new_batches(&self) -> Self::Unmerkleized {
-                ($($T::new_batch(&self.$idx.writer),)+)
+                ($(self.$idx.writer.view(|db| $T::new_batch(db, self.$idx.writer.reader())),)+)
             }
 
             fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -1806,8 +1807,8 @@ async fn prune<E, T: ManagedDb<E>>(
 mod tests {
     use super::{
         Anchor, Barrier, CoordinatorAction, CoordinatorState, DatabaseSet,
-        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Single, StateSyncDb, StateSyncSet, SyncEngineConfig,
-        TipUpdate, Writer, drain_single_tip_updates, split,
+        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Reader, Single, StateSyncDb, StateSyncSet,
+        SyncEngineConfig, TipUpdate, drain_single_tip_updates, split,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -2158,7 +2159,8 @@ mod tests {
             let db = T::init(context, config).await.unwrap();
             assert_eq!(initial, db.sync_target());
             let (writer, _) = split(db);
-            let batch = T::new_batch(&writer)
+            let batch = writer
+                .view(|db| T::new_batch(db, writer.reader()))
                 .merkleize()
                 .await
                 .expect("empty batch must merkleize");
@@ -2231,7 +2233,8 @@ mod tests {
         {
             let db = T::init(context, config).await.unwrap();
             let (writer, reader) = split(db);
-            let batch = T::new_batch(&writer)
+            let batch = writer
+                .view(|db| T::new_batch(db, writer.reader()))
                 .merkleize()
                 .await
                 .expect("first batch must merkleize");
@@ -2240,7 +2243,8 @@ mod tests {
             handle.await.expect("first database sync failed");
             let target = reader.read().await.sync_target();
 
-            let batch = T::new_batch(&writer)
+            let batch = writer
+                .view(|db| T::new_batch(db, writer.reader()))
                 .merkleize()
                 .await
                 .expect("second batch must merkleize");
@@ -2362,7 +2366,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2399,7 +2403,7 @@ mod tests {
             unreachable!("CountingRewindDb is constructed directly in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2438,7 +2442,7 @@ mod tests {
             Ok(Self { prune_count })
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2548,7 +2552,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2591,7 +2595,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2676,7 +2680,7 @@ mod tests {
             unreachable!("BlockingApplyDb is constructed directly in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2725,7 +2729,7 @@ mod tests {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2768,7 +2772,7 @@ mod tests {
             )
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2807,7 +2811,7 @@ mod tests {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2846,7 +2850,7 @@ mod tests {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2885,7 +2889,7 @@ mod tests {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2924,7 +2928,7 @@ mod tests {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2963,7 +2967,7 @@ mod tests {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3002,7 +3006,7 @@ mod tests {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3041,7 +3045,7 @@ mod tests {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3084,7 +3088,7 @@ mod tests {
             )
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3232,7 +3236,7 @@ mod tests {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_db: &Writer<Self>) -> Self::Unmerkleized {
+        fn new_batch(_: &Self, _: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 

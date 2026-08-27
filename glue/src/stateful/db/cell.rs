@@ -98,15 +98,13 @@ impl<T> Writer<T> {
     ///
     /// A mutation exists only inside [`Self::mutate`], which consumes the writer, so
     /// holding `&self` proves no write is held or queued and a read guard is free.
-    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        let guard = self
-            .0
-            .state
-            .try_read()
-            .expect("no mutation is pending while the writer is held");
-        match &*guard {
-            State::Live(db) => f(db),
-            State::Poisoned => unreachable!("a writer only exists while its cell is live"),
+    /// The header's one-guard rule does not apply here for the same reason.
+    pub(super) fn view<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        match self.0.state.try_read().as_deref() {
+            Some(State::Live(db)) => f(db),
+            _ => {
+                unreachable!("a mutation exists only inside Writer::mutate, which owns the writer")
+            }
         }
     }
 

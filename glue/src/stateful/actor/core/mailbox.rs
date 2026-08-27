@@ -1,6 +1,6 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::{Application, actor::processor::Request};
+use crate::stateful::Application;
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -53,7 +53,7 @@ impl<B: Block> WeakAncestry<B> {
 
 /// A verification is scoped to its caller.
 pub(in crate::stateful::actor) struct Verification {
-    pub(in crate::stateful::actor) response: oneshot::Sender<bool>,
+    response: oneshot::Sender<bool>,
 }
 
 impl Verification {
@@ -67,6 +67,47 @@ impl Verification {
 
     pub(in crate::stateful::actor) fn respond(self, valid: bool) {
         self.response.send_lossy(valid);
+    }
+}
+
+/// A request to verify a block.
+///
+/// The request carries a non-owning ancestry handle, so caller cancellation
+/// releases the backing blocks even while the request waits in the mailbox.
+/// Scheduling upgrades the handle to an independent owning cursor.
+pub(in crate::stateful::actor) struct Request<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    pub(in crate::stateful::actor) span: Span,
+    pub(in crate::stateful::actor) context: (E, A::Context),
+    pub(in crate::stateful::actor) ancestry: WeakAncestry<A::Block>,
+    pub(in crate::stateful::actor) verification: Verification,
+}
+
+impl<E, A> Request<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    /// Build a request over `ancestry`, answered through `response`. The
+    /// returned owner keeps the ancestry alive; dropping it cancels the
+    /// request.
+    pub(in crate::stateful::actor) fn new(
+        span: Span,
+        context: (E, A::Context),
+        ancestry: impl Ancestry<A::Block>,
+        response: oneshot::Sender<bool>,
+    ) -> (Arc<Mutex<BoxedAncestry<A::Block>>>, Self) {
+        let (owner, ancestry) = WeakAncestry::new(ancestry);
+        let request = Self {
+            span,
+            context,
+            ancestry,
+            verification: Verification { response },
+        };
+        (owner, request)
     }
 }
 
@@ -244,18 +285,13 @@ where
         // Scope the strong ancestry owner to this caller. Queued work receives only a weak
         // handle, so cancellation releases backing blocks before the actor drains the request.
         let (response, receiver) = oneshot::channel();
-        let (_ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
         let span = info_span!(
             "stateful.mailbox.verify",
             epoch = context.1.epoch().traced(),
             view = context.1.view().traced()
         );
-        let _ = self.sender.enqueue(Message::Verify(Request {
-            span,
-            context,
-            ancestry,
-            verification: Verification { response },
-        }));
+        let (_ancestry_owner, request) = Request::new(span, context, ancestry, response);
+        let _ = self.sender.enqueue(Message::Verify(request));
 
         // The strong ancestry owner stays live across the await. Dropping this
         // future releases it even while the request sits in the mailbox.

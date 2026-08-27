@@ -6,7 +6,7 @@
 
 use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, Writer, sync_compact_db,
+    Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -241,13 +241,12 @@ where
         }
     }
 
-    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
-        let (batch, inactivity_floor) = db.with(|db| (db.new_batch(), db.inactivity_floor_loc()));
+    fn new_batch(db: &Self, reader: Reader<Self>) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
-            batch,
-            db: db.reader(),
+            batch: db.new_batch(),
+            db: reader,
             metadata: None,
-            inactivity_floor,
+            inactivity_floor: db.inactivity_floor_loc(),
         }
     }
 
@@ -321,13 +320,12 @@ where
         }
     }
 
-    fn new_batch(db: &Writer<Self>) -> Self::Unmerkleized {
-        let (batch, inactivity_floor) = db.with(|db| (db.new_batch(), db.inactivity_floor_loc()));
+    fn new_batch(db: &Self, reader: Reader<Self>) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
-            batch,
-            db: db.reader(),
+            batch: db.new_batch(),
+            db: reader,
             metadata: None,
-            inactivity_floor,
+            inactivity_floor: db.inactivity_floor_loc(),
         }
     }
 
@@ -593,7 +591,9 @@ mod tests {
             let metadata = Sha256::hash(&[&[3]]);
 
             let db = Single::from(db);
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db.writer)
+            let batch = db
+                .writer
+                .view(|inner| <FixedDb as ManagedDb<_>>::new_batch(inner, db.writer.reader()))
                 .set(key, value)
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(metadata);
@@ -630,7 +630,8 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let (writer, reader) = split(db);
 
-            let first = <FixedDb as ManagedDb<_>>::new_batch(&writer)
+            let first = writer
+                .view(|inner| <FixedDb as ManagedDb<_>>::new_batch(inner, writer.reader()))
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Sha256::hash(&[&[11]]));
             let first = crate::stateful::db::Unmerkleized::merkleize(first)
@@ -647,7 +648,8 @@ mod tests {
                 })
                 .await;
 
-            let second = <FixedDb as ManagedDb<_>>::new_batch(&writer)
+            let second = writer
+                .view(|inner| <FixedDb as ManagedDb<_>>::new_batch(inner, writer.reader()))
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
                 .with_metadata(Sha256::hash(&[&[22]]));
             let second = crate::stateful::db::Unmerkleized::merkleize(second)
@@ -682,7 +684,9 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Single::from(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db.writer)
+            let batch = db
+                .writer
+                .view(|inner| <FixedDb as ManagedDb<_>>::new_batch(inner, db.writer.reader()))
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Sha256::hash(&[&[3]]));
             let batch = crate::stateful::db::Unmerkleized::merkleize(batch)

@@ -10,11 +10,12 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::{mailbox::Message, processing::Processing},
-        metrics::Metrics as StatefulMetrics,
-        processor::{
-            PendingSyncTargets, Processor, Provider, Pruning, Request as VerificationRequest,
+        core::{
+            mailbox::{Message, Request as VerificationRequest},
+            processing::Processing,
         },
+        metrics::Metrics as StatefulMetrics,
+        processor::{Marshal, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, Publisher, SnapshotsOf},
@@ -110,7 +111,7 @@ where
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: Provider<Block = A::Block>,
+    MarshalMailbox<S, V>: Marshal<Block = A::Block>,
 {
     pub async fn start(mut self) {
         select_loop! {
@@ -319,7 +320,7 @@ where
             syncer: _,
             deferred_verifications,
             artifact,
-            mut snapshot_publisher,
+            snapshot_publisher,
             sync_completed: _,
             pending_finalizations: _,
             pruning,
@@ -332,12 +333,13 @@ where
         let mut processor = Processor::new(
             application,
             databases,
-            marshal.clone(),
+            marshal,
+            snapshot_publisher,
             anchor,
             metrics,
             pruning,
         );
-        processor.publish_snapshot(&mut snapshot_publisher).await;
+        processor.publish_snapshot().await;
 
         let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
@@ -369,11 +371,6 @@ where
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     // Exiting on stop leaves the block unacknowledged, and
                     // marshal redelivers it after a restart.
-                    let Some(finalizing) =
-                        processor.begin_finalize(context.as_present(), Arc::clone(&block))
-                    else {
-                        panic!("sync handoff block cannot be a duplicate")
-                    };
                     let prune;
                     select! {
                         _ = &mut shutdown => {
@@ -384,7 +381,7 @@ where
                             return;
                         },
                         driven = async {
-                            let prune = processor.finalize(context.as_present(), finalizing).await;
+                            let prune = processor.finalize(context.as_present(), block.as_ref()).await;
                             processor.notify_finalized(context.as_present(), block.as_ref()).await;
                             prune
                         } => {
@@ -401,7 +398,7 @@ where
         // Applied handoffs extend beyond the state-sync artifact. Release their acknowledgements
         // only after one barrier makes the entire suffix durable.
         if !pending_acknowledgements.is_empty() {
-            let (snapshots, barrier);
+            let barrier;
             select! {
                 _ = &mut shutdown => {
                     warn!(
@@ -411,13 +408,9 @@ where
                     return;
                 },
                 driven = processor.sync() => {
-                    (snapshots, barrier) = driven;
+                    (_, barrier) = driven;
                 },
             }
-
-            // The snapshots serve immediately; peers verify what they fetch
-            // against a finalized root, so serving safely runs ahead of disk.
-            snapshot_publisher.publish(completed_height, snapshots);
             if !barrier.durable().await {
                 return;
             }
@@ -437,19 +430,17 @@ where
         // what the prune cadence needs, so this fires only in tests that feed
         // more handoffs than the window holds.
         if let Some(prune) = pending_prune {
-            processor.prune(prune, &marshal).await;
+            processor.prune(prune).await;
             // The published snapshots were captured before this prune. Republish
             // so serving stops pinning the pruned state. Every handoff barrier
             // was awaited above, so the republished state is already durable.
-            processor.publish_snapshot(&mut snapshot_publisher).await;
+            processor.publish_snapshot().await;
         }
 
         Processing {
             context,
             mailbox,
             provider,
-            marshal,
-            snapshot_publisher,
             skip_finalized_until: Some(completed_height),
         }
         .start(processor, deferred_verifications)

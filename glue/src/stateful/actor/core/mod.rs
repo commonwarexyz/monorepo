@@ -32,7 +32,7 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
-pub(super) use mailbox::{Verification, WeakAncestry};
+pub(super) use mailbox::{Request, Verification};
 
 mod processing;
 mod syncing;
@@ -278,7 +278,8 @@ where
         let mut processor = Processor::new(
             self.application,
             databases,
-            marshal.clone(),
+            marshal,
+            self.snapshot_publisher,
             anchor,
             metrics,
             self.pruning,
@@ -286,14 +287,11 @@ where
 
         // The recovered state alone must publish before the loop starts, so
         // serving begins before the next finalization.
-        let mut snapshot_publisher = self.snapshot_publisher;
-        processor.publish_snapshot(&mut snapshot_publisher).await;
+        processor.publish_snapshot().await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
-            marshal,
-            snapshot_publisher,
             skip_finalized_until,
         }
         .start(processor, Vec::new())
