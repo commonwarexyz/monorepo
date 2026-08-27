@@ -1451,10 +1451,11 @@ fn reserve_orphan_wind_down(
 fn wind_down_orphan_prepared(
     ops: &mut Ops,
     id: WaiterId,
+    outcome: DropOutcome,
     completion_waker: Option<Waker>,
     actions: &mut impl CapacityActionSink,
 ) {
-    let (outcome, op_waker) = ops.waiters.mark_orphaned(id);
+    let op_waker = ops.waiters.mark_orphaned(id, &outcome);
     if let Some(waker) = completion_waker {
         actions.push(WakerAction::Drop(waker));
     }
@@ -1484,7 +1485,7 @@ fn wind_down_orphan_prepared(
 pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl CapacityActionSink) {
     let outcome = ops.waiters.classify_orphan(id);
     reserve_orphan_wind_down(ops, &outcome, actions);
-    wind_down_orphan_prepared(ops, id, None, actions);
+    wind_down_orphan_prepared(ops, id, outcome, None, actions);
 }
 
 /// Apply detached-ticket wind-down after generation-validating its completion
@@ -1511,7 +1512,7 @@ pub(super) fn wind_down_ticket(
             waker,
         } => {
             assert_eq!(removed_waiter, waiter_id, "completion waiter changed");
-            wind_down_orphan_prepared(ops, removed_waiter, waker, actions);
+            wind_down_orphan_prepared(ops, removed_waiter, outcome, waker, actions);
         }
         CompletionDropOutcome::Ready => unreachable!("pending completion became ready"),
     }
@@ -2624,13 +2625,15 @@ mod tests {
         });
 
         let actions = handle.with(|ops| {
+            let outcome = ops.waiters.classify_orphan(blocker);
             assert!(matches!(
-                ops.waiters.mark_orphaned(blocker).0,
+                &outcome,
                 DropOutcome::Cancel {
                     needs_sqe: false,
                     ..
                 }
             ));
+            let _ = ops.waiters.mark_orphaned(blocker, &outcome);
             assert!(matches!(
                 ops.waiters.stage(blocker),
                 StageOutcome::Complete { freed: true, .. }

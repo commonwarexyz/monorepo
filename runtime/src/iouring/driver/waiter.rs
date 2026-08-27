@@ -1350,18 +1350,21 @@ impl Waiters {
         }
     }
 
-    /// Mark a waiter's observer as dropped and resolve how its slot winds down.
+    /// Mark a waiter's observer as dropped using its classified wind-down.
     ///
     /// Parked results are dropped and their slot freed immediately. Requests
     /// whose kind stops progressing without an observer transition to
     /// cancellation. Storage writes and syncs detach and keep running.
     ///
     /// Returns the stored ordinary-op waker, if any, so its destruction can
-    /// run only after the caller releases the op-state borrow.
+    /// run only after the caller releases the op-state borrow. The caller must
+    /// classify the waiter and reserve all fallible destinations before
+    /// calling this method while retaining exclusive access to the waiter
+    /// table.
     ///
-    /// Panics if the waiter is not tracked or the id is stale.
-    pub fn mark_orphaned(&mut self, waiter_id: WaiterId) -> (DropOutcome, Option<Waker>) {
-        let outcome = self.classify_orphan(waiter_id);
+    /// Panics if the waiter is not tracked, the id is stale, or its observer
+    /// was already dropped.
+    pub fn mark_orphaned(&mut self, waiter_id: WaiterId, outcome: &DropOutcome) -> Option<Waker> {
         let index = waiter_id.index() as usize;
         let slot = self
             .entries
@@ -1379,14 +1382,14 @@ impl Waiters {
             Observer::Orphaned => panic!("mark_orphaned called for orphaned waiter"),
         };
 
-        if matches!(&outcome, DropOutcome::Freed) {
+        if matches!(outcome, DropOutcome::Freed) {
             slot.observer = Observer::Orphaned;
             let _ = self.take(index);
-            return (DropOutcome::Freed, waker);
+            return waker;
         }
 
         slot.observer = Observer::Orphaned;
-        if matches!(&outcome, DropOutcome::Cancel { .. })
+        if matches!(outcome, DropOutcome::Cancel { .. })
             && matches!(slot.state, WaiterState::Active { .. })
         {
             // The ticket is gone, so the parked result (and its reason) is
@@ -1395,7 +1398,7 @@ impl Waiters {
                 reason: CancelReason::Deadline,
             };
         }
-        (outcome, waker)
+        waker
     }
 
     /// Return whether a waiter currently has an operation SQE in flight.
@@ -1499,6 +1502,12 @@ mod tests {
         let index = waiter_id.index() as usize;
         let slot = waiters.entries.get(index)?.as_ref()?;
         (slot.id == waiter_id).then_some(slot.state)
+    }
+
+    fn mark_orphaned(waiters: &mut Waiters, waiter_id: WaiterId) -> DropOutcome {
+        let outcome = waiters.classify_orphan(waiter_id);
+        drop(waiters.mark_orphaned(waiter_id, &outcome));
+        outcome
     }
 
     fn remove_waiter(waiters: &mut Waiters, waiter_id: WaiterId) -> Lifecycle {
@@ -1673,7 +1682,7 @@ mod tests {
             } if pending_waiter == waiter_id
         ));
         assert!(matches!(
-            waiters.mark_orphaned(waiter_id).0,
+            mark_orphaned(&mut waiters, waiter_id),
             DropOutcome::Detached
         ));
         assert_eq!(completions.ready(), 0);
@@ -2004,7 +2013,7 @@ mod tests {
             let mut waiters = Waiters::new(1);
             let waiter_id = insert(&mut waiters, request, Some(tick));
             assert!(matches!(
-                waiters.mark_orphaned(waiter_id).0,
+                mark_orphaned(&mut waiters, waiter_id),
                 DropOutcome::Cancel {
                     needs_sqe: false,
                     target_tick: Some(_),
@@ -2039,7 +2048,7 @@ mod tests {
             let waiter_id = insert(&mut waiters, request, Some(tick));
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
             assert!(matches!(
-                waiters.mark_orphaned(waiter_id).0,
+                mark_orphaned(&mut waiters, waiter_id),
                 DropOutcome::Cancel {
                     needs_sqe: true,
                     ..
@@ -2068,7 +2077,7 @@ mod tests {
         let waiter_id = insert(&mut waiters, make_sync_request(), None);
         assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(matches!(
-            waiters.mark_orphaned(waiter_id).0,
+            mark_orphaned(&mut waiters, waiter_id),
             DropOutcome::Detached
         ));
 
@@ -2094,7 +2103,7 @@ mod tests {
         let waiter_id = insert(&mut waiters, make_write_at_request(), None);
         assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(matches!(
-            waiters.mark_orphaned(waiter_id).0,
+            mark_orphaned(&mut waiters, waiter_id),
             DropOutcome::Detached
         ));
 
@@ -2132,7 +2141,7 @@ mod tests {
         assert_eq!(waiters.len(), 1);
 
         assert!(matches!(
-            waiters.mark_orphaned(waiter_id).0,
+            mark_orphaned(&mut waiters, waiter_id),
             DropOutcome::Freed
         ));
         assert!(waiters.is_empty());
