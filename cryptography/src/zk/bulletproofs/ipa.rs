@@ -71,7 +71,7 @@
 //! ```rust
 //! # use commonware_cryptography::{
 //! #     bls12381::primitives::group::{G1, Scalar},
-//! #     transcript::Transcript,
+//! #     transcript::{Transcript, Version},
 //! #     zk::bulletproofs::ipa::{prove, verify, Setup, Witness},
 //! # };
 //! # use commonware_math::algebra::{Additive, CryptoGroup, Ring};
@@ -87,7 +87,9 @@
 //! let setup = Setup::new(
 //!     GENERATORS[0].clone(),
 //!     GENERATORS[1..]
-//!         .chunks_exact(2)
+//!         .as_chunks::<2>()
+//!         .0
+//!         .iter()
 //!         .map(|chunk| (chunk[0].clone(), chunk[1].clone())),
 //! );
 //!
@@ -105,7 +107,7 @@
 //! .expect("witness should fit the setup");
 //!
 //! // The proof is bound to this transcript state.
-//! let mut prover_transcript = Transcript::new(b"ipa-example");
+//! let mut prover_transcript = Transcript::new(b"ipa-example", Version::V1);
 //! prover_transcript.commit(b"context".as_slice());
 //!
 //! // Any Strategy works here. Sequential is simplest; a parallel strategy can
@@ -115,7 +117,7 @@
 //!     .expect("claim should match the witness and setup");
 //!
 //! // Verification must replay the same transcript state.
-//! let mut verifier_transcript = Transcript::new(b"ipa-example");
+//! let mut verifier_transcript = Transcript::new(b"ipa-example", Version::V1);
 //! verifier_transcript.commit(b"context".as_slice());
 //! let valid = setup
 //!     .eval(|vs| verify(&mut verifier_transcript, vs, &claim, proof), &strategy)
@@ -133,7 +135,7 @@ use crate::transcript::{Summary, Transcript};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
-    algebra::{powers, CryptoGroup, Field, Random, Space},
+    algebra::{CryptoGroup, Field, Random, Space, powers},
     synthetic::Synthetic,
 };
 use commonware_parallel::{Sequential, Strategy};
@@ -590,7 +592,7 @@ where
     // At this point, we've committed to the claim we're trying to prove, so
     // we can't pull any shenanigans by modifying the claim based on the challenges.
     transcript.commit(claim.encode());
-    let w = F::random(&mut transcript.noise(b"w challenge"));
+    let w = F::random(transcript.noise(b"w challenge"));
     let w_q = setup.product_generator.clone() * &w;
 
     let mut l_r_coms = Vec::<(G, G)>::new();
@@ -605,8 +607,8 @@ where
         let mid = a.len() / 2;
         let (a_lo, a_hi) = a.split_at_mut(mid);
         let (b_lo, b_hi) = b.split_at_mut(mid);
-        let (g_lo, g_hi) = g.split_at_mut(mid);
-        let (h_lo, h_hi) = h.split_at_mut(mid);
+        let (g_lo, g_hi) = g.split_at(mid);
+        let (h_lo, h_hi) = h.split_at(mid);
         let l = G::msm(g_hi, a_lo, strategy)
             + &G::msm(h_lo, b_hi, strategy)
             + &(w_q.clone() * &F::msm(a_lo, b_hi, strategy));
@@ -616,7 +618,7 @@ where
         l_r_coms.push((l.clone(), r.clone()));
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let u = F::random(&mut transcript.noise(b"u challenge"));
+        let u = F::random(transcript.noise(b"u challenge"));
         let u_inv = u.inv();
 
         for (a_lo_i, a_hi_i) in a_lo.iter_mut().zip(a_hi.iter_mut()) {
@@ -631,17 +633,21 @@ where
         }
         b.truncate(mid);
 
-        for (g_lo_i, g_hi_i) in g_lo.iter_mut().zip(g_hi.iter_mut()) {
-            *g_lo_i *= &u_inv;
-            *g_lo_i += &(g_hi_i.clone() * &u);
-        }
-        g.truncate(mid);
-
-        for (h_lo_i, h_hi_i) in h_lo.iter_mut().zip(h_hi.iter_mut()) {
-            *h_lo_i *= &u;
-            *h_lo_i += &(h_hi_i.clone() * &u_inv);
-        }
-        h.truncate(mid);
+        let u_u_inv = [u.clone(), u_inv.clone()];
+        let (new_g, new_h) = strategy.join(
+            || {
+                strategy.map_collect_vec(g_lo.iter().zip(g_hi), |(g_lo_i, g_hi_i)| {
+                    G::msm(&[g_hi_i.clone(), g_lo_i.clone()], &u_u_inv, strategy)
+                })
+            },
+            || {
+                strategy.map_collect_vec(h_lo.iter().zip(h_hi), |(h_lo_i, h_hi_i)| {
+                    G::msm(&[h_lo_i.clone(), h_hi_i.clone()], &u_u_inv, strategy)
+                })
+            },
+        );
+        g = new_g;
+        h = new_h;
     }
     let a_final = a.pop().expect("a should not be empty");
     let b_final = b.pop().expect("b should not be empty");
@@ -759,7 +765,7 @@ where
     }
     transcript.commit(claim.encode());
 
-    let w = F::random(&mut transcript.noise(b"w challenge"));
+    let w = F::random(transcript.noise(b"w challenge"));
 
     // We reduce verification down to one MSM which needs to equal 0:
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)
@@ -834,6 +840,7 @@ mod conformance {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
+    use crate::transcript::Version;
     use arbitrary::{Arbitrary, Unstructured};
     #[cfg(test)]
     use commonware_codec::Decode;
@@ -860,7 +867,9 @@ pub mod fuzz {
             Setup::new(
                 generators[0],
                 generators[1..]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|chunk| (chunk[0], chunk[1])),
             )
         })
@@ -881,7 +890,7 @@ pub mod fuzz {
                 Witness::new_with_claim(setup, y, a.iter().zip(b).map(|(&a, &b)| (a, b)))
                     .expect("prover expects arguments to match setup");
             let proof = prove(
-                &mut Transcript::new(NAMESPACE),
+                &mut Transcript::new(NAMESPACE, Version::V1),
                 setup,
                 &claim,
                 witness.clone(),
@@ -925,7 +934,7 @@ pub mod fuzz {
             self.claim.product -= &delta;
             self.claim.commitment += &(*self.setup.product_generator() * &delta);
             self.proof = prove(
-                &mut Transcript::new(NAMESPACE),
+                &mut Transcript::new(NAMESPACE, Version::V1),
                 self.setup,
                 &self.claim,
                 self.witness.clone(),
@@ -954,7 +963,7 @@ pub mod fuzz {
                 ..self.claim
             };
             self.proof = prove(
-                &mut Transcript::new(NAMESPACE),
+                &mut Transcript::new(NAMESPACE, Version::V1),
                 self.setup,
                 &longer_claim,
                 self.witness.clone(),
@@ -1000,7 +1009,7 @@ pub mod fuzz {
             let proof = self.proof;
             setup
                 .eval(
-                    |vs| super::verify(&mut Transcript::new(ns), vs, &claim, proof),
+                    |vs| super::verify(&mut Transcript::new(ns, Version::V1), vs, &claim, proof),
                     &Sequential,
                 )
                 .map(|g| g == G::zero())

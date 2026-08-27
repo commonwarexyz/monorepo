@@ -2,10 +2,10 @@
 
 use crate::error::Error;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 #[cfg(feature = "std")]
-use std::vec::Vec;
+use std::{sync::Arc, vec::Vec};
 
 /// Trait for types with a known, fixed encoded size.
 ///
@@ -169,6 +169,30 @@ pub trait Write {
     }
 }
 
+impl<T: EncodeSize + ?Sized> EncodeSize for Arc<T> {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        self.as_ref().encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.as_ref().encode_inline_size()
+    }
+}
+
+impl<T: Write + ?Sized> Write for Arc<T> {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        self.as_ref().write(buf);
+    }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.as_ref().write_bufs(buf);
+    }
+}
+
 /// Trait for types that can be read (decoded) from a byte buffer.
 pub trait Read: Sized {
     /// The `Cfg` type parameter allows passing configuration during the read process. This is
@@ -183,8 +207,12 @@ pub trait Read: Sized {
     /// Implementations should consume the exact number of bytes required from `buf` to reconstruct
     /// the value.
     ///
-    /// Returns [Error] if decoding fails due to invalid data, insufficient bytes in the buffer,
-    /// or violation of constraints imposed by the `cfg`.
+    /// Implementations must return [Error] if decoding fails due to invalid data, insufficient
+    /// bytes in the buffer, or violation of constraints imposed by the `cfg`.
+    ///
+    /// # Warning
+    ///
+    /// Parsing a message (often untrusted) should never result in a panic.
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
 
     /// Reads `len` values from the buffer into a vector.
@@ -201,7 +229,7 @@ pub trait Read: Sized {
     #[doc(hidden)]
     #[inline]
     fn read_vec(buf: &mut impl Buf, len: usize, cfg: &Self::Cfg) -> Result<Vec<Self>, Error> {
-        let mut values = Vec::with_capacity(len);
+        let mut values = Vec::with_capacity(len.min(buf.remaining()));
         for _ in 0..len {
             values.push(Self::read_cfg(buf, cfg)?);
         }
@@ -396,8 +424,8 @@ pub trait BufsMut: BufMut {
 mod tests {
     use super::*;
     use crate::{
-        extensions::{DecodeExt, ReadExt},
         Error, FixedArray,
+        extensions::{DecodeExt, ReadExt},
     };
     use bytes::Bytes;
     use core::marker::PhantomData;
@@ -420,6 +448,14 @@ mod tests {
         let encoded: [u8; 4] = value.encode_fixed();
         let decoded = <u32>::decode(&encoded[..]).unwrap();
         assert_eq!(value, decoded);
+    }
+
+    #[test]
+    fn test_arc_encode() {
+        let value = Arc::new(vec![1u8, 2, 3]);
+
+        assert_eq!(value.encode(), value.as_ref().encode());
+        assert_eq!(value.encode_size(), value.as_ref().encode_size());
     }
 
     #[test]

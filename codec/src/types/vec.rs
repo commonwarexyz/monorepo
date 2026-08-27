@@ -1,7 +1,9 @@
 //! Codec implementation for [`Vec<T>`].
 //!
-//! For portability and consistency between architectures,
-//! the length of the vector must fit within a [u32].
+//! Vector lengths are restricted to a [u32] so their wire representation is consistent across
+//! architectures, but allocation limits remain target-dependent. On a 32-bit target, a [`Vec<T>`]
+//! with non-zero-sized `T` cannot allocate more than `isize::MAX` bytes. Callers should use
+//! [`RangeCfg`] to choose a decoded length limit that works on all supported targets.
 
 use crate::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 #[cfg(not(feature = "std"))]
@@ -72,8 +74,8 @@ impl<T: Read> Read for Vec<T> {
 mod tests {
     use super::*;
     use crate::{
-        types::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
         DecodeRangeExt, Encode,
+        types::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
     };
     use bytes::{Bytes, BytesMut};
 
@@ -122,6 +124,35 @@ mod tests {
             Vec::<Byte>::decode_range([0x02, 0x01, 0x02, 0x03].as_slice(), ..),
             Err(Error::ExtraData(1))
         ));
+
+        // A length prefix advertising the maximum wire-encodable length (u32::MAX) with a
+        // single-byte payload must fail with [Error::EndOfBuffer] without attempting the
+        // advertised allocation.
+        let mut malicious_buf = BytesMut::new();
+        (u32::MAX as usize).write(&mut malicious_buf);
+        malicious_buf.put_u8(0x01);
+
+        assert!(matches!(
+            Vec::<Byte>::decode_range(malicious_buf.clone().freeze(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            Vec::<u8>::decode_range(malicious_buf.clone().freeze(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            Vec::<u16>::decode_range(malicious_buf.freeze(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+    }
+
+    #[test]
+    fn test_vec_read_vec_bounds_preallocation() {
+        // A huge requested length must fail with [Error::EndOfBuffer] without attempting the
+        // full pre-allocation (initial capacity is clamped to the bytes remaining).
+        let mut buf = [0u8; 1].as_slice();
+        let result = Byte::read_vec(&mut buf, usize::MAX, &());
+        assert!(matches!(result, Err(Error::EndOfBuffer)));
     }
 
     #[test]

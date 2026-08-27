@@ -2,10 +2,10 @@
 
 //! Fuzz target contiguous journal crash recovery.
 //!
-//! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` push data
-//! to storage, and an unclean shutdown loses anything not yet durable. On the next `init()` the
-//! journal must rebuild a consistent state from whatever survived. This target tests recovering
-//! after storage faults.
+//! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` establish
+//! durability, while the configured crash policy may retain unsynchronized storage mutations. On
+//! the next `init()` the journal must rebuild a consistent state from whatever survived. This
+//! target tests recovering after storage faults.
 //!
 //! # Cycles
 //!
@@ -14,7 +14,8 @@
 //!   1. `init()` recovers the journal left by the previous cycle's crash.
 //!   2. Check it against the `Expected` carried from that crash.
 //!   3. Append and query under fault injection (the cycle's `ops`).
-//!   4. Drop the journal without a clean shutdown: the crash. Unsynced data is lost.
+//!   4. Drop the journal without a clean shutdown: the crash. Unsynchronized bytes survive
+//!      according to the configured write-retention policy.
 //!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
 //! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
@@ -29,9 +30,9 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. The torn-write modes
-//! (`partial_write_rate`, `partial_resize_rate`) cut a write or truncation short, leaving the
-//! half-finished bytes a real crash would.
+//! The operation phase runs under write/sync/resize fault injection. `write_retention_rate`
+//! controls the prefix of a failed or unsynchronized write that survives, while
+//! `partial_resize_rate` can stop a failed truncation at an intermediate length.
 //!
 //! # Positions
 //!
@@ -42,16 +43,16 @@
 //! guarantees the success path is covered on every input; the raw value still tests rejection.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
+use commonware_runtime::{BufferPooler, ReadOptions, Runner, Supervisor as _, deterministic};
 use commonware_storage::journal::{
+    Error,
     contiguous::{
+        Contiguous,
         fixed::{Config as FixedConfig, Journal as FixedJournal},
         variable::{Config as VariableConfig, Journal as VariableJournal},
-        Reader,
     },
-    Error,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -99,9 +100,9 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
 }
 
 /// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
-fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<f64> {
+fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
     let percent: u8 = u.int_in_range(0..=100)?;
-    Ok(f64::from(percent) / 100.0)
+    Ok(probability!(u64::from(percent), 100))
 }
 
 /// Op sequence capped at `MAX_OPERATIONS`; a derived `Vec` would instead grow with input length.
@@ -165,19 +166,19 @@ struct FuzzInput {
     write_buffer: usize,
     /// Failure rate for write operations.
     #[arbitrary(with = bounded_rate)]
-    write_failure_rate: f64,
-    /// Probability that a write failure is a partial (torn) write.
+    write_failure_rate: Probability,
+    /// Probability used to retain bytes from a failed or unsynchronized write.
     #[arbitrary(with = bounded_rate)]
-    partial_write_rate: f64,
+    write_retention_rate: Probability,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
-    sync_failure_rate: f64,
+    sync_failure_rate: Probability,
     /// Failure rate for resize operations (truncation during rewind/prune).
     #[arbitrary(with = bounded_rate)]
-    resize_failure_rate: f64,
+    resize_failure_rate: Probability,
     /// Probability that a resize failure is partial.
     #[arbitrary(with = bounded_rate)]
-    partial_resize_rate: f64,
+    partial_resize_rate: Probability,
     /// Operations to execute, split into one `ops` list per cycle at each `Crash` marker.
     #[arbitrary(with = bounded_operations)]
     operations: Vec<JournalOperation>,
@@ -190,22 +191,27 @@ struct Params {
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
-    write_rate: f64,
-    partial_write_rate: f64,
-    sync_rate: f64,
-    resize_rate: f64,
-    partial_resize_rate: f64,
+    write_rate: Probability,
+    write_retention_rate: Probability,
+    sync_rate: Probability,
+    resize_rate: Probability,
+    partial_resize_rate: Probability,
 }
 
 impl Params {
     /// The fault config applied during the operation phase of each cycle.
     fn fault_config(&self) -> deterministic::FaultConfig {
         deterministic::FaultConfig {
-            write_rate: Some(self.write_rate),
-            partial_write_rate: Some(self.partial_write_rate),
+            write_rate: Some(deterministic::WriteConfig {
+                failure_rate: self.write_rate,
+                retention_rate: self.write_retention_rate,
+                mode: deterministic::PartialWriteMode::Prefix,
+            }),
             sync_rate: Some(self.sync_rate),
-            resize_rate: Some(self.resize_rate),
-            partial_resize_rate: Some(self.partial_resize_rate),
+            resize_rate: Some(deterministic::ResizeConfig {
+                failure_rate: self.resize_rate,
+                partial_rate: self.partial_resize_rate,
+            }),
             ..Default::default()
         }
     }
@@ -287,31 +293,33 @@ trait FuzzJournal: Sized {
     ) -> impl Future<Output = Result<Self, Error>> + Send;
 
     fn size(&self) -> impl Future<Output = u64> + Send;
-    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send;
+    fn bounds(&self) -> Range<u64>;
 
-    fn append(&mut self, item: Item) -> impl Future<Output = Result<u64, Error>> + Send;
+    fn append(self, item: Item) -> impl Future<Output = Result<(Self, u64), Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
-    fn commit(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
-    fn rewind(&mut self, size: u64) -> impl Future<Output = Result<(), Error>> + Send;
-    fn prune(&mut self, min_pos: u64) -> impl Future<Output = Result<bool, Error>> + Send;
+    fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn commit(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn rewind(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn prune(self, min_pos: u64) -> impl Future<Output = Result<(Self, bool), Error>> + Send;
 
     fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send;
 
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Drain a reader's replay stream into a `(position, item)` vector.
-async fn collect_replay<R: Reader<Item = Item>>(
-    reader: R,
-    buffer: NonZeroUsize,
+async fn collect_replay<C: Contiguous<Item = Item>>(
+    reader: &C,
     start_pos: u64,
+    buffer: NonZeroUsize,
 ) -> Result<Vec<(u64, Item)>, Error> {
-    let stream = reader.replay(buffer, start_pos).await?;
+    let stream = reader
+        .replay(start_pos, buffer, ReadOptions::default())
+        .await?;
     futures::pin_mut!(stream);
     let mut out = Vec::new();
     while let Some(result) = stream.next().await {
@@ -341,49 +349,43 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     }
 
     async fn size(&self) -> u64 {
-        FixedJournal::size(self).await
+        FixedJournal::size(self)
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
-        async { self.reader().await.bounds() }
+    fn bounds(&self) -> Range<u64> {
+        Contiguous::bounds(self)
     }
 
-    async fn append(&mut self, item: Item) -> Result<u64, Error> {
+    async fn append(self, item: Item) -> Result<(Self, u64), Error> {
         FixedJournal::append(self, &item).await
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send {
-        async move { self.reader().await.read(pos).await }
+    async fn read(&self, pos: u64) -> Result<Item, Error> {
+        Contiguous::read(self, pos).await
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(self) -> Result<Self, Error> {
         FixedJournal::sync(self).await
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(self) -> Result<Self, Error> {
         FixedJournal::commit(self).await
     }
 
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+    async fn rewind(self, size: u64) -> Result<Self, Error> {
         FixedJournal::rewind(self, size).await
     }
 
-    async fn prune(&mut self, min_pos: u64) -> Result<bool, Error> {
+    async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
         FixedJournal::prune(self, min_pos).await
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn replay(
+    async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
-    ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send {
-        async move { collect_replay(self.reader().await, buffer, start_pos).await }
+        buffer: NonZeroUsize,
+    ) -> Result<Vec<(u64, Item)>, Error> {
+        collect_replay(self, start_pos, buffer).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -414,48 +416,42 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     }
 
     async fn size(&self) -> u64 {
-        VariableJournal::size(self).await
+        VariableJournal::size(self)
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
-        async { self.reader().await.bounds() }
+    fn bounds(&self) -> Range<u64> {
+        Contiguous::bounds(self)
     }
 
-    async fn append(&mut self, item: Item) -> Result<u64, Error> {
+    async fn append(self, item: Item) -> Result<(Self, u64), Error> {
         VariableJournal::append(self, &item).await
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send {
-        async move { self.reader().await.read(pos).await }
+    async fn read(&self, pos: u64) -> Result<Item, Error> {
+        Contiguous::read(self, pos).await
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(self) -> Result<Self, Error> {
         VariableJournal::sync(self).await
     }
 
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+    async fn rewind(self, size: u64) -> Result<Self, Error> {
         VariableJournal::rewind(self, size).await
     }
 
-    async fn prune(&mut self, min_pos: u64) -> Result<bool, Error> {
+    async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
         VariableJournal::prune(self, min_pos).await
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn replay(
+    async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
-    ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send {
-        async move { collect_replay(self.reader().await, buffer, start_pos).await }
+        buffer: NonZeroUsize,
+    ) -> Result<Vec<(u64, Item)>, Error> {
+        collect_replay(self, start_pos, buffer).await
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(self) -> Result<Self, Error> {
         VariableJournal::commit(self).await
     }
 
@@ -469,7 +465,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
     let Range {
         start: boundary,
         end: size,
-    } = journal.bounds().await;
+    } = journal.bounds();
     assert!(size >= boundary, "size {size} < boundary {boundary}");
 
     // Size and boundary fall within the expected bounds.
@@ -521,7 +517,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 
     // Replay must yield exactly [boundary, size) contiguously and agree with `read()` everywhere.
     let items = journal
-        .replay(NZUsize!(VERIFY_REPLAY_BUF), boundary)
+        .replay(boundary, NZUsize!(VERIFY_REPLAY_BUF))
         .await
         .expect("replay during recovery verification");
     assert_eq!(
@@ -542,9 +538,9 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 
 /// Read the recovered journal back into an `Expected` pinned to exactly that state.
 async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
-    let bounds = journal.bounds().await;
+    let bounds = journal.bounds();
     let items = journal
-        .replay(NZUsize!(VERIFY_REPLAY_BUF), bounds.start)
+        .replay(bounds.start, NZUsize!(VERIFY_REPLAY_BUF))
         .await
         .expect("to_expected replay");
     let mut values = vec![Item::from([0u8; ITEM_SIZE]); bounds.end as usize];
@@ -621,62 +617,63 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
 }
 
 /// Run a cycle's ops under faults, updating `expected`. Stops early on any error that may have left
-/// the journal inconsistent (a mutable-method error or a tail-repair I/O fault); the caller then
-/// drops the journal to crash. Reads never fault, so a bad read panics instead of ending the cycle.
+/// the journal inconsistent (a mutable-method error or a tail-repair I/O fault); the journal is
+/// then dropped to crash. Reads never fault, so a bad read panics instead of ending the cycle.
 async fn run_ops<J: FuzzJournal>(
-    journal: &mut J,
+    mut journal: J,
     expected: &mut Expected,
     ops: &[JournalOperation],
     params: Params,
 ) {
     for op in ops {
-        let should_continue = match op {
+        // A mutation error ends the cycle.
+        journal = match op {
             JournalOperation::Append { value } => {
                 let item = Item::from(*value);
                 let size_before = journal.size().await;
                 match journal.append(item.clone()).await {
-                    Ok(pos) => {
+                    Ok((journal, pos)) => {
                         assert_eq!(pos, size_before, "append returned non-contiguous position");
                         expected.appended(item);
-                        true
+                        journal
                     }
                     Err(_) => {
                         expected.append_failed(size_before);
-                        false
+                        return;
                     }
                 }
             }
 
             JournalOperation::Read { pos } => {
-                let bounds = journal.bounds().await;
+                let bounds = journal.bounds();
                 if !bounds.is_empty() {
                     let target = bounds.start + (*pos % (bounds.end - bounds.start));
                     assert_read(journal.read(target).await, target, &bounds);
                 }
                 assert_read(journal.read(*pos).await, *pos, &bounds);
-                true
+                journal
             }
 
             JournalOperation::Sync => match journal.sync().await {
-                Ok(()) => {
-                    expected.synced(journal.bounds().await);
-                    true
+                Ok(journal) => {
+                    expected.synced(journal.bounds());
+                    journal
                 }
-                Err(_) => false,
+                Err(_) => return,
             },
 
             JournalOperation::Commit => match journal.commit().await {
-                Ok(()) => {
+                Ok(journal) => {
                     expected.committed(journal.size().await);
-                    true
+                    journal
                 }
-                Err(_) => false,
+                Err(_) => return,
             },
 
             JournalOperation::Rewind { size } => {
-                let bounds = journal.bounds().await;
+                let bounds = journal.bounds();
                 if bounds.is_empty() {
-                    true
+                    journal
                 } else {
                     // Usually clamp to a valid retained target; occasionally pass the raw value to
                     // exercise the validation paths.
@@ -687,13 +684,16 @@ async fn run_ops<J: FuzzJournal>(
                         bounds.start + (*size % (bounds.end - bounds.start + 1))
                     };
                     match journal.rewind(target).await {
-                        Ok(()) => {
+                        Ok(journal) => {
                             expected.rewound(target, bounds.end);
                             expected.values.truncate(target as usize);
-                            true
+                            journal
                         }
-                        // Validation error: rejected before any mutation, so leave the expectation
-                        // put. Only a raw target can be invalid; on a clamped target this is a bug.
+                        // Any error ends the cycle. Validation errors reject before
+                        // mutating and are only possible for a raw target; seeing one for
+                        // a clamped target is a bug. Any other error
+                        // may have interrupted the truncation and lost data above `target`,
+                        // so lower durable_len conservatively.
                         Err(e @ (Error::InvalidRewind(_) | Error::ItemPruned(_))) => {
                             assert!(
                                 use_raw_target,
@@ -701,13 +701,11 @@ async fn run_ops<J: FuzzJournal>(
                                  returned {e:?}",
                                 bounds.start, bounds.end
                             );
-                            true
+                            return;
                         }
-                        // I/O fault mid-truncation: data above `target` may be lost, so lower
-                        // durable_len conservatively and end the cycle.
                         Err(_) => {
                             expected.rewound(target.min(bounds.end), bounds.end);
-                            false
+                            return;
                         }
                     }
                 }
@@ -717,9 +715,9 @@ async fn run_ops<J: FuzzJournal>(
                 // Raw position: `prune` caps it to size internally, covering prune-past-size.
                 let size = journal.size().await;
                 match journal.prune(*min_pos).await {
-                    Ok(_) => {
-                        expected.pruned(journal.bounds().await.start);
-                        true
+                    Ok((journal, _)) => {
+                        expected.pruned(journal.bounds().start);
+                        journal
                     }
                     Err(_) => {
                         // A failed prune advances the boundary at most to the section floor.
@@ -727,7 +725,7 @@ async fn run_ops<J: FuzzJournal>(
                         let section_floor =
                             capped / params.items_per_section * params.items_per_section;
                         expected.prune_failed(section_floor);
-                        false
+                        return;
                     }
                 }
             }
@@ -735,9 +733,9 @@ async fn run_ops<J: FuzzJournal>(
             JournalOperation::Replay { buffer, start_pos } => {
                 // The clamped replay must return the full suffix matching `read()`, or hit a
                 // tail-repair I/O fault.
-                let bounds = journal.bounds().await;
+                let bounds = journal.bounds();
                 let clamped = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                let clamped_ok = match journal.replay(NZUsize!(*buffer), clamped).await {
+                let clamped_ok = match journal.replay(clamped, NZUsize!(*buffer)).await {
                     Ok(items) => {
                         assert_replay_suffix(&items, clamped, &bounds);
                         for (pos, item) in &items {
@@ -756,21 +754,22 @@ async fn run_ops<J: FuzzJournal>(
                     // Tail-repair I/O fault: end the cycle.
                     Err(_) => false,
                 };
-                clamped_ok
-                    && should_continue_raw_replay(
-                        journal.replay(NZUsize!(*buffer), *start_pos).await,
-                        *start_pos,
-                        &bounds,
-                    )
+                if !clamped_ok {
+                    return;
+                }
+                if !should_continue_raw_replay(
+                    journal.replay(*start_pos, NZUsize!(*buffer)).await,
+                    *start_pos,
+                    &bounds,
+                ) {
+                    return;
+                }
+                journal
             }
 
             // `split_into_cycles` strips `Crash`; a stray one defensively ends the cycle.
-            JournalOperation::Crash => false,
+            JournalOperation::Crash => return,
         };
-
-        if !should_continue {
-            break;
-        }
     }
 }
 
@@ -790,7 +789,7 @@ where
         // Recover with faults disabled to obtain clean ground truth.
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let cfg = J::config(&partition, &ctx, &params);
-        let mut journal = J::init(ctx.child("journal"), cfg)
+        let journal = J::init(ctx.child("journal"), cfg)
             .await
             .expect("recovery should succeed without panic");
         assert_matches_expected(&journal, &expected).await;
@@ -799,7 +798,7 @@ where
 
         // Faults on for the operation phase; returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
-        run_ops(&mut journal, &mut expected, &ops, params).await;
+        run_ops(journal, &mut expected, &ops, params).await;
         expected
     })
 }
@@ -830,7 +829,7 @@ where
         items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
         write_rate: input.write_failure_rate,
-        partial_write_rate: input.partial_write_rate,
+        write_retention_rate: input.write_retention_rate,
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,
@@ -864,7 +863,7 @@ where
     // sentinel to prove the synced state survives restart.
     deterministic::Runner::from(checkpoint).start(move |ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let mut journal = J::init(
+        let journal = J::init(
             ctx.child("journal_final"),
             J::config(&partition, &ctx, &params),
         )
@@ -876,14 +875,14 @@ where
         let mut expected = to_expected(&journal).await;
         let size = journal.size().await;
         let sentinel = Item::from([0xEFu8; ITEM_SIZE]);
-        let pos = journal
+        let (journal, pos) = journal
             .append(sentinel.clone())
             .await
             .expect("final append");
         assert_eq!(pos, size);
         expected.appended(sentinel.clone());
-        journal.sync().await.expect("final sync");
-        expected.synced(journal.bounds().await);
+        let journal = journal.sync().await.expect("final sync");
+        expected.synced(journal.bounds());
         drop(journal);
 
         // Reopen and confirm the synced sentinel survived the restart.

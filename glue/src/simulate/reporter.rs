@@ -7,7 +7,7 @@
 
 use super::tracker::FinalizationUpdate;
 use commonware_actor::Feedback;
-use commonware_consensus::{marshal::Update, Block, Reporter};
+use commonware_consensus::{Block, Reporter, marshal::Update};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_utils::channel::mpsc;
 
@@ -47,7 +47,7 @@ where
         if let Update::Tip(round, _, ref digest) = activity {
             let _ = self.monitor.try_send(FinalizationUpdate {
                 pk: self.pk.clone(),
-                view: round.view(),
+                round,
                 block_digest: digest.as_ref().to_vec(),
             });
         }

@@ -9,6 +9,7 @@ use thiserror::Error;
 
 commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
 pub mod contiguous;
+mod frame;
 pub mod segmented;
 
 #[cfg(all(test, feature = "arbitrary"))]
@@ -19,8 +20,6 @@ mod conformance;
 pub enum Error {
     #[error("merkle error: {0}")]
     Merkle(anyhow::Error),
-    #[error("journal error: {0}")]
-    Journal(anyhow::Error),
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]
@@ -41,10 +40,12 @@ pub enum Error {
     UsizeTooSmall,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("replay interrupted during repair")]
+    ReplayInterrupted,
+    #[error("replay failed")]
+    ReplayFailed,
     #[error("size overflow")]
     SizeOverflow,
-    #[error("unexpected size: expected={0} actual={1}")]
-    UnexpectedSize(u32, u32),
     #[error("missing blob: {0}")]
     MissingBlob(u64),
     #[error("item out of range: {0}")]
@@ -63,7 +64,9 @@ pub enum Error {
     Corruption(String),
     /// The offsets journal and the data journal disagree about an item's layout. Either the
     /// on-disk state is corrupted, or the caller passed offsets that aren't byte-adjacent on disk.
-    #[error("offset/data layout mismatch in section {section} at offset {offset}: offsets journal expected {expected_len}, data varint reports {actual_len}")]
+    #[error(
+        "offset/data layout mismatch in section {section} at offset {offset}: offsets journal expected {expected_len}, data varint reports {actual_len}"
+    )]
     OffsetDataMismatch {
         section: u64,
         offset: u64,

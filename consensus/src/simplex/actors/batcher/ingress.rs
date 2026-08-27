@@ -1,10 +1,10 @@
 use crate::{
+    Viewable,
     simplex::types::{Proposal, Vote},
     types::{Participant, View},
-    Viewable,
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use std::collections::VecDeque;
 use tracing::Span;
 
@@ -18,7 +18,7 @@ pub enum Message<S: Scheme, D: Digest> {
         finalized: View,
         forwardable_proposal: Option<Proposal<D>>,
     },
-    /// A constructed vote (needed for quorum).
+    /// A durable locally constructed vote for certificate assembly.
     Constructed(Vote<S, D>),
 }
 
@@ -86,11 +86,11 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
     where
         F: FnMut(Message<S, D>) -> Option<Message<S, D>>,
     {
-        if let Some(update) = self.update.take() {
-            if let Some(update) = push(update) {
-                self.update = Some(update);
-                return;
-            }
+        if let Some(update) = self.update.take()
+            && let Some(update) = push(update)
+        {
+            self.update = Some(update);
+            return;
         }
 
         while let Some(vote) = self.constructed.pop_front() {
@@ -188,7 +188,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Send a constructed vote.
+    /// Sends a locally constructed vote after its journal entry is durable.
     pub fn constructed(&mut self, message: Vote<S, D>) {
         let _ = self.sender.enqueue(Message::Constructed(message));
     }

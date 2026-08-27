@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
+use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -76,7 +76,7 @@ fn fuzz(input: FuzzInput) {
             match op {
                 Op::Put { key, value } => {
                     let k = vec_to_key(&key);
-                    freezer.put(k.clone(), value).await.unwrap();
+                    (freezer, _) = freezer.put(k.clone(), value).await.unwrap();
                     expected_state.insert(k, value);
                 }
                 Op::Get { key } => {
@@ -85,7 +85,7 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(res, expected_state.get(&k).cloned());
                 }
                 Op::Sync => {
-                    freezer.sync().await.unwrap();
+                    (freezer, _) = freezer.sync().await.unwrap();
                 }
                 Op::Close => {
                     freezer.close().await.unwrap();

@@ -34,7 +34,9 @@ pub struct PrioritySet<I: Ord + Hash + Clone, P: Ord + Copy> {
 }
 
 impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
-    /// Create a new `PrioritySet`.
+    /// Creates an empty `PrioritySet`.
+    ///
+    /// To support efficient temporary replacement, this does not allocate heap storage.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -236,12 +238,16 @@ mod tests {
         // Verify iteration over only the kept items
         let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 2);
-        assert!(entries
-            .iter()
-            .any(|e| *e.0 == key1 && *e.1 == Duration::from_secs(10)));
-        assert!(entries
-            .iter()
-            .any(|e| *e.0 == key3 && *e.1 == Duration::from_secs(2)));
+        assert!(
+            entries
+                .iter()
+                .any(|e| *e.0 == key1 && *e.1 == Duration::from_secs(10))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| *e.0 == key3 && *e.1 == Duration::from_secs(2))
+        );
     }
 
     #[test]

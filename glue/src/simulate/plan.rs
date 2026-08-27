@@ -4,6 +4,7 @@ use super::{
     action::{Action, Crash, Schedule},
     engine::EngineDefinition,
     exit::{ExitCondition, MinimumFinalizations},
+    processed::ProcessedHeight as _,
     property::{FinalizationProperty, Property},
     team::Team,
     tracker::{FinalizationUpdate, ProgressTracker},
@@ -11,17 +12,18 @@ use super::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    simulated::{self, Link, Network},
     Manager as _,
+    simulated::{self, Link, Network},
 };
-use commonware_runtime::{deterministic, Clock, Runner as _, Spawner, Supervisor as _};
-use commonware_utils::{channel::mpsc, ordered::Set, NZUsize, TryCollect};
-use rand::seq::SliceRandom;
+use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, deterministic};
+use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set, probability};
+use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
+    ops::RangeInclusive,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -47,7 +49,7 @@ pub struct PlanResult<D: EngineDefinition> {
     /// Number of scheduled actions that were applied.
     pub scheduled_actions: u64,
 
-    /// Whether delayed validators were started (if Delay was configured).
+    /// Whether delayed validators were started.
     pub delayed_started: bool,
 }
 
@@ -145,7 +147,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             link: Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(5),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             },
             max_message_size: 1024 * 1024,
             engine,
@@ -186,12 +188,12 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 
     pub fn crash(mut self, crash: Crash<D::PublicKey>) -> Self {
         match crash {
-            Crash::Delay { .. } => assert!(
+            Crash::DelayRound { .. } => assert!(
                 !self
                     .crashes
                     .iter()
-                    .any(|crash| matches!(crash, Crash::Delay { .. })),
-                "only one Crash::Delay strategy may be configured"
+                    .any(|crash| matches!(crash, Crash::DelayRound { .. })),
+                "only one delay strategy may be configured"
             ),
             Crash::Random { .. } => assert!(
                 !self
@@ -200,6 +202,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                     .any(|crash| matches!(crash, Crash::Random { .. })),
                 "only one Crash::Random strategy may be configured"
             ),
+            Crash::ProcessedHeight { .. } => {}
             Crash::Schedule(_) => {}
         }
         self.crashes.push(crash);
@@ -309,11 +312,17 @@ impl<D: EngineDefinition> Plan<D> {
             })
     }
 
-    fn delay_crash(&self) -> Option<(usize, u64)> {
-        self.crashes.iter().find_map(|crash| match crash {
-            Crash::Delay { count, after } => Some((*count, *after)),
-            _ => None,
+    fn delay_reached(&self, tracker: &ProgressTracker<D::PublicKey>) -> bool {
+        self.crashes.iter().any(|crash| match crash {
+            Crash::DelayRound { round, .. } => tracker.max_round().is_some_and(|max| max >= *round),
+            _ => false,
         })
+    }
+
+    fn has_delay(&self) -> bool {
+        self.crashes
+            .iter()
+            .any(|crash| matches!(crash, Crash::DelayRound { .. }))
     }
 
     fn random_crash(&self) -> Option<(Duration, Duration, usize)> {
@@ -334,13 +343,75 @@ impl<D: EngineDefinition> Plan<D> {
         })
     }
 
+    fn processed_height_crashes(
+        &self,
+    ) -> impl Iterator<Item = (usize, &D::PublicKey, RangeInclusive<u64>, Duration)> {
+        self.crashes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, crash)| match crash {
+                Crash::ProcessedHeight {
+                    participant,
+                    heights,
+                    downtime,
+                } => Some((index, participant, heights.clone(), *downtime)),
+                _ => None,
+            })
+    }
+
+    async fn trigger_processed_height_crashes(
+        &self,
+        ctx: &deterministic::Context,
+        team: &mut Team<D>,
+        triggered: &mut HashSet<usize>,
+        restart_tx: &mpsc::Sender<D::PublicKey>,
+    ) -> u64 {
+        let mut crashes = 0;
+        for (index, participant, heights, downtime) in self.processed_height_crashes() {
+            if triggered.contains(&index) {
+                continue;
+            }
+            let Some(state) = team.active_state(participant) else {
+                continue;
+            };
+            let processed = state.processed_height().await;
+            if processed < *heights.start() {
+                continue;
+            }
+            assert!(
+                heights.contains(&processed),
+                "validator skipped configured processed-height crash window: {processed} not in {heights:?}",
+            );
+
+            triggered.insert(index);
+            if !team.crash(participant) {
+                continue;
+            }
+            crashes += 1;
+            let pk = participant.clone();
+            let restart_tx = restart_tx.clone();
+            ctx.child("processed_height_restart")
+                .spawn(move |ctx| async move {
+                    if downtime > Duration::ZERO {
+                        ctx.sleep(downtime).await;
+                    }
+                    let _ = restart_tx.send(pk).await;
+                });
+        }
+        crashes
+    }
+
     /// Determine which participants should be delayed at startup.
     fn delayed_participants(&self) -> HashSet<D::PublicKey> {
-        if let Some((count, _)) = self.delay_crash() {
-            self.participants.iter().take(count).cloned().collect()
-        } else {
-            HashSet::new()
-        }
+        self.crashes
+            .iter()
+            .find_map(|crash| match crash {
+                Crash::DelayRound { participants, .. } => {
+                    Some(participants.iter().cloned().collect())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     /// Check post-run properties, log completion, and build the result.
@@ -402,8 +473,9 @@ impl<D: EngineDefinition> Plan<D> {
             ctx.child("network"),
             simulated::Config {
                 max_size: self.max_message_size,
+                max_peers_per_set: NZUsize!(self.participants.len()),
                 disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(3),
+                tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();
@@ -482,6 +554,7 @@ impl<D: EngineDefinition> Plan<D> {
 
         let mut tracker = ProgressTracker::default();
         let mut delayed_started = false;
+        let mut processed_height_crashes = HashSet::new();
         let active_count = total - delayed.len();
         let mut crashes: u64 = 0;
         let mut result: Result<PlanResult<D>, String> =
@@ -493,11 +566,24 @@ impl<D: EngineDefinition> Plan<D> {
             on_stopped => {
                 result = Err("simulation stopped".into());
             },
+            Some(pk) = restart_rx.recv() else break => {
+                let was_delayed = delayed.contains(&pk);
+                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                    .await;
+            },
             Some(update) = monitor_rx.recv() else {
                 result = Err("monitor channel closed".into());
                 break;
             } => {
                 tracker.observe(update)?;
+                crashes += self
+                    .trigger_processed_height_crashes(
+                        &ctx,
+                        &mut team,
+                        &mut processed_height_crashes,
+                        &restart_tx,
+                    )
+                    .await;
 
                 // Check finalization properties
                 let states = team.active_states();
@@ -553,17 +639,13 @@ impl<D: EngineDefinition> Plan<D> {
                 }
 
                 // Start delayed validators after enough progress
-                if !delayed_started {
-                    if let Some((_, after)) = self.delay_crash() {
-                        if tracker.min_view() >= after {
-                            info!(target: "simulator", "starting delayed participants");
-                            for pk in &delayed {
-                                team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
-                                    .await;
-                            }
-                            delayed_started = true;
-                        }
+                if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
+                    info!(target: "simulator", "starting delayed participants");
+                    for pk in &delayed {
+                        team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
+                            .await;
                     }
+                    delayed_started = true;
                 }
             },
             _ = ctx.sleep(EXIT_POLL) => {
@@ -598,11 +680,6 @@ impl<D: EngineDefinition> Plan<D> {
                     .await;
                 break;
             },
-            Some(pk) = restart_rx.recv() else break => {
-                let was_delayed = delayed.contains(&pk);
-                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
-                    .await;
-            },
             Some(cmd) = schedule_rx.recv() else break => match cmd {
                 ScheduleCmd::Crash(pk) => {
                     if team.crash(&pk) {
@@ -621,10 +698,8 @@ impl<D: EngineDefinition> Plan<D> {
                 };
                 let active = team.active_keys();
                 let crash_count = count.min(active.len());
-                let to_crash: Vec<D::PublicKey> = active
-                    .choose_multiple(&mut ctx, crash_count)
-                    .cloned()
-                    .collect();
+                let to_crash: Vec<D::PublicKey> =
+                    active.sample(&mut ctx, crash_count).cloned().collect();
                 for pk in to_crash {
                     if !team.crash(&pk) {
                         continue;
@@ -662,13 +737,20 @@ impl<D: EngineDefinition> Plan<D> {
                 );
             }
 
-            if self.delay_crash().is_some() {
+            if self.has_delay() {
                 assert!(
                     r.delayed_started,
-                    "Crash::Delay configured but delayed validators were never started. \
-                     Increase required_finalizations or decrease the `after` threshold."
+                    "delay configured but delayed validators were never started. \
+                     Increase required_finalizations or decrease the delay threshold."
                 );
             }
+
+            let expected_processed_height_crashes = self.processed_height_crashes().count();
+            assert_eq!(
+                processed_height_crashes.len(),
+                expected_processed_height_crashes,
+                "not all Crash::ProcessedHeight triggers were reached",
+            );
         }
 
         result
@@ -765,8 +847,8 @@ impl<D: EngineDefinition> Plan<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::types::View;
-    use commonware_cryptography::{ed25519, Signer as _};
+    use commonware_consensus::types::{Epoch, Round, View};
+    use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Clock, Handle, Quota, Spawner};
     use std::{
         future::Future,
@@ -871,7 +953,7 @@ mod tests {
                     let _ = monitor
                         .send(FinalizationUpdate {
                             pk: pk.clone(),
-                            view: View::new(view),
+                            round: Round::new(Epoch::zero(), View::new(view)),
                             block_digest: vec![view as u8],
                         })
                         .await;
@@ -897,7 +979,8 @@ mod tests {
             &self,
             ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
         ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
-            let saw_fault = ctx.context.storage_fault_config().read().open_rate == Some(1.0);
+            let saw_fault =
+                ctx.context.storage_fault_config().read().open_rate == Some(probability!(1.0));
             async move {
                 (
                     FaultObservingNode {
@@ -918,7 +1001,7 @@ mod tests {
                 let _ = monitor
                     .send(FinalizationUpdate {
                         pk,
-                        view: View::new(1),
+                        round: Round::new(Epoch::zero(), View::new(1)),
                         block_digest: vec![1],
                     })
                     .await;
@@ -1004,7 +1087,7 @@ mod tests {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(0),
-            success_rate: 1.0,
+            success_rate: probability!(1.0),
         };
         let result = PlanBuilder::new(FinalizingEngine::new(1, Duration::from_millis(100), 1))
             .required_finalizations(1)
@@ -1031,12 +1114,17 @@ mod tests {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(0),
-            success_rate: 1.0,
+            success_rate: probability!(1.0),
         };
-        let result = PlanBuilder::new(FinalizingEngine::new(2, Duration::from_millis(100), 2))
+        let engine = FinalizingEngine::new(2, Duration::from_millis(100), 2);
+        let delayed = engine.participants[0].clone();
+        let result = PlanBuilder::new(engine)
             .required_finalizations(2)
             .timeout(Duration::from_secs(2))
-            .crash(Crash::Delay { count: 1, after: 1 })
+            .crash(Crash::DelayRound {
+                participants: vec![delayed],
+                round: Round::new(Epoch::zero(), View::new(1)),
+            })
             .crash(Crash::Schedule(
                 Schedule::new().at(Duration::from_millis(1), Action::Heal(link)),
             ))
@@ -1112,7 +1200,7 @@ mod tests {
     #[test]
     fn storage_fault_is_visible_during_engine_init() {
         PlanBuilder::new(FaultObservingEngine::new(1))
-            .with_storage_fault(deterministic::FaultConfig::default().open(1.0))
+            .with_storage_fault(deterministic::FaultConfig::default().open(probability!(1.0)))
             .timeout(Duration::from_secs(1))
             .required_finalizations(1)
             .property(AllStatesSawFault)

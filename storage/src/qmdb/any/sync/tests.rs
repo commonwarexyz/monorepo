@@ -12,10 +12,9 @@ use crate::{
         any::traits::DbAny,
         operation::Operation as OperationTrait,
         sync::{
-            self,
+            self, Engine, Target,
             engine::{Config, NextStep},
-            resolver::{self, FetchResult, Resolver},
-            Engine, Target,
+            source::{self, FeedbackTx, Request, Response, Source, tests::dropped_feedback},
         },
     },
 };
@@ -23,21 +22,21 @@ use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
-    deterministic, BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _,
+    BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
+    NZU64,
     channel::{mpsc, oneshot},
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
-    NZU64,
 };
-use futures::{pin_mut, FutureExt};
-use rand::RngCore as _;
+use futures::{FutureExt, pin_mut};
+use rand::Rng as _;
 use std::{
     num::NonZeroU64,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -139,7 +138,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -158,8 +157,8 @@ where
                 range: non_empty_range!(Location::new(0), Location::new(10)),
             },
             context: context.child("client"),
-            resolver: Arc::new(target_db),
-            apply_batch_size: 1024,
+            source: Arc::new(target_db),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
@@ -181,17 +180,17 @@ where
     });
 }
 
-/// Test that resolver failure is handled correctly
-pub(crate) fn test_sync_resolver_fails<H: SyncTestHarness>()
+/// Test that source failure is handled correctly
+pub(crate) fn test_sync_source_fails<H: SyncTestHarness>()
 where
-    resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
-        Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    source::tests::FailSource<H::Family, OpOf<H>, Digest>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let resolver = resolver::tests::FailResolver::<H::Family, OpOf<H>, Digest>::new();
+        let source = source::tests::FailSource::<H::Family, OpOf<H>, Digest>::new();
         let target_root = Digest::from([0; 32]);
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -201,8 +200,8 @@ where
                 root: target_root,
                 range: non_empty_range!(Location::new(0), Location::new(5)),
             },
-            resolver,
-            apply_batch_size: 2,
+            source,
+            apply_batch_size: NZU64!(2),
             max_outstanding_requests: 2,
             fetch_batch_size: NZU64!(2),
             db_config,
@@ -220,27 +219,25 @@ where
 /// Test basic sync functionality with various batch sizes
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate target database
-        let mut target_db = H::init_db(context.child("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(target_db_ops);
-        target_db = H::apply_ops(target_db, target_ops).await;
+        let target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
-        target_db
-            .prune(target_db.sync_boundary().await)
-            .await
-            .unwrap();
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
 
-        let target_op_count = target_db.bounds().await.end;
-        let target_inactivity_floor = target_db.inactivity_floor_loc().await;
+        let target_op_count = target_db.bounds().end;
+        let target_inactivity_floor = target_db.inactivity_floor_loc();
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
+        let lower_bound = target_db.sync_boundary();
 
         // Configure sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -254,8 +251,8 @@ where
                 range: non_empty_range!(lower_bound, target_op_count),
             },
             context: client_context.child("client"),
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
@@ -267,26 +264,20 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state (root hash is the key verification)
-        assert_eq!(synced_db.bounds().await.end, target_op_count);
-        assert_eq!(
-            synced_db.inactivity_floor_loc().await,
-            target_inactivity_floor
-        );
+        assert_eq!(synced_db.bounds().end, target_op_count);
+        assert_eq!(synced_db.inactivity_floor_loc(), target_inactivity_floor);
         assert_eq!(synced_db.root(), verification_root);
 
         // Verify persistence
         let final_root = synced_db.root();
-        let final_op_count = synced_db.bounds().await.end;
-        let final_inactivity_floor = synced_db.inactivity_floor_loc().await;
+        let final_op_count = synced_db.bounds().end;
+        let final_inactivity_floor = synced_db.inactivity_floor_loc();
 
         // Reopen and verify state persisted
         drop(synced_db);
         let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
-        assert_eq!(reopened_db.bounds().await.end, final_op_count);
-        assert_eq!(
-            reopened_db.inactivity_floor_loc().await,
-            final_inactivity_floor
-        );
+        assert_eq!(reopened_db.bounds().end, final_op_count);
+        assert_eq!(reopened_db.inactivity_floor_loc(), final_inactivity_floor);
         assert_eq!(reopened_db.root(), final_root);
 
         // Cleanup
@@ -302,7 +293,7 @@ where
 /// Test syncing to a subset of the target database (target has additional ops beyond sync range)
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_ops: usize)
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -315,10 +306,10 @@ where
         target_db = H::apply_ops(target_db, target_ops[0..target_db_ops - 1].to_vec()).await;
         // commit already done in apply_ops
 
-        let upper_bound = target_db.bounds().await.end;
+        let upper_bound = target_db.bounds().end;
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
+        let lower_bound = target_db.sync_boundary();
 
         // Add another operation after the sync range
         let final_op = target_ops[target_db_ops - 1].clone();
@@ -336,8 +327,8 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
-            resolver: Arc::new(target_db),
-            apply_batch_size: 1024,
+            source: Arc::new(target_db),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
@@ -348,8 +339,8 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify the synced database has the correct range of operations
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
-        assert_eq!(synced_db.bounds().await.end, upper_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
+        assert_eq!(synced_db.bounds().end, upper_bound);
 
         // Verify the final root digest matches our target
         assert_eq!(synced_db.root(), verification_root);
@@ -368,7 +359,7 @@ where
 /// Tests the scenario where sync_db already has partial data and needs to sync additional ops.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(original_ops: usize)
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -398,8 +389,8 @@ where
 
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
         // Reopen the sync database and sync it to the target database
         let target_db = Arc::new(target_db);
@@ -411,8 +402,8 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("sync"),
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
@@ -422,13 +413,13 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state
-        let bounds = synced_db.bounds().await;
+        let bounds = synced_db.bounds();
         assert_eq!(bounds.end, upper_bound);
         assert_eq!(
-            synced_db.inactivity_floor_loc().await,
-            target_db.inactivity_floor_loc().await
+            synced_db.inactivity_floor_loc(),
+            target_db.inactivity_floor_loc()
         );
-        assert_eq!(bounds.end, target_db.bounds().await.end);
+        assert_eq!(bounds.end, target_db.bounds().end);
         // Verify the root digest matches the target
         assert_eq!(synced_db.root(), verification_root);
 
@@ -458,11 +449,11 @@ where
 }
 
 /// Test case where existing database on disk exactly matches the sync target.
-/// Uses FailResolver to verify that no network requests are made since data already exists.
+/// Uses FailSource to verify that no network requests are made since data already exists.
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>(num_ops: usize)
 where
-    resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
-        Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    source::tests::FailSource<H::Family, OpOf<H>, Digest>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -472,36 +463,35 @@ where
 
         // Create two databases with their own configs
         let target_config = H::config(&context.next_u64().to_string(), &context);
-        let mut target_db = H::init_db_with_config(context.child("target"), target_config).await;
+        let target_db = H::init_db_with_config(context.child("target"), target_config).await;
         let sync_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
-        let mut sync_db =
+        let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
 
         // Apply the same operations to both databases
-        target_db = H::apply_ops(target_db, target_ops.clone()).await;
-        sync_db = H::apply_ops(sync_db, target_ops.clone()).await;
+        let target_db = H::apply_ops(target_db, target_ops.clone()).await;
+        let sync_db = H::apply_ops(sync_db, target_ops.clone()).await;
         // commit already done in apply_ops
 
-        target_db
-            .prune(target_db.sync_boundary().await)
-            .await
-            .unwrap();
-        sync_db.prune(sync_db.sync_boundary().await).await.unwrap();
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
+        let boundary = sync_db.sync_boundary();
+        let sync_db = sync_db.prune(boundary).await.unwrap();
 
-        sync_db.sync().await.unwrap();
+        let sync_db = sync_db.sync().await.unwrap();
         drop(sync_db);
 
         // Capture target state
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
-        // sync_db should never ask the resolver for operations
-        // because it is already complete. Use a resolver that always fails
+        // sync_db should never ask the source for operations
+        // because it is already complete. Use a source that always fails
         // to ensure that it's not being used.
-        let resolver = resolver::tests::FailResolver::<H::Family, OpOf<H>, Digest>::new();
+        let source = source::tests::FailSource::<H::Family, OpOf<H>, Digest>::new();
         let config = Config {
             db_config: sync_config, // Use same config to access same partitions
             fetch_batch_size: NZU64!(10),
@@ -510,8 +500,8 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("sync"),
-            resolver,
-            apply_batch_size: 1024,
+            source,
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
@@ -521,10 +511,10 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state
-        let bounds = synced_db.bounds().await;
+        let bounds = synced_db.bounds();
         assert_eq!(bounds.end, upper_bound);
-        assert_eq!(bounds.end, target_db.bounds().await.end);
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
+        assert_eq!(bounds.end, target_db.bounds().end);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
 
         // Verify the root digest matches the target
         assert_eq!(synced_db.root(), verification_root);
@@ -543,10 +533,10 @@ where
     });
 }
 
-/// Test that the client fails to sync if the lower bound is decreased via target update.
+/// Test that a target update that decreases the lower bound is ignored.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -561,12 +551,12 @@ where
         // Use inactivity_floor as range.start so we have a non-zero bound to decrement.
         // The engine only checks that range.start does not decrease on updates; it doesn't
         // require range.start to equal sync_boundary here.
-        let initial_lower_bound = target_db.inactivity_floor_loc().await;
+        let initial_lower_bound = target_db.inactivity_floor_loc();
         assert!(
             *initial_lower_bound > 0,
             "test setup requires non-zero inactivity floor"
         );
-        let initial_upper_bound = target_db.bounds().await.end;
+        let initial_upper_bound = target_db.bounds().end;
         let initial_root = H::sync_target_root(&target_db);
 
         // Create client with initial target
@@ -580,8 +570,8 @@ where
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
             finish_rx: None,
@@ -602,13 +592,10 @@ where
             .await
             .unwrap();
 
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(
-                sync::EngineError::SyncTargetMovedBackward { .. }
-            ))
-        ));
+        // The non-advancing update is discarded and the sync completes at the original target.
+        let synced_db: H::Db = client.sync().await.unwrap();
+        assert_eq!(synced_db.root(), target_db.root());
+        synced_db.destroy().await.unwrap();
 
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -618,10 +605,10 @@ where
     });
 }
 
-/// Test that the client fails to sync if the upper bound is decreased via target update.
+/// Test that a target update that decreases the upper bound is ignored.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -634,8 +621,8 @@ where
         // commit already done in apply_ops
 
         // Capture initial target state
-        let initial_lower_bound = target_db.sync_boundary().await;
-        let initial_upper_bound = target_db.bounds().await.end;
+        let initial_lower_bound = target_db.sync_boundary();
+        let initial_upper_bound = target_db.bounds().end;
         let initial_root = H::sync_target_root(&target_db);
 
         // Create client with initial target
@@ -649,8 +636,8 @@ where
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
             finish_rx: None,
@@ -671,13 +658,10 @@ where
             .await
             .unwrap();
 
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(
-                sync::EngineError::SyncTargetMovedBackward { .. }
-            ))
-        ));
+        // The non-advancing update is discarded and the sync completes at the original target.
+        let synced_db: H::Db = client.sync().await.unwrap();
+        assert_eq!(synced_db.root(), target_db.root());
+        synced_db.destroy().await.unwrap();
 
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -690,7 +674,7 @@ where
 /// Test that the client succeeds when bounds are updated (increased).
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -703,8 +687,8 @@ where
         // commit already done in apply_ops
 
         // Capture initial target state
-        let initial_lower_bound = target_db.sync_boundary().await;
-        let initial_upper_bound = target_db.bounds().await.end;
+        let initial_lower_bound = target_db.sync_boundary();
+        let initial_upper_bound = target_db.bounds().end;
         let initial_root = H::sync_target_root(&target_db);
 
         // Apply more operations to the target database
@@ -715,8 +699,8 @@ where
             // commit already done in apply_ops
 
             // Capture new target state
-            let new_lower_bound = target_db.sync_boundary().await;
-            let new_upper_bound = target_db.bounds().await.end;
+            let new_lower_bound = target_db.sync_boundary();
+            let new_upper_bound = target_db.bounds().end;
             let new_sync_root = H::sync_target_root(&target_db);
             let new_verification_root = target_db.root();
 
@@ -732,8 +716,8 @@ where
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
-                resolver: target_db.clone(),
-                apply_batch_size: 1024,
+                source: target_db.clone(),
+                apply_batch_size: NZU64!(1024),
                 max_outstanding_requests: 1,
                 update_rx: Some(update_receiver),
                 finish_rx: None,
@@ -755,8 +739,8 @@ where
 
             // Verify the synced database has the expected final state
             assert_eq!(synced_db.root(), new_verification_root);
-            assert_eq!(synced_db.bounds().await.end, new_upper_bound);
-            assert_eq!(synced_db.sync_boundary().await, new_lower_bound);
+            assert_eq!(synced_db.bounds().end, new_upper_bound);
+            assert_eq!(synced_db.sync_boundary(), new_lower_bound);
 
             synced_db.destroy().await.unwrap();
 
@@ -775,7 +759,7 @@ where
 /// Test that target updates can be sent even after the client is done (no panic).
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -788,8 +772,8 @@ where
         // commit already done in apply_ops
 
         // Capture target state
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
 
@@ -804,8 +788,8 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
             finish_rx: None,
@@ -828,8 +812,8 @@ where
 
         // Verify the synced database has the expected state
         assert_eq!(synced_db.root(), verification_root);
-        assert_eq!(synced_db.bounds().await.end, upper_bound);
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
+        assert_eq!(synced_db.bounds().end, upper_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
 
         synced_db.destroy().await.unwrap();
 
@@ -841,10 +825,10 @@ where
     });
 }
 
-/// Test that prune-only target updates are rejected as backward target movement.
-pub(crate) fn test_target_update_prune_only_rejected<H: SyncTestHarness>()
+/// Test that prune-only target updates (same end, larger start) are ignored.
+pub(crate) fn test_target_update_prune_only_ignored<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -853,12 +837,12 @@ where
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(50)).await;
 
-        let initial_lower_bound = target_db.inactivity_floor_loc().await;
+        let initial_lower_bound = target_db.inactivity_floor_loc();
         assert!(
             *initial_lower_bound > 1,
             "test setup requires lower bound that can advance twice"
         );
-        let upper_bound = target_db.bounds().await.end;
+        let upper_bound = target_db.bounds().end;
         let root = H::sync_target_root(&target_db);
 
         let (update_sender, update_receiver) = mpsc::channel(2);
@@ -871,8 +855,8 @@ where
                 root,
                 range: non_empty_range!(initial_lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
             finish_rx: None,
@@ -892,13 +876,10 @@ where
         update_sender.send(first_target).await.unwrap();
         update_sender.send(second_target).await.unwrap();
 
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(
-                sync::EngineError::SyncTargetMovedBackward { .. }
-            ))
-        ));
+        // The non-advancing update is discarded and the sync completes at the original target.
+        let synced_db: H::Db = client.sync().await.unwrap();
+        assert_eq!(synced_db.root(), target_db.root());
+        synced_db.destroy().await.unwrap();
 
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -911,7 +892,7 @@ where
 /// Test that explicit finish control waits for a finish signal even after reaching target.
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -921,15 +902,12 @@ where
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
         let initial_target = Target {
             root: H::sync_target_root(&target_db),
-            range: non_empty_range!(
-                target_db.sync_boundary().await,
-                target_db.bounds().await.end
-            ),
+            range: non_empty_range!(target_db.sync_boundary(), target_db.bounds().end),
         };
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1)).await;
-        let updated_lower_bound = target_db.sync_boundary().await;
-        let updated_upper_bound = target_db.bounds().await.end;
+        let updated_lower_bound = target_db.sync_boundary();
+        let updated_upper_bound = target_db.bounds().end;
         let updated_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(updated_lower_bound, updated_upper_bound),
@@ -945,8 +923,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(10),
             target: initial_target.clone(),
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
@@ -999,8 +977,8 @@ where
             .await
             .expect("sync should succeed after finish signal");
         assert_eq!(synced_db.root(), updated_verification_root);
-        assert_eq!(synced_db.bounds().await.end, updated_upper_bound);
-        assert_eq!(synced_db.sync_boundary().await, updated_lower_bound);
+        assert_eq!(synced_db.bounds().end, updated_upper_bound);
+        assert_eq!(synced_db.sync_boundary(), updated_lower_bound);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1015,12 +993,12 @@ async fn wait_for_reached_progress<F: merkle::Family>(
     context: deterministic::Context,
     target: &Target<F, Digest>,
 ) {
-    let target_end = *target.range.end();
-    let journal_size = format!("client_sync_journal_size {target_end}");
-    let target_end = format!("client_sync_target_end {target_end}");
+    let target_size = *target.range.end();
+    let size = format!("client_sync_size {target_size}");
+    let target_size = format!("client_sync_target_size {target_size}");
     loop {
         let metrics = context.encode();
-        if metrics.contains(&journal_size) && metrics.contains(&target_end) {
+        if metrics.contains(&size) && metrics.contains(&target_size) {
             return;
         }
         context.sleep(Duration::from_millis(1)).await;
@@ -1032,7 +1010,7 @@ pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_fin
     H: SyncTestHarness,
 >()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1044,8 +1022,8 @@ where
         let initial_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.sync_boundary().await,
-                target_db.bounds().await.end
+                target_db.sync_boundary(),
+                target_db.bounds().end
             ),
         };
 
@@ -1053,8 +1031,8 @@ where
         let first_update = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.sync_boundary().await,
-                target_db.bounds().await.end
+                target_db.sync_boundary(),
+                target_db.bounds().end
             ),
         };
 
@@ -1062,8 +1040,8 @@ where
         let second_update = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.sync_boundary().await,
-                target_db.bounds().await.end
+                target_db.sync_boundary(),
+                target_db.bounds().end
             ),
         };
         let final_root = target_db.root();
@@ -1076,8 +1054,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(2),
             target: initial_target.clone(),
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
@@ -1138,8 +1116,8 @@ where
             .await
             .expect("sync should succeed after finish signal");
         assert_eq!(synced_db.root(), final_root);
-        assert_eq!(synced_db.bounds().await.end, *second_update.range.end());
-        assert_eq!(synced_db.sync_boundary().await, *second_update.range.start());
+        assert_eq!(synced_db.bounds().end, *second_update.range.end());
+        assert_eq!(synced_db.sync_boundary(), *second_update.range.start());
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1153,7 +1131,7 @@ where
 /// Test that a finish signal received before target completion still allows full sync.
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1161,8 +1139,8 @@ where
     executor.start(|mut context| async move {
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(30)).await;
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
         let target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(lower_bound, upper_bound),
@@ -1182,8 +1160,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(3),
             target: target.clone(),
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: Some(finish_receiver),
@@ -1201,8 +1179,8 @@ where
 
         assert_eq!(reached, target);
         assert_eq!(synced_db.root(), verification_root);
-        assert_eq!(synced_db.bounds().await.end, upper_bound);
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
+        assert_eq!(synced_db.bounds().end, upper_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1216,7 +1194,7 @@ where
 /// Test that dropping finish sender without sending is treated as an error.
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1224,8 +1202,8 @@ where
     executor.start(|mut context| async move {
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         drop(finish_sender);
@@ -1239,8 +1217,8 @@ where
                 root: H::sync_target_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: Some(finish_receiver),
@@ -1265,7 +1243,7 @@ where
 /// Test that dropping reached-target receiver does not fail sync.
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1273,8 +1251,8 @@ where
     executor.start(|mut context| async move {
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
         let verification_root = target_db.root();
 
         let (reached_sender, reached_receiver) = mpsc::channel(1);
@@ -1289,8 +1267,8 @@ where
                 root: H::sync_target_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
@@ -1302,8 +1280,8 @@ where
             .await
             .expect("sync should succeed when reached-target receiver is dropped");
         assert_eq!(synced_db.root(), verification_root);
-        assert_eq!(synced_db.bounds().await.end, upper_bound);
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
+        assert_eq!(synced_db.bounds().end, upper_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1319,7 +1297,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
 ) where
-    Arc<AsyncRwLock<Option<DbOf<H>>>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<Option<DbOf<H>>>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1332,8 +1310,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         // commit already done in apply_ops
 
         // Capture initial target state
-        let initial_lower_bound = target_db.sync_boundary().await;
-        let initial_upper_bound = target_db.bounds().await.end;
+        let initial_lower_bound = target_db.sync_boundary();
+        let initial_upper_bound = target_db.bounds().end;
         let initial_sync_root = H::sync_target_root(&target_db);
 
         // Wrap target database for shared mutable access (using Option so we can take ownership)
@@ -1350,10 +1328,10 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                     root: initial_sync_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
-                resolver: target_db.clone(),
+                source: target_db.clone(),
                 fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
                 max_outstanding_requests: 10,
-                apply_batch_size: 1024,
+                apply_batch_size: NZU64!(1024),
                 update_rx: Some(update_receiver),
                 finish_rx: None,
                 reached_target_tx: None,
@@ -1366,7 +1344,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                     NextStep::Continue(new_client) => new_client,
                     NextStep::Complete(_) => panic!("client should not be complete"),
                 };
-                let log_size = client.journal().size().await;
+                let log_size = Contiguous::bounds(client.journal()).end;
                 if log_size > initial_lower_bound {
                     break client;
                 }
@@ -1382,8 +1360,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             let db = H::apply_ops(db, additional_ops_data).await;
 
             // Capture new target state
-            let new_lower_bound = db.sync_boundary().await;
-            let new_upper_bound = db.bounds().await.end;
+            let new_lower_bound = db.sync_boundary();
+            let new_upper_bound = db.bounds().end;
             let new_sync_root = H::sync_target_root(&db);
             let new_verification_root = db.root();
             *db_guard = Some(db);
@@ -1412,12 +1390,12 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             |rw_lock| rw_lock.into_inner().expect("db should be present"),
         );
         {
-            let synced_bounds = synced_db.bounds().await;
-            let target_bounds = target_db.bounds().await;
+            let synced_bounds = synced_db.bounds();
+            let target_bounds = target_db.bounds();
             assert_eq!(synced_bounds.end, target_bounds.end);
             assert_eq!(
-                synced_db.inactivity_floor_loc().await,
-                target_db.inactivity_floor_loc().await
+                synced_db.inactivity_floor_loc(),
+                target_db.inactivity_floor_loc()
             );
             assert_eq!(synced_db.root(), target_db.root());
         }
@@ -1430,68 +1408,89 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 /// Test demonstrating that a synced database can be reopened and retain its state.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        // Create and populate a simple target database
-        let mut target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(10);
-        target_db = H::apply_ops(target_db, target_ops).await;
-        // commit already done in apply_ops
+        let base_ops = H::create_ops(10);
+        let older_source_config = H::config(&context.next_u64().to_string(), &context);
+        let mut older_source =
+            H::init_db_with_config(context.child("older_source"), older_source_config).await;
+        older_source = H::apply_ops(older_source, base_ops.clone()).await;
+        let older_target = Target {
+            root: H::sync_target_root(&older_source),
+            range: non_empty_range!(older_source.sync_boundary(), older_source.bounds().end),
+        };
+        let older_root = older_source.root();
 
-        // Capture target state
-        let sync_root = H::sync_target_root(&target_db);
-        let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let newer_source_config = H::config(&context.next_u64().to_string(), &context);
+        let mut newer_source =
+            H::init_db_with_config(context.child("newer_source"), newer_source_config).await;
+        newer_source = H::apply_ops(newer_source, base_ops).await;
+        newer_source = H::apply_ops(newer_source, H::create_ops_seeded(5, 1)).await;
+        let newer_target = Target {
+            root: H::sync_target_root(&newer_source),
+            range: non_empty_range!(newer_source.sync_boundary(), newer_source.bounds().end),
+        };
+        let newer_root = newer_source.root();
+        assert!(newer_target.range.end() > older_target.range.end());
 
-        // Perform sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
-        let target_db = Arc::new(target_db);
-        let config = Config {
+        let older_source = Arc::new(older_source);
+        let newer_source = Arc::new(newer_source);
+        let synced_db: H::Db = sync::sync(Config {
             db_config: db_config.clone(),
             fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: sync_root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
-            context: client_context.child("client"),
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            target: newer_target,
+            context: client_context.child("newer"),
+            source: newer_source.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
-        };
-        let synced_db: H::Db = sync::sync(config).await.unwrap();
-
-        // Verify initial sync worked
-        assert_eq!(synced_db.root(), verification_root);
-
-        // Save state before dropping
-        let expected_root = synced_db.root();
-        let expected_op_count = synced_db.bounds().await.end;
-        let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc().await;
-
-        // Re-open the database
+        })
+        .await
+        .unwrap();
+        assert_eq!(synced_db.root(), newer_root);
         drop(synced_db);
+
+        let recovered_db: H::Db = sync::sync(Config {
+            db_config: db_config.clone(),
+            fetch_batch_size: NZU64!(5),
+            target: older_target.clone(),
+            context: client_context.child("older"),
+            source: older_source.clone(),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(recovered_db.root(), older_root);
+        assert_eq!(recovered_db.bounds().end, *older_target.range.end());
+        assert_eq!(recovered_db.sync_boundary(), *older_target.range.start());
+        drop(recovered_db);
+
         let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
+        assert_eq!(reopened_db.root(), older_root);
+        assert_eq!(reopened_db.bounds().end, *older_target.range.end());
+        assert_eq!(reopened_db.sync_boundary(), *older_target.range.start());
 
-        // Verify the state is unchanged
-        assert_eq!(reopened_db.root(), expected_root);
-        assert_eq!(reopened_db.bounds().await.end, expected_op_count);
-        assert_eq!(
-            reopened_db.inactivity_floor_loc().await,
-            expected_inactivity_floor_loc
-        );
-
-        // Cleanup
-        Arc::try_unwrap(target_db)
+        Arc::try_unwrap(older_source)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+        Arc::try_unwrap(newer_source)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
             .destroy()
             .await
@@ -1503,7 +1502,7 @@ where
 /// Test post-sync usability: after syncing, the database supports normal operations.
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1514,8 +1513,8 @@ where
         target_db = H::apply_ops(target_db, target_ops).await;
 
         let sync_root = H::sync_target_root(&target_db);
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
         let target_db = Arc::new(target_db);
 
         let config = H::config(&context.next_u64().to_string(), &context);
@@ -1527,8 +1526,8 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
@@ -1545,7 +1544,7 @@ where
 
         // Root should change after applying more ops.
         assert_ne!(synced_db.root(), root_after_sync);
-        assert!(synced_db.bounds().await.end > upper_bound);
+        assert!(synced_db.bounds().end > upper_bound);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1571,11 +1570,11 @@ where
         db = H::apply_ops(db, ops).await;
         // commit already done in apply_ops
 
-        let sync_lower_bound = db.sync_boundary().await;
-        let bounds = db.bounds().await;
+        let sync_lower_bound = db.sync_boundary();
+        let bounds = db.bounds();
         let sync_upper_bound = bounds.end;
         let target_db_op_count = bounds.end;
-        let target_db_inactivity_floor_loc = db.inactivity_floor_loc().await;
+        let target_db_inactivity_floor_loc = db.inactivity_floor_loc();
 
         let pinned_nodes = db.pinned_nodes_at(sync_lower_bound).await;
         let (_, journal) = db.into_log_components();
@@ -1586,18 +1585,18 @@ where
             journal,
             Some(pinned_nodes),
             non_empty_range!(sync_lower_bound, sync_upper_bound),
-            1024,
+            NZU64!(1024),
         )
         .await
         .unwrap();
 
         // Verify database state
-        assert_eq!(sync_db.bounds().await.end, target_db_op_count);
+        assert_eq!(sync_db.bounds().end, target_db_op_count);
         assert_eq!(
-            sync_db.inactivity_floor_loc().await,
+            sync_db.inactivity_floor_loc(),
             target_db_inactivity_floor_loc
         );
-        assert_eq!(sync_db.sync_boundary().await, sync_lower_bound);
+        assert_eq!(sync_db.sync_boundary(), sync_lower_bound);
 
         sync_db.destroy().await.unwrap();
     });
@@ -1615,35 +1614,34 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate two databases.
-        let mut target_db = H::init_db(context.child("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let sync_db_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
-        let mut sync_db =
+        let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
         let original_ops = H::create_ops(NUM_OPS);
-        target_db = H::apply_ops(target_db, original_ops.clone()).await;
+        let target_db = H::apply_ops(target_db, original_ops.clone()).await;
         // commit already done in apply_ops
-        target_db
-            .prune(target_db.sync_boundary().await)
-            .await
-            .unwrap();
-        sync_db = H::apply_ops(sync_db, original_ops.clone()).await;
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
+        let sync_db = H::apply_ops(sync_db, original_ops.clone()).await;
         // commit already done in apply_ops
-        sync_db.prune(sync_db.sync_boundary().await).await.unwrap();
-        sync_db.sync().await.unwrap();
+        let boundary = sync_db.sync_boundary();
+        let sync_db = sync_db.prune(boundary).await.unwrap();
+        let sync_db = sync_db.sync().await.unwrap();
         drop(sync_db);
 
         // Add more operations to the target db
         // (use different seed to avoid key collisions)
         let more_ops = H::create_ops_seeded(NUM_ADDITIONAL_OPS, 1);
-        target_db = H::apply_ops(target_db, more_ops).await;
+        let target_db = H::apply_ops(target_db, more_ops).await;
         // commit already done in apply_ops
 
         // Capture target db state for comparison
-        let bounds = target_db.bounds().await;
+        let bounds = target_db.bounds();
         let target_db_op_count = bounds.end;
-        let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc().await;
-        let sync_lower_bound = target_db.sync_boundary().await;
+        let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc();
+        let sync_lower_bound = target_db.sync_boundary();
         let sync_upper_bound = bounds.end;
         let target_hash = target_db.root();
 
@@ -1659,18 +1657,18 @@ where
             journal,
             Some(pinned_nodes),
             non_empty_range!(sync_lower_bound, sync_upper_bound),
-            1024,
+            NZU64!(1024),
         )
         .await
         .unwrap();
 
         // Verify database state
-        assert_eq!(sync_db.bounds().await.end, target_db_op_count);
+        assert_eq!(sync_db.bounds().end, target_db_op_count);
         assert_eq!(
-            sync_db.inactivity_floor_loc().await,
+            sync_db.inactivity_floor_loc(),
             target_db_inactivity_floor_loc
         );
-        assert_eq!(sync_db.sync_boundary().await, sync_lower_bound);
+        assert_eq!(sync_db.sync_boundary(), sync_lower_bound);
 
         // Verify the root digest matches the target (verifies content integrity)
         assert_eq!(sync_db.root(), target_hash);
@@ -1692,23 +1690,21 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Create and populate a source database
-        let mut source_db = H::init_db(context.child("source")).await;
+        let source_db = H::init_db(context.child("source")).await;
         let ops = H::create_ops(NUM_OPS);
-        source_db = H::apply_ops(source_db, ops).await;
+        let source_db = H::apply_ops(source_db, ops).await;
         // commit already done in apply_ops
-        source_db
-            .prune(source_db.sync_boundary().await)
-            .await
-            .unwrap();
+        let boundary = source_db.sync_boundary();
+        let source_db = source_db.prune(boundary).await.unwrap();
 
-        let lower_bound = source_db.sync_boundary().await;
-        let upper_bound = source_db.bounds().await.end;
+        let lower_bound = source_db.sync_boundary();
+        let upper_bound = source_db.bounds().end;
 
         // Get pinned nodes and target hash before deconstructing source_db
         let pinned_nodes = source_db.pinned_nodes_at(lower_bound).await;
         let target_hash = source_db.root();
-        let target_op_count = source_db.bounds().await.end;
-        let target_inactivity_floor = source_db.inactivity_floor_loc().await;
+        let target_op_count = source_db.bounds().end;
+        let target_inactivity_floor = source_db.inactivity_floor_loc();
 
         let (mmr, journal) = source_db.into_log_components();
 
@@ -1721,15 +1717,15 @@ where
             journal,
             Some(pinned_nodes),
             non_empty_range!(lower_bound, upper_bound),
-            1024,
+            NZU64!(1024),
         )
         .await
         .unwrap();
 
         // Verify database state
-        assert_eq!(db.bounds().await.end, target_op_count);
-        assert_eq!(db.inactivity_floor_loc().await, target_inactivity_floor);
-        assert_eq!(db.sync_boundary().await, lower_bound);
+        assert_eq!(db.bounds().end, target_op_count);
+        assert_eq!(db.inactivity_floor_loc(), target_inactivity_floor);
+        assert_eq!(db.sync_boundary(), lower_bound);
 
         // Verify the root digest matches the target
         assert_eq!(db.root(), target_hash);
@@ -1752,7 +1748,7 @@ where
         let source_db = H::init_db(context.child("source")).await;
 
         // An empty database has exactly 1 operation (the initial CommitFloor)
-        assert_eq!(source_db.bounds().await.end, Location::new(1));
+        assert_eq!(source_db.bounds().end, Location::new(1));
 
         let target_hash = source_db.root();
         let (mmr, journal) = source_db.into_log_components();
@@ -1766,14 +1762,14 @@ where
             journal,
             None,
             non_empty_range!(Location::new(0), Location::new(1)),
-            1024,
+            NZU64!(1024),
         )
         .await
         .unwrap();
 
         // Verify database state
-        assert_eq!(synced_db.bounds().await.end, Location::new(1));
-        assert_eq!(synced_db.inactivity_floor_loc().await, Location::new(0));
+        assert_eq!(synced_db.bounds().end, Location::new(1));
+        assert_eq!(synced_db.inactivity_floor_loc(), Location::new(0));
         assert_eq!(synced_db.root(), target_hash);
 
         // Test that we can perform operations on the synced database
@@ -1781,90 +1777,74 @@ where
         synced_db = H::apply_ops(synced_db, ops).await;
 
         // Verify the operations worked
-        assert!(synced_db.bounds().await.end > Location::new(1));
+        assert!(synced_db.bounds().end > Location::new(1));
 
         synced_db.destroy().await.unwrap();
         mmr.destroy().await.unwrap();
     });
 }
 
-/// A resolver wrapper that corrupts pinned nodes on the first request, then returns correct
+/// A source wrapper that corrupts pinned nodes on the first request, then returns correct
 /// data on subsequent requests.
 #[derive(Clone)]
-struct CorruptFirstPinnedNodesResolver<R> {
+struct CorruptFirstPinnedNodesSource<R> {
     inner: R,
     corrupted: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl<R> Resolver for CorruptFirstPinnedNodesResolver<R>
+impl<R, F> Source for CorruptFirstPinnedNodesSource<R>
 where
-    R: Resolver<Digest = Digest>,
+    F: merkle::Family,
+    R: Source<Family = F, Digest = Digest>,
 {
     type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn get_operations(
+    async fn serve(
         &self,
-        op_count: Location<Self::Family>,
-        start_loc: Location<Self::Family>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        let mut result = self
-            .inner
-            .get_operations(
-                op_count,
-                start_loc,
-                max_ops,
-                include_pinned_nodes,
-                cancel_rx,
-            )
-            .await?;
-        // Corrupt pinned nodes only on the first request that includes them.
-        if result.pinned_nodes.is_some()
+        request: Request<F>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
+        let (mut response, feedback_tx) = self.inner.serve(request).await?;
+        // Corrupt pinned nodes only on the first boundary response.
+        if let Response::Boundary { pinned_nodes, .. } = &mut response
             && !self
                 .corrupted
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
+            && !pinned_nodes.is_empty()
         {
-            if let Some(ref mut nodes) = result.pinned_nodes {
-                if !nodes.is_empty() {
-                    nodes[0] = Digest::from([0xFFu8; 32]);
-                }
-            }
+            pinned_nodes[0] = Digest::from([0xFFu8; 32]);
+            return Ok((response, dropped_feedback()));
         }
-        Ok(result)
+        Ok((response, feedback_tx))
     }
 }
 
 /// Test that corrupted pinned nodes on the first attempt are rejected and the sync
-/// succeeds on retry when the resolver returns correct data.
+/// succeeds on retry when the source returns correct data.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         // Build a target database with some operations and prune so that pinned nodes are needed.
-        let mut target_db = H::init_db(context.child("target")).await;
+        let target_db = H::init_db(context.child("target")).await;
         let ops = H::create_ops(20);
-        target_db = H::apply_ops(target_db, ops).await;
-        target_db
-            .prune(target_db.sync_boundary().await)
-            .await
-            .unwrap();
+        let target_db = H::apply_ops(target_db, ops).await;
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
 
         let sync_root = H::sync_target_root(&target_db);
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
 
-        let resolver = CorruptFirstPinnedNodesResolver {
+        let source = CorruptFirstPinnedNodesSource {
             inner: Arc::new(target_db),
             corrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -1877,8 +1857,8 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
-            resolver,
-            apply_batch_size: 1024,
+            source,
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
@@ -1894,45 +1874,38 @@ where
     });
 }
 
-/// A resolver wrapper that replays the first fresh boundary request against the retained
+/// A source wrapper that replays the first fresh boundary request against the retained
 /// historical root, then blocks the retry until the test releases it.
 #[derive(Clone)]
-struct ReplayFreshBoundaryResolver<R: Resolver<Digest = Digest>> {
+struct ReplayFreshBoundarySource<R, F: merkle::Family> {
     inner: R,
-    historical_target_size: Location<R::Family>,
-    boundary_start: Location<R::Family>,
+    historical_target_size: Location<F>,
+    boundary_start: Location<F>,
     release_historical_gap: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     release_boundary_retry: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     boundary_attempts: Arc<AtomicUsize>,
 }
 
-impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
+impl<R, F> Source for ReplayFreshBoundarySource<R, F>
+where
+    F: merkle::Family,
+    R: Source<Family = F, Digest = Digest>,
+{
     type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn get_operations(
+    async fn serve(
         &self,
-        op_count: Location<Self::Family>,
-        start_loc: Location<Self::Family>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        if op_count == self.historical_target_size {
-            if include_pinned_nodes {
-                let _ = cancel_rx.await;
-                return self
-                    .inner
-                    .get_operations(
-                        op_count,
-                        start_loc,
-                        max_ops,
-                        include_pinned_nodes,
-                        oneshot::channel().1,
-                    )
-                    .await;
+        request: Request<F>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
+        if request.size() == self.historical_target_size {
+            if matches!(request, Request::Boundary { .. }) {
+                // Simulate a source that has not answered the old target's pinned-nodes
+                // request when the target changes. The update cancels the request and drops
+                // this pending future.
+                return std::future::pending().await;
             }
 
             let release = self.release_historical_gap.lock().take();
@@ -1941,21 +1914,18 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
             }
         }
 
-        if include_pinned_nodes && start_loc == self.boundary_start {
+        if matches!(request, Request::Boundary { .. }) && request.start() == self.boundary_start {
             let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
-                let mut result = self
-                    .inner
-                    .get_operations(
-                        self.historical_target_size,
-                        start_loc,
-                        max_ops,
-                        false,
-                        oneshot::channel().1,
-                    )
-                    .await?;
-                result.pinned_nodes = None;
-                return Ok(result);
+                // Answer the boundary request with an operations response against the
+                // historical size, so the engine has to retry it.
+                let historical = Request::Operations {
+                    size: self.historical_target_size,
+                    start: request.start(),
+                    max_ops: request.max_ops(),
+                };
+                let (response, _) = self.inner.serve(historical).await?;
+                return Ok((response, dropped_feedback()));
             }
 
             let release = self.release_boundary_retry.lock().take();
@@ -1964,15 +1934,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
             }
         }
 
-        self.inner
-            .get_operations(
-                op_count,
-                start_loc,
-                max_ops,
-                include_pinned_nodes,
-                cancel_rx,
-            )
-            .await
+        self.inner.serve(request).await
     }
 }
 
@@ -1980,7 +1942,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
 /// boundary retry is still outstanding.
 pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1991,12 +1953,10 @@ where
         let mut seed = 0;
         loop {
             target_db = H::apply_ops(target_db, H::create_ops_seeded(32, seed)).await;
-            target_db
-                .prune(target_db.sync_boundary().await)
-                .await
-                .unwrap();
+            let boundary = target_db.sync_boundary();
+            target_db = target_db.prune(boundary).await.unwrap();
 
-            if target_db.inactivity_floor_loc().await > Location::new(0) {
+            if target_db.inactivity_floor_loc() > Location::new(0) {
                 break;
             }
 
@@ -2007,8 +1967,8 @@ where
         let old_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.inactivity_floor_loc().await,
-                target_db.bounds().await.end
+                target_db.inactivity_floor_loc(),
+                target_db.bounds().end
             ),
         };
 
@@ -2016,8 +1976,8 @@ where
         let new_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.inactivity_floor_loc().await,
-                target_db.bounds().await.end
+                target_db.inactivity_floor_loc(),
+                target_db.bounds().end
             ),
         };
         let verification_root = target_db.root();
@@ -2028,7 +1988,7 @@ where
         let (release_historical_gap_tx, release_historical_gap_rx) = oneshot::channel();
         let (release_boundary_retry_tx, release_boundary_retry_rx) = oneshot::channel();
         let target_db = Arc::new(target_db);
-        let resolver = ReplayFreshBoundaryResolver {
+        let source = ReplayFreshBoundarySource {
             inner: target_db.clone(),
             historical_target_size: old_target.range.end(),
             boundary_start: new_target.range.start(),
@@ -2046,8 +2006,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(1),
             target: old_target.clone(),
-            resolver,
-            apply_batch_size: 1024,
+            source,
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 2,
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
@@ -2067,7 +2027,7 @@ where
 
         let _ = release_historical_gap_tx.send(());
 
-        let journal_start = engine.journal().size().await;
+        let journal_start = engine.journal().bounds().end;
         for step_idx in 0..4 {
             let next_step = engine.step();
             pin_mut!(next_step);
@@ -2079,7 +2039,7 @@ where
                         NextStep::Complete(_) => panic!("boundary retry should still be required"),
                     };
                     assert_eq!(
-                        engine.journal().size().await,
+                        engine.journal().bounds().end,
                         journal_start,
                         "replayed fresh boundary responses must not advance the journal"
                     );
@@ -2122,9 +2082,9 @@ mod harnesses {
     };
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic::Context, BufferPooler};
-    use commonware_utils::test_rng_seeded;
-    use rand::RngCore;
+    use commonware_runtime::{BufferPooler, deterministic::Context};
+    use commonware_utils::TestRng;
+    use rand::Rng;
 
     // ===== Family-generic op creation helpers =====
     //
@@ -2135,8 +2095,8 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-        let mut rng = test_rng_seeded(seed);
+        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -2161,8 +2121,8 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-        let mut rng = test_rng_seeded(seed);
+        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -2182,8 +2142,8 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Vec<u8>>> {
-        use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-        let mut rng = test_rng_seeded(seed);
+        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -2209,8 +2169,8 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Vec<u8>>> {
-        use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-        let mut rng = test_rng_seeded(seed);
+        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -2245,7 +2205,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
         }
 
         fn create_ops(
@@ -2275,16 +2235,15 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::ordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
             >,
         ) -> Self::Db {
-            crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
+            let db = crate::qmdb::any::ordered::fixed::test::apply_ops(db, ops).await;
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2307,6 +2266,7 @@ mod harnesses {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
                 pooler,
+                (),
             )
         }
 
@@ -2337,20 +2297,19 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::ordered::variable::Operation<crate::mmr::Family, Digest, Vec<u8>>,
             >,
         ) -> Self::Db {
-            crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
+            let db = crate::qmdb::any::ordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2370,7 +2329,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
         }
 
         fn create_ops_seeded(
@@ -2400,16 +2359,15 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::unordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
             >,
         ) -> Self::Db {
-            crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
+            let db = crate::qmdb::any::unordered::fixed::test::apply_ops(db, ops).await;
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2463,7 +2421,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::unordered::Operation<
                     crate::mmr::Family,
@@ -2472,15 +2430,14 @@ mod harnesses {
                 >,
             >,
         ) -> Self::Db {
-            crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
+            let db = crate::qmdb::any::unordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2510,7 +2467,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
         }
 
         fn create_ops(
@@ -2540,7 +2497,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::Operation;
@@ -2557,11 +2514,10 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2592,6 +2548,7 @@ mod harnesses {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
                 pooler,
+                (),
             )
         }
 
@@ -2612,7 +2569,8 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx);
+            let config =
+                crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx, ());
             Self::Db::init(ctx, config).await.unwrap()
         }
 
@@ -2624,7 +2582,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Vec<u8>>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::Operation;
@@ -2641,15 +2599,14 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2677,7 +2634,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
         }
 
         fn create_ops(
@@ -2709,7 +2666,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>,
         ) -> Self::Db {
             use crate::qmdb::any::operation::Operation;
@@ -2726,11 +2683,10 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 
@@ -2794,7 +2750,7 @@ mod harnesses {
         }
 
         async fn apply_ops(
-            mut db: Self::Db,
+            db: Self::Db,
             ops: Vec<
                 crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Vec<u8>>,
             >,
@@ -2813,15 +2769,14 @@ mod harnesses {
                 }
             }
             let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-            db
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
     }
 }
@@ -2889,8 +2844,8 @@ macro_rules! sync_tests_for_harness {
             }
 
             #[test]
-            fn test_target_update_prune_only_rejected() {
-                super::test_target_update_prune_only_rejected::<$harness>();
+            fn test_target_update_prune_only_ignored() {
+                super::test_target_update_prune_only_ignored::<$harness>();
             }
 
             #[test_traced("WARN")]
@@ -2956,8 +2911,8 @@ macro_rules! sync_tests_for_harness {
             }
 
             #[test_traced]
-            fn test_sync_resolver_fails() {
-                super::test_sync_resolver_fails::<$harness>();
+            fn test_sync_source_fails() {
+                super::test_sync_source_fails::<$harness>();
             }
 
             #[test_traced]

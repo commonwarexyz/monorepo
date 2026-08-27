@@ -60,7 +60,7 @@
 //!   [Encode], [Codec], [EncodeFixed], and [CodecFixed] when `T: FixedSize`.
 //! - Collections: [`Vec`], [`Option`], `BTreeMap`, `BTreeSet`
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
-//! - Common External Types: [::bytes::Bytes]
+//! - Common External Types: [::bytes::Bytes], `Arc` (encoding only)
 //!
 //! With the `std` feature (enabled by default):
 //! - Networking:
@@ -222,6 +222,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod config;
     pub mod error;
     pub mod extensions;
+    pub mod mode;
     pub mod types;
     pub mod util;
     pub mod varint;
@@ -232,6 +233,7 @@ commonware_macros::stability_scope!(BETA {
     pub use config::RangeCfg;
     pub use error::Error;
     pub use extensions::*;
+    pub use mode::{InvalidMode, Mode, Modes};
 });
 
 commonware_macros::stability_scope!(ALPHA {

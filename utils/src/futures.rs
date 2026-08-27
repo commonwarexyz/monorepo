@@ -2,15 +2,15 @@
 
 use core::ops::{Deref, DerefMut};
 use futures::{
+    StreamExt,
     future::{self, AbortHandle, Abortable, Aborted},
     stream::{FuturesUnordered, SelectNextSome},
-    StreamExt,
 };
 use pin_project::pin_project;
-use std::{future::Future, pin::Pin, task::Poll};
+use std::{collections::BTreeMap, future::Future, pin::Pin, task::Poll};
 
-/// A future type that can be used in `Pool`.
-type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+/// A future type that can be used in [Pool].
+type PooledFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// An unordered pool of futures.
 ///
@@ -18,11 +18,11 @@ type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 ///
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
 /// synchronization.
-pub struct Pool<T> {
-    pool: FuturesUnordered<PooledFuture<T>>,
+pub struct Pool<'a, T> {
+    pool: FuturesUnordered<PooledFuture<'a, T>>,
 }
 
-impl<T: Send> Default for Pool<T> {
+impl<'a, T: Send> Default for Pool<'a, T> {
     fn default() -> Self {
         // Insert a dummy future (that never resolves) to prevent the stream from being empty.
         // Else, the `select_next_some()` function returns `None` instantly.
@@ -32,7 +32,7 @@ impl<T: Send> Default for Pool<T> {
     }
 }
 
-impl<T: Send> Pool<T> {
+impl<'a, T: Send> Pool<'a, T> {
     /// Returns the number of futures in the pool.
     pub fn len(&self) -> usize {
         // Subtract the dummy future.
@@ -46,15 +46,15 @@ impl<T: Send> Pool<T> {
 
     /// Adds a future to the pool.
     ///
-    /// The future must be `'static` and `Send` to ensure it can be safely stored and executed.
-    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) {
+    /// The future must be `Send` and outlive `'a` to ensure it can be safely stored and executed.
+    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'a) {
         self.pool.push(Box::pin(future));
     }
 
     /// Returns a futures that resolves to the next future in the pool that resolves.
     ///
     /// If the pool is empty, the future will never resolve.
-    pub fn next_completed(&mut self) -> SelectNextSome<'_, FuturesUnordered<PooledFuture<T>>> {
+    pub fn next_completed(&mut self) -> SelectNextSome<'_, FuturesUnordered<PooledFuture<'a, T>>> {
         self.pool.select_next_some()
     }
 
@@ -67,7 +67,7 @@ impl<T: Send> Pool<T> {
     }
 
     /// Creates a dummy future that never resolves.
-    fn create_dummy_future() -> PooledFuture<T> {
+    fn create_dummy_future() -> PooledFuture<'a, T> {
         Box::pin(async { future::pending::<T>().await })
     }
 }
@@ -86,7 +86,7 @@ impl Drop for Aborter {
 }
 
 /// A future type that can be used in [AbortablePool].
-type AbortablePooledFuture<T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> + Send>>;
+type AbortablePooledFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> + Send + 'a>>;
 
 /// An unordered pool of futures that can be individually aborted.
 ///
@@ -95,11 +95,11 @@ type AbortablePooledFuture<T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> 
 ///
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
 /// synchronization.
-pub struct AbortablePool<T> {
-    pool: FuturesUnordered<AbortablePooledFuture<T>>,
+pub struct AbortablePool<'a, T> {
+    pool: FuturesUnordered<AbortablePooledFuture<'a, T>>,
 }
 
-impl<T: Send> Default for AbortablePool<T> {
+impl<'a, T: Send> Default for AbortablePool<'a, T> {
     fn default() -> Self {
         // Insert a dummy future (that never resolves) to prevent the stream from being empty.
         // Else, the `select_next_some()` function returns `None` instantly.
@@ -109,7 +109,7 @@ impl<T: Send> Default for AbortablePool<T> {
     }
 }
 
-impl<T: Send> AbortablePool<T> {
+impl<'a, T: Send> AbortablePool<'a, T> {
     /// Returns the number of futures in the pool.
     pub fn len(&self) -> usize {
         // Subtract the dummy future.
@@ -123,9 +123,9 @@ impl<T: Send> AbortablePool<T> {
 
     /// Adds a future to the pool and returns an [Aborter] that can be used to abort it.
     ///
-    /// The future must be `'static` and `Send` to ensure it can be safely stored and executed.
+    /// The future must be `Send` and outlive `'a` to ensure it can be safely stored and executed.
     /// When the returned [Aborter] is dropped, the future will be aborted.
-    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) -> Aborter {
+    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'a) -> Aborter {
         let (handle, registration) = AbortHandle::new_pair();
         let abortable_future = Abortable::new(future, registration);
         self.pool.push(Box::pin(abortable_future));
@@ -138,12 +138,12 @@ impl<T: Send> AbortablePool<T> {
     /// Returns `Ok(T)` for successful completion or `Err(Aborted)` for aborted futures.
     pub fn next_completed(
         &mut self,
-    ) -> SelectNextSome<'_, FuturesUnordered<AbortablePooledFuture<T>>> {
+    ) -> SelectNextSome<'_, FuturesUnordered<AbortablePooledFuture<'a, T>>> {
         self.pool.select_next_some()
     }
 
     /// Creates a dummy future that never resolves.
-    fn create_dummy_future() -> AbortablePooledFuture<T> {
+    fn create_dummy_future() -> AbortablePooledFuture<'a, T> {
         Box::pin(async { Ok(future::pending::<T>().await) })
     }
 }
@@ -193,19 +193,103 @@ impl<F: Future> Future for OptionFuture<F> {
     }
 }
 
+/// A consuming mutation's return value: the threaded value first, then any extra outputs.
+pub trait Threaded<T> {
+    /// The outputs beyond the threaded value.
+    type Rest;
+
+    /// Splits into the threaded value and the extra outputs.
+    fn split(self) -> (T, Self::Rest);
+}
+
+impl<T> Threaded<T> for T {
+    type Rest = ();
+
+    fn split(self) -> (T, ()) {
+        (self, ())
+    }
+}
+
+impl<T, A> Threaded<T> for (T, A) {
+    type Rest = A;
+
+    fn split(self) -> (T, A) {
+        self
+    }
+}
+
+impl<T, A, B> Threaded<T> for (T, A, B) {
+    type Rest = (A, B);
+
+    fn split(self) -> (T, (A, B)) {
+        let (value, a, b) = self;
+        (value, (a, b))
+    }
+}
+
+/// Threads the value in `slot` through a consuming mutation, restoring the returned
+/// value and yielding the mutation's extra outputs.
+///
+/// On error the value stays absent, matching the contract of consuming mutators: the
+/// handle is destroyed.
+///
+/// # Panics
+///
+/// Panics when `slot` is empty.
+pub async fn rebind<T, Out, Fut, E>(
+    slot: &mut Option<T>,
+    op: impl FnOnce(T) -> Fut,
+) -> Result<Out::Rest, E>
+where
+    Out: Threaded<T>,
+    Fut: Future<Output = Result<Out, E>>,
+{
+    let value = slot.take().expect("cannot rebind an empty slot");
+    let (value, rest) = op(value).await?.split();
+    *slot = Some(value);
+    Ok(rest)
+}
+
+/// Threads the value at `key` in `map` through a consuming mutation, restoring the
+/// returned value and yielding the mutation's extra outputs.
+///
+/// On error the entry stays absent, matching the contract of consuming mutators: the
+/// handle is destroyed.
+///
+/// # Panics
+///
+/// Panics when `key` is absent from `map`.
+pub async fn rebind_entry<K, V, Out, Fut, E>(
+    map: &mut BTreeMap<K, V>,
+    key: &K,
+    op: impl FnOnce(V) -> Fut,
+) -> Result<Out::Rest, E>
+where
+    K: Ord,
+    Out: Threaded<V>,
+    Fut: Future<Output = Result<Out, E>>,
+{
+    let (key, value) = map
+        .remove_entry(key)
+        .expect("cannot rebind a missing entry");
+    let (value, rest) = op(value).await?.split();
+    map.insert(key, value);
+    Ok(rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::channel::oneshot;
     use futures::{
         executor::block_on,
-        future::{self, select, Either},
+        future::{self, Either, select},
         pin_mut,
     };
     use std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         },
         thread,
         time::Duration,
@@ -384,6 +468,27 @@ mod tests {
     }
 
     #[test]
+    fn test_borrowing_futures() {
+        block_on(async {
+            let values = vec![1, 2, 3];
+
+            // The pool borrows `values`, so it cannot outlive it.
+            let mut pool = Pool::<&i32>::default();
+            for value in &values {
+                pool.push(async move { value });
+            }
+            assert_eq!(pool.len(), values.len());
+
+            let mut sum = 0;
+            for _ in 0..values.len() {
+                sum += *pool.next_completed().await;
+            }
+            assert_eq!(sum, 6);
+            assert!(pool.is_empty());
+        });
+    }
+
+    #[test]
     fn test_abortable_pool_initialization() {
         let pool = AbortablePool::<i32>::default();
         assert_eq!(pool.len(), 0);
@@ -480,6 +585,98 @@ mod tests {
             assert!(pool.is_empty());
 
             let _ = sender.send(());
+        });
+    }
+
+    #[test]
+    fn test_abortable_pool_borrowing_futures() {
+        block_on(async {
+            let value = 42;
+            let mut pool = AbortablePool::<&i32>::default();
+
+            // A borrowing future is aborted by its aborter, which holds no borrow itself.
+            let (sender, receiver) = oneshot::channel::<()>();
+            let hook = pool.push(async {
+                receiver.await.unwrap();
+                &value
+            });
+            drop(hook);
+            assert!(pool.next_completed().await.is_err());
+
+            let _hook = pool.push(async { &value });
+            assert_eq!(pool.next_completed().await, Ok(&42));
+            assert!(pool.is_empty());
+
+            let _ = sender.send(());
+        });
+    }
+
+    #[test]
+    fn test_rebind_restores_value_and_yields_rest() {
+        block_on(async {
+            let mut slot = Some(1u32);
+            let rest: Result<(&str, bool), &str> = rebind(&mut slot, |value| {
+                future::ready(Ok((value + 1, "rest", true)))
+            })
+            .await;
+            assert_eq!(rest, Ok(("rest", true)));
+            assert_eq!(slot, Some(2));
+
+            let rest: Result<(), &str> =
+                rebind(&mut slot, |value| future::ready(Ok(value + 1))).await;
+            assert_eq!(rest, Ok(()));
+            assert_eq!(slot, Some(3));
+        });
+    }
+
+    #[test]
+    fn test_rebind_error_destroys_value() {
+        block_on(async {
+            let mut slot = Some(1u32);
+            let rest: Result<(), &str> =
+                rebind(&mut slot, |_| future::ready(Err::<u32, _>("failed"))).await;
+            assert_eq!(rest, Err("failed"));
+            assert_eq!(slot, None);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot rebind an empty slot")]
+    fn test_rebind_empty_slot_panics() {
+        block_on(async {
+            let mut slot: Option<u32> = None;
+            let _: Result<(), &str> = rebind(&mut slot, |v| future::ready(Ok(v))).await;
+        });
+    }
+
+    #[test]
+    fn test_rebind_entry_restores_value_and_yields_rest() {
+        block_on(async {
+            let mut map = BTreeMap::from([("a", 1u32), ("b", 10)]);
+            let rest: Result<bool, &str> =
+                rebind_entry(&mut map, &"a", |value| future::ready(Ok((value + 1, true)))).await;
+            assert_eq!(rest, Ok(true));
+            assert_eq!(map, BTreeMap::from([("a", 2), ("b", 10)]));
+        });
+    }
+
+    #[test]
+    fn test_rebind_entry_error_destroys_value() {
+        block_on(async {
+            let mut map = BTreeMap::from([("a", 1u32)]);
+            let rest: Result<(), &str> =
+                rebind_entry(&mut map, &"a", |_| future::ready(Err::<u32, _>("failed"))).await;
+            assert_eq!(rest, Err("failed"));
+            assert!(map.is_empty());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot rebind a missing entry")]
+    fn test_rebind_entry_missing_entry_panics() {
+        block_on(async {
+            let mut map: BTreeMap<&str, u32> = BTreeMap::new();
+            let _: Result<(), &str> = rebind_entry(&mut map, &"a", |v| future::ready(Ok(v))).await;
         });
     }
 

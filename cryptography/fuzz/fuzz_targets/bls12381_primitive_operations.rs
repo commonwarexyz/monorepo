@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{ReadExt, Write};
+use commonware_codec::{Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
-    group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
+    group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Private, Scalar, ScalarReadCfg, Share},
     ops,
     variant::{MinPk, MinSig, Variant},
 };
@@ -14,7 +14,7 @@ use commonware_math::{
 use commonware_parallel::Sequential;
 use commonware_utils::Participant;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -604,7 +604,9 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::SerializeScalar { scalar } => {
             let mut encoded = Vec::new();
             scalar.write(&mut encoded);
-            if let Ok(decoded) = Scalar::read(&mut encoded.as_slice()) {
+            if let Ok(decoded) =
+                Scalar::read_cfg(&mut encoded.as_slice(), &ScalarReadCfg::RejectZero)
+            {
                 assert_eq!(scalar, decoded);
             }
         }

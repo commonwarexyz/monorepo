@@ -18,6 +18,8 @@
 //!   type safety to prevent mixing epoch, height, and view deltas. Type aliases [`EpochDelta`],
 //!   [`HeightDelta`], and [`ViewDelta`] are provided for convenience.
 //!
+//! - [`TermLength`]: The number of consecutive views in which a leader remains stable (a "term").
+//!
 //! - [`Epocher`]: Mechanism for determining epoch boundaries.
 //!
 //! - [`coding::Commitment`]: A unique identifier combining a block digest, coding digest, context
@@ -25,8 +27,9 @@
 //!
 //! # Arithmetic Safety
 //!
-//! Arithmetic operations avoid silent errors. Only `next()` panics on overflow. All other
-//! operations either saturate or return `Option`.
+//! Arithmetic operations avoid silent errors. Only `next()`, `View::term_end()`, and
+//! `View::next_term_start()` panic on overflow. All other operations either saturate or
+//! return `Option`.
 //!
 //! # Type Conversions
 //!
@@ -36,14 +39,15 @@
 
 use crate::{Epochable, Viewable};
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
 use core::{
     fmt::{self, Display, Formatter},
     marker::PhantomData,
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
+    ops::RangeInclusive,
 };
 
 /// Represents a distinct segment of a contiguous sequence of views.
@@ -314,6 +318,112 @@ impl View {
             inner: start.get()..end.get(),
         }
     }
+
+    /// Returns the first view of the term containing this view.
+    ///
+    /// Terms group consecutive views so that the same leader serves for
+    /// `term_length` views. View 0 (genesis) is its own term. For views >= 1,
+    /// term boundaries are: [1, term_length], [term_length+1, 2*term_length], ...
+    ///
+    /// When `term_length` is 1, every view is its own term (no grouping).
+    pub const fn term_start(self, term_length: TermLength) -> Self {
+        let term_length = term_length.get();
+        let Self(view) = self;
+        if view == 0 {
+            return self;
+        }
+        // Cannot overflow: base is at most view - 1.
+        let base = (view - 1) / term_length * term_length;
+        Self(base).next()
+    }
+
+    /// Returns whether this view is the first view of its term.
+    pub const fn is_term_start(self, term_length: TermLength) -> bool {
+        let start = self.term_start(term_length);
+        self.get() == start.get()
+    }
+
+    /// Returns whether this view shares a term with `other`.
+    pub const fn same_term(self, other: Self, term_length: TermLength) -> bool {
+        let start = self.term_start(term_length);
+        let other_start = other.term_start(term_length);
+        start.get() == other_start.get()
+    }
+
+    /// Returns the last view of the term containing this view.
+    ///
+    /// See [`term_start`](View::term_start) for term boundary semantics.
+    ///
+    /// When `term_length` is 1, returns `self`.
+    pub const fn term_end(self, term_length: TermLength) -> Self {
+        if self.0 == 0 {
+            return self;
+        }
+        let end = self
+            .term_start(term_length)
+            .get()
+            .checked_add(term_length.get() - 1)
+            .expect("view term_end overflow");
+        Self(end)
+    }
+
+    /// Returns the first view of the term that follows this view's term.
+    ///
+    /// When `term_length` is 1, returns `self.next()`.
+    pub const fn next_term_start(self, term_length: TermLength) -> Self {
+        self.term_end(term_length).next()
+    }
+
+    /// Returns the index of the term containing this view.
+    ///
+    /// View 0 (genesis) is its own term with index 0; terms of later views
+    /// are numbered from 1. When `term_length` is 1, the index equals the
+    /// view.
+    pub const fn term_index(self, term_length: TermLength) -> u64 {
+        self.get().div_ceil(term_length.get())
+    }
+
+    /// Returns whether a nullification at this view covers `view`.
+    ///
+    /// A nullification covers the view it was created for and the rest of that
+    /// view's term.
+    pub const fn covers(self, view: Self, term_length: TermLength) -> bool {
+        self.get() <= view.get() && self.same_term(view, term_length)
+    }
+
+    /// Returns the range of views whose nullifications cover this view.
+    ///
+    /// The inverse of [`covers`](Self::covers): a nullification covers the
+    /// rest of its term, so this view is covered by a nullification at any
+    /// view in `[term_start, self]`.
+    pub const fn covering_range(self, term_length: TermLength) -> RangeInclusive<Self> {
+        self.term_start(term_length)..=self
+    }
+
+    /// Returns whether `pending` is an acceptable view relative to this view
+    /// when future views are bounded.
+    ///
+    /// Views at or below this view are always acceptable (callers enforce any
+    /// lower bound separately). Beyond that, only the next view and the first
+    /// view of the next term are acceptable: the only views this view can
+    /// directly advance into (a nullification of the current view skips to
+    /// the latter). When `term_length` is 1 the two views are the same.
+    ///
+    /// This bound exists to limit memory committed to unverified messages
+    /// (like votes) from future views. It should not be applied to
+    /// self-certifying artifacts (like certificates), which may arrive from
+    /// arbitrarily far ahead and let a lagging participant fast-forward.
+    pub const fn admits(self, pending: Self, term_length: TermLength) -> bool {
+        if pending.get() <= self.get() || pending.get() == self.next().get() {
+            return true;
+        }
+        // Equivalent to `pending == self.next_term_start(term_length)`, but
+        // stated as a property of `pending` so it stays total: computing the
+        // next term start can overflow near `u64::MAX`, where the correct
+        // answer is simply that no representable view starts the next term.
+        // Cannot underflow: pending is above self, so it is at least 1.
+        pending.is_term_start(term_length) && self.same_term(Self(pending.get() - 1), term_length)
+    }
 }
 
 impl Display for View {
@@ -425,6 +535,74 @@ pub type HeightDelta = Delta<Height>;
 /// [`ViewDelta`] represents a distance between views or a duration measured in views.
 /// It is commonly used for timeouts, activity tracking windows, and view arithmetic.
 pub type ViewDelta = Delta<View>;
+
+/// Number of consecutive views in which a leader remains stable (a "term").
+///
+/// When the term length is 1, every view is its own term and each view has an
+/// independently elected leader. When greater than 1, views are grouped into
+/// terms and the same leader serves for every view in the term.
+///
+/// Unlike [`ViewDelta`], which represents an offset added to or subtracted from
+/// a view, a term length is a period that partitions the view space. It is
+/// always non-zero.
+///
+/// # Consensus-Critical
+///
+/// The term length is consensus-critical configuration (like the namespace or
+/// participant set): it is local, is not carried by any vote or certificate,
+/// and nothing in the protocol detects a mismatch. All participants must
+/// configure the same value. Term boundaries determine which views a
+/// nullification covers, leader election, and when finalize votes are
+/// withheld, so mismatched participants silently disagree on view transitions
+/// and vote safety without producing any fault evidence. Only change the term
+/// length when all participants change it together (e.g., at an epoch
+/// boundary).
+///
+/// Longer terms also widen the window of unverified votes a participant may
+/// buffer while finalization stalls: votes are accepted for any view between
+/// the highest finalized view and the current view, and the current view
+/// advances by up to a full term per nullification.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TermLength(u32);
+
+impl TermLength {
+    /// The maximum term length. Lengths are stored as a `u32`, bounding term
+    /// arithmetic (like [`View::next_term_start`]) away from `u64` overflow
+    /// for any realistic view.
+    pub const MAX: Self = Self(u32::MAX);
+
+    /// A term length of one view (every view has an independently elected leader).
+    pub const ONE: Self = Self(1);
+
+    /// Creates a new term length.
+    pub const fn new(length: NonZeroU32) -> Self {
+        Self(length.get())
+    }
+
+    /// Returns the number of views per term.
+    pub const fn get(self) -> u64 {
+        self.0 as u64
+    }
+}
+
+impl Default for TermLength {
+    fn default() -> Self {
+        Self::ONE
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for TermLength {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(u.int_in_range(1..=u32::MAX)?))
+    }
+}
+
+impl Display for TermLength {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// A unique identifier combining epoch and view for a consensus round.
 ///
@@ -603,6 +781,14 @@ impl FixedEpocher {
         let last = first.checked_add(self.0 - 1)?;
         Some((Height::new(first), Height::new(last)))
     }
+
+    /// Returns the midpoint block height in the given epoch.
+    ///
+    /// Returns `None` if the epoch is not supported.
+    pub fn midpoint(&self, epoch: Epoch) -> Option<Height> {
+        let (first, _) = self.bounds(epoch)?;
+        first.get().checked_add(self.0 / 2).map(Height::new)
+    }
 }
 
 impl Epocher for FixedEpocher {
@@ -732,7 +918,7 @@ commonware_macros::stability_scope!(ALPHA {
             num::NonZeroU16,
             ops::Deref,
         };
-        use rand_core::CryptoRngCore;
+        use rand_core::CryptoRng;
 
         /// The maximum encoded size of any digest field in a [`Commitment`].
         pub const COMMITMENT_DIGEST_SIZE: usize = 32;
@@ -814,7 +1000,6 @@ commonware_macros::stability_scope!(ALPHA {
                 self.field(Self::CONFIG_OFFSET)
             }
 
-            /// Reads the fixed-size field of type `T` beginning at `offset`.
             fn field<T: ReadExt + FixedSize>(&self, offset: usize) -> T {
                 T::read(&mut &self.0[offset..offset + T::SIZE])
                     .expect("Commitment fields are validated on construction")
@@ -855,7 +1040,7 @@ commonware_macros::stability_scope!(ALPHA {
         }
 
         impl<B: Digestible, C: Scheme, H: Hasher> Random for Commitment<B, C, H> {
-            fn random(mut rng: impl CryptoRngCore) -> Self {
+            fn random(mut rng: impl CryptoRng) -> Self {
                 let one = NZU16!(1);
                 let shards = rng.next_u32();
                 let config = CodingConfig {
@@ -1003,12 +1188,12 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::coding::{Commitment, COMMITMENT_SIZE};
+    use crate::types::coding::{COMMITMENT_SIZE, Commitment};
     use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{Digest as DigestTrait, Digestible, Hasher};
     use commonware_math::algebra::Random;
-    use commonware_utils::{test_rng, Array, Span, NZU16, NZU64};
+    use commonware_utils::{Array, NZU16, NZU64, Span, test_rng};
     use std::{marker::PhantomData, ops::Deref};
 
     #[derive(Clone)]
@@ -1034,16 +1219,20 @@ mod tests {
     impl<D: DigestTrait> Hasher for TestHasher<D> {
         type Digest = D;
 
+        fn hash(_parts: &[&[u8]]) -> Self::Digest {
+            D::EMPTY
+        }
+
+        fn hash_pair(_left: &[&[u8]], _right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+            (D::EMPTY, D::EMPTY)
+        }
+
         fn update(&mut self, _message: &[u8]) -> &mut Self {
             self
         }
 
-        fn finalize(&mut self) -> Self::Digest {
-            D::EMPTY
-        }
-
-        fn reset(&mut self) -> &mut Self {
-            self
+        fn finalize(self) -> (Self, Self::Digest) {
+            (self, D::EMPTY)
         }
     }
 
@@ -1394,6 +1583,226 @@ mod tests {
             let decoded = View::decode(encoded).unwrap();
             assert_eq!(view, decoded);
         }
+    }
+
+    #[test]
+    fn test_view_term_start() {
+        let cases = [
+            (0, 5, 0),
+            (1, 1, 1),
+            (5, 1, 5),
+            (6, 1, 6),
+            (7, 1, 7),
+            (1, 5, 1),
+            (5, 5, 1),
+            (6, 5, 6),
+            (10, 5, 6),
+            (11, 5, 11),
+            (12, 3, 10),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view).term_start(TermLength::new(commonware_utils::NZU32!(term_length))),
+                View::new(expected),
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_term_end() {
+        let cases = [
+            (0, 5, 0),
+            (1, 1, 1),
+            (5, 1, 5),
+            (1, 5, 5),
+            (5, 5, 5),
+            (6, 5, 10),
+            (10, 5, 10),
+            (11, 5, 15),
+            (12, 3, 12),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view).term_end(TermLength::new(commonware_utils::NZU32!(term_length))),
+                View::new(expected),
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_is_term_start() {
+        let cases = [
+            (0, 1, true),
+            (1, 1, true),
+            (5, 1, true),
+            (1, 5, true),
+            (5, 5, false),
+            (6, 5, true),
+            (10, 5, false),
+            (11, 5, true),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view)
+                    .is_term_start(TermLength::new(commonware_utils::NZU32!(term_length))),
+                expected,
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_same_term() {
+        let cases = [
+            (0, 0, 1, true),
+            (0, 0, 5, true),
+            (0, 1, 5, false),
+            (0, 5, 5, false),
+            (1, 1, 1, true),
+            (1, 2, 5, true),
+            (1, 5, 5, true),
+            (5, 6, 5, false),
+            (6, 10, 5, true),
+            (10, 11, 5, false),
+            (11, 15, 5, true),
+        ];
+        for (a, b, term_length, expected) in cases {
+            assert_eq!(
+                View::new(a).same_term(
+                    View::new(b),
+                    TermLength::new(commonware_utils::NZU32!(term_length))
+                ),
+                expected,
+                "a={a}, b={b}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_next_term_start() {
+        let cases = [
+            (0, 1, 1),
+            (5, 1, 6),
+            (1, 5, 6),
+            (5, 5, 6),
+            (6, 5, 11),
+            (10, 5, 11),
+            (11, 5, 16),
+            (12, 3, 13),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view)
+                    .next_term_start(TermLength::new(commonware_utils::NZU32!(term_length))),
+                View::new(expected),
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_term_index() {
+        let cases = [
+            (0, 1, 0),
+            (1, 1, 1),
+            (5, 1, 5),
+            (0, 5, 0),
+            (1, 5, 1),
+            (5, 5, 1),
+            (6, 5, 2),
+            (10, 5, 2),
+            (11, 5, 3),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view).term_index(TermLength::new(commonware_utils::NZU32!(term_length))),
+                expected,
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_covers() {
+        let cases = [
+            (0, 0, 5, true),
+            (0, 3, 5, false),
+            (1, 0, 5, false),
+            (1, 1, 1, true),
+            (1, 2, 1, false),
+            (2, 1, 1, false),
+            (6, 6, 5, true),
+            (6, 8, 5, true),
+            (6, 10, 5, true),
+            (6, 11, 5, false),
+            (8, 6, 5, false),
+            (6, 5, 5, false),
+        ];
+        for (nullified, view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(nullified).covers(
+                    View::new(view),
+                    TermLength::new(commonware_utils::NZU32!(term_length))
+                ),
+                expected,
+                "nullified={nullified}, view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_admits() {
+        let cases = [
+            (0, 0, 5, true),
+            (0, 1, 5, true),
+            (0, 2, 5, false),
+            (0, 5, 5, false),
+            (5, 4, 1, true),
+            (5, 5, 1, true),
+            (5, 6, 1, true),
+            (5, 7, 1, false),
+            (6, 7, 5, true),
+            (6, 11, 5, true),
+            (6, 8, 5, false),
+            (6, 12, 5, false),
+            (10, 11, 5, true),
+            (10, 12, 5, false),
+        ];
+        for (current, pending, term_length, expected) in cases {
+            assert_eq!(
+                View::new(current).admits(
+                    View::new(pending),
+                    TermLength::new(commonware_utils::NZU32!(term_length))
+                ),
+                expected,
+                "current={current}, pending={pending}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "view term_end overflow")]
+    fn test_view_term_end_overflow_panics() {
+        let _ = View::new(u64::MAX).term_end(TermLength::new(commonware_utils::NZU32!(2)));
+    }
+
+    #[test]
+    #[should_panic(expected = "view overflow")]
+    fn test_view_next_term_start_overflow_panics() {
+        let _ = View::new(u64::MAX).next_term_start(TermLength::ONE);
+    }
+
+    #[test]
+    fn test_view_admits_near_max_does_not_panic() {
+        let term_length = TermLength::new(commonware_utils::NZU32!(5));
+        // The next term start overflows, so only lower views and the
+        // successor are admitted.
+        let current = View::new(u64::MAX - 2);
+        assert!(current.admits(View::new(0), term_length));
+        assert!(current.admits(View::new(u64::MAX - 1), term_length));
+        assert!(!current.admits(View::new(u64::MAX), term_length));
     }
 
     #[test]
@@ -1813,7 +2222,7 @@ mod tests {
         struct Digest([u8; Self::SIZE]);
 
         impl Random for Digest {
-            fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
+            fn random(mut rng: impl rand_core::CryptoRng) -> Self {
                 let mut buf = [0u8; Self::SIZE];
                 rng.fill_bytes(&mut buf);
                 Self(buf)
@@ -1878,21 +2287,37 @@ mod tests {
         impl Array for Digest {}
 
         let digest = Digest::random(test_rng());
-        type InvalidCommitment =
+        let config = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        type Sha256Digest = commonware_cryptography::sha256::Digest;
+        type InvalidBlockCommitment =
             Commitment<TestBlock<Digest>, ReedSolomon<TestHasher<Digest>>, TestHasher<Digest>>;
+        let commitment = InvalidBlockCommitment::from((digest, digest, digest, config));
+        assert!(InvalidBlockCommitment::decode(commitment.encode()).is_err());
 
-        let commitment: InvalidCommitment = Commitment::from((
+        type InvalidRootCommitment = Commitment<
+            TestBlock<Sha256Digest>,
+            ReedSolomon<TestHasher<Digest>>,
+            TestHasher<Sha256Digest>,
+        >;
+        let commitment =
+            InvalidRootCommitment::from((Sha256Digest::EMPTY, digest, Sha256Digest::EMPTY, config));
+        assert!(InvalidRootCommitment::decode(commitment.encode()).is_err());
+
+        type InvalidContextCommitment = Commitment<
+            TestBlock<Sha256Digest>,
+            ReedSolomon<TestHasher<Sha256Digest>>,
+            TestHasher<Digest>,
+        >;
+        let commitment = InvalidContextCommitment::from((
+            Sha256Digest::EMPTY,
+            Sha256Digest::EMPTY,
             digest,
-            digest,
-            digest,
-            CodingConfig {
-                minimum_shards: NZU16!(1),
-                extra_shards: NZU16!(1),
-            },
+            config,
         ));
-
-        let encoded = commitment.encode();
-        assert!(InvalidCommitment::decode(encoded).is_err());
+        assert!(InvalidContextCommitment::decode(commitment.encode()).is_err());
     }
 
     #[test]
@@ -1940,10 +2365,16 @@ mod tests {
             commonware_cryptography::crc32::Digest::from(3),
             config,
         ));
-        let mut encoded = commitment.encode().to_vec();
-
-        encoded[commonware_cryptography::crc32::Digest::SIZE] = 1;
-        assert!(CrcCommitment::decode(encoded.as_ref()).is_err());
+        let encoded = commitment.encode();
+        for offset in [
+            commonware_cryptography::crc32::Digest::SIZE,
+            32 + commonware_cryptography::crc32::Digest::SIZE,
+            64 + commonware_cryptography::crc32::Digest::SIZE,
+        ] {
+            let mut malformed = encoded.to_vec();
+            malformed[offset] = 1;
+            assert!(CrcCommitment::decode(malformed.as_ref()).is_err());
+        }
     }
 
     #[cfg(feature = "arbitrary")]

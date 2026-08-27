@@ -2,26 +2,78 @@
 
 use crate::stateful::Application;
 use commonware_actor::{
-    mailbox::{Overflow, Policy, Sender},
     Feedback,
+    mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    marshal::Update, Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter,
-    Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Reporter, Viewable,
+    marshal::{
+        Update,
+        ancestry::{Ancestry, BoxedAncestry},
+    },
 };
 use commonware_cryptography::Digestible;
-use commonware_runtime::{telemetry::traces::TracedExt as _, Clock, Metrics, Spawner};
-use commonware_utils::{acknowledgement::Exact, channel::oneshot};
-use futures::Stream;
-use rand::Rng;
-use std::{collections::VecDeque, pin::Pin};
-use tracing::{info_span, Span};
+use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_utils::{
+    acknowledgement::Exact,
+    channel::{fallible::OneshotExt, oneshot},
+    sync::Mutex,
+};
+use rand_core::Rng;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Weak},
+};
+use tracing::{Span, info_span};
 
-/// Type alias for an ancestor stream sent through the actor mailbox.
-pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = B> + Send>>;
+/// Re-enqueues live verification requests after finalization or pruning stops
+/// their active attempt.
+type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
+
+/// A non-owning reference to ancestry owned by the verification caller.
+///
+/// Queued and deferred requests carry this handle so caller cancellation
+/// releases the ancestry's backing blocks. Each active attempt clones an
+/// independent cursor from the same caller-owned ancestry.
+pub(in crate::stateful::actor) struct WeakAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
+
+impl<B: Block> WeakAncestry<B> {
+    /// Returns the caller-owned ancestry and a non-owning request handle.
+    fn new(ancestry: impl Ancestry<B>) -> (Arc<Mutex<BoxedAncestry<B>>>, Self) {
+        let owner = Arc::new(Mutex::new(BoxedAncestry::new(ancestry)));
+        let reference = Self(Arc::downgrade(&owner));
+        (owner, reference)
+    }
+
+    /// Upgrades to an independent cursor while the caller still owns the ancestry.
+    ///
+    /// Returns `None` once caller cancellation releases the strong owner.
+    pub(in crate::stateful::actor) fn upgrade(&self) -> Option<BoxedAncestry<B>> {
+        self.0.upgrade().map(|ancestry| ancestry.lock().clone())
+    }
+}
+
+/// A verification is scoped to its caller.
+pub(in crate::stateful::actor) struct Verification {
+    response: oneshot::Sender<bool>,
+}
+
+impl Verification {
+    pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
+        self.response.closed().await;
+    }
+
+    pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
+        self.response.is_closed()
+    }
+
+    pub(in crate::stateful::actor) fn respond(self, valid: bool) {
+        self.response.send_lossy(valid);
+    }
+}
 
 /// Messages processed by the actor loop.
-pub(crate) enum Message<E, A>
+pub(super) enum Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -30,7 +82,8 @@ where
     Propose {
         span: Span,
         context: (E, A::Context),
-        ancestry: ErasedAncestorStream<A::Block>,
+        ancestry: BoxedAncestry<A::Block>,
+        upstream: A::Input,
         response: oneshot::Sender<Option<A::Block>>,
     },
 
@@ -38,15 +91,16 @@ where
     Verify {
         span: Span,
         context: (E, A::Context),
-        ancestry: ErasedAncestorStream<A::Block>,
-        response: oneshot::Sender<bool>,
+        ancestry: WeakAncestry<A::Block>,
+        verification: Verification,
     },
 
     /// A reporting of a new finalized block.
     Finalized {
         span: Span,
-        block: A::Block,
+        block: Arc<A::Block>,
         acknowledgement: Exact,
+        retry_mailbox: RetryMailbox<E, A>,
     },
 
     /// Requests the attached database set.
@@ -63,17 +117,20 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    fn response_closed(&self) -> bool {
+    fn is_obsolete(&self) -> bool {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
-            Self::Verify { response, .. } => response.is_closed(),
+            Self::Verify { verification, .. } => verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
         }
     }
 }
 
-pub(crate) struct Pending<E, A>(VecDeque<Message<E, A>>)
+/// FIFO overflow for reliable messages that do not fit in the bounded mailbox.
+///
+/// Caller-scoped requests are discarded after their response channel closes.
+pub(super) struct Pending<E, A>(VecDeque<Message<E, A>>)
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>;
@@ -102,7 +159,7 @@ where
         F: FnMut(Message<E, A>) -> Option<Message<E, A>>,
     {
         while let Some(message) = self.0.pop_front() {
-            if message.response_closed() {
+            if message.is_obsolete() {
                 continue;
             }
 
@@ -122,7 +179,7 @@ where
     type Overflow = Pending<E, A>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        if message.response_closed() {
+        if message.is_obsolete() {
             return;
         }
         overflow.0.push_back(message);
@@ -139,6 +196,7 @@ where
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
+    retry_mailbox: RetryMailbox<E, A>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -149,6 +207,7 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            retry_mailbox: self.retry_mailbox.clone(),
         }
     }
 }
@@ -159,8 +218,15 @@ where
     A: Application<E>,
 {
     /// Create a mailbox from the send half of the actor's message channel.
-    pub(crate) const fn new(sender: Sender<Message<E, A>>) -> Self {
-        Self { sender }
+    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
+        let retry_sender = sender.clone();
+        let retry_mailbox = Arc::new(move |message| {
+            let _ = retry_sender.enqueue(message);
+        });
+        Self {
+            sender,
+            retry_mailbox,
+        }
     }
 }
 
@@ -202,11 +268,13 @@ where
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
     type Block = A::Block;
+    type Input = A::Input;
 
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Ancestry<Self::Block>,
+        upstream: Self::Input,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -217,7 +285,8 @@ where
         let _ = self.sender.enqueue(Message::Propose {
             span,
             context,
-            ancestry: Box::pin(ancestry),
+            ancestry: BoxedAncestry::new(ancestry),
+            upstream,
             response,
         });
         receiver.await.ok().flatten()
@@ -226,11 +295,12 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        // We must panic if we don't get a response; We cannot override the decision
-        // of the application based on the availabilitiy of the actor.
+        // Scope the strong ancestry owner to this caller. Queued work receives only a weak
+        // handle, so cancellation releases backing blocks before the actor drains the request.
         let (response, receiver) = oneshot::channel();
+        let (ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
         let span = info_span!(
             "stateful.mailbox.verify",
             epoch = context.1.epoch().traced(),
@@ -239,12 +309,16 @@ where
         let _ = self.sender.enqueue(Message::Verify {
             span,
             context,
-            ancestry: Box::pin(ancestry),
-            response,
+            ancestry,
+            verification: Verification { response },
         });
-        receiver
+
+        // Retain ancestry through the application verdict. Actor shutdown remains an error.
+        let result = receiver
             .await
-            .expect("stateful actor dropped during verify")
+            .expect("stateful actor dropped during verify");
+        drop(ancestry_owner);
+        result
     }
 }
 
@@ -270,6 +344,7 @@ where
                     span,
                     block,
                     acknowledgement,
+                    retry_mailbox: self.retry_mailbox.clone(),
                 }
             }
         };

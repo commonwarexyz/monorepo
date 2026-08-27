@@ -1,14 +1,16 @@
 //! Queue conformance tests
 
-use crate::queue::{Config, Queue};
+use crate::queue::{Config, Error, Queue};
 use commonware_codec::RangeCfg;
-use commonware_conformance::{conformance_tests, Conformance};
+use commonware_conformance::conformance_tests;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    BufferPooler, Supervisor as _,
+    buffer::paged::CacheRef,
+    conformance::{StorageConformance, StorageWorkload},
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
-use rand::Rng;
+use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(64);
@@ -26,61 +28,54 @@ fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())
     }
 }
 
-struct QueueConformance;
+struct QueueWorkload;
 
-impl Conformance for QueueConformance {
-    async fn commit(seed: u64) -> Vec<u8> {
-        let runner = deterministic::Runner::seeded(seed);
-        runner.start(|mut context| async move {
-            let mut queue = Queue::<_, Vec<u8>>::init(
-                context.child("queue").with_attribute("index", 0),
-                config(seed, &context),
-            )
-            .await
-            .unwrap();
+impl StorageWorkload for QueueWorkload {
+    type Error = Error;
 
-            // Enqueue random variable-length items across multiple sections
-            let items_count = context.gen_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);
-            let mut data = vec![Vec::new(); items_count];
-            for item in data.iter_mut() {
-                let size = context.gen_range(0..256);
-                item.resize(size, 0);
-                context.fill(item.as_mut_slice());
-            }
-            for item in &data {
-                queue.enqueue(item.clone()).await.unwrap();
-            }
+    async fn run(
+        mut context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        let mut queue = Queue::<_, Vec<u8>>::init(
+            context.child("queue").with_attribute("index", 0),
+            config(seed, &context),
+        )
+        .await?;
 
-            // Dequeue half and ack them
-            let dequeue_count = items_count / 2;
-            for _ in 0..dequeue_count {
-                let (pos, _) = queue.dequeue().await.unwrap().unwrap();
-                queue.ack(pos).await.unwrap();
-            }
+        let items_count = context.random_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);
+        let mut data = vec![Vec::new(); items_count];
+        for item in data.iter_mut() {
+            let size = context.random_range(0..256);
+            item.resize(size, 0);
+            context.fill(item.as_mut_slice());
+        }
+        for item in &data {
+            (queue, _) = queue.enqueue(item.clone()).await?;
+        }
 
-            // Sync (commit + prune), then drop
-            queue.sync().await.unwrap();
-            drop(queue);
+        let dequeue_count = items_count / 2;
+        for _ in 0..dequeue_count {
+            let (pos, _) = queue.dequeue().await?.expect("queue should have items");
+            queue.ack(pos)?;
+        }
 
-            // Re-open and verify surviving items are readable
-            let mut queue = Queue::<_, Vec<u8>>::init(
-                context.child("queue").with_attribute("index", 1),
-                config(seed, &context),
-            )
-            .await
-            .unwrap();
-            while let Some((pos, item)) = queue.dequeue().await.unwrap() {
-                assert_eq!(item, data[pos as usize]);
-                queue.ack(pos).await.unwrap();
-            }
-            queue.sync().await.unwrap();
-            drop(queue);
+        queue.sync().await?;
 
-            context.storage_audit().to_vec()
-        })
+        let mut queue = Queue::<_, Vec<u8>>::init(
+            context.child("queue").with_attribute("index", 1),
+            config(seed, &context),
+        )
+        .await?;
+        while let Some((pos, item)) = queue.dequeue().await? {
+            assert_eq!(item, data[pos as usize]);
+            queue.ack(pos)?;
+        }
+        queue.sync().await?;
+        Ok(())
     }
 }
 
 conformance_tests! {
-    QueueConformance => 512,
+    StorageConformance<QueueWorkload> => 512,
 }

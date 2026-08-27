@@ -1,27 +1,28 @@
 //! Simulate mechanism performance under realistic network conditions.
 
-use clap::{value_parser, Arg, Command as ClapCommand};
+use clap::{Arg, Command as ClapCommand, value_parser};
 use colored::Colorize;
-use commonware_cryptography::{ed25519, Signer};
-use commonware_macros::select_loop;
+use commonware_cryptography::{Signer, ed25519};
+use commonware_macros::{boxed, select_loop};
 use commonware_p2p::{
-    simulated::{Config, Link, Network, Receiver, Sender},
-    utils::codec::{wrap, WrappedReceiver, WrappedSender},
+    simulated::{Config, Link, MAX_SIZE, Network, Receiver, Sender},
+    utils::codec::{WrappedReceiver, WrappedSender, wrap},
 };
 use commonware_runtime::{
-    deterministic, BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota,
-    Runner, Spawner,
+    BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
+    deterministic,
 };
 use commonware_utils::{
+    NZUsize, Probability,
     channel::{mpsc, oneshot},
-    NZUsize,
+    probability,
 };
 use estimator::{
-    calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
-    mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
+    Command, Distribution, Latencies, RegionConfig, calculate_proposer_region, calculate_threshold,
+    count_peers, crate_version, get_latency_data, mean, median, parse_task, std_dev,
 };
 use futures::future::try_join_all;
-use rand::RngCore;
+use rand_core::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU32,
@@ -35,8 +36,18 @@ const DEFAULT_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 /// The channel to use for all messages
 const DEFAULT_CHANNEL: u64 = 0;
 
-/// The success rate over all links (1.0 = 100%)
-const DEFAULT_SUCCESS_RATE: f64 = 1.0;
+/// The success probability over all links (100%).
+const DEFAULT_SUCCESS_RATE: Probability = probability!(1.0);
+
+/// Returns a network configuration that accepts every supported application payload size.
+const fn network_config(max_peers_per_set: usize) -> Config {
+    Config {
+        max_size: MAX_SIZE,
+        max_peers_per_set: NZUsize!(max_peers_per_set),
+        disconnect_on_block: true,
+        tracked_peer_sets: NZUsize!(1),
+    }
+}
 
 /// The message type
 type Message = Vec<u8>;
@@ -290,7 +301,7 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNetwork + Rng>(
     context: C,
     proposer_idx: usize,
     peers: usize,
@@ -311,11 +322,7 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
 
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
-        Config {
-            max_size: u32::MAX,
-            disconnect_on_block: true,
-            tracked_peer_sets: NZUsize!(1),
-        },
+        network_config(peer_addresses.len()),
         peer_addresses.iter().map(|(k, _)| k.clone()),
     )
     .await;
@@ -504,6 +511,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 }
 
 /// Check if a single command would succeed without executing side effects
+#[boxed]
 async fn process_single_command_check<C: Clock>(
     ctx: &C,
     command_ctx: &CommandContext,
@@ -527,39 +535,19 @@ async fn process_single_command_check<C: Clock>(
         Command::Or(cmd1, cmd2) => {
             let cmd1_test = (command.0, cmd1.as_ref().clone());
             let cmd2_test = (command.0, cmd2.as_ref().clone());
-            let result1 = Box::pin(process_single_command_check(
-                ctx,
-                command_ctx,
-                &cmd1_test,
-                received,
-            ))
-            .await;
-            let result2 = Box::pin(process_single_command_check(
-                ctx,
-                command_ctx,
-                &cmd2_test,
-                received,
-            ))
-            .await;
+            let result1 =
+                process_single_command_check(ctx, command_ctx, &cmd1_test, received).await;
+            let result2 =
+                process_single_command_check(ctx, command_ctx, &cmd2_test, received).await;
             result1 || result2
         }
         Command::And(cmd1, cmd2) => {
             let cmd1_test = (command.0, cmd1.as_ref().clone());
             let cmd2_test = (command.0, cmd2.as_ref().clone());
-            let result1 = Box::pin(process_single_command_check(
-                ctx,
-                command_ctx,
-                &cmd1_test,
-                received,
-            ))
-            .await;
-            let result2 = Box::pin(process_single_command_check(
-                ctx,
-                command_ctx,
-                &cmd2_test,
-                received,
-            ))
-            .await;
+            let result1 =
+                process_single_command_check(ctx, command_ctx, &cmd1_test, received).await;
+            let result2 =
+                process_single_command_check(ctx, command_ctx, &cmd2_test, received).await;
             result1 && result2
         }
         _ => {
@@ -913,8 +901,21 @@ fn print_aggregated_regional_statistics(observations: &Observations, line_num: u
         let overall_median = median(&mut all_lats_sorted);
         let overall_std = std_dev(&all_lats).unwrap_or(0.0);
         let stat_line = format!(
-                "    [all] mean: {overall_mean:.2}ms (stdv: {overall_std:.2}ms) | median: {overall_median:.2}ms"
-            );
+            "    [all] mean: {overall_mean:.2}ms (stdv: {overall_std:.2}ms) | median: {overall_median:.2}ms"
+        );
         println!("{}", stat_line.white());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_config() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let _ = Network::<_, ed25519::PublicKey>::new(context, network_config(1));
+        });
     }
 }

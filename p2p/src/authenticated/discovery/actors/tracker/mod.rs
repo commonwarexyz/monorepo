@@ -1,6 +1,6 @@
 //! Tracker
 
-use crate::{authenticated::discovery::config::Bootstrapper, Ingress};
+use crate::{Ingress, authenticated::discovery::config::Bootstrapper};
 use commonware_cryptography::Signer;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -30,8 +30,8 @@ pub struct Config<C: Signer> {
     pub allow_dns: bool,
     pub synchrony_bound: Duration,
     pub mailbox_size: NonZeroUsize,
+    pub max_peers_per_set: usize,
     pub tracked_peer_sets: NonZeroUsize,
-    pub max_peer_set_size: u64,
     pub peer_connection_cooldown: Duration,
     pub peer_gossip_max_count: usize,
     pub dial_fail_limit: usize,

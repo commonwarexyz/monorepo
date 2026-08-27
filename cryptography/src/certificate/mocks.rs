@@ -1,21 +1,22 @@
 //! Mocks for certificate signing schemes.
 
-use super::{Attestation, Scheme, Signers, Subject, Verification};
+use super::{AssemblyError, Attestation, Scheme, Signers, Subject, Verification};
 use crate::{
-    ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
     Digest, PublicKey,
+    ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
 };
 use bytes::Bytes;
 use commonware_utils::{
+    Participant,
+    iter::NonEmpty,
     ordered::{Quorum, Set},
     sequence::U64,
     sync::Mutex,
-    Faults, Participant,
 };
 use core::fmt;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     sync::Arc,
     vec::Vec,
 };
@@ -161,6 +162,14 @@ where
         }
     }
 
+    fn assembly_error(error: AssemblyError) -> AssemblyError {
+        if ALLOW_INVALID {
+            error
+        } else {
+            panic!("invalid mock certificate request: {error}");
+        }
+    }
+
     /// Creates a signer bound to the provided participant index.
     pub fn signer(
         namespace: &[u8],
@@ -270,7 +279,7 @@ where
     where
         S: Scheme<Signature = U64>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
@@ -288,58 +297,57 @@ where
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Assembles attestations into a mock certificate.
-    pub fn assemble<S, I, M>(&self, attestations: I) -> Option<U64>
+    /// Assembles a non-empty stream of attestations into a mock certificate.
+    pub fn assemble<S, I>(&self, attestations: NonEmpty<I>) -> Result<U64, AssemblyError>
     where
         S: Scheme<Signature = U64>,
-        I: IntoIterator<Item = Attestation<S>>,
-        M: Faults,
+        I: Iterator<Item = Attestation<S>>,
     {
-        let mut unique_signers = HashSet::new();
         let mut signers = Vec::new();
         let mut signed_subject = None;
         let mut inner = self.shared.0.lock();
 
         for attestation in attestations {
-            self.participants
-                .key(attestation.signer)
-                .or_else(|| Self::invalid("attestation signer missing from participant set"))?;
+            self.participants.key(attestation.signer).ok_or_else(|| {
+                Self::assembly_error(AssemblyError::UnknownSigner(attestation.signer))
+            })?;
 
-            let signature = attestation
-                .signature
-                .get()
-                .or_else(|| Self::invalid("attestation signature missing"))?;
+            let signature = attestation.signature.get().ok_or_else(|| {
+                Self::assembly_error(AssemblyError::MalformedSignature(attestation.signer))
+            })?;
             let signature = u64::from(signature);
             let entry = inner
                 .signatures
                 .by_signer
                 .get(&attestation.signer)
-                .or_else(|| Self::invalid("attestation signer not found"))?
+                .ok_or_else(|| {
+                    Self::assembly_error(AssemblyError::MalformedSignature(attestation.signer))
+                })?
                 .by
                 .get(&signature)
-                .or_else(|| Self::invalid("attestation signature not found"))?
+                .ok_or_else(|| {
+                    Self::assembly_error(AssemblyError::MalformedSignature(attestation.signer))
+                })?
                 .clone();
 
             if let Some(existing) = &signed_subject {
                 if existing != &entry {
-                    return Self::invalid("attestations signed different subjects");
+                    return Err(Self::assembly_error(AssemblyError::MalformedSignature(
+                        attestation.signer,
+                    )));
                 }
             } else {
                 signed_subject = Some(entry);
             }
 
-            if !unique_signers.insert(attestation.signer) {
-                return Self::invalid("duplicate signer");
-            }
             signers.push(attestation.signer);
         }
 
-        if signers.len() < self.participants.quorum::<M>() as usize {
-            return None;
-        }
+        let signers =
+            Signers::try_from((&self.participants, signers)).map_err(Self::assembly_error)?;
+        let signers = signers.require(self.participants.quorum::<S::Faults>())?;
 
-        let subject = signed_subject?;
-        let signers = Signers::from(self.participants.len(), signers);
+        let subject = signed_subject.expect("non-empty attestations establish a signed subject");
         let stored_subject = subject.clone();
         let artifact = (subject, signers);
         let certificate = inner
@@ -354,11 +362,11 @@ where
                 certificate
             });
 
-        Some(U64::new(certificate))
+        Ok(U64::new(certificate))
     }
 
     /// Verifies a mock certificate.
-    pub fn verify_certificate<'a, S, R, D, M>(
+    pub fn verify_certificate<'a, S, R, D>(
         &self,
         _rng: &mut R,
         subject: S::Subject<'a, D>,
@@ -367,9 +375,8 @@ where
     where
         S: Scheme<Certificate = U64>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
-        M: Faults,
     {
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let certificate = u64::from(certificate);
@@ -383,18 +390,24 @@ where
     }
 
     /// Verifies a batch of certificates one-by-one.
-    pub fn verify_certificates<'a, S, R, D, I, M>(&self, rng: &mut R, mut certificates: I) -> bool
+    pub fn verify_certificates<'a, S, R, D, I>(
+        &self,
+        rng: &mut R,
+        certificates: NonEmpty<I>,
+    ) -> bool
     where
         S: Scheme<Certificate = U64>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a U64)>,
-        M: Faults,
     {
-        certificates.all(|(subject, certificate)| {
-            self.verify_certificate::<S, _, D, M>(rng, subject, certificate)
-        })
+        for (subject, certificate) in certificates {
+            if !self.verify_certificate::<S, _, D>(rng, subject, certificate) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Returns whether this scheme is attributable.
@@ -417,18 +430,19 @@ where
 /// Implements a mock mock certificate scheme for a concrete subject and namespace.
 ///
 /// This follows the same binding pattern as the other certificate macros: the protocol
-/// supplies the subject type and namespace type, and the macro emits a local `Scheme`
-/// wrapper plus a `fixture(...)` helper for tests.
+/// supplies the subject type, namespace type, and fault model, and the macro emits a
+/// local `Scheme` wrapper plus a `fixture(...)` helper for tests.
 ///
 /// # Example
 /// ```ignore
 /// use commonware_cryptography::impl_certificate_mock;
+/// use commonware_utils::N3f1;
 ///
-/// impl_certificate_mock!(Subject<'a, D>, Namespace);
+/// impl_certificate_mock!(Subject<'a, D>, Namespace, N3f1);
 /// ```
 #[macro_export]
 macro_rules! impl_certificate_mock {
-    ($subject:ty, $namespace:ty) => {
+    ($subject:ty, $namespace:ty, $faults:ty) => {
         /// Generates a test fixture with Ed25519 identities and a mock mock scheme.
         #[cfg(feature = "mocks")]
         #[allow(dead_code)]
@@ -438,7 +452,7 @@ macro_rules! impl_certificate_mock {
             n: u32,
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey>>
         where
-            R: rand::RngCore + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             fixture_with::<true, true, true, R>(rng, namespace, n)
         }
@@ -459,7 +473,7 @@ macro_rules! impl_certificate_mock {
             Scheme<$crate::ed25519::PublicKey, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>,
         >
         where
-            R: rand::RngCore + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             assert!(n > 0);
 
@@ -518,11 +532,11 @@ macro_rules! impl_certificate_mock {
         }
 
         impl<
-                P: $crate::PublicKey,
-                const ATTRIBUTABLE: bool,
-                const BATCHABLE: bool,
-                const ALLOW_INVALID: bool,
-            > Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            P: $crate::PublicKey,
+            const ATTRIBUTABLE: bool,
+            const BATCHABLE: bool,
+            const ALLOW_INVALID: bool,
+        > Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             pub fn signer(
                 namespace: &[u8],
@@ -556,17 +570,18 @@ macro_rules! impl_certificate_mock {
         }
 
         impl<
-                P: $crate::PublicKey,
-                const ATTRIBUTABLE: bool,
-                const BATCHABLE: bool,
-                const ALLOW_INVALID: bool,
-            > $crate::certificate::Verifier for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            P: $crate::PublicKey,
+            const ATTRIBUTABLE: bool,
+            const BATCHABLE: bool,
+            const ALLOW_INVALID: bool,
+        > $crate::certificate::Verifier for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             type Subject<'a, D: $crate::Digest> = $subject;
+            type Faults = $faults;
             type PublicKey = P;
             type Certificate = commonware_utils::sequence::U64;
 
-            fn verify_certificate<R, D, M>(
+            fn verify_certificate<R, D>(
                 &self,
                 rng: &mut R,
                 subject: Self::Subject<'_, D>,
@@ -574,28 +589,26 @@ macro_rules! impl_certificate_mock {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
-                M: commonware_utils::Faults,
             {
                 self.generic
-                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
+                    .verify_certificate::<Self, _, D>(rng, subject, certificate)
             }
 
-            fn verify_certificates<'a, R, D, I, M>(
+            fn verify_certificates<'a, R, D, I>(
                 &self,
                 rng: &mut R,
-                certificates: I,
+                certificates: commonware_utils::iter::NonEmpty<I>,
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                M: commonware_utils::Faults,
             {
                 self.generic
-                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
+                    .verify_certificates::<Self, _, D, _>(rng, certificates)
             }
 
             fn is_batchable() -> bool {
@@ -614,8 +627,8 @@ macro_rules! impl_certificate_mock {
                 self.generic.certificate_codec_config()
             }
 
-            fn certificate_codec_config_unbounded(
-            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            fn certificate_codec_config_unbounded()
+            -> <Self::Certificate as commonware_codec::Read>::Cfg {
                 $crate::certificate::mocks::Generic::<
                     P,
                     $namespace,
@@ -627,11 +640,11 @@ macro_rules! impl_certificate_mock {
         }
 
         impl<
-                P: $crate::PublicKey,
-                const ATTRIBUTABLE: bool,
-                const BATCHABLE: bool,
-                const ALLOW_INVALID: bool,
-            > $crate::certificate::Scheme for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            P: $crate::PublicKey,
+            const ATTRIBUTABLE: bool,
+            const BATCHABLE: bool,
+            const ALLOW_INVALID: bool,
+        > $crate::certificate::Scheme for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             type Signature = commonware_utils::sequence::U64;
 
@@ -658,7 +671,7 @@ macro_rules! impl_certificate_mock {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -673,7 +686,7 @@ macro_rules! impl_certificate_mock {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
@@ -681,16 +694,15 @@ macro_rules! impl_certificate_mock {
                     .verify_attestations::<Self, _, D, _>(rng, subject, attestations)
             }
 
-            fn assemble<I, M>(
+            fn assemble<I>(
                 &self,
-                attestations: I,
+                attestations: commonware_utils::iter::NonEmpty<I>,
                 _strategy: &impl commonware_parallel::Strategy,
-            ) -> Option<Self::Certificate>
+            ) -> Result<Self::Certificate, $crate::certificate::AssemblyError>
             where
-                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                M: commonware_utils::Faults,
+                I: Iterator<Item = $crate::certificate::Attestation<Self>> + Send,
             {
-                self.generic.assemble::<Self, _, M>(attestations)
+                self.generic.assemble::<Self, _>(attestations)
             }
 
             fn is_attributable() -> bool {
@@ -710,14 +722,14 @@ macro_rules! impl_certificate_mock {
 mod tests {
     use super::{Certificates, Shared, Signatures};
     use crate::{
-        certificate::{Attestation, Lazy, Scheme as _, Verifier as _},
+        certificate::{AssemblyError, Attestation, Lazy, Scheme as _, Verifier as _},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_parallel::Sequential;
-    use commonware_utils::{sequence::U64, test_rng, N3f1, Participant};
+    use commonware_utils::{N3f1, Participant, non_empty, sequence::U64, test_rng};
 
     #[derive(Clone, Copy, Debug)]
     pub struct TestSubject<'a> {
@@ -736,7 +748,7 @@ mod tests {
         }
     }
 
-    impl_certificate_mock!(TestSubject<'a>, Vec<u8>);
+    impl_certificate_mock!(TestSubject<'a>, Vec<u8>, N3f1);
 
     #[test]
     fn attestation_round_trip_verifies() {
@@ -829,13 +841,15 @@ mod tests {
             Scheme::<Ed25519PublicKey>::certificate_codec_config_unbounded(),
             ()
         );
-        assert!(Scheme::<Ed25519PublicKey>::signer(
-            b"mock-scheme",
-            fixture.verifier.participants().clone(),
-            Participant::new(99),
-            Shared::default(),
-        )
-        .is_none());
+        assert!(
+            Scheme::<Ed25519PublicKey>::signer(
+                b"mock-scheme",
+                fixture.verifier.participants().clone(),
+                Participant::new(99),
+                Shared::default(),
+            )
+            .is_none()
+        );
         assert!(fixture.verifier.sign::<Sha256Digest>(subject).is_none());
         assert!(cloned.sign::<Sha256Digest>(subject).is_some());
         assert!(format!("{cloned:?}").contains("participants"));
@@ -861,25 +875,31 @@ mod tests {
             .sign::<Sha256Digest>(subject)
             .expect("foreign signer must produce an attestation");
 
-        assert!(!scheme_fixture
-            .verifier
-            .verify_attestation::<_, Sha256Digest>(
-                &mut rng,
-                subject,
-                &invalid_signer,
-                &Sequential,
-            ));
-        assert!(!scheme_fixture
-            .verifier
-            .verify_attestation::<_, Sha256Digest>(
-                &mut rng,
-                subject,
-                &missing_signature,
-                &Sequential,
-            ));
-        assert!(!scheme_fixture
-            .verifier
-            .verify_attestation::<_, Sha256Digest>(&mut rng, subject, &foreign, &Sequential,));
+        assert!(
+            !scheme_fixture
+                .verifier
+                .verify_attestation::<_, Sha256Digest>(
+                    &mut rng,
+                    subject,
+                    &invalid_signer,
+                    &Sequential,
+                )
+        );
+        assert!(
+            !scheme_fixture
+                .verifier
+                .verify_attestation::<_, Sha256Digest>(
+                    &mut rng,
+                    subject,
+                    &missing_signature,
+                    &Sequential,
+                )
+        );
+        assert!(
+            !scheme_fixture
+                .verifier
+                .verify_attestation::<_, Sha256Digest>(&mut rng, subject, &foreign, &Sequential,)
+        );
     }
 
     #[test]
@@ -951,6 +971,22 @@ mod tests {
     }
 
     #[test]
+    fn verify_attestations_empty_returns_empty_partition() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+        let verification = fixture.verifier.verify_attestations::<_, Sha256Digest, _>(
+            &mut rng,
+            subject,
+            std::iter::empty(),
+            &Sequential,
+        );
+
+        assert!(verification.verified.is_empty());
+        assert!(verification.invalid.is_empty());
+    }
+
+    #[test]
     fn certificate_round_trip_verifies() {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, b"mock-scheme", 4);
@@ -963,32 +999,26 @@ mod tests {
             .collect();
         let certificate = fixture
             .verifier
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
         let decoded =
             U64::decode_cfg(encoded, &fixture.verifier.certificate_codec_config()).unwrap();
 
-        assert!(
-            fixture
-                .verifier
-                .verify_certificate::<_, Sha256Digest, N3f1>(
-                    &mut rng,
-                    subject,
-                    &decoded,
-                    &Sequential,
-                )
-        );
-        assert!(!fixture
-            .verifier
-            .verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                TestSubject {
-                    message: b"other-subject",
-                },
-                &decoded,
-                &Sequential,
-            ));
+        assert!(fixture.verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject,
+            &decoded,
+            &Sequential,
+        ));
+        assert!(!fixture.verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            TestSubject {
+                message: b"other-subject",
+            },
+            &decoded,
+            &Sequential,
+        ));
     }
 
     #[test]
@@ -1005,12 +1035,12 @@ mod tests {
 
         let first = fixture
             .verifier
-            .assemble::<_, N3f1>(attestations.clone(), &Sequential)
+            .assemble(non_empty![@attestations.clone()], &Sequential)
             .unwrap();
         let second = fixture
             .verifier
-            .assemble::<_, N3f1>(
-                attestations.iter().cloned().rev().collect::<Vec<_>>(),
+            .assemble(
+                non_empty![@attestations.iter().cloned().rev().collect::<Vec<_>>()],
                 &Sequential,
             )
             .unwrap();
@@ -1029,7 +1059,7 @@ mod tests {
             .collect();
         let certificate = fixture
             .verifier
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
 
@@ -1045,21 +1075,20 @@ mod tests {
         let fixture = fixture(&mut rng, b"mock-scheme", 4);
         let subject = TestSubject { message: b"vote-1" };
 
-        assert!(fixture
-            .verifier
-            .assemble::<_, N3f1>(
-                [
+        assert_eq!(
+            fixture.verifier.assemble(
+                non_empty![
                     fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
                     fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
                 ],
                 &Sequential,
-            )
-            .is_none());
+            ),
+            Err(AssemblyError::InsufficientAttestations(3, 2))
+        );
 
-        assert!(fixture
-            .verifier
-            .assemble::<_, N3f1>(
-                [
+        assert_eq!(
+            fixture.verifier.assemble(
+                non_empty![
                     fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
                     fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
                     fixture.schemes[2]
@@ -1067,8 +1096,27 @@ mod tests {
                         .unwrap(),
                 ],
                 &Sequential,
-            )
-            .is_none());
+            ),
+            Err(AssemblyError::MalformedSignature(Participant::new(2)))
+        );
+    }
+
+    #[test]
+    fn strict_certificate_assembly_allows_subquorum_input() {
+        let mut rng = test_rng();
+        let fixture = fixture_with::<true, true, false, _>(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+
+        assert_eq!(
+            fixture.verifier.assemble(
+                non_empty![
+                    fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
+                    fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
+                ],
+                &Sequential,
+            ),
+            Err(AssemblyError::InsufficientAttestations(3, 2))
+        );
     }
 
     #[test]
@@ -1082,8 +1130,8 @@ mod tests {
             .sign::<Sha256Digest>(subject)
             .expect("signer must produce an attestation");
 
-        let certificate = fixture.verifier.assemble::<_, N3f1>(
-            [
+        let certificate = fixture.verifier.assemble(
+            non_empty![
                 attestation.clone(),
                 attestation,
                 fixture.schemes[1].sign::<Sha256Digest>(subject).unwrap(),
@@ -1091,9 +1139,10 @@ mod tests {
             &Sequential,
         );
 
-        assert!(
-            certificate.is_none(),
-            "duplicate signers should be rejected by mock assembly"
+        assert_eq!(
+            certificate,
+            Err(AssemblyError::DuplicateSigner(Participant::new(0))),
+            "duplicate signers should be rejected by mock assembly",
         );
     }
 
@@ -1113,44 +1162,35 @@ mod tests {
             .collect();
         let certificate_a = fixture
             .verifier
-            .assemble::<_, N3f1>(attestations_a, &Sequential)
+            .assemble(non_empty![@attestations_a], &Sequential)
             .unwrap();
         let certificate_b = fixture
             .verifier
-            .assemble::<_, N3f1>(attestations_b, &Sequential)
+            .assemble(non_empty![@attestations_b], &Sequential)
             .unwrap();
         let missing = U64::new(u64::MAX);
-
-        assert!(!fixture
-            .verifier
-            .verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                subject_a,
-                &certificate_b,
-                &Sequential,
-            ));
-        assert!(!fixture
-            .verifier
-            .verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                subject_b,
-                &missing,
-                &Sequential,
-            ));
-        assert!(fixture
-            .verifier
-            .verify_certificates::<_, Sha256Digest, _, N3f1>(
-                &mut rng,
-                [(subject_a, &certificate_a), (subject_b, &certificate_b)].into_iter(),
-                &Sequential,
-            ));
-        assert!(!fixture
-            .verifier
-            .verify_certificates::<_, Sha256Digest, _, N3f1>(
-                &mut rng,
-                [(subject_a, &certificate_a), (subject_b, &missing)].into_iter(),
-                &Sequential,
-            ));
+        assert!(!fixture.verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject_a,
+            &certificate_b,
+            &Sequential,
+        ));
+        assert!(!fixture.verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject_b,
+            &missing,
+            &Sequential,
+        ));
+        assert!(fixture.verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            non_empty![(subject_a, &certificate_a), (subject_b, &certificate_b)],
+            &Sequential,
+        ));
+        assert!(!fixture.verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            non_empty![(subject_a, &certificate_a), (subject_b, &missing)],
+            &Sequential,
+        ));
     }
 
     #[test]
@@ -1178,8 +1218,8 @@ mod tests {
         let fixture = fixture_with::<true, true, false, _>(&mut rng, b"mock-scheme", 4);
         let subject = TestSubject { message: b"vote-1" };
 
-        let _ = fixture.verifier.assemble::<_, N3f1>(
-            [
+        let _ = fixture.verifier.assemble(
+            non_empty![
                 fixture.schemes[0].sign::<Sha256Digest>(subject).unwrap(),
                 fixture.schemes[1]
                     .sign::<Sha256Digest>(TestSubject { message: b"vote-2" })

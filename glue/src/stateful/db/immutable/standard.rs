@@ -2,46 +2,48 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture `Arc<TracedAsyncRwLock<Immutable>>`
-//! so the batch API can read through to committed state.
+//! deletions. The wrapper types here capture a [`Shared`] database handle
+//! so the batch API can read through to applied state.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait,
+    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::Handle;
 use commonware_storage::{
+    Context,
     journal::contiguous::{
-        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
+        Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
     },
     merkle::{Family, Location},
     qmdb::{
+        Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
+            Immutable, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            fixed, variable, Immutable, Operation,
+            fixed, initial_root, variable,
         },
         operation::Key,
-        sync::{self, resolver::Resolver, Target as AnySyncTarget},
-        Error,
+        sync::{self, Target as AnySyncTarget},
     },
     translator::Translator,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
+use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-type ImmutableDbHandle<F, E, K, V, C, H, T, S> =
-    Arc<TracedAsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
+/// Shared handle to an immutable database.
+type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -59,7 +61,7 @@ where
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -78,7 +80,7 @@ where
 impl<F, E, K, V, C, H, T, S> ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -102,18 +104,18 @@ where
         self
     }
 
-    /// Read a value by key, falling back to committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get(key, &*db).await
+        self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get_many(keys, &*db).await
+        self.batch.get_many(keys, &db).await
     }
 
     /// Set `key` to `value` in the speculative batch.
@@ -128,7 +130,7 @@ where
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -141,10 +143,30 @@ where
     db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
 }
 
+impl<F, E, K, V, C, H, T, S> Clone for ImmutableMerkleized<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+    Operation<F, K, V>: EncodeShared,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            db: self.db.clone(),
+        }
+    }
+}
+
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -163,7 +185,7 @@ where
 impl<F, E, K, V, C, H, T, S> ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -172,25 +194,25 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get(key, &*db).await
+        self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get_many(keys, &*db).await
+        self.inner.get_many(keys, &db).await
     }
 }
 
 impl<F, E, K, V, C, H, T, S> UnmerkleizedTrait for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -204,11 +226,14 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(
-            &*db,
-            self.metadata,
-            self.inactivity_floor.unwrap_or_default(),
-        );
+        let merkleized = self
+            .batch
+            .merkleize(
+                &db,
+                self.metadata,
+                self.inactivity_floor.unwrap_or_default(),
+            )
+            .await;
         Ok(ImmutableMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -219,7 +244,7 @@ where
 impl<F, E, K, V, C, H, T, S> MerkleizedTrait for ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -248,7 +273,7 @@ where
 impl<F, E, K, V, H, T, S> ManagedDb<E> for fixed::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -283,11 +308,18 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, K, FixedEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         ImmutableUnmerkleized {
-            batch: inner.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
             inactivity_floor: None,
         }
@@ -296,43 +328,47 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
+    }
+
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+    fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
 impl<F, E, K, V, H, T, S> ManagedDb<E> for variable::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
@@ -368,11 +404,18 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, K, VariableEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         ImmutableUnmerkleized {
-            batch: inner.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
             inactivity_floor: None,
         }
@@ -381,75 +424,76 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
+    }
+
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+    fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
 impl<F, E, K, V, H, T, R, S> StateSyncDb<E, R> for fixed::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     T: Translator,
     S: Strategy,
-    R: Resolver<Family = F, Op = fixed::Operation<F, K, V>, Digest = H::Digest>,
+    R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync::sync(sync::engine::Config {
+        sync_standard_db(
             context,
-            resolver,
+            config,
+            source,
             target,
-            max_outstanding_requests: sync_config.max_outstanding_requests,
-            fetch_batch_size: sync_config.fetch_batch_size,
-            apply_batch_size: sync_config.apply_batch_size,
-            db_config: config,
-            update_rx: Some(tip_updates),
-            finish_rx: finish,
-            reached_target_tx: reached_target,
-            max_retained_roots: sync_config.max_retained_roots,
-        })
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
         .await
     }
 }
@@ -457,40 +501,37 @@ where
 impl<F, E, K, V, H, T, R, S> StateSyncDb<E, R> for variable::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     T: Translator,
     S: Strategy,
     variable::Operation<F, K, V>: Codec,
-    R: Resolver<Family = F, Op = variable::Operation<F, K, V>, Digest = H::Digest>,
+    R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync::sync(sync::engine::Config {
+        sync_standard_db(
             context,
-            resolver,
+            config,
+            source,
             target,
-            max_outstanding_requests: sync_config.max_outstanding_requests,
-            fetch_batch_size: sync_config.fetch_batch_size,
-            apply_batch_size: sync_config.apply_batch_size,
-            db_config: config,
-            update_rx: Some(tip_updates),
-            finish_rx: finish,
-            reached_target_tx: reached_target,
-            max_retained_roots: sync_config.max_retained_roots,
-        })
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
         .await
     }
 }

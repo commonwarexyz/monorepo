@@ -2,12 +2,12 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
     merkle::{
-        hasher::Standard, mem::Mem, mmb, mmr, verification, Bagging, Bagging::ForwardFold,
-        Family as MerkleFamily, Location,
+        Bagging, Bagging::ForwardFold, Family as MerkleFamily, Location, hasher::Standard,
+        mem::Mem, mmb, mmr, verification,
     },
 };
 use futures::executor::block_on;
@@ -120,10 +120,8 @@ where
             }
         }
     };
-    if mutated {
-        if let Ok(m) = P::decode_cfg(bytes.as_slice(), cfg) {
-            *proof = m;
-        }
+    if mutated && let Ok(m) = P::decode_cfg(bytes.as_slice(), cfg) {
+        *proof = m;
     }
 }
 
@@ -263,7 +261,11 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
 }
 
 fn fuzz(input: FuzzInput) {
-    let digests: Vec<Digest> = input.elements.iter().map(|&v| Sha256::hash(&[v])).collect();
+    let digests: Vec<Digest> = input
+        .elements
+        .iter()
+        .map(|&v| Sha256::hash(&[&[v]]))
+        .collect();
 
     match input.proof {
         ProofType::Merkle => {
@@ -284,18 +286,21 @@ fn fuzz(input: FuzzInput) {
 
             for (idx, digest) in digests.iter().enumerate() {
                 let original_proof = tree.proof(idx as u32).unwrap();
-                let mut hasher = Sha256::default();
-                assert!(original_proof
-                    .verify_element_inclusion(&mut hasher, digest, idx as u32, &root)
-                    .is_ok());
+                assert!(
+                    original_proof
+                        .verify_element_inclusion::<Sha256>(digest, idx as u32, &root)
+                        .is_ok()
+                );
 
                 for mutation in &input.mutations {
                     let mut mutated_proof = original_proof.clone();
                     mutate_proof_bytes(&mut mutated_proof, mutation, &1);
                     if mutated_proof != original_proof {
-                        assert!(mutated_proof
-                            .verify_element_inclusion(&mut hasher, digest, idx as u32, &root)
-                            .is_err());
+                        assert!(
+                            mutated_proof
+                                .verify_element_inclusion::<Sha256>(digest, idx as u32, &root)
+                                .is_err()
+                        );
                     }
                 }
             }
@@ -325,18 +330,21 @@ fn fuzz(input: FuzzInput) {
                 .map(|&p| (digests[p as usize], p))
                 .collect();
 
-            let mut hasher = Sha256::default();
-            assert!(original_proof
-                .verify_multi_inclusion(&mut hasher, &elements, &root)
-                .is_ok());
+            assert!(
+                original_proof
+                    .verify_multi_inclusion::<Sha256>(&elements, &root)
+                    .is_ok()
+            );
 
             for mutation in &input.mutations {
                 let mut mutated_proof = original_proof.clone();
                 mutate_proof_bytes(&mut mutated_proof, mutation, &positions.len());
                 if mutated_proof != original_proof {
-                    assert!(mutated_proof
-                        .verify_multi_inclusion(&mut hasher, &elements, &root)
-                        .is_err());
+                    assert!(
+                        mutated_proof
+                            .verify_multi_inclusion::<Sha256>(&elements, &root)
+                            .is_err()
+                    );
                 }
             }
         }

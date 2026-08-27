@@ -1,39 +1,40 @@
 //! Engine for the module.
 
 use super::{
-    metrics,
+    Config, metrics,
     safe_tip::SafeTip,
     types::{Ack, Activity, Error, Item, TipAck},
-    Config,
 };
 use crate::{
+    Automaton, Monitor, Reporter,
     aggregation::{scheme, types::Certificate},
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
-    Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
-    certificate::{Provider, Scheme, Verifier},
     Digest,
+    certificate::{Provider, Scheme, Verifier},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
+    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
-    telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
-use futures::{
-    future::{self, Either},
-    pin_mut, StreamExt,
+use commonware_utils::{
+    N3f1, PrioritySet,
+    futures::{Pool as FuturesPool, rebind},
+    non_empty,
+    ordered::Quorum,
 };
-use rand_core::CryptoRngCore;
+use futures::future::{self, Either};
+use rand_core::CryptoRng;
 use std::{
     cmp::max,
     collections::BTreeMap,
@@ -68,7 +69,7 @@ struct DigestRequest<D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -104,7 +105,7 @@ pub struct Engine<
 
     // Messaging
     /// Pool of pending futures to request a digest from the automaton.
-    digest_requests: FuturesPool<DigestRequest<D>>,
+    digest_requests: FuturesPool<'static, DigestRequest<D>>,
 
     // State
     /// The current epoch.
@@ -151,15 +152,15 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
-        P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
-        D: Digest,
-        A: Automaton<Context = Height, Digest = D>,
-        Z: Reporter<Activity = Activity<P::Scheme, D>>,
-        M: Monitor<Index = Epoch>,
-        B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-        T: Strategy,
-    > Engine<E, P, D, A, Z, M, B, T>
+    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
+    P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
+    D: Digest,
+    A: Automaton<Context = Height, Digest = D>,
+    Z: Reporter<Activity = Activity<P::Scheme, D>>,
+    M: Monitor<Index = Epoch>,
+    B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    T: Strategy,
+> Engine<E, P, D, A, Z, M, B, T>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, D, A, Z, M, B, T>) -> Self {
@@ -252,7 +253,7 @@ impl<
         let journal = Journal::init(self.context.child("journal"), journal_cfg)
             .await
             .expect("init failed");
-        let unverified_heights = self.replay(&journal).await;
+        let (journal, unverified_heights) = self.replay(journal).await;
         self.journal = Some(journal);
 
         // Request digests for unverified heights
@@ -278,10 +279,11 @@ impl<
                 // Underflow safe: next >= self.tip is guaranteed by next()
                 if next.delta_from(self.tip).unwrap() < self.window {
                     trace!(%next, "requesting new digest");
-                    assert!(self
-                        .pending
-                        .insert(next, Pending::Unverified(BTreeMap::new()))
-                        .is_none());
+                    assert!(
+                        self.pending
+                            .insert(next, Pending::Unverified(BTreeMap::new()))
+                            .is_none()
+                    );
                     self.get_digest(next);
                     continue;
                 }
@@ -341,10 +343,7 @@ impl<
                     }
                     Ok(digest) => {
                         timer.observe(self.context.as_ref());
-                        if let Err(err) = self.handle_digest(height, digest, &mut sender).await {
-                            debug!(?err, %height, "handle_digest failed");
-                            continue;
-                        }
+                        self = self.handle_digest(height, digest, &mut sender).await;
                     }
                 }
             },
@@ -373,7 +372,7 @@ impl<
                     // Fast-forward our tip if needed
                     let safe_tip = self.safe_tip.get();
                     if safe_tip > self.tip {
-                        self.fast_forward_tip(safe_tip).await;
+                        self = self.fast_forward_tip(safe_tip).await;
                     }
                 }
 
@@ -393,8 +392,9 @@ impl<
                 };
 
                 // Handle the ack
-                if let Err(err) = self.handle_ack(&ack).await {
-                    debug!(?err, ?sender, "ack handle failed");
+                let accepted;
+                (self, accepted) = self.handle_ack(&ack).await;
+                if !accepted {
                     guard.set(Status::Failure);
                     continue;
                 }
@@ -412,18 +412,13 @@ impl<
                     .pop()
                     .expect("no rebroadcast deadline");
                 trace!(%height, "rebroadcasting");
-                if let Err(err) = self.handle_rebroadcast(height, &mut sender).await {
-                    warn!(?err, %height, "rebroadcast failed");
-                };
+                self = self.handle_rebroadcast(height, &mut sender).await;
             },
         }
 
         // Close journal on shutdown
         if let Some(journal) = self.journal.take() {
-            journal
-                .sync_all()
-                .await
-                .expect("unable to close aggregation journal");
+            journal.sync_all().await.expect("unable to sync journal");
         }
     }
 
@@ -431,17 +426,18 @@ impl<
 
     /// Handles a digest returned by the automaton.
     async fn handle_digest(
-        &mut self,
+        mut self,
         height: Height,
         digest: D,
         sender: &mut WrappedSender<
             impl Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
-    ) -> Result<(), Error> {
+    ) -> Self {
         // Entry must be `Pending::Unverified`, or return early
         if !matches!(self.pending.get(&height), Some(Pending::Unverified(_))) {
-            return Err(Error::AckHeight(height));
+            debug!(%height, "digest height not pending");
+            return self;
         };
 
         // Move the entry to `Pending::Verified`
@@ -462,7 +458,7 @@ impl<
                 }
 
                 // Handle the ack
-                let _ = self.handle_ack(epoch_ack).await;
+                (self, _) = self.handle_ack(epoch_ack).await;
             }
             // Break early if a certificate was formed
             if self.confirmed.contains_key(&height) {
@@ -471,42 +467,56 @@ impl<
         }
 
         // Sign my own ack
-        let ack = self.sign_ack(height, digest).await?;
+        let signed;
+        (self, signed) = self.sign_ack(height, digest).await;
+        let Some(ack) = signed else {
+            return self;
+        };
 
         // Set the rebroadcast deadline for this height
         self.rebroadcast_deadlines
             .put(height, self.context.current() + self.rebroadcast_timeout);
 
         // Handle ack as if it was received over the network
-        let _ = self.handle_ack(&ack).await;
+        (self, _) = self.handle_ack(&ack).await;
 
         // Send ack over the network.
         self.broadcast(ack, sender);
 
-        Ok(())
+        self
     }
 
     /// Handles an ack.
     ///
-    /// Returns an error if the ack is invalid, or can be ignored (e.g. already exists, certificate
-    /// already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &Ack<P::Scheme, D>) -> Result<(), Error> {
+    /// Returns whether the ack was accepted. An ack is rejected if it is invalid or
+    /// inapplicable (e.g. unknown scheme, non-pending height, digest mismatch).
+    /// Duplicate acks are accepted as no-ops.
+    async fn handle_ack(mut self, ack: &Ack<P::Scheme, D>) -> (Self, bool) {
         // Get the quorum (from scheme participants for the ack's epoch)
-        let scheme = self.scheme(ack.epoch)?;
-        let quorum = scheme.participants().quorum::<N3f1>();
+        let scheme = match self.scheme(ack.epoch) {
+            Ok(scheme) => scheme,
+            Err(err) => {
+                debug!(?err, epoch = %ack.epoch, signer = %ack.attestation.signer, "ack for unknown scheme");
+                return (self, false);
+            }
+        };
+        let quorum = usize::try_from(scheme.participants().quorum::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
             None => {
                 // If the height is not in the pending pool, it may be confirmed
                 // (i.e. we have a certificate for it).
-                return Err(Error::AckHeight(ack.item.height));
+                debug!(height = %ack.item.height, signer = %ack.attestation.signer, "ack height not pending");
+                return (self, false);
             }
             Some(Pending::Unverified(acks)) => acks,
             Some(Pending::Verified(digest, acks)) => {
                 // If we have a verified digest, ensure the ack matches it
                 if ack.item.digest != *digest {
-                    return Err(Error::AckDigest(ack.item.height));
+                    debug!(height = %ack.item.height, signer = %ack.attestation.signer, "ack digest mismatch");
+                    return (self, false);
                 }
                 acks
             }
@@ -515,7 +525,7 @@ impl<
         // Add the attestation (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
         if acks.contains_key(&ack.attestation.signer) {
-            return Ok(());
+            return (self, true);
         }
         acks.insert(ack.attestation.signer, ack.clone());
 
@@ -524,22 +534,25 @@ impl<
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
             .collect::<Vec<_>>();
-        if filtered.len() >= quorum as usize {
-            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &self.strategy) {
-                self.metrics.certificates.inc();
-                self.handle_certificate(certificate).await;
-            }
+        if filtered.len() >= quorum {
+            // Every stored acknowledgement is verified and signer-unique, so a same-item quorum
+            // satisfies the certificate scheme's assembly contract.
+            let certificate =
+                Certificate::from_acks(&*scheme, non_empty![@filtered], &self.strategy)
+                    .expect("verified acknowledgement quorum must assemble");
+            self.metrics.certificates.inc();
+            self = self.handle_certificate(certificate).await;
         }
 
-        Ok(())
+        (self, true)
     }
 
     /// Handles a certificate.
-    async fn handle_certificate(&mut self, certificate: Certificate<P::Scheme, D>) {
+    async fn handle_certificate(mut self, certificate: Certificate<P::Scheme, D>) -> Self {
         // Check if we already have the certificate
         let height = certificate.item.height;
         if self.confirmed.contains_key(&height) {
-            return;
+            return self;
         }
 
         // Store the certificate
@@ -547,8 +560,7 @@ impl<
 
         // Journal and notify the automaton
         let certified = Activity::Certified(certificate);
-        self.record(certified.clone()).await;
-        self.sync(height).await;
+        self = self.record(certified.clone()).await.sync(height).await;
         self.reporter.report(certified);
 
         // Increase the tip if needed
@@ -561,36 +573,52 @@ impl<
 
             // If the next tip is larger, try to fast-forward the tip (may not be possible)
             if new_tip > self.tip {
-                self.fast_forward_tip(new_tip).await;
+                self = self.fast_forward_tip(new_tip).await;
             }
         }
+
+        self
     }
 
     /// Handles a rebroadcast request for the given height.
     async fn handle_rebroadcast(
-        &mut self,
+        mut self,
         height: Height,
         sender: &mut WrappedSender<
             impl Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
-    ) -> Result<(), Error> {
+    ) -> Self {
         let Some(Pending::Verified(digest, acks)) = self.pending.get(&height) else {
             // The height may already be confirmed; continue silently if so
-            return Ok(());
+            return self;
         };
+        let digest = *digest;
 
         // Get our signature
-        let scheme = self.scheme(self.epoch)?;
-        let Some(signer) = scheme.me() else {
-            return Err(Error::NotSigner(self.epoch));
+        let epoch = self.epoch;
+        let scheme = match self.scheme(epoch) {
+            Ok(scheme) => scheme,
+            Err(err) => {
+                warn!(?err, %height, "cannot rebroadcast: unknown scheme");
+                return self;
+            }
         };
-        let ack = acks
-            .get(&self.epoch)
-            .and_then(|acks| acks.get(&signer).cloned());
+        let Some(signer) = scheme.me() else {
+            warn!(%epoch, %height, "cannot rebroadcast: not a signer");
+            return self;
+        };
+        let ack = acks.get(&epoch).and_then(|acks| acks.get(&signer).cloned());
         let ack = match ack {
             Some(ack) => ack,
-            None => self.sign_ack(height, *digest).await?,
+            None => {
+                let signed;
+                (self, signed) = self.sign_ack(height, digest).await;
+                match signed {
+                    Some(ack) => ack,
+                    None => return self,
+                }
+            }
         };
 
         // Reinsert the height with a new deadline
@@ -600,7 +628,7 @@ impl<
         // Broadcast the ack to all peers
         self.broadcast(ack, sender);
 
-        Ok(())
+        self
     }
 
     // ---------- Validation ----------
@@ -702,22 +730,32 @@ impl<
     }
 
     /// Signs an ack for the given height, and digest. Stores the ack in the journal and returns it.
-    /// Returns an error if the share is unknown at the current epoch.
-    async fn sign_ack(&mut self, height: Height, digest: D) -> Result<Ack<P::Scheme, D>, Error> {
-        let scheme = self.scheme(self.epoch)?;
-        if scheme.me().is_none() {
-            return Err(Error::NotSigner(self.epoch));
-        }
+    /// Returns `None` if this node cannot sign at the current epoch.
+    async fn sign_ack(mut self, height: Height, digest: D) -> (Self, Option<Ack<P::Scheme, D>>) {
+        let epoch = self.epoch;
+        let scheme = match self.scheme(epoch) {
+            Ok(scheme) => scheme,
+            Err(err) => {
+                warn!(?err, %height, "cannot sign ack: unknown scheme");
+                return (self, None);
+            }
+        };
 
         // Sign the item
         let item = Item { height, digest };
-        let ack = Ack::sign(&*scheme, self.epoch, item).ok_or(Error::NotSigner(self.epoch))?;
+        let Some(ack) = Ack::sign(&*scheme, epoch, item) else {
+            debug!(%epoch, %height, "cannot sign ack: not a signer");
+            return (self, None);
+        };
 
         // Journal the ack
-        self.record(Activity::Ack(ack.clone())).await;
-        self.sync(height).await;
+        self = self
+            .record(Activity::Ack(ack.clone()))
+            .await
+            .sync(height)
+            .await;
 
-        Ok(ack)
+        (self, Some(ack))
     }
 
     /// Broadcasts an ack to all peers with the appropriate priority.
@@ -757,7 +795,7 @@ impl<
     /// # Panics
     ///
     /// Panics if the given tip is less-than-or-equal-to the current tip.
-    async fn fast_forward_tip(&mut self, tip: Height) {
+    async fn fast_forward_tip(mut self, tip: Height) -> Self {
         assert!(tip > self.tip);
 
         // Prune data structures with buffer to prevent losing certificates
@@ -768,17 +806,19 @@ impl<
             .retain(|height, _| *height >= activity_threshold);
 
         // Add tip to journal
-        self.record(Activity::Tip(tip)).await;
-        self.sync(tip).await;
+        self = self.record(Activity::Tip(tip)).await.sync(tip).await;
         self.reporter.report(Activity::Tip(tip));
 
-        // Prune journal with buffer, ignoring errors
+        // Prune journal with buffer
         let section = self.get_journal_section(activity_threshold);
-        let journal = self.journal.as_mut().expect("journal must be initialized");
-        let _ = journal.prune(section).await;
+        rebind(&mut self.journal, |journal| journal.prune(section))
+            .await
+            .expect("unable to prune journal");
 
         // Update the tip
         self.tip = tip;
+
+        self
     }
 
     // ---------- Journal ----------
@@ -789,17 +829,22 @@ impl<
     }
 
     /// Replays the journal, updating the state of the engine.
-    /// Returns a list of unverified pending heights that need digest requests.
-    async fn replay(&mut self, journal: &Journal<E, Activity<P::Scheme, D>>) -> Vec<Height> {
+    /// Returns the journal and a list of unverified pending heights that need digest requests.
+    async fn replay(
+        &mut self,
+        journal: Journal<E, Activity<P::Scheme, D>>,
+    ) -> (Journal<E, Activity<P::Scheme, D>>, Vec<Height>) {
         let mut tip = Height::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
-        let stream = journal
-            .replay(0, 0, self.journal_replay_buffer)
+
+        // Replay rebuilds the engine's in-memory state, so journal pages need
+        // not remain in the OS page cache.
+        let mut replay = journal
+            .replay(0, 0, self.journal_replay_buffer, ReadOptions::DONT_CACHE)
             .await
             .expect("replay failed");
-        pin_mut!(stream);
-        while let Some(msg) = stream.next().await {
+        while let Some(msg) = replay.next().await {
             let (_, _, _, activity) = msg.expect("replay failed");
             match activity {
                 Activity::Tip(height) => {
@@ -903,29 +948,115 @@ impl<
         }
         info!(tip = %self.tip, %next, ?unverified, "replayed journal");
 
-        unverified
+        (replay.finish().expect("replay failed"), unverified)
     }
 
     /// Appends an activity to the journal.
-    async fn record(&mut self, activity: Activity<P::Scheme, D>) {
+    async fn record(mut self, activity: Activity<P::Scheme, D>) -> Self {
         let height = match activity {
             Activity::Ack(ref ack) => ack.item.height,
             Activity::Certified(ref certificate) => certificate.item.height,
             Activity::Tip(h) => h,
         };
         let section = self.get_journal_section(height);
-        self.journal
-            .as_mut()
-            .expect("journal must be initialized")
-            .append(section, &activity)
-            .await
-            .expect("unable to append to journal");
+        rebind(&mut self.journal, |journal| {
+            journal.append(section, &activity)
+        })
+        .await
+        .expect("unable to append to journal");
+        self
     }
 
     /// Syncs (ensures all data is written to disk).
-    async fn sync(&mut self, height: Height) {
+    async fn sync(mut self, height: Height) -> Self {
         let section = self.get_journal_section(height);
-        let journal = self.journal.as_mut().expect("journal must be initialized");
-        journal.sync(section).await.expect("unable to sync journal");
+        rebind(&mut self.journal, |journal| journal.sync(section))
+            .await
+            .expect("unable to sync journal");
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        aggregation::{mocks, scheme::ed25519},
+        simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
+    };
+    use commonware_actor::Feedback;
+    use commonware_cryptography::{Hasher as _, Sha256, certificate::mocks::Fixture};
+    use commonware_p2p::Blocker;
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    };
+    use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
+
+    #[derive(Clone)]
+    struct NoopBlocker;
+
+    impl Blocker for NoopBlocker {
+        type PublicKey = commonware_cryptography::ed25519::PublicKey;
+
+        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "verified acknowledgement quorum must assemble")]
+    fn assembly_failure_panics() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"aggregation-recovery-failure", 4);
+            let provider = mocks::Provider::new();
+            assert!(provider.register(
+                epoch,
+                WrappedScheme::new(schemes[0].clone(), Behavior::RecoveryFailure),
+            ));
+            let (_, reporter) = mocks::Reporter::new(
+                context.child("reporter"),
+                WrappedScheme::new(verifier, Behavior::Honest),
+            );
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let mut engine = Engine::new(
+                context.child("engine"),
+                Config {
+                    monitor: mocks::Monitor::new(epoch),
+                    provider,
+                    automaton: mocks::Application::new(mocks::Strategy::Correct),
+                    reporter,
+                    blocker: NoopBlocker,
+                    priority_acks: false,
+                    rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
+                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                    window: NonZeroU64::new(1).unwrap(),
+                    activity_timeout: HeightDelta::new(10),
+                    journal_partition: "aggregation-recovery-failure".to_string(),
+                    journal_write_buffer: NZUsize!(4096),
+                    journal_replay_buffer: NZUsize!(4096),
+                    journal_heights_per_section: NonZeroU64::new(6).unwrap(),
+                    journal_compression: None,
+                    journal_page_cache: page_cache,
+                    strategy: Sequential,
+                },
+            );
+
+            let height = Height::new(0);
+            let digest = Sha256::hash(&[b"payload"]);
+            engine
+                .pending
+                .insert(height, Pending::Verified(digest, BTreeMap::new()));
+
+            for scheme in schemes.iter().take(3) {
+                let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
+                let ack = Ack::sign(&scheme, epoch, Item { height, digest }).unwrap();
+                (engine, _) = engine.handle_ack(&ack).await;
+            }
+        });
     }
 }

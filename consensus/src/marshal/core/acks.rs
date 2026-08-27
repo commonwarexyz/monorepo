@@ -1,6 +1,6 @@
 use super::Variant;
 use crate::types::Height;
-use commonware_utils::{futures::OptionFuture, Acknowledgement};
+use commonware_utils::{Acknowledgement, futures::OptionFuture};
 use futures::FutureExt;
 use pin_project::pin_project;
 use std::{
@@ -44,10 +44,14 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
         }
     }
 
-    /// Drops the current ack and all queued acks.
-    pub(super) fn clear(&mut self) {
-        self.current = None.into();
-        self.queue.clear();
+    /// Drops the current ack and all queued acks, returning their heights and commitments.
+    pub(super) fn clear(&mut self) -> Vec<(Height, V::Commitment)> {
+        let mut acks = Vec::with_capacity(self.queue.len() + usize::from(self.current.is_some()));
+        if let Some(ack) = self.current.take() {
+            acks.push((ack.height, ack.commitment));
+        }
+        acks.extend(self.queue.drain(..).map(|ack| (ack.height, ack.commitment)));
+        acks
     }
 
     /// Returns the currently armed ack future (if any) for `select_loop!`.
@@ -107,13 +111,13 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{mocks::block::Block, standard::Standard},
+        marshal::{mocks::block::EmptyBlock, standard::Standard},
         types::Height,
     };
     use commonware_cryptography::sha256::{Digest, Sha256};
     use commonware_utils::acknowledgement::Exact;
 
-    type TestBlock = Block<Digest, ()>;
+    type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
 
     fn digest(byte: u8) -> Digest {
@@ -178,7 +182,11 @@ mod tests {
         pending.enqueue(second);
         assert!(!pending.has_capacity());
 
-        pending.clear();
+        let acks = pending.clear();
+        assert_eq!(
+            acks,
+            vec![(Height::new(3), digest(1)), (Height::new(4), digest(2))]
+        );
         first_ack.acknowledge();
         second_ack.acknowledge();
 

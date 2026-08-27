@@ -13,3 +13,7 @@ hash = "fbf783e8550fe15cd7000f8185e1ca3bc9641ba0baf156ba6365d3b224e2222d"
 ["commonware_coding::zoda::tests::conformance::CodecConformance<WeakShard<Sha256Digest>>"]
 n_cases = 65536
 hash = "0571442797c611b3822c8a9c54138de9f54fc5b9daaf01796f611a5c74466710"
+
+["commonware_coding::zoda::tests::conformance::EncodeCheck"]
+n_cases = 256
+hash = "70f7c614f3f7cebfe5f8f7c25d88943e59f93a45b69afad10bde405e29303c39"

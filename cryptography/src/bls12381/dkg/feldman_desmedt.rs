@@ -111,6 +111,26 @@
 //! This can detect some recoverable operator errors, like storage misconfiguration (where a player has publicly
 //! acknowledged a private message but has no record of it in storage).
 //!
+//! ## Errors and Failures
+//!
+//! [`enum@Error`] reports invalid caller input or incomplete local state.
+//! [`DealerMessageError`] and [`PlayerAckError`] explain why live messages were
+//! rejected without attributing the failure to a participant. [`FaultReason`]
+//! describes invalid content in a configured dealer's signed log. [`Failure`]
+//! reports that the protocol round did not produce the requested result.
+//!
+//! These categories reflect the evidence available to each operation. A
+//! live-message error explains why input was rejected but does not establish who
+//! caused it. A [`FaultReason`] supports dealer attribution only for invalid
+//! content in a configured dealer's log authenticated by [`SignedDealerLog::check`].
+//!
+//! [`Failure::InsufficientLogs`] separates those faults from configured dealers
+//! with no usable log. A safe [`DealerLogSummary::TooManyReveals`] log is
+//! unavailable because it intentionally omits its results.
+//!
+//! [`Player::finalize`] can encounter either kind of problem, so it returns
+//! [`FinalizeError`] to distinguish a local [`enum@Error`] from a protocol [`Failure`].
+//!
 //! # Caveats
 //!
 //! ## Share Reveals
@@ -172,10 +192,35 @@
 //! construction is used.
 //!
 //! In practice:
-//! - [`Player::dealer_message`] returns `None` for invalid messages (implicit complaint)
-//! - [`Dealer::receive_player_ack`] validates acknowledgements
+//! - [`Player::dealer_message`] returns [`DealerMessageError`] for an invalid
+//!   message and `Ok(None)` for a benign duplicate
+//! - [`Dealer::receive_player_ack`] returns [`PlayerAckError`] when an
+//!   acknowledgement cannot be used
 //! - Other custom mechanisms can exclude dealers before calling [`observe`] or [`Player::finalize`],
 //!   to enforce other rules for "misbehavior" beyond what the DKG does already.
+//!
+//! ## Aggregate Degree
+//!
+//! For `n` players and at most `f` faults, the configured quorum is `n - f`, so dealer polynomials
+//! have degree `d = n - f - 1`. The aggregate must retain that exact degree; otherwise, fewer than
+//! `n - f` participants could recover the shared secret or produce a threshold signature.
+//!
+//! Every accepted dealer commitment has exact degree `d`, and a usable dealer log records one
+//! result for every player. At most `f` results can be Byzantine acknowledgements issued without
+//! verifying their shares. Every other result is either an honest acknowledgement of a verified
+//! share or a reveal verified against the commitment. The log therefore contains at least
+//! `n - f = d + 1` valid scalar evaluations, enough to determine the dealer's polynomial and the
+//! scalar behind every coefficient commitment.
+//!
+//! Whether selected commitments are summed during initial key generation or combined with non-zero
+//! Lagrange weights during resharing, the leading coefficient includes an independently sampled
+//! contribution from at least one honest dealer. Although
+//! [a rushing adversary](https://decentralizedthoughts.github.io/2019-06-07-modeling-the-adversary/#rushing)
+//! may observe the honest commitments before choosing its own, it must know every Byzantine
+//! coefficient scalar before those commitments can be selected. Choosing those scalars so their
+//! combined leading term cancels the honest contribution would require solving the discrete
+//! logarithm of the honest leading commitment (preventing any efficient adversary from forcing the
+//! aggregate below degree `d`).
 //!
 //! ## Non-Uniform Distribution
 //!
@@ -195,7 +240,9 @@
 //!
 //! ```
 //! use commonware_cryptography::bls12381::{
-//!     dkg::feldman_desmedt::{Dealer, Info, Logs, Player, SignedDealerLog, observe},
+//!     dkg::feldman_desmedt::{
+//!         Dealer, Info, Logs, Player, Reveal, SignedDealerLog, observe,
+//!     },
 //!     primitives::{variant::MinSig, sharing::Mode},
 //! };
 //! use commonware_cryptography::{ed25519, Signer};
@@ -226,7 +273,8 @@
 //!     b"application-namespace",
 //!     0,                        // round number
 //!     None,                     // no previous output (initial DKG)
-//!     Mode::default(),   // sharing mode
+//!     Mode::NonZeroCounter,     // sharing mode
+//!     Reveal::V1,               // revealed-share calculation
 //!     dealer_set.clone(),       // dealers
 //!     player_set.clone(),       // players
 //! )?;
@@ -259,7 +307,7 @@
 //!                 dealer_priv.public_key(),
 //!                 pub_msg.clone(),
 //!                 priv_msg,
-//!             ) {
+//!             )? {
 //!                 dealer.receive_player_ack(player_pk, ack)?;
 //!             }
 //!         }
@@ -298,15 +346,17 @@
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 
 use crate::{
+    BatchVerifier, PublicKey, Secret, Signer,
     bls12381::primitives::{
-        group::{Private, Scalar, Share},
+        group::{Private, Scalar, ScalarReadCfg, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
-    transcript::{Summary, Transcript},
-    BatchVerifier, PublicKey, Secret, Signer,
+    transcript::{Summary, Transcript, Version},
 };
-use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
+};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Ring as _},
     poly::{Interpolator, Poly},
@@ -315,11 +365,11 @@ use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
+    Faults, NZU32, Participant, TryCollect,
     ordered::{Map, Quorum, Set},
-    Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
 use thiserror::Error;
 
@@ -328,29 +378,33 @@ const SIG_ACK: &[u8] = b"ack";
 const SIG_LOG: &[u8] = b"log";
 const NOISE_PRE_VERIFY: &[u8] = b"pre_verify";
 
-/// The error type for the DKG protocol.
-///
-/// The only error which can happen through no fault of your own is
-/// [`Error::DkgFailed`].
-///
-/// [`Error::MissingPlayerDealing`] happens through mistakes or faults when the state
-/// of a player is restored after a crash.
-///
-/// The other errors are due to issues with configuration or misuse.
-#[derive(Debug, Error)]
+// Feldman satisfies V0's fixed-schema requirements: its application namespace is fixed, and every
+// later packet has a canonical encoding at a fixed position.
+const TRANSCRIPT_VERSION: Version = Version::V0;
+
+/// An error caused by invalid caller input or incomplete local state.
+#[derive(Clone, Debug, Error)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
     MissingDealerShare,
     #[error("player is not present in the list of players")]
-    UnknownPlayer,
-    #[error("dealer is not present in the previous list of players")]
-    UnknownDealer(String),
+    PlayerNotInRound,
+    #[error("dealer {0} is not present in the round")]
+    DealerNotInRound(String),
     #[error("invalid number of dealers: {0}")]
     NumDealers(usize),
     #[error("invalid number of players: {0}")]
     NumPlayers(usize),
-    #[error("dkg failed for some reason")]
-    DkgFailed,
+    /// The previous output is not internally consistent.
+    #[error("invalid previous DKG output")]
+    InvalidPreviousOutput,
+    /// A persisted dealing is invalid or stale relative to the selected dealer log.
+    #[error("invalid persisted dealing from dealer {dealer}")]
+    InvalidPersistedDealing {
+        /// Dealer associated with the invalid persisted dealing.
+        dealer: String,
+    },
+    /// The supplied logs are bound to a different DKG round.
     #[error("logs are bound to a different dkg round")]
     MismatchedLogs,
     /// The player's state is missing a dealing it should have.
@@ -362,6 +416,152 @@ pub enum Error {
     /// on disk, or missing, then this error can happen.
     #[error("missing player's dealing")]
     MissingPlayerDealing,
+}
+
+/// The reason a configured dealer's signed log proves a protocol fault.
+#[derive(Clone, Debug, Error)]
+pub enum FaultReason {
+    #[error("dealer log contains an acknowledgement signature that does not verify")]
+    InvalidAck,
+    #[error("dealer reveal does not match its commitment")]
+    InvalidReveal,
+    #[error("invalid dealer commitment degree: expected {expected}, got {actual}")]
+    InvalidCommitmentDegree {
+        /// The commitment degree required by the round.
+        expected: u32,
+        /// The commitment degree supplied by the dealer.
+        actual: u32,
+    },
+    #[error("dealer commitment does not match its previous share")]
+    MismatchedReshareCommitment,
+    #[error("dealer log player set does not match the round")]
+    MismatchedLogPlayers,
+    /// The dealer published explicit results containing too many reveals.
+    ///
+    /// A log that safely omits its results with [`DealerLogSummary::TooManyReveals`]
+    /// is unavailable, not faulty.
+    #[error("dealer log publishes too many reveals")]
+    ExcessiveReveals,
+}
+
+/// The reason an initial dealer message was rejected.
+///
+/// Initial dealer messages carry no dealer signature in this construction, so
+/// the caller is responsible for authenticating the `dealer` supplied to
+/// [`Player::dealer_message`]. The dealer later signs the public message as part
+/// of the [`SignedDealerLog`] produced by [`Dealer::finalize`].
+#[derive(Clone, Debug, Error)]
+pub enum DealerMessageError {
+    #[error("participant is not a dealer in this round")]
+    UnexpectedDealer,
+    #[error("invalid dealer commitment degree: expected {expected}, got {actual}")]
+    InvalidCommitmentDegree {
+        /// The commitment degree required by the round.
+        expected: u32,
+        /// The commitment degree supplied by the dealer.
+        actual: u32,
+    },
+    #[error("dealer commitment does not match its previous share")]
+    MismatchedReshareCommitment,
+    #[error("dealer share does not match its commitment")]
+    InvalidDealerShare,
+}
+
+/// The reason a live player acknowledgement was rejected.
+#[derive(Clone, Debug, Error)]
+pub enum PlayerAckError {
+    #[error("participant is not a player in this round")]
+    UnexpectedPlayer,
+    #[error("player acknowledgement signature does not match the dealer transcript")]
+    InvalidAck,
+}
+
+/// Failures determined solely from a dealer's public message.
+///
+/// The shared validator returns exactly these cases. Each validation boundary
+/// maps them into its operation-specific public error without widening that
+/// error's reachable variants.
+enum DealerPubMsgError {
+    /// The commitment degree differs from the degree required by the round.
+    InvalidCommitmentDegree { expected: u32, actual: u32 },
+    /// The commitment constant does not preserve the dealer's previous share.
+    MismatchedReshareCommitment,
+}
+
+// Live validation exposes the rejection without claiming signed-log evidence.
+impl From<DealerPubMsgError> for DealerMessageError {
+    fn from(error: DealerPubMsgError) -> Self {
+        match error {
+            DealerPubMsgError::InvalidCommitmentDegree { expected, actual } => {
+                Self::InvalidCommitmentDegree { expected, actual }
+            }
+            DealerPubMsgError::MismatchedReshareCommitment => Self::MismatchedReshareCommitment,
+        }
+    }
+}
+
+// Signed-log validation records the same rejection as dealer-authenticated evidence.
+impl From<DealerPubMsgError> for FaultReason {
+    fn from(error: DealerPubMsgError) -> Self {
+        match error {
+            DealerPubMsgError::InvalidCommitmentDegree { expected, actual } => {
+                Self::InvalidCommitmentDegree { expected, actual }
+            }
+            DealerPubMsgError::MismatchedReshareCommitment => Self::MismatchedReshareCommitment,
+        }
+    }
+}
+
+/// Non-fault outcome of checking a dealer log against a round.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DealerLogOutcome {
+    /// The configured dealer's log contains verified results.
+    Available,
+    /// The configured dealer omitted results to avoid excessive reveals.
+    Unavailable,
+}
+
+/// The reason a dealer log was rejected for a round.
+#[derive(Clone, Debug)]
+enum DealerLogError {
+    /// The supplied identity is not a dealer in the round.
+    UnexpectedDealer,
+    /// The configured dealer's signed log proves a protocol fault.
+    Fault(FaultReason),
+}
+
+/// A protocol round failure.
+#[derive(Debug, Error)]
+pub enum Failure<P> {
+    /// Too few usable dealer logs remain to complete the DKG.
+    #[error("insufficient usable dealer logs: required={required}, found={found}")]
+    InsufficientLogs {
+        /// Number of usable dealer logs required to complete the DKG.
+        required: u32,
+        /// Number of usable dealer logs found.
+        found: u32,
+        /// Configured dealers whose signed logs prove a protocol fault.
+        ///
+        /// Attribution assumes [`Logs::record`] receives only pairs returned by
+        /// [`SignedDealerLog::check`].
+        faults: Map<P, FaultReason>,
+        /// Configured dealers for which no usable log was available.
+        ///
+        /// This includes missing logs and logs that safely omit their results
+        /// because publishing them would reveal too many shares.
+        unavailable: Set<P>,
+    },
+}
+
+/// An error finalizing a player's DKG output and private share.
+#[derive(Debug, Error)]
+pub enum FinalizeError<P> {
+    /// The caller supplied invalid input or incomplete local state.
+    #[error(transparent)]
+    Error(#[from] Error),
+    /// The protocol round failed.
+    #[error(transparent)]
+    Failure(#[from] Failure<P>),
 }
 
 /// The output of a successful DKG.
@@ -403,7 +603,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
     /// Return the set of players whose shares may have been revealed.
     ///
-    /// These are players who had more than `max_faults` reveals.
+    /// These are players whose shares can be reconstructed from the selected dealer reveals.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
     }
@@ -492,16 +692,40 @@ where
     }
 }
 
+/// Revealed-share calculation used by a DKG ceremony.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Reveal {
+    /// Original calculation based on the number of players in the new sharing.
+    #[deprecated(note = "uses the new player set instead of the contributor set")]
+    V0 = 0,
+    /// Contributor-aware calculation based on the dealers or previous players.
+    V1 = 1,
+}
+
+#[allow(deprecated)]
+impl From<Reveal> for CodecMode {
+    fn from(reveal: Reveal) -> Self {
+        match reveal {
+            Reveal::V0 => mode!(0),
+            Reveal::V1 => mode!(1),
+        }
+    }
+}
+
 /// Information about the current round of the DKG.
 ///
 /// This is used to bind signatures to the current round, and to provide the
 /// information that dealers, players, and observers need to perform their actions.
+/// Every operation using an [`Info`] must use the same [`Faults`] implementation
+/// that constructed it. Reshares must retain that fault model across rounds.
 #[derive(Debug, Clone)]
 pub struct Info<V: Variant, P> {
     summary: Summary,
     round: u64,
     previous: Option<Output<V, P>>,
     mode: Mode,
+    reveal: Reveal,
     dealers: Set<P>,
     players: Set<P>,
 }
@@ -520,7 +744,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// However, if there is a previous round, we expect a share, hence `Result`.
     fn unwrap_or_random_share(
         &self,
-        mut rng: impl CryptoRngCore,
+        mut rng: impl CryptoRng,
         share: Option<Scalar>,
     ) -> Result<Scalar, Error> {
         let out = match (self.previous.as_ref(), share) {
@@ -554,75 +778,93 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         self.players.max_faults::<M>()
     }
 
-    fn player_index(&self, player: &P) -> Result<Participant, Error> {
-        self.players.index(player).ok_or(Error::UnknownPlayer)
-    }
-
-    fn dealer_index(&self, dealer: &P) -> Result<Participant, Error> {
-        self.dealers
-            .index(dealer)
-            .ok_or(Error::UnknownDealer(format!("{dealer:?}")))
-    }
-
-    fn player_scalar(&self, player: &P) -> Result<Scalar, Error> {
-        Ok(self
-            .mode
-            .scalar(self.num_players(), self.player_index(player)?)
-            .expect("player index should be < num_players"))
-    }
-
-    #[must_use]
-    fn check_dealer_pub_msg<M: Faults>(&self, dealer: &P, pub_msg: &DealerPubMsg<V>) -> bool {
-        if self.degree::<M>() != pub_msg.commitment.degree_exact() {
-            return false;
-        }
-        if let Some(previous) = self.previous.as_ref() {
-            let Some(share_commitment) = previous.share_commitment(dealer) else {
-                return false;
-            };
-            if *pub_msg.commitment.constant() != share_commitment {
-                return false;
+    fn reveal_threshold<M: Faults>(&self) -> u32 {
+        #[allow(deprecated)]
+        match self.reveal {
+            Reveal::V0 => self.players.max_faults::<M>() + 1,
+            Reveal::V1 => {
+                let max_faults = self.previous.as_ref().map_or_else(
+                    || self.dealers.max_faults::<M>(),
+                    |previous| previous.players.max_faults::<M>(),
+                );
+                self.required_commitments::<M>()
+                    .checked_sub(max_faults)
+                    .expect("a quorum must contain more participants than max_faults")
             }
         }
-        true
     }
 
-    #[must_use]
+    fn player_index(&self, player: &P) -> Option<Participant> {
+        self.players.index(player)
+    }
+
+    fn dealer_index(&self, dealer: &P) -> Option<Participant> {
+        self.dealers.index(dealer)
+    }
+
+    fn player_scalar(&self, player: &P) -> Option<Scalar> {
+        self.mode
+            .scalar(self.num_players(), self.player_index(player)?)
+    }
+
+    fn check_dealer_pub_msg<M: Faults>(
+        &self,
+        dealer: &P,
+        pub_msg: &DealerPubMsg<V>,
+    ) -> Result<(), DealerPubMsgError> {
+        let expected = self.degree::<M>();
+        let actual = pub_msg.commitment.degree_exact();
+        if expected != actual {
+            return Err(DealerPubMsgError::InvalidCommitmentDegree { expected, actual });
+        }
+        if let Some(previous) = self.previous.as_ref() {
+            let share_commitment = previous
+                .share_commitment(dealer)
+                .expect("Info::new validates previous output and dealer membership");
+            if *pub_msg.commitment.constant() != share_commitment {
+                return Err(DealerPubMsgError::MismatchedReshareCommitment);
+            }
+        }
+        Ok(())
+    }
+
     fn check_dealer_priv_msg(
         &self,
-        player: &P,
+        player: Participant,
         pub_msg: &DealerPubMsg<V>,
         priv_msg: &DealerPrivMsg,
     ) -> bool {
-        let Ok(scalar) = self.player_scalar(player) else {
-            return false;
-        };
+        let scalar = self
+            .mode
+            .scalar(self.num_players(), player)
+            .expect("Player::new validates the participant index");
         let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
         priv_msg
             .share
             .expose(|share| expected == V::Public::generator() * share)
     }
 
-    #[must_use]
     fn check_dealer_log<M: Faults, B: BatchVerifier<PublicKey = P>>(
         &self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
         round_transcript: &Transcript,
         dealer: &P,
         log: &DealerLog<V, P>,
-    ) -> bool {
-        if self.dealer_index(dealer).is_err() {
-            return false;
+    ) -> Result<DealerLogOutcome, DealerLogError> {
+        if self.dealer_index(dealer).is_none() {
+            return Err(DealerLogError::UnexpectedDealer);
         }
-        if !self.check_dealer_pub_msg::<M>(dealer, &log.pub_msg) {
-            return false;
-        }
-        let Some(results_iter) = log.zip_players(&self.players) else {
-            return false;
+        self.check_dealer_pub_msg::<M>(dealer, &log.pub_msg)
+            .map_err(|error| DealerLogError::Fault(error.into()))?;
+        let Some(results_iter) = log
+            .zip_players(&self.players)
+            .map_err(DealerLogError::Fault)?
+        else {
+            return Ok(DealerLogOutcome::Unavailable);
         };
         let ack_summary = transcript_for_ack(round_transcript, dealer, &log.pub_msg).summarize();
-        let mut ack_batch = B::new();
+        let mut ack_batch = B::new(self.players.len());
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
         let mut reveal_eval_points = Vec::new();
@@ -631,17 +873,17 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             match result {
                 AckOrReveal::Ack(ack) => {
                     if !ack_summary.add_to_batch(&mut ack_batch, player, &ack.sig) {
-                        return false;
+                        return Err(DealerLogError::Fault(FaultReason::InvalidAck));
                     }
                 }
                 AckOrReveal::Reveal(priv_msg) => {
                     reveal_count += 1;
                     if reveal_count > max_reveals {
-                        return false;
+                        return Err(DealerLogError::Fault(FaultReason::ExcessiveReveals));
                     }
-                    let Ok(player_scalar) = self.player_scalar(player) else {
-                        return false;
-                    };
+                    let player_scalar = self
+                        .player_scalar(player)
+                        .expect("log players were matched against the round");
                     let coeff = if reveal_count == 1 {
                         Scalar::one()
                     } else {
@@ -655,7 +897,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             }
         }
         if !ack_batch.verify(&mut *rng, strategy) {
-            return false;
+            return Err(DealerLogError::Fault(FaultReason::InvalidAck));
         }
         let lhs = log.pub_msg.commitment.lin_comb_eval(
             reveal_eval_points
@@ -663,7 +905,10 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                 .map(|(coeff, point)| (coeff, Cow::Owned(point))),
             strategy,
         );
-        lhs == V::Public::generator() * &reveal_sum
+        if lhs != V::Public::generator() * &reveal_sum {
+            return Err(DealerLogError::Fault(FaultReason::InvalidReveal));
+        }
+        Ok(DealerLogOutcome::Available)
     }
 }
 
@@ -671,9 +916,13 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// Create a new [`Info`].
     ///
     /// `namespace` must be provided to isolate different applications
-    /// performing DKGs from each other.
+    /// performing DKGs from each other. It must remain fixed across all rounds,
+    /// epochs, restarts, and participants in the protocol's lifetime.
     /// `round` should be a counter, always incrementing, even for failed DKGs.
-    /// `previous` should be the result of the previous successful DKG.
+    /// `previous` should be the result of the previous successful DKG. Its public sharing must
+    /// have a participant count matching its player set and an exact recovery threshold equal to
+    /// the fault-model quorum.
+    /// `reveal` selects the revealed-share calculation.
     /// `dealers` should be the list of public keys for the dealers. This MUST
     /// be a subset of the previous round's players.
     /// `players` should be the list of public keys for the players.
@@ -682,6 +931,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         round: u64,
         previous: Option<Output<V, P>>,
         mode: Mode,
+        reveal: Reveal,
         dealers: Set<P>,
         players: Set<P>,
     ) -> Result<Self, Error> {
@@ -693,29 +943,33 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return Err(Error::NumPlayers(players.len()));
         }
         if let Some(previous) = previous.as_ref() {
+            if Some(previous.public.total().get()) != u32::try_from(previous.players.len()).ok()
+                || previous.public.required() != previous.quorum::<M>()
+            {
+                return Err(Error::InvalidPreviousOutput);
+            }
             if let Some(unknown) = dealers
                 .iter()
                 .find(|d| previous.players.position(d).is_none())
             {
-                return Err(Error::UnknownDealer(format!("{unknown:?}")));
+                return Err(Error::DealerNotInRound(format!("{unknown:?}")));
             }
             if dealers.len() < previous.quorum::<M>() as usize {
                 return Err(Error::NumDealers(dealers.len()));
             }
         }
         let summary = {
-            let mut transcript = Transcript::new(NAMESPACE);
+            let mut transcript = Transcript::new(NAMESPACE, TRANSCRIPT_VERSION);
             transcript
                 .commit(namespace)
                 .commit(round.encode())
                 .commit(previous.encode())
                 .commit(dealers.encode())
                 .commit(players.encode());
-            // We want backwards compatibility with the default mode, which wasn't
-            // committed. The absence of the mode is thus treated as an implicit
-            // default in the transcript, so this is sound.
-            if mode != Mode::default() {
-                transcript.commit([mode as u8].as_slice());
+
+            // Record the selected polynomial evaluation and revealed-share calculations.
+            if let Some(modes) = modes![mode, reveal] {
+                transcript.commit(modes.encode());
             }
             transcript.summarize()
         };
@@ -724,6 +978,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             round,
             previous,
             mode,
+            reveal,
             dealers,
             players,
         })
@@ -819,7 +1074,10 @@ impl Read for DealerPrivMsg {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(ReadExt::read(buf)?))
+        Ok(Self::new(Scalar::read_cfg(
+            buf,
+            &ScalarReadCfg::RejectZero,
+        )?))
     }
 }
 
@@ -1106,15 +1364,15 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     fn zip_players<'a, 'b>(
         &'a self,
         players: &'b Set<P>,
-    ) -> Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>> {
+    ) -> Result<Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>>, FaultReason> {
         match &self.results {
-            DealerResult::TooManyReveals => None,
+            DealerResult::TooManyReveals => Ok(None),
             DealerResult::Ok(results) => {
                 // We don't check this on deserialization.
                 if results.keys() != players {
-                    return None;
+                    return Err(FaultReason::MismatchedLogPlayers);
                 }
-                Some(players.iter().zip(results.values().iter()))
+                Ok(Some(players.iter().zip(results.values().iter())))
             }
         }
     }
@@ -1264,7 +1522,7 @@ where
 }
 
 fn transcript_for_round<V: Variant, P: PublicKey>(info: &Info<V, P>) -> Transcript {
-    Transcript::resume(info.summary)
+    Transcript::resume(info.summary, TRANSCRIPT_VERSION)
 }
 
 fn transcript_for_ack<V: Variant, P: PublicKey>(
@@ -1293,12 +1551,11 @@ fn transcript_for_log<V: Variant, P: PublicKey>(
 pub struct Logs<V: Variant, P: PublicKey, M: Faults> {
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-    known: BTreeMap<P, bool>,
+    known: BTreeMap<P, Result<DealerLogOutcome, DealerLogError>>,
     phantom_m: PhantomData<M>,
 }
 
-// Keep the selected logs paired with the bound round info without repeating
-// the tuple shape at each `select` call site.
+// Selected logs stay paired with the round information against which they were validated.
 type SelectedLogs<V, P> = (Info<V, P>, Map<P, DealerLog<V, P>>);
 
 impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
@@ -1313,12 +1570,12 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     }
 
     fn check_dealers<B: BatchVerifier<PublicKey = P>>(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         info: &Info<V, P>,
         strategy: &impl Strategy,
         transcript: &Transcript,
         dealers: &[(&P, &DealerLog<V, P>)],
-    ) -> Vec<(P, bool)> {
+    ) -> Vec<(P, Result<DealerLogOutcome, DealerLogError>)> {
         let checks: Vec<_> = dealers
             .iter()
             .map(|&(dealer, log)| {
@@ -1333,10 +1590,11 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         // and also introduces a slow path if any dealer has a bad sig. This slow
         // path can easily be exercised by an adversary.
         strategy.map_collect_vec(checks, |(dealer, log, seed)| {
-            let mut local_rng = Transcript::resume(seed).noise(NOISE_PRE_VERIFY);
-            let valid =
+            let mut local_rng =
+                Transcript::resume(seed, TRANSCRIPT_VERSION).noise(NOISE_PRE_VERIFY);
+            let result =
                 info.check_dealer_log::<M, B>(&mut local_rng, strategy, transcript, &dealer, log);
-            (dealer, valid)
+            (dealer, result)
         })
     }
 
@@ -1344,6 +1602,10 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     ///
     /// Return `true` if the dealer was already present in the log, in which
     /// case its log will be replaced.
+    ///
+    /// This method does not authenticate the log. Faults reported by
+    /// [`Failure::InsufficientLogs`] are attributable only when `dealer` and
+    /// `log` are the pair returned by [`SignedDealerLog::check`].
     pub fn record(&mut self, dealer: P, log: DealerLog<V, P>) -> bool {
         self.known.remove(&dealer);
         self.logs.insert(dealer, log).is_some()
@@ -1359,7 +1621,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// each call.
     pub fn pre_verify<B: BatchVerifier<PublicKey = P>>(
         &mut self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
     ) {
         let required_commitments = self.info.required_commitments::<M>() as usize;
@@ -1376,8 +1638,8 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
                 break;
             };
             match self.known.get(dealer) {
-                Some(true) => need -= 1,
-                Some(false) => {}
+                Some(Ok(DealerLogOutcome::Available)) => need -= 1,
+                Some(_) => {}
                 None => {
                     need -= 1;
                     pending.push((dealer, log));
@@ -1385,15 +1647,16 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
             }
         }
 
-        // Verify the batch and update the known valid dealers.
+        // Verify the batch and update the known usable dealers.
         let pending_results =
             Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, &pending);
-        let mut all_pending_valid = true;
-        for (dealer, is_valid) in pending_results {
-            self.known.insert(dealer, is_valid);
-            all_pending_valid &= is_valid;
+        let mut all_pending_usable = true;
+        for (dealer, result) in pending_results {
+            let is_usable = matches!(result, Ok(DealerLogOutcome::Available));
+            self.known.insert(dealer, result);
+            all_pending_usable &= is_usable;
         }
-        if all_pending_valid {
+        if all_pending_usable {
             return;
         }
 
@@ -1408,8 +1671,8 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
             .filter(|(dealer, _)| !self.known.contains_key(*dealer))
             .collect();
         let results = Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, &remaining);
-        for (dealer, is_valid) in results {
-            self.known.insert(dealer, is_valid);
+        for (dealer, result) in results {
+            self.known.insert(dealer, result);
         }
     }
 
@@ -1418,20 +1681,57 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// This might return an error if there are not enough good logs that we can use.
     fn select<B: BatchVerifier<PublicKey = P>>(
         mut self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
-    ) -> Result<SelectedLogs<V, P>, Error> {
+    ) -> Result<SelectedLogs<V, P>, Failure<P>> {
         self.pre_verify::<B>(rng, strategy);
-        let required_commitments = self.info.required_commitments::<M>() as usize;
+        let required = self.info.required_commitments::<M>();
+        let required_count =
+            usize::try_from(required).expect("required commitments exceed usize::MAX");
         let out: Map<_, _> = self
             .logs
             .into_iter()
-            .filter(|(dealer, _)| matches!(self.known.get(dealer), Some(true)))
-            .take(required_commitments)
+            .filter(|(dealer, _)| {
+                matches!(
+                    self.known.get(dealer),
+                    Some(Ok(DealerLogOutcome::Available))
+                )
+            })
+            .take(required_count)
             .try_collect()
             .expect("dealers should be unique");
-        if out.len() < required_commitments {
-            return Err(Error::DkgFailed);
+        let found = u32::try_from(out.len()).expect("valid dealer count exceeds u32::MAX");
+        if found < required {
+            let unavailable =
+                self.info
+                    .dealers
+                    .iter()
+                    .filter(|dealer| match self.known.get(*dealer) {
+                        None
+                        | Some(Ok(DealerLogOutcome::Unavailable))
+                        | Some(Err(DealerLogError::UnexpectedDealer)) => true,
+                        Some(Ok(DealerLogOutcome::Available))
+                        | Some(Err(DealerLogError::Fault(_))) => false,
+                    })
+                    .cloned()
+                    .try_collect::<Set<_>>()
+                    .expect("configured dealers are unique");
+            let faults = self
+                .known
+                .into_iter()
+                .filter_map(|(dealer, result)| match result {
+                    Err(DealerLogError::Fault(fault)) => Some((dealer, fault)),
+                    Ok(DealerLogOutcome::Available | DealerLogOutcome::Unavailable)
+                    | Err(DealerLogError::UnexpectedDealer) => None,
+                })
+                .try_collect::<Map<_, _>>()
+                .expect("checked dealers are unique");
+            return Err(Failure::InsufficientLogs {
+                required,
+                found,
+                faults,
+                unavailable,
+            });
         }
         Ok((self.info, out))
     }
@@ -1469,13 +1769,14 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     #[allow(clippy::type_complexity)]
     pub fn start<M: Faults>(
-        mut rng: impl CryptoRngCore,
+        mut rng: impl CryptoRng,
         info: Info<V, S::PublicKey>,
         me: S,
         share: Option<Share>,
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
         // Check that this dealer is defined in the round.
-        info.dealer_index(&me.public_key())?;
+        info.dealer_index(&me.public_key())
+            .ok_or_else(|| Error::DealerNotInRound(format!("{:?}", me.public_key())))?;
         let share = info.unwrap_or_random_share(
             &mut rng,
             // We are extracting the private scalar from `Secret` protection because
@@ -1524,18 +1825,22 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ///
     /// Acknowledgements should really only be processed once per player,
     /// but this method is idempotent nonetheless.
+    ///
+    /// A rejection is not attributed to `player`: a signature mismatch can also
+    /// arise when a dealer equivocates and the player acknowledges a different
+    /// public message.
     pub fn receive_player_ack(
         &mut self,
         player: S::PublicKey,
         ack: PlayerAck<S::PublicKey>,
-    ) -> Result<(), Error> {
-        let res_mut = self
-            .results
-            .get_value_mut(&player)
-            .ok_or(Error::UnknownPlayer)?;
-        if self.transcript.verify(&player, &ack.sig) {
-            *res_mut = AckOrReveal::Ack(ack);
+    ) -> Result<(), PlayerAckError> {
+        let Some(res_mut) = self.results.get_value_mut(&player) else {
+            return Err(PlayerAckError::UnexpectedPlayer);
+        };
+        if !self.transcript.verify(&player, &ack.sig) {
+            return Err(PlayerAckError::InvalidAck);
         }
+        *res_mut = AckOrReveal::Ack(ack);
         Ok(())
     }
 
@@ -1563,32 +1868,34 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     }
 }
 
-struct ObserveInner<V: Variant, P: PublicKey> {
+struct Observe<V: Variant, P: PublicKey> {
     output: Output<V, P>,
     weights: Option<Interpolator<P, Scalar>>,
 }
 
-impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
+impl<V: Variant, P: PublicKey> Observe<V, P> {
     fn reckon<M: Faults>(
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
         strategy: &impl Strategy,
-    ) -> Result<Self, Error> {
-        // Track players with too many reveals
-        let max_faults = info.players.max_faults::<M>();
+    ) -> Self {
+        // Logs::select validated the shape of each selected log. Track player
+        // shares reconstructible from their dealer reveals.
+        let reveal_threshold = info.reveal_threshold::<M>();
         let mut reveal_counts: BTreeMap<P, u32> = BTreeMap::new();
         let mut revealed = Vec::new();
         for log in selected.values() {
-            let Some(iter) = log.zip_players(&info.players) else {
-                continue;
-            };
+            let iter = log
+                .zip_players(&info.players)
+                .expect("selected dealer log should match the round's players")
+                .expect("selected dealer log should contain usable results");
             for (player, result) in iter {
                 if !result.is_reveal() {
                     continue;
                 }
                 let count = reveal_counts.entry(player.clone()).or_insert(0);
                 *count += 1;
-                if *count == max_faults + 1 {
+                if *count == reveal_threshold {
                     revealed.push(player.clone());
                 }
             }
@@ -1621,9 +1928,14 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             let public = weights
                 .interpolate(&commitments, strategy)
                 .expect("select checks that enough points have been provided");
-            if previous.public().public() != public.constant() {
-                return Err(Error::DkgFailed);
-            }
+
+            // Public-message validation binds each commitment's constant term to the dealer's
+            // previous public share, so interpolating a valid subset must preserve the public key.
+            assert_eq!(
+                previous.public().public(),
+                public.constant(),
+                "selected reshare commitments must preserve the previous public key",
+            );
             (public, Some(weights))
         } else {
             let mut public = Poly::zero();
@@ -1640,7 +1952,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             players: info.players,
             revealed,
         };
-        Ok(Self { output, weights })
+        Self { output, weights }
     }
 }
 
@@ -1651,14 +1963,14 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 ///
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
-/// This will only ever return [`Error::DkgFailed`].
+/// Returns [`Failure::InsufficientLogs`] if too few usable dealer logs remain.
 pub fn observe<V: Variant, P: PublicKey, M: Faults, B: BatchVerifier<PublicKey = P>>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     logs: Logs<V, P, M>,
     strategy: &impl Strategy,
-) -> Result<Output<V, P>, Error> {
+) -> Result<Output<V, P>, Failure<P>> {
     let (info, selected) = logs.select::<B>(rng, strategy)?;
-    ObserveInner::<V, P>::reckon::<M>(info, selected, strategy).map(|x| x.output)
+    Ok(Observe::<V, P>::reckon::<M>(info, selected, strategy).output)
 }
 
 /// Represents a player in the DKG / reshare process.
@@ -1682,7 +1994,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     pub fn new(info: Info<V, S::PublicKey>, me: S) -> Result<Self, Error> {
         let me_pub = me.public_key();
         Ok(Self {
-            index: info.player_index(&me_pub)?,
+            index: info.player_index(&me_pub).ok_or(Error::PlayerNotInRound)?,
             me,
             me_pub,
             transcript: transcript_for_round(&info),
@@ -1706,16 +2018,19 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// and if any messages which should be present based on this player's actions
     /// in the log are missing, this method will return [`Error::MissingPlayerDealing`].
     ///
-    /// For example, if a particular private message containing a share is not
-    /// present in `msgs`, but we've already acknowledged it, and this has been
-    /// included in a public log, then this method will fail.
+    /// For example, if no private message from a dealer is present in `msgs`, but
+    /// we've already acknowledged one, and this has been included in a public log,
+    /// then this method will fail.
+    ///
     /// This method cannot catch all cases where state has been corrupted. In
     /// particular, if a dealer has not posted their log publicly yet, but has
     /// already received an ack, then this method cannot help in that case,
     /// but the issue still remains.
     ///
     /// The returned map contains the acknowledgements generated while replaying
-    /// `msgs`, keyed by dealer.
+    /// `msgs`, keyed by dealer. Invalid replayed messages return
+    /// [`Error::InvalidPersistedDealing`], because `msgs` is caller-supplied
+    /// persisted state rather than a live authenticated channel.
     #[allow(clippy::type_complexity)]
     pub fn resume<M: Faults>(
         info: Info<V, S::PublicKey>,
@@ -1727,13 +2042,21 @@ impl<V: Variant, S: Signer> Player<V, S> {
         let mut this = Self::new(info, me)?;
         let mut acks = BTreeMap::new();
         for (dealer, pub_msg, priv_msg) in msgs {
-            if let Some(ack) = this.dealer_message::<M>(dealer.clone(), pub_msg, priv_msg) {
-                acks.insert(dealer, ack);
+            match this.dealer_message::<M>(dealer.clone(), pub_msg, priv_msg) {
+                Ok(Some(ack)) => {
+                    acks.insert(dealer, ack);
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    return Err(Error::InvalidPersistedDealing {
+                        dealer: format!("{dealer:?}"),
+                    });
+                }
             }
         }
 
         // Have we emitted any valid acks, publicly recorded, for which we do
-        // not have the private message?
+        // not have a private message from the dealer?
         if logs.iter().any(|(dealer, log)| {
             let Some(ack) = log.get_ack(&this.me_pub) else {
                 return false;
@@ -1741,7 +2064,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             // Only trust this ack if the signature is valid for this round.
             transcript_for_ack(&this.transcript, dealer, &log.pub_msg)
                 .verify(&this.me_pub, &ack.sig)
-                && !acks.contains_key(dealer)
+                && !this.view.contains_key(dealer)
         }) {
             // If so, we have a problem, because we're missing a dealing that we're
             // supposed to have, and that we publicly committed to having.
@@ -1757,28 +2080,35 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// private message was not exposed to anyone else. A convenient way to
     /// provide this is by using an authenticated channel, e.g. via
     /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
+    ///
+    /// Returns [`DealerMessageError`] if the message is invalid, `Ok(None)` if a
+    /// message from this dealer was already processed, and `Ok(Some(_))` with
+    /// the acknowledgement otherwise. The error carries no attribution. A
+    /// transport-aware caller can apply its own attribution policy to `dealer`.
     pub fn dealer_message<M: Faults>(
         &mut self,
         dealer: S::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> Option<PlayerAck<S::PublicKey>> {
+    ) -> Result<Option<PlayerAck<S::PublicKey>>, DealerMessageError> {
         if self.view.contains_key(&dealer) {
-            return None;
+            return Ok(None);
         }
-        self.info.dealer_index(&dealer).ok()?;
-        if !self.info.check_dealer_pub_msg::<M>(&dealer, &pub_msg) {
-            return None;
+        if self.info.dealer_index(&dealer).is_none() {
+            return Err(DealerMessageError::UnexpectedDealer);
         }
+        self.info
+            .check_dealer_pub_msg::<M>(&dealer, &pub_msg)
+            .map_err(DealerMessageError::from)?;
         if !self
             .info
-            .check_dealer_priv_msg(&self.me_pub, &pub_msg, &priv_msg)
+            .check_dealer_priv_msg(self.index, &pub_msg, &priv_msg)
         {
-            return None;
+            return Err(DealerMessageError::InvalidDealerShare);
         }
         let sig = transcript_for_ack(&self.transcript, &dealer, &pub_msg).sign(&self.me);
         self.view.insert(dealer, (pub_msg, priv_msg));
-        Some(PlayerAck { sig })
+        Ok(Some(PlayerAck { sig }))
     }
 
     /// Finalize the player, producing an output, and a share.
@@ -1788,33 +2118,28 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// The exception is that if this function returns [`Error::MissingPlayerDealing`],
-    /// then [`observe`] will return `Ok`, because this error indicates that this
-    /// player's state has been corrupted, but the DKG has otherwise succeeded.
-    /// However, this player's share is not recoverable without external intervention.
+    /// The exception is that if this function returns [`FinalizeError::Error`]
+    /// containing [`Error::MissingPlayerDealing`] or
+    /// [`Error::InvalidPersistedDealing`], then [`observe`] will return `Ok`,
+    /// because these errors indicate that this player's state has been corrupted,
+    /// but the DKG has otherwise succeeded. However, this player's share is not
+    /// recoverable without external intervention.
     ///
-    /// Otherwise, this function returns [`Error::DkgFailed`] if the DKG fails, or
-    /// [`Error::MismatchedLogs`] if `logs` are bound to a different DKG round.
+    /// Otherwise, this function returns [`FinalizeError::Failure`] if the agreed
+    /// dealer logs cannot produce a DKG output, or
+    /// [`FinalizeError::Error`] containing [`Error::MismatchedLogs`] if `logs` are
+    /// bound to a different DKG round.
+    #[allow(clippy::type_complexity)]
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = S::PublicKey>>(
         self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         logs: Logs<V, S::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
-        // `Logs::select` verifies ack signatures, so any ack present in `selected`
-        // is trustworthy for this round/dealer/pub_msg transcript.
-        // If there's a log that contains an ack of ours, but no corresponding view,
-        // then we're missing a dealing.
+    ) -> Result<(Output<V, S::PublicKey>, Share), FinalizeError<S::PublicKey>> {
         if logs.info != self.info {
-            return Err(Error::MismatchedLogs);
+            return Err(Error::MismatchedLogs.into());
         }
         let (_, selected) = logs.select::<B>(rng, strategy)?;
-        if selected
-            .iter_pairs()
-            .any(|(d, l)| l.get_ack(&self.me_pub).is_some() && !self.view.contains_key(d))
-        {
-            return Err(Error::MissingPlayerDealing);
-        }
 
         // We are extracting the private scalars from `Secret` protection
         // because interpolation/summation needs owned scalars for polynomial
@@ -1824,26 +2149,31 @@ impl<V: Variant, S: Signer> Player<V, S> {
         let dealings = selected
             .iter_pairs()
             .map(|(dealer, log)| {
-                let share = self
-                    .view
-                    .get(dealer)
-                    .map(|(_, priv_msg)| priv_msg.share.clone().expose_unwrap())
-                    .unwrap_or_else(|| {
-                        log.get_reveal(&self.me_pub).map_or_else(
-                            || {
-                                unreachable!(
-                                    "Logs::select didn't check dealer reveal, or we're not a player?"
-                                )
-                            },
-                            |priv_msg| priv_msg.share.clone().expose_unwrap(),
-                        )
-                    });
-                (dealer.clone(), share)
+                // A selected ack carries no share and requires the exact persisted
+                // dealing. A validated reveal can replace missing or stale local state.
+                let persisted = self.view.get(dealer);
+                let share = match persisted {
+                    Some((pub_msg, priv_msg)) if pub_msg == &log.pub_msg => {
+                        priv_msg.share.clone().expose_unwrap()
+                    }
+                    _ => match log.get_reveal(&self.me_pub) {
+                        Some(priv_msg) => priv_msg.share.clone().expose_unwrap(),
+                        None if persisted.is_some() => {
+                            return Err(Error::InvalidPersistedDealing {
+                                dealer: format!("{dealer:?}"),
+                            });
+                        }
+                        None => return Err(Error::MissingPlayerDealing),
+                    },
+                };
+                Ok((dealer.clone(), share))
             })
+            .collect::<Result<Vec<_>, Error>>()?
+            .into_iter()
             .try_collect::<Map<_, _>>()
             .expect("Logs::select produces at most one entry per dealer");
-        let ObserveInner { output, weights } =
-            ObserveInner::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy)?;
+        let Observe { output, weights } =
+            Observe::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy);
         let private = weights.map_or_else(
             || {
                 let mut out = <Scalar as Additive>::zero();
@@ -1868,7 +2198,7 @@ pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
-    mut rng: impl CryptoRngCore,
+    mut rng: impl CryptoRng,
     mode: Mode,
     players: Set<P>,
 ) -> DealResult<V, P> {
@@ -1910,7 +2240,7 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
 /// the trouble of generating signing keys. The downside is that the result isn't
 /// compatible with subsequent DKGs, which need an [`Output`].
 pub fn deal_anonymous<V: Variant, M: Faults>(
-    rng: impl CryptoRngCore,
+    rng: impl CryptoRng,
     mode: Mode,
     n: NonZeroU32,
 ) -> (Sharing<V>, Vec<Share>) {
@@ -1923,17 +2253,17 @@ pub fn deal_anonymous<V: Variant, M: Faults>(
 mod test_plan {
     use super::*;
     use crate::{
+        PublicKey,
         bls12381::primitives::{
             ops::{self, threshold},
             variant::Variant,
         },
-        ed25519, PublicKey,
+        ed25519,
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{Faults, N3f1, TryCollect};
+    use commonware_utils::{Faults, N3f1, TestRng, TryCollect};
     use core::num::NonZeroI32;
-    use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
 
     /// Apply a mask to some bytes, returning whether or not a modification happened
@@ -1968,7 +2298,7 @@ mod test_plan {
             let mut summary_bs = info.summary.encode_mut();
             let modified = apply_mask(&mut summary_bs, &self.info_summary);
             let summary = Summary::read(&mut summary_bs)?;
-            Ok((modified, Transcript::resume(summary)))
+            Ok((modified, Transcript::resume(summary, TRANSCRIPT_VERSION)))
         }
 
         fn transcript_for_player_ack<V: Variant, P: PublicKey>(
@@ -2278,7 +2608,7 @@ mod test_plan {
         pub fn run<V: Variant>(self, seed: u64) -> anyhow::Result<()> {
             self.validate()?;
 
-            let mut rng = StdRng::seed_from_u64(seed);
+            let mut rng = TestRng::new(seed);
 
             // Generate keys for all participants (1-indexed to num_participants)
             let keys = (0..self.num_participants.get())
@@ -2332,7 +2662,8 @@ mod test_plan {
                     b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
                     i_round as u64,
                     previous_output.clone(),
-                    Default::default(),
+                    Mode::NonZeroCounter,
+                    Reveal::V1,
                     dealer_set.clone(),
                     player_set.clone(),
                 )?;
@@ -2455,13 +2786,15 @@ mod test_plan {
 
                         let i_player = players
                             .index(&player_pk)
-                            .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
+                            .ok_or_else(|| anyhow!("unknown player: {:?}", player_pk))?;
                         let player_key_idx = pk_to_key_idx[&player_pk];
                         let player = &mut players.values_mut()[usize::from(i_player)];
                         let persisted = priv_msg.clone();
 
-                        let ack =
-                            player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg);
+                        let ack = player
+                            .dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
+                            .ok()
+                            .flatten();
                         assert_eq!(ack, ReadExt::read(&mut ack.encode())?);
                         if let Some(ack) = ack {
                             acked_dealings
@@ -2524,7 +2857,7 @@ mod test_plan {
                                 let player_pk = keys[i_player as usize].public_key();
                                 *results
                                     .get_value_mut(&player_pk)
-                                    .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))? =
+                                    .ok_or_else(|| anyhow!("unknown player: {:?}", player_pk))? =
                                     AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::random(
                                         &mut rng,
                                     )));
@@ -2547,7 +2880,7 @@ mod test_plan {
                         let missing_pk = keys[missing_dealer as usize].public_key();
                         let missing_log = dealer_logs
                             .get(&missing_pk)
-                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", &missing_pk));
+                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", missing_pk));
                         for &i_player in &round.players {
                             let player_pk = keys[i_player as usize].public_key();
                             let was_acked = missing_log.get_ack(&player_pk).is_some();
@@ -2687,7 +3020,7 @@ mod test_plan {
                         let dealer_pk = keys[dealer_idx as usize].public_key();
                         let dealer_log = dealer_logs
                             .get(&dealer_pk)
-                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", &dealer_pk));
+                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", dealer_pk));
                         if dealer_log.get_ack(&player_pk).is_none() {
                             continue;
                         }
@@ -2716,7 +3049,10 @@ mod test_plan {
                             &Sequential,
                         );
                         assert!(
-                            matches!(finalize_res, Err(Error::MissingPlayerDealing)),
+                            matches!(
+                                finalize_res,
+                                Err(FinalizeError::Error(Error::MissingPlayerDealing))
+                            ),
                             "finalize without dealer {dealer_idx} message should return MissingPlayerDealing for player {i_player}"
                         );
                         tested += 1;
@@ -2745,11 +3081,15 @@ mod test_plan {
                 }
 
                 // Verify each player's revealed status
-                let max_faults = selected_players.max_faults::<N3f1>();
+                let reveal_threshold = info.reveal_threshold::<N3f1>();
                 for player in player_set.iter() {
-                    let expected = expected_reveals.get(player).copied().unwrap_or(0) > max_faults;
+                    let expected =
+                        expected_reveals.get(player).copied().unwrap_or(0) >= reveal_threshold;
                     let actual = observer_output.revealed().position(player).is_some();
-                    assert_eq!(expected, actual, "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})");
+                    assert_eq!(
+                        expected, actual,
+                        "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})"
+                    );
                 }
 
                 // Finalize each player
@@ -2810,7 +3150,7 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum::<N3f1>();
-                let threshold_sig = threshold::recover::<V, _, N3f1>(
+                let threshold_sig = threshold::recover(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                     &Sequential,
@@ -2983,25 +3323,465 @@ mod test {
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_invariants::minifuzz;
-    use commonware_math::algebra::Random;
-    use commonware_utils::{test_rng, test_rng_seeded, Faults, N3f1};
+    use commonware_utils::{N3f1, TestRng, test_rng};
     use core::num::NonZeroI32;
 
     const PRE_VERIFY_DEALERS: usize = 8;
     type PreVerifyLog = DealerLog<MinPk, ed25519::PublicKey>;
-    type PreVerifyLogs = Logs<MinPk, ed25519::PublicKey, QuorumTwo>;
+    type PreVerifyLogs = Logs<MinPk, ed25519::PublicKey, N3f1>;
 
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    struct QuorumTwo;
+    fn check_pre_verify_log(
+        info: &Info<MinPk, ed25519::PublicKey>,
+        dealer: &ed25519::PublicKey,
+        log: &PreVerifyLog,
+    ) -> Result<DealerLogOutcome, DealerLogError> {
+        let transcript = transcript_for_round(info);
+        PreVerifyLogs::check_dealers::<ed25519::Batch>(
+            &mut test_rng(),
+            info,
+            &Sequential,
+            &transcript,
+            &[(dealer, log)],
+        )
+        .pop()
+        .expect("one dealer should produce one check")
+        .1
+    }
 
-    impl Faults for QuorumTwo {
-        fn max_faults(n: impl num_traits::ToPrimitive) -> u32 {
-            let n = n
-                .to_u32()
-                .expect("n must be a non-negative integer that fits in u32");
-            assert!(n >= 2, "n must be at least 2");
-            n - 2
+    fn reshare_info(seed: u64) -> Info<MinPk, ed25519::PublicKey> {
+        let participants = (seed..seed + 4)
+            .map(ed25519::PrivateKey::from_seed)
+            .map(|key| key.public_key())
+            .try_collect::<Set<_>>()
+            .expect("participants must be unique");
+        let (previous, _) = deal::<MinPk, _, N3f1>(
+            TestRng::new(seed + 4),
+            Mode::NonZeroCounter,
+            participants.clone(),
+        )
+        .expect("previous dealing must succeed");
+        Info::new::<N3f1>(
+            b"specific-reshare-error-test",
+            1,
+            Some(previous),
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            participants.clone(),
+            participants,
+        )
+        .expect("reshare info must be valid")
+    }
+
+    fn pub_msg_with_different_constant(
+        info: &Info<MinPk, ed25519::PublicKey>,
+        expected: &<MinPk as Variant>::Public,
+        seed: u64,
+    ) -> DealerPubMsg<MinPk> {
+        let degree = info.degree::<N3f1>();
+        let mut pub_msg = DealerPubMsg::<MinPk> {
+            commitment: Poly::commit(Poly::new_with_constant(
+                TestRng::new(seed),
+                degree,
+                Scalar::zero(),
+            )),
+        };
+        if pub_msg.commitment.constant() == expected {
+            pub_msg.commitment = Poly::commit(Poly::new_with_constant(
+                TestRng::new(seed),
+                degree,
+                Scalar::one(),
+            ));
         }
+        assert_eq!(pub_msg.commitment.degree_exact(), degree);
+        assert_ne!(pub_msg.commitment.constant(), expected);
+        pub_msg
+    }
+
+    #[test]
+    fn info_rejects_inconsistent_previous_output() {
+        let participants = (0..4)
+            .map(ed25519::PrivateKey::from_seed)
+            .map(|key| key.public_key())
+            .try_collect::<Set<_>>()
+            .expect("participants must be unique");
+        let (previous, _) =
+            deal::<MinPk, _, N3f1>(TestRng::new(4), Mode::NonZeroCounter, participants.clone())
+                .expect("previous dealing must succeed");
+
+        let mut wrong_total = previous.clone();
+        wrong_total.public = Sharing::<MinPk>::new(
+            Mode::NonZeroCounter,
+            NZU32!(1),
+            Poly::commit(Poly::<Scalar>::new(TestRng::new(5), 2)),
+        );
+
+        let mut excessive_degree = previous;
+        excessive_degree.public = Sharing::<MinPk>::new(
+            Mode::NonZeroCounter,
+            NZU32!(4),
+            Poly::commit(Poly::<Scalar>::new(TestRng::new(6), 3)),
+        );
+
+        // Matching the participant count is insufficient when the recovery threshold does not
+        // match the configured fault model.
+        let mut lower_threshold = excessive_degree.clone();
+        lower_threshold.public = Sharing::<MinPk>::new(
+            Mode::NonZeroCounter,
+            NZU32!(4),
+            Poly::commit(Poly::<Scalar>::new(TestRng::new(7), 1)),
+        );
+        assert_eq!(lower_threshold.public.required(), 2);
+        assert_eq!(lower_threshold.quorum::<N3f1>(), 3);
+
+        for previous in [wrong_total, excessive_degree, lower_threshold] {
+            assert!(matches!(
+                Info::<MinPk, _>::new::<N3f1>(
+                    b"invalid-previous-output-test",
+                    1,
+                    Some(previous),
+                    Mode::NonZeroCounter,
+                    Reveal::V1,
+                    participants.clone(),
+                    participants.clone(),
+                ),
+                Err(Error::InvalidPreviousOutput)
+            ));
+        }
+    }
+
+    fn is_revealed_after(
+        reveal: Reveal,
+        dealer_count: usize,
+        player_count: usize,
+        reveal_count: usize,
+    ) -> bool {
+        let keys: Vec<_> = (0..dealer_count + player_count)
+            .map(|seed| ed25519::PrivateKey::from_seed(seed as u64 + 1_000))
+            .collect();
+        let dealer_keys = &keys[..dealer_count];
+        let player_keys = &keys[dealer_count..];
+        let dealers: Set<_> = dealer_keys
+            .iter()
+            .map(|key| key.public_key())
+            .try_collect()
+            .expect("dealers must be unique");
+        let players: Set<_> = player_keys
+            .iter()
+            .map(|key| key.public_key())
+            .try_collect()
+            .expect("players must be unique");
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"reveal-threshold-test",
+            0,
+            None,
+            Mode::NonZeroCounter,
+            reveal,
+            dealers,
+            players,
+        )
+        .expect("info must be valid");
+        let target = player_keys[0].public_key();
+        let player_keys: BTreeMap<_, _> = player_keys
+            .iter()
+            .cloned()
+            .map(|key| (key.public_key(), key))
+            .collect();
+
+        let required = usize::try_from(info.required_commitments::<N3f1>())
+            .expect("required commitments exceed usize::MAX");
+        let mut selected = Vec::new();
+        for (dealer_number, dealer_key) in dealer_keys.iter().take(required).enumerate() {
+            let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<N3f1>(
+                TestRng::new(dealer_number as u64),
+                info.clone(),
+                dealer_key.clone(),
+                None,
+            )
+            .expect("dealer must start");
+            for (player, priv_msg) in priv_msgs {
+                if dealer_number < reveal_count && player == target {
+                    continue;
+                }
+                let mut receiver = Player::<MinPk, _>::new(
+                    info.clone(),
+                    player_keys.get(&player).expect("player must exist").clone(),
+                )
+                .expect("player must initialize");
+                let ack = receiver
+                    .dealer_message::<N3f1>(dealer_key.public_key(), pub_msg.clone(), priv_msg)
+                    .expect("dealing must be valid")
+                    .expect("dealing must be new");
+                dealer
+                    .receive_player_ack(player, ack)
+                    .expect("ack must be valid");
+            }
+            selected.push(
+                dealer
+                    .finalize::<N3f1>()
+                    .check(&info)
+                    .expect("dealer log must verify"),
+            );
+        }
+        let selected = selected
+            .into_iter()
+            .try_collect::<Map<_, _>>()
+            .expect("dealers must be unique");
+        let output = Observe::reckon::<N3f1>(info, selected, &Sequential).output;
+
+        output.revealed().position(&target).is_some()
+    }
+
+    #[test]
+    fn reveal_threshold_uses_dealer_set_when_dealers_are_fewer() {
+        assert!(is_revealed_after(Reveal::V1, 4, 10, 2));
+    }
+
+    #[test]
+    fn reveal_threshold_uses_dealer_set_when_dealers_are_more() {
+        assert!(!is_revealed_after(Reveal::V1, 13, 4, 4));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_reveal_threshold_uses_player_set() {
+        assert!(!is_revealed_after(Reveal::V0, 4, 10, 2));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn reveal_v1_is_committed_to_summary() {
+        // Exercise both sharing modes so each non-legacy selector combination must
+        // identify a distinct ceremony.
+        let participants = (0..4)
+            .map(ed25519::PrivateKey::from_seed)
+            .map(|key| key.public_key())
+            .try_collect::<Set<_>>()
+            .expect("participants must be unique");
+        let info = |mode, reveal| {
+            Info::<MinPk, _>::new::<N3f1>(
+                b"reveal-version-transcript-test",
+                0,
+                None,
+                mode,
+                reveal,
+                participants.clone(),
+                participants.clone(),
+            )
+            .expect("info must be valid")
+        };
+        let v0_non_zero = info(Mode::NonZeroCounter, Reveal::V0);
+        let v0_roots = info(Mode::RootsOfUnity, Reveal::V0);
+        let v1_non_zero = info(Mode::NonZeroCounter, Reveal::V1);
+        let v1_roots = info(Mode::RootsOfUnity, Reveal::V1);
+
+        // Every selector combination identifies a distinct ceremony. The cross-pair
+        // checks prevent the compact selector encodings from aliasing.
+        assert_ne!(v0_non_zero.summary, v0_roots.summary);
+        assert_ne!(v0_non_zero.summary, v1_non_zero.summary);
+        assert_ne!(v0_non_zero.summary, v1_roots.summary);
+        assert_ne!(v0_roots.summary, v1_non_zero.summary);
+        assert_ne!(v0_roots.summary, v1_roots.summary);
+        assert_ne!(v1_non_zero.summary, v1_roots.summary);
+
+        // Info identity follows the ceremony summary.
+        assert_ne!(v0_non_zero, v1_non_zero);
+        assert_ne!(v0_roots, v1_roots);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn reveals_reject_cross_configured_logs() {
+        // Hold every other ceremony input constant and vary only the revealed-share
+        // calculation.
+        let dealer = ed25519::PrivateKey::from_seed(0);
+        let participants: Set<ed25519::PublicKey> = vec![dealer.public_key()]
+            .try_into()
+            .expect("participant must be unique");
+        let info = |reveal| {
+            Info::<MinPk, _>::new::<N3f1>(
+                b"reveal-version-signature-test",
+                0,
+                None,
+                Mode::NonZeroCounter,
+                reveal,
+                participants.clone(),
+                participants.clone(),
+            )
+            .expect("info must be valid")
+        };
+        let v0 = info(Reveal::V0);
+        let v1 = info(Reveal::V1);
+
+        // A V0 log remains valid in its ceremony but cannot enter a V1 ceremony.
+        let (dealer, _, _) = Dealer::start::<N3f1>(TestRng::new(0), v0.clone(), dealer, None)
+            .expect("dealer must start");
+        let log = dealer.finalize::<N3f1>();
+
+        assert!(log.clone().check(&v0).is_some());
+        assert!(log.check(&v1).is_none());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn observers_match_players_for_each_reveal_calculation() {
+        fn outputs(
+            reveal: Reveal,
+        ) -> (
+            Output<MinPk, ed25519::PublicKey>,
+            Output<MinPk, ed25519::PublicKey>,
+            ed25519::PublicKey,
+        ) {
+            const DEALER_COUNT: usize = 4;
+            const PLAYER_COUNT: usize = 10;
+            const SELECTED_DEALERS: usize = 3;
+            const TARGET_REVEALS: usize = 2;
+
+            // Two revealed dealings cross V1's dealer threshold but not V0's player
+            // threshold, making the selected calculation observable in the output.
+            let keys: Vec<_> = (0..DEALER_COUNT + PLAYER_COUNT)
+                .map(|seed| ed25519::PrivateKey::from_seed(seed as u64 + 3_000))
+                .collect();
+            let dealer_keys = &keys[..DEALER_COUNT];
+            let player_keys = &keys[DEALER_COUNT..];
+            let dealers = dealer_keys
+                .iter()
+                .map(|key| key.public_key())
+                .try_collect()
+                .expect("dealers must be unique");
+            let players = player_keys
+                .iter()
+                .map(|key| key.public_key())
+                .try_collect()
+                .expect("players must be unique");
+            let info = Info::<MinPk, _>::new::<N3f1>(
+                b"public-reveal-calculation-test",
+                0,
+                None,
+                Mode::NonZeroCounter,
+                reveal,
+                dealers,
+                players,
+            )
+            .expect("info must be valid");
+            let target = player_keys[0].public_key();
+            let finalizer_key = player_keys[1].clone();
+            let finalizer = finalizer_key.public_key();
+            let player_keys: BTreeMap<_, _> = player_keys
+                .iter()
+                .cloned()
+                .map(|key| (key.public_key(), key))
+                .collect();
+            let mut verified_logs = BTreeMap::new();
+            let mut logs = Logs::<MinPk, _, N3f1>::new(info.clone());
+            let mut persisted = Vec::new();
+
+            // Build quorum logs while withholding the target's dealing from two dealers.
+            // Retain the finalizer's dealings so its player path can resume from the same logs.
+            for (dealer_number, dealer_key) in dealer_keys.iter().take(SELECTED_DEALERS).enumerate()
+            {
+                let dealer_pk = dealer_key.public_key();
+                let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<N3f1>(
+                    TestRng::new(dealer_number as u64 + 4_000),
+                    info.clone(),
+                    dealer_key.clone(),
+                    None,
+                )
+                .expect("dealer must start");
+                for (player, priv_msg) in priv_msgs {
+                    if dealer_number < TARGET_REVEALS && player == target {
+                        continue;
+                    }
+                    if player == finalizer {
+                        persisted.push((dealer_pk.clone(), pub_msg.clone(), priv_msg.clone()));
+                    }
+                    let mut receiver = Player::<MinPk, _>::new(
+                        info.clone(),
+                        player_keys.get(&player).expect("player must exist").clone(),
+                    )
+                    .expect("player must initialize");
+                    let ack = receiver
+                        .dealer_message::<N3f1>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
+                        .expect("dealing must be valid")
+                        .expect("dealing must be new");
+                    dealer
+                        .receive_player_ack(player, ack)
+                        .expect("ack must be valid");
+                }
+                let (dealer, log) = dealer
+                    .finalize::<N3f1>()
+                    .check(&info)
+                    .expect("dealer log must verify");
+                verified_logs.insert(dealer.clone(), log.clone());
+                logs.record(dealer, log);
+            }
+
+            // Run the selected logs through both the recovered-player and public-observer paths.
+            let (player, _) =
+                Player::resume::<N3f1>(info, finalizer_key, &verified_logs, persisted)
+                    .expect("player must resume");
+            let observed = observe::<MinPk, _, N3f1, ed25519::Batch>(
+                &mut test_rng(),
+                logs.clone(),
+                &Sequential,
+            )
+            .expect("observation must succeed");
+            let (finalized, _) = player
+                .finalize::<N3f1, ed25519::Batch>(&mut test_rng(), logs, &Sequential)
+                .expect("finalization must succeed");
+            (finalized, observed, target)
+        }
+
+        // Each calculation agrees across both paths, while target membership proves the
+        // configured threshold rule changes the result.
+        let (v1_finalized, v1_observed, v1_target) = outputs(Reveal::V1);
+        let (v0_finalized, v0_observed, v0_target) = outputs(Reveal::V0);
+
+        assert_eq!(v1_finalized, v1_observed);
+        assert_eq!(v0_finalized, v0_observed);
+        assert!(v1_finalized.revealed().position(&v1_target).is_some());
+        assert!(v0_finalized.revealed().position(&v0_target).is_none());
+    }
+
+    #[test]
+    fn reveal_threshold_uses_previous_players_during_reshare() {
+        let keys: Vec<_> = (0..14)
+            .map(|seed| ed25519::PrivateKey::from_seed(seed + 2_000))
+            .collect();
+        let previous_players = keys[..10]
+            .iter()
+            .map(|key| key.public_key())
+            .try_collect::<Set<_>>()
+            .expect("previous players must be unique");
+        let (previous, _) = deal::<MinPk, _, N3f1>(
+            TestRng::new(0),
+            Mode::NonZeroCounter,
+            previous_players.clone(),
+        )
+        .expect("previous dealing must succeed");
+        let dealers = previous_players
+            .iter()
+            .take(7)
+            .cloned()
+            .try_collect::<Set<_>>()
+            .expect("dealers must be unique");
+        let players = keys[10..]
+            .iter()
+            .map(|key| key.public_key())
+            .try_collect::<Set<_>>()
+            .expect("players must be unique");
+        let info = Info::new::<N3f1>(
+            b"reshare-reveal-threshold-test",
+            1,
+            Some(previous),
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            dealers,
+            players,
+        )
+        .expect("reshare info must be valid");
+
+        assert_eq!(info.required_commitments::<N3f1>(), 7);
+        assert_eq!(info.reveal_threshold::<N3f1>(), 4);
     }
 
     struct PreVerifyDealer {
@@ -3033,11 +3813,12 @@ mod test {
                     .map(|sk| sk.public_key())
                     .try_collect()
                     .expect("dealers must be unique");
-                Info::<MinPk, _>::new::<QuorumTwo>(
+                Info::<MinPk, _>::new::<N3f1>(
                     b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
                     round,
                     None,
-                    Default::default(),
+                    Mode::NonZeroCounter,
+                    Reveal::V1,
                     dealers.clone(),
                     dealers,
                 )
@@ -3065,22 +3846,23 @@ mod test {
 
                 let dealer_sk = keys[dealer_index].clone();
                 let dealer_pk = dealer_sk.public_key();
-                let mut rng = test_rng_seeded(seed);
+                let mut rng = TestRng::new(seed);
                 let (mut dealer, pub_msg, priv_msgs) =
-                    Dealer::start::<QuorumTwo>(&mut rng, info.clone(), dealer_sk, None)
+                    Dealer::start::<N3f1>(&mut rng, info.clone(), dealer_sk, None)
                         .expect("dealer initialization must succeed");
                 for (player_pk, priv_msg) in priv_msgs {
                     let ack = players
                         .get_mut(&player_pk)
                         .expect("player should exist")
-                        .dealer_message::<QuorumTwo>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
-                        .expect("dealer message must succeed");
+                        .dealer_message::<N3f1>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
+                        .expect("dealer message must succeed")
+                        .expect("dealer message must be new");
                     dealer
                         .receive_player_ack(player_pk, ack)
                         .expect("ack handling must succeed");
                 }
                 dealer
-                    .finalize::<QuorumTwo>()
+                    .finalize::<N3f1>()
                     .check(info)
                     .expect("signed dealer log must verify against its own info")
                     .1
@@ -3127,7 +3909,8 @@ mod test {
         }
 
         fn required_commitments(&self) -> usize {
-            self.info.required_commitments::<QuorumTwo>() as usize
+            usize::try_from(self.info.required_commitments::<N3f1>())
+                .expect("required commitments exceed usize::MAX")
         }
 
         fn expected(&self, valid: &[bool]) -> Set<ed25519::PublicKey> {
@@ -3267,6 +4050,175 @@ mod test {
     }
 
     #[test]
+    fn check_dealers_reports_invalid_reveal() {
+        let fixture = PreVerifyFixture::new();
+        let dealer = &fixture.dealers[0];
+        let mut log = dealer.valid.clone();
+        let DealerResult::Ok(results) = &mut log.results else {
+            panic!("valid fixture should contain player results");
+        };
+        let player = fixture.info.players.iter().next().unwrap().clone();
+        *results.get_value_mut(&player).unwrap() =
+            AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::zero()));
+
+        let result = check_pre_verify_log(&fixture.info, &dealer.key, &log);
+        assert!(matches!(
+            result,
+            Err(DealerLogError::Fault(FaultReason::InvalidReveal))
+        ));
+    }
+
+    #[test]
+    fn dealer_log_identifies_unexpected_dealer() {
+        let fixture = PreVerifyFixture::new();
+        let dealer = &fixture.dealers[0];
+        let stranger = ed25519::PrivateKey::from_seed(u64::MAX).public_key();
+        assert!(fixture.info.dealer_index(&stranger).is_none());
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &stranger, &dealer.valid),
+            Err(DealerLogError::UnexpectedDealer)
+        ));
+    }
+
+    #[test]
+    fn dealer_public_message_distinguishes_fault_reasons() {
+        let fixture = PreVerifyFixture::new();
+        let dealer = &fixture.dealers[0];
+        let expected = fixture.info.degree::<N3f1>();
+        let actual = 0;
+        assert_ne!(expected, actual);
+        let log = DealerLog {
+            pub_msg: DealerPubMsg::<MinPk> {
+                commitment: Poly::commit(Poly::new_with_constant(
+                    TestRng::new(10_000),
+                    actual,
+                    Scalar::one(),
+                )),
+            },
+            results: dealer.valid.results.clone(),
+        };
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &dealer.key, &log),
+            Err(DealerLogError::Fault(
+                FaultReason::InvalidCommitmentDegree {
+                    expected: error_expected,
+                    actual: error_actual,
+                }
+            )) if error_expected == expected && error_actual == actual
+        ));
+
+        let info = reshare_info(20_000);
+        let dealer = info.dealers.iter().next().unwrap().clone();
+        let expected = info
+            .previous
+            .as_ref()
+            .unwrap()
+            .share_commitment(&dealer)
+            .unwrap();
+        let pub_msg = pub_msg_with_different_constant(&info, &expected, 20_005);
+        let log = DealerLog {
+            pub_msg,
+            results: DealerResult::TooManyReveals,
+        };
+        assert!(matches!(
+            check_pre_verify_log(&info, &dealer, &log),
+            Err(DealerLogError::Fault(
+                FaultReason::MismatchedReshareCommitment
+            ))
+        ));
+    }
+
+    #[test]
+    fn dealer_public_message_distinguishes_live_errors() -> anyhow::Result<()> {
+        // Initial-round validation preserves the exact degree mismatch.
+        let fixture = PreVerifyFixture::new();
+        let dealer = fixture.dealers[0].key.clone();
+        let expected = fixture.info.degree::<N3f1>();
+        let actual = 0;
+        assert_ne!(expected, actual);
+        let pub_msg = DealerPubMsg::<MinPk> {
+            commitment: Poly::commit(Poly::new_with_constant(
+                TestRng::new(10_000),
+                actual,
+                Scalar::one(),
+            )),
+        };
+        let mut player = Player::new(fixture.info, ed25519::PrivateKey::from_seed(0))?;
+        assert!(matches!(
+            player.dealer_message::<N3f1>(
+                dealer,
+                pub_msg,
+                DealerPrivMsg::new(Scalar::zero()),
+            ),
+            Err(DealerMessageError::InvalidCommitmentDegree {
+                expected: error_expected,
+                actual: error_actual,
+            }) if error_expected == expected && error_actual == actual
+        ));
+
+        // Reshare validation preserves the previous-share mismatch.
+        let info = reshare_info(20_000);
+        let dealer = info.dealers.iter().next().unwrap().clone();
+        let expected = info
+            .previous
+            .as_ref()
+            .unwrap()
+            .share_commitment(&dealer)
+            .unwrap();
+        let pub_msg = pub_msg_with_different_constant(&info, &expected, 20_005);
+        let mut player = Player::new(info, ed25519::PrivateKey::from_seed(20_000))?;
+        assert!(matches!(
+            player.dealer_message::<N3f1>(dealer, pub_msg, DealerPrivMsg::new(Scalar::zero()),),
+            Err(DealerMessageError::MismatchedReshareCommitment)
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn dealer_log_distinguishes_unavailable_and_faulty_outcomes() {
+        let fixture = PreVerifyFixture::new();
+        let dealer = &fixture.dealers[0];
+
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &dealer.key, &dealer.valid),
+            Ok(DealerLogOutcome::Available)
+        ));
+
+        let mut log = dealer.valid.clone();
+        let DealerResult::Ok(results) = &mut log.results else {
+            panic!("valid fixture should contain player results");
+        };
+        results.truncate(results.len() - 1);
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &dealer.key, &log),
+            Err(DealerLogError::Fault(FaultReason::MismatchedLogPlayers))
+        ));
+
+        let mut log = dealer.valid.clone();
+        log.results = DealerResult::TooManyReveals;
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &dealer.key, &log),
+            Ok(DealerLogOutcome::Unavailable)
+        ));
+
+        let mut log = dealer.valid.clone();
+        let DealerResult::Ok(results) = &mut log.results else {
+            panic!("valid fixture should contain player results");
+        };
+        let excessive_reveals = usize::try_from(fixture.info.max_reveals::<N3f1>())
+            .expect("maximum reveals exceed usize::MAX")
+            + 1;
+        for result in results.values_mut().iter_mut().take(excessive_reveals) {
+            *result = AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::one()));
+        }
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &dealer.key, &log),
+            Err(DealerLogError::Fault(FaultReason::ExcessiveReveals))
+        ));
+    }
+
+    #[test]
     fn logs_are_bound_to_constructor_info() {
         let fixture = PreVerifyFixture::new();
         let mut logs = fixture.logs_for(&fixture.info, &[false; PRE_VERIFY_DEALERS]);
@@ -3281,13 +4233,119 @@ mod test {
                 .is_ok(),
             "control check: logs should verify when bound to the round they were created for"
         );
-        assert!(
-            matches!(
-                logs.select::<ed25519::Batch>(&mut rng, &Sequential),
-                Err(Error::DkgFailed)
-            ),
-            "logs bound to a different round must reject these transcript-bound signatures"
+        let Err(Failure::InsufficientLogs {
+            required,
+            found,
+            faults,
+            unavailable,
+        }) = observe::<MinPk, _, N3f1, ed25519::Batch>(&mut rng, logs, &Sequential)
+        else {
+            panic!("logs bound to a different round must fail reconciliation");
+        };
+        assert_eq!(
+            usize::try_from(required).expect("required commitments exceed usize::MAX"),
+            fixture.required_commitments()
         );
+        assert_eq!(found, 0);
+        assert_eq!(faults.len(), PRE_VERIFY_DEALERS);
+        assert!(unavailable.is_empty());
+        for dealer in &fixture.dealers {
+            assert!(matches!(
+                faults.get_value(&dealer.key),
+                Some(FaultReason::InvalidAck)
+            ));
+        }
+    }
+
+    #[test]
+    fn pre_verify_preserves_classifications_and_invalidates_replacements() {
+        let fixture = PreVerifyFixture::new();
+        let mut logs = fixture.logs_for(&fixture.info, &[true; PRE_VERIFY_DEALERS]);
+        fixture.record(&mut logs, 0, false);
+
+        let mut too_many_reveals = fixture.dealers[1].valid.clone();
+        too_many_reveals.results = DealerResult::TooManyReveals;
+        logs.record(fixture.dealers[1].key.clone(), too_many_reveals);
+
+        let mut wrong_players = fixture.dealers[2].valid.clone();
+        let DealerResult::Ok(results) = &mut wrong_players.results else {
+            panic!("valid fixture should contain player results");
+        };
+        results.truncate(results.len() - 1);
+        logs.record(fixture.dealers[2].key.clone(), wrong_players);
+        logs.pre_verify::<ed25519::Batch>(&mut test_rng(), &Sequential);
+
+        let Err(Failure::InsufficientLogs {
+            required,
+            found,
+            faults,
+            unavailable,
+        }) = observe::<MinPk, _, N3f1, ed25519::Batch>(&mut test_rng(), logs.clone(), &Sequential)
+        else {
+            panic!("three rejected logs must prevent reconciliation");
+        };
+        assert_eq!(
+            usize::try_from(required).expect("required commitments exceed usize::MAX"),
+            fixture.required_commitments()
+        );
+        assert_eq!(
+            usize::try_from(found).expect("valid dealer count exceeds usize::MAX"),
+            PRE_VERIFY_DEALERS - 3
+        );
+        assert_eq!(faults.len(), 2);
+        assert!(matches!(
+            faults.get_value(&fixture.dealers[0].key),
+            Some(FaultReason::InvalidAck)
+        ));
+        assert_eq!(unavailable.len(), 1);
+        assert!(unavailable.position(&fixture.dealers[1].key).is_some());
+        assert!(faults.get_value(&fixture.dealers[1].key).is_none());
+        assert!(matches!(
+            faults.get_value(&fixture.dealers[2].key),
+            Some(FaultReason::MismatchedLogPlayers)
+        ));
+
+        fixture.record(&mut logs, 0, true);
+        assert!(
+            observe::<MinPk, _, N3f1, ed25519::Batch>(&mut test_rng(), logs, &Sequential).is_ok(),
+            "replacing one rejected log must restore the exact quorum"
+        );
+    }
+
+    #[test]
+    fn missing_logs_report_dealers_as_unavailable() {
+        let fixture = PreVerifyFixture::new();
+        let logs = PreVerifyLogs::new(fixture.info.clone());
+        let Err(Failure::InsufficientLogs {
+            required,
+            found,
+            faults,
+            unavailable,
+        }) = observe::<MinPk, _, N3f1, ed25519::Batch>(&mut test_rng(), logs, &Sequential)
+        else {
+            panic!("missing logs must fail reconciliation");
+        };
+        assert_eq!(
+            usize::try_from(required).expect("required commitments exceed usize::MAX"),
+            fixture.required_commitments()
+        );
+        assert_eq!(found, 0);
+        assert!(faults.is_empty());
+        assert_eq!(unavailable, fixture.info.dealers);
+    }
+
+    #[test]
+    fn finalize_wraps_reconciliation_failure() {
+        let fixture = PreVerifyFixture::new();
+        let player =
+            Player::<MinPk, _>::new(fixture.info.clone(), ed25519::PrivateKey::from_seed(0))
+                .expect("player initialization must succeed");
+        let logs = PreVerifyLogs::new(fixture.info);
+
+        assert!(matches!(
+            player.finalize::<N3f1, ed25519::Batch>(&mut test_rng(), logs, &Sequential),
+            Err(FinalizeError::Failure(Failure::InsufficientLogs { .. }))
+        ));
     }
 
     #[test]
@@ -3299,12 +4357,125 @@ mod test {
         let wrong_logs = fixture.logs_for(&fixture.wrong_info, &[false; PRE_VERIFY_DEALERS]);
 
         let result =
-            player.finalize::<QuorumTwo, ed25519::Batch>(&mut test_rng(), wrong_logs, &Sequential);
+            player.finalize::<N3f1, ed25519::Batch>(&mut test_rng(), wrong_logs, &Sequential);
 
         assert!(
-            matches!(result, Err(Error::MismatchedLogs)),
+            matches!(result, Err(FinalizeError::Error(Error::MismatchedLogs))),
             "finalize should reject logs bound to a different round"
         );
+    }
+
+    fn replaced_dealing_fixture(
+        replacement_ack: bool,
+    ) -> (
+        Player<MinPk, ed25519::PrivateKey>,
+        Logs<MinPk, ed25519::PublicKey, N3f1>,
+    ) {
+        let mut keys: Vec<_> = (0..4).map(ed25519::PrivateKey::from_seed).collect();
+        keys.sort_by_key(|key| key.public_key());
+        let participants: Set<_> = keys
+            .iter()
+            .map(|key| key.public_key())
+            .try_collect()
+            .expect("participants must be unique");
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"stale-dealing-test",
+            0,
+            None,
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            participants.clone(),
+            participants,
+        )
+        .expect("info must be valid");
+        let malicious = keys[0].clone();
+        let malicious_pk = malicious.public_key();
+        let target_key = keys[3].clone();
+        let target = target_key.public_key();
+
+        let (_, stale_pub_msg, stale_priv_msgs) =
+            Dealer::start::<N3f1>(TestRng::new(100), info.clone(), malicious, None)
+                .expect("dealer must start");
+        let stale_priv_msg = stale_priv_msgs
+            .into_iter()
+            .find_map(|(player, priv_msg)| (player == target).then_some(priv_msg))
+            .expect("target dealing must exist");
+
+        let mut verified_logs = BTreeMap::new();
+        let mut logs = Logs::<MinPk, _, N3f1>::new(info.clone());
+        let mut persisted = vec![(malicious_pk, stale_pub_msg.clone(), stale_priv_msg)];
+        for (dealer_number, dealer_key) in keys.iter().take(3).enumerate() {
+            let seed = 200 + dealer_number as u64;
+            let dealer_pk = dealer_key.public_key();
+            let (mut dealer, pub_msg, priv_msgs) =
+                Dealer::start::<N3f1>(TestRng::new(seed), info.clone(), dealer_key.clone(), None)
+                    .expect("dealer must start");
+            if dealer_number == 0 {
+                assert_ne!(pub_msg, stale_pub_msg);
+            }
+
+            for (player, priv_msg) in priv_msgs {
+                if dealer_number == 0 && player == target && !replacement_ack {
+                    continue;
+                }
+                if dealer_number != 0 && player == target {
+                    persisted.push((dealer_pk.clone(), pub_msg.clone(), priv_msg.clone()));
+                }
+                let receiver_key = keys
+                    .iter()
+                    .find(|key| key.public_key() == player)
+                    .expect("receiver must exist")
+                    .clone();
+                let mut receiver = Player::<MinPk, _>::new(info.clone(), receiver_key)
+                    .expect("player must initialize");
+                let ack = receiver
+                    .dealer_message::<N3f1>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
+                    .expect("dealing must be valid")
+                    .expect("dealing must be new");
+                dealer
+                    .receive_player_ack(player, ack)
+                    .expect("ack must be valid");
+            }
+
+            let (dealer, log) = dealer
+                .finalize::<N3f1>()
+                .check(&info)
+                .expect("dealer log must verify");
+            if dealer_number == 0 {
+                assert_eq!(log.get_reveal(&target).is_some(), !replacement_ack);
+            }
+            verified_logs.insert(dealer.clone(), log.clone());
+            logs.record(dealer, log);
+        }
+
+        let (target_player, _) =
+            Player::resume::<N3f1>(info, target_key, &verified_logs, persisted)
+                .expect("target must resume");
+        (target_player, logs)
+    }
+
+    #[test]
+    fn stale_dealing_is_not_reused_for_replaced_log() {
+        let (target_player, logs) = replaced_dealing_fixture(false);
+        let (output, share) = target_player
+            .finalize::<N3f1, ed25519::Batch>(&mut test_rng(), logs, &Sequential)
+            .expect("target must finalize");
+        assert_eq!(
+            share.public::<MinPk>(),
+            output
+                .public()
+                .partial_public(share.index)
+                .expect("share index must be valid")
+        );
+    }
+
+    #[test]
+    fn replacement_ack_rejects_stale_persisted_dealing() {
+        let (target_player, logs) = replaced_dealing_fixture(true);
+        assert!(matches!(
+            target_player.finalize::<N3f1, ed25519::Batch>(&mut test_rng(), logs, &Sequential),
+            Err(FinalizeError::Error(Error::InvalidPersistedDealing { .. }))
+        ));
     }
 
     #[test]
@@ -3365,25 +4536,31 @@ mod test {
 
     #[test]
     fn invalid_checkpoint_configs_fail_validation() {
-        assert!(Plan::new(NZU32!(4))
-            .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .resume_missing_dealer_msg_fails(1, 2),
-            )
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .bad_reveal(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
-            )
-            .validate()
-            .is_err());
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(
+                    Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                        .resume_missing_dealer_msg_fails(1, 2),
+                )
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(
+                    Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                        .bad_reveal(1, 0)
+                        .resume_missing_dealer_msg_fails(2, 1),
+                )
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
@@ -3512,14 +4689,15 @@ mod test {
     }
 
     #[test]
-    fn signed_dealer_log_commitment() -> Result<(), Error> {
+    fn signed_dealer_log_commitment() -> anyhow::Result<()> {
         let sk = ed25519::PrivateKey::from_seed(0);
         let pk = sk.public_key();
         let info = Info::<MinPk, _>::new::<N3f1>(
             b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
             0,
             None,
-            Default::default(),
+            Mode::NonZeroCounter,
+            Reveal::V1,
             vec![sk.public_key()].try_into().unwrap(),
             vec![sk.public_key()].try_into().unwrap(),
         )?;
@@ -3533,8 +4711,8 @@ mod test {
                 Dealer::start::<N3f1>(&mut test_rng(), info.clone(), sk.clone(), None)?;
             let mut player = Player::new(info.clone(), sk)?;
             let ack = player
-                .dealer_message::<N3f1>(pk.clone(), pub_msg, priv_msgs[0].1.clone())
-                .unwrap();
+                .dealer_message::<N3f1>(pk.clone(), pub_msg, priv_msgs[0].1.clone())?
+                .expect("dealer message must be new");
             dealer.receive_player_ack(pk, ack)?;
             dealer.finalize::<N3f1>()
         };
@@ -3546,17 +4724,142 @@ mod test {
     }
 
     #[test]
+    fn dealer_message_reports_errors_and_skips_duplicates() -> anyhow::Result<()> {
+        let a = ed25519::PrivateKey::from_seed(0);
+        let b = ed25519::PrivateKey::from_seed(1);
+        let stranger = ed25519::PrivateKey::from_seed(2);
+        let (a_pk, b_pk, stranger_pk) = (a.public_key(), b.public_key(), stranger.public_key());
+        let members: Set<ed25519::PublicKey> = vec![a_pk.clone(), b_pk.clone()].try_into().unwrap();
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            0,
+            None,
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            members.clone(),
+            members,
+        )?;
+
+        // Dealer A produces one private message per player.
+        let (_, pub_msg, priv_msgs) =
+            Dealer::start::<N3f1>(&mut test_rng(), info.clone(), a, None)?;
+        let priv_for_a = priv_msgs
+            .iter()
+            .find(|(player, _)| *player == a_pk)
+            .map(|(_, msg)| msg.clone())
+            .expect("share for a");
+        let priv_for_b = priv_msgs
+            .iter()
+            .find(|(player, _)| *player == b_pk)
+            .map(|(_, msg)| msg.clone())
+            .expect("share for b");
+
+        // Persisted invalid input is reported as local state corruption.
+        assert!(matches!(
+            Player::resume::<N3f1>(
+                info.clone(),
+                b.clone(),
+                &BTreeMap::new(),
+                [(a_pk.clone(), pub_msg.clone(), priv_for_a.clone())],
+            ),
+            Err(Error::InvalidPersistedDealing { .. })
+        ));
+        let mut player = Player::new(info, b)?;
+        assert!(matches!(
+            player.dealer_message::<N3f1>(a_pk.clone(), pub_msg.clone(), priv_for_a),
+            Err(DealerMessageError::InvalidDealerShare)
+        ));
+
+        // Live message errors expose the rejection reason without attributing it.
+        assert!(matches!(
+            player.dealer_message::<N3f1>(stranger_pk, pub_msg.clone(), priv_for_b.clone(),),
+            Err(DealerMessageError::UnexpectedDealer)
+        ));
+
+        // A correct dealing validates.
+        assert!(
+            player
+                .dealer_message::<N3f1>(a_pk.clone(), pub_msg.clone(), priv_for_b.clone())?
+                .is_some()
+        );
+
+        // Replaying a dealer's message is a benign skip.
+        assert!(matches!(
+            player.dealer_message::<N3f1>(a_pk, pub_msg, priv_for_b),
+            Ok(None)
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn receive_player_ack_reports_non_attributable_errors() -> anyhow::Result<()> {
+        let a = ed25519::PrivateKey::from_seed(0);
+        let stranger = ed25519::PrivateKey::from_seed(1);
+        let (a_pk, stranger_pk) = (a.public_key(), stranger.public_key());
+        let members: Set<ed25519::PublicKey> = vec![a_pk.clone()].try_into().unwrap();
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            0,
+            None,
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            members.clone(),
+            members,
+        )?;
+
+        let (mut dealer, pub_msg, priv_msgs) =
+            Dealer::start::<N3f1>(TestRng::new(0), info.clone(), a.clone(), None)?;
+        let (_, alternate_pub_msg, alternate_priv_msgs) =
+            Dealer::start::<N3f1>(TestRng::new(1), info.clone(), a.clone(), None)?;
+        assert_ne!(pub_msg, alternate_pub_msg);
+
+        let mut player = Player::new(info.clone(), a.clone())?;
+        let ack = player
+            .dealer_message::<N3f1>(a_pk.clone(), pub_msg, priv_msgs[0].1.clone())?
+            .expect("valid ack");
+
+        // An honest player can acknowledge an alternate public message from an
+        // equivocating dealer. A signature mismatch therefore cannot identify a
+        // faulty player.
+        let mut alternate_player = Player::new(info, a)?;
+        let alternate_ack = alternate_player
+            .dealer_message::<N3f1>(
+                a_pk.clone(),
+                alternate_pub_msg,
+                alternate_priv_msgs[0].1.clone(),
+            )?
+            .expect("valid ack for alternate message");
+        assert!(matches!(
+            dealer.receive_player_ack(a_pk.clone(), alternate_ack),
+            Err(PlayerAckError::InvalidAck)
+        ));
+
+        // Out-of-round identities produce the precise non-attributed error.
+        assert!(matches!(
+            dealer.receive_player_ack(stranger_pk, ack.clone()),
+            Err(PlayerAckError::UnexpectedPlayer)
+        ));
+
+        // The genuine ack is still accepted.
+        assert!(dealer.receive_player_ack(a_pk, ack).is_ok());
+
+        Ok(())
+    }
+
+    #[test]
     fn info_with_different_mode_is_not_equal() -> Result<(), Error> {
         let sk = ed25519::PrivateKey::from_seed(0);
         let pk = sk.public_key();
         let dealers: Set<ed25519::PublicKey> = vec![pk.clone()].try_into().unwrap();
         let players: Set<ed25519::PublicKey> = vec![pk].try_into().unwrap();
 
-        let default_mode_info = Info::<MinPk, _>::new::<N3f1>(
+        let non_zero_counter_info = Info::<MinPk, _>::new::<N3f1>(
             b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
             0,
             None,
-            Mode::default(),
+            Mode::NonZeroCounter,
+            Reveal::V1,
             dealers.clone(),
             players.clone(),
         )?;
@@ -3565,11 +4868,12 @@ mod test {
             0,
             None,
             Mode::RootsOfUnity,
+            Reveal::V1,
             dealers,
             players,
         )?;
 
-        assert_ne!(default_mode_info, roots_of_unity_mode_info);
+        assert_ne!(non_zero_counter_info, roots_of_unity_mode_info);
         Ok(())
     }
 
@@ -3585,7 +4889,8 @@ mod test {
             b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
             0,
             None,
-            Default::default(),
+            Mode::NonZeroCounter,
+            Reveal::V1,
             dealers.clone(),
             players.clone(),
         )?;
@@ -3593,7 +4898,8 @@ mod test {
             b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
             1,
             None,
-            Default::default(),
+            Mode::NonZeroCounter,
+            Reveal::V1,
             dealers,
             players,
         )?;
@@ -3636,12 +4942,100 @@ mod test {
         assert!(debug.contains("REDACTED"));
     }
 
+    #[test]
+    fn test_dealer_priv_msg_decode_rejects_zero_scalar() {
+        let mut encoded = Scalar::zero().encode();
+        let decoded = DealerPrivMsg::read_cfg(&mut encoded, &());
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn test_dealer_pub_msg_decode_rejects_zero_commitment() {
+        let mut rng = test_rng();
+        let commitment = Poly::commit(Poly::new_with_constant(&mut rng, 0, Scalar::zero()));
+        let mut encoded = DealerPubMsg::<MinPk> { commitment }.encode();
+        let decoded = DealerPubMsg::<MinPk>::read_cfg(&mut encoded, &NZU32!(1));
+        assert!(decoded.is_err());
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_conformance::Conformance;
+
+        fn feldman_transcript(seed: u64, mode: Mode, reveal: Reveal) -> Vec<u8> {
+            const APPLICATION_NAMESPACE: &[u8] =
+                b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_CONFORMANCE";
+            let dealer_sk = ed25519::PrivateKey::from_seed(11);
+            let dealer_pk = dealer_sk.public_key();
+            let player_sk = ed25519::PrivateKey::from_seed(22);
+            let player_pk = player_sk.public_key();
+            let dealers: Set<ed25519::PublicKey> = vec![dealer_pk.clone()].try_into().unwrap();
+            let players: Set<ed25519::PublicKey> = vec![player_pk].try_into().unwrap();
+            let info = Info::<MinPk, _>::new::<N3f1>(
+                APPLICATION_NAMESPACE,
+                seed,
+                None,
+                mode,
+                reveal,
+                dealers,
+                players,
+            )
+            .unwrap();
+
+            let (_, pub_msg, _) = Dealer::start::<N3f1>(
+                &mut TestRng::new(seed),
+                info.clone(),
+                dealer_sk.clone(),
+                None,
+            )
+            .unwrap();
+
+            let round_transcript = transcript_for_round(&info);
+            let ack = transcript_for_ack(&round_transcript, &dealer_pk, &pub_msg);
+            let ack_summary = ack.summarize();
+            let ack_signature = ack.sign(&player_sk);
+
+            let log = DealerLog {
+                pub_msg,
+                results: DealerResult::TooManyReveals,
+            };
+            let log_summary = transcript_for_log(&info, &log).summarize();
+            let signed_log = SignedDealerLog::sign(&dealer_sk, &info, log);
+
+            let mut output = info.summary.encode().to_vec();
+            output.extend(ack_summary.encode());
+            output.extend(ack_signature.encode());
+            output.extend(log_summary.encode());
+            output.extend(signed_log.encode());
+            output
+        }
+
+        /// Pins the full transcript for one polynomial/reveal mode tag pair.
+        struct FeldmanTranscript<const POLYNOMIAL_MODE: u8, const REVEAL_MODE: u8>;
+
+        impl<const POLYNOMIAL_MODE: u8, const REVEAL_MODE: u8> Conformance
+            for FeldmanTranscript<POLYNOMIAL_MODE, REVEAL_MODE>
+        {
+            #[allow(deprecated)]
+            async fn commit(seed: u64) -> Vec<u8> {
+                let (mode, reveal) = match (POLYNOMIAL_MODE, REVEAL_MODE) {
+                    (0, 0) => (Mode::NonZeroCounter, Reveal::V0),
+                    (0, 1) => (Mode::NonZeroCounter, Reveal::V1),
+                    (1, 0) => (Mode::RootsOfUnity, Reveal::V0),
+                    (1, 1) => (Mode::RootsOfUnity, Reveal::V1),
+                    _ => panic!("unsupported Feldman transcript mode"),
+                };
+                feldman_transcript(seed, mode, reveal)
+            }
+        }
 
         commonware_conformance::conformance_tests! {
+            FeldmanTranscript<0, 0> => 16,
+            FeldmanTranscript<0, 1> => 16,
+            FeldmanTranscript<1, 0> => 16,
+            FeldmanTranscript<1, 1> => 16,
             CodecConformance<Output<MinPk, ed25519::PublicKey>>,
             CodecConformance<DealerPubMsg<MinPk>>,
             CodecConformance<DealerPrivMsg>,

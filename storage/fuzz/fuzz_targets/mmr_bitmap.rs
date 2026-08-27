@@ -1,17 +1,19 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256, Digest, Sha256};
+use commonware_cryptography::{Digest, Sha256, sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage, Supervisor as _};
-use commonware_storage::{merkle::Bagging::ForwardFold, MerkleizedBitMap, UnmerkleizedBitMap};
+use commonware_runtime::{Runner, Supervisor as _, deterministic};
+use commonware_storage::{
+    Context, MerkleizedBitMap, UnmerkleizedBitMap, merkle::Bagging::ForwardFold,
+};
 use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 100;
 const CHUNK_SIZE: usize = 32;
 
-enum Bitmap<E: Clock + Storage + Metrics, D: Digest, const N: usize> {
+enum Bitmap<E: Context, D: Digest, const N: usize> {
     Merkleized(MerkleizedBitMap<E, D, N, Sequential>),
     Unmerkleized(UnmerkleizedBitMap<E, D, N, Sequential>),
 }
@@ -250,11 +252,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::WritePruned => {
-                    let mut bitmap = match bitmap {
+                    let bitmap = match bitmap {
                         Bitmap::Merkleized(bitmap) => bitmap,
                         Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&hasher).unwrap(),
                     };
-                    let _ = bitmap.write_pruned().await;
+                    let bitmap = bitmap.write_pruned().await.unwrap();
                     Bitmap::Merkleized(bitmap)
                 }
             }

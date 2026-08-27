@@ -1,7 +1,7 @@
 use crate::Ingress;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
@@ -14,11 +14,11 @@ pub type Bootstrapper<P> = (P, Ingress);
 /// Configuration for the peer-to-peer instance.
 ///
 /// # Warning
-/// It is recommended to synchronize this configuration across peers in the network (with the
-/// exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`, `mailbox_size`, and
-/// `send_batch_size`).
-/// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
-/// and/or peers will rate limit each other during normal operation.
+/// It is recommended to synchronize this configuration across peers in the network (with
+/// the exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`,
+/// `max_peers_per_set`, `mailbox_size`, `send_batch_size`, and `dial_timeout`). If this is not
+/// synchronized, connections could be unnecessarily dropped, messages could be parsed
+/// incorrectly, and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
 pub struct Config<C: Signer> {
     /// Cryptographic primitives.
@@ -45,17 +45,35 @@ pub struct Config<C: Signer> {
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
-    /// Maximum size allowed for messages over any connection.
+    /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The actual size of the network message will be higher due to overhead from the protocol;
-    /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
+    /// The largest supported value is [`crate::authenticated::MAX_SIZE`].
+    ///
+    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
+    /// part of the payload and counts toward this limit.
+    ///
+    /// Framing and transport overhead are added after this size check and do not count toward
+    /// the limit, so the resulting network message will be larger.
     pub max_message_size: u32,
 
-    /// Message backlog allowed for internal actors.
+    /// Maximum number of distinct identities at one peer-set index, including the local identity.
     ///
-    /// When there are more messages in a mailbox than this value, messages may be rejected before
-    /// they are processed. Refer to [`commonware_actor::Feedback`] and/or metrics on
-    /// [`commonware_actor::mailbox`] for a signal this is occurring.
+    /// This applies to the deduplicated union of a peer set's primary and secondary identities.
+    /// The local identity counts even when omitted from the registered set. Configure only this
+    /// per-set value; do not multiply it or add bootstrappers separately. The network derives its
+    /// retained identity bound by multiplying it by [`Config::tracked_peer_sets`] and adding the
+    /// distinct configured bootstrappers other than the local identity. Tracking an oversized peer
+    /// set panics.
+    ///
+    /// The derived bound sizes every application channel's inbound mailbox and its contribution
+    /// to the shared outbound router mailbox. It also limits primary peer-set bit vectors decoded
+    /// from the network.
+    pub max_peers_per_set: NonZeroUsize,
+
+    /// Capacity for internal actor mailboxes.
+    ///
+    /// This does not affect inbound application message capacity, which is derived from channel
+    /// rate limits and [`Config::max_peers_per_set`].
     pub mailbox_size: NonZeroUsize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.
@@ -74,6 +92,12 @@ pub struct Config<C: Signer> {
     /// This is often set to some value less than the connection read timeout to prevent
     /// unauthenticated peers from holding open connection.
     pub handshake_timeout: Duration,
+
+    /// Timeout for an outbound dial attempt.
+    ///
+    /// This bounds address resolution, connection establishment, and the handshake so a
+    /// peer reservation cannot be held indefinitely.
+    pub dial_timeout: Duration,
 
     /// Minimum time between connection reservations for a single peer.
     pub peer_connection_cooldown: Duration,
@@ -107,12 +131,6 @@ pub struct Config<C: Signer> {
     /// key).
     pub tracked_peer_sets: NonZeroUsize,
 
-    /// Maximum number of peers to track in a single peer set.
-    ///
-    /// This is used to limit the size of the bit vec messages, which will take one bit per peer in
-    /// the set. This number can be set to a reasonably high value that we never expect to reach.
-    pub max_peer_set_size: u64,
-
     /// Frequency we gossip about known peers.
     ///
     /// If there is no other network activity, this message is used as a ping
@@ -140,6 +158,7 @@ impl<C: Signer> Config<C> {
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+        max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
@@ -152,11 +171,13 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: false,
             max_message_size,
+            max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
+            dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_secs(60),
             max_concurrent_handshakes: NZU32!(512),
             allowed_handshake_rate_per_ip: Quota::with_period(Duration::from_secs(5)).unwrap(), // 1 concurrent handshake per IP
@@ -164,7 +185,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_secs(1),
             dial_fail_limit: 2,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(4),
@@ -183,6 +203,7 @@ impl<C: Signer> Config<C> {
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+        max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
@@ -195,11 +216,13 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             max_message_size,
+            max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
+            dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_secs(1),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 80 concurrent handshakes per IP
@@ -207,7 +230,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(500),
             dial_fail_limit: 1,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(1),
@@ -231,11 +253,13 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             max_message_size,
+            max_peers_per_set: NZUsize!(32),
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
+            dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_millis(250),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
@@ -243,7 +267,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(200),
             dial_fail_limit: 1,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_mins(1),

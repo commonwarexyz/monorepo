@@ -10,20 +10,17 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
+    Runner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic::{self, Context},
-    Runner, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
-    qmdb::{
-        self,
-        current::{unordered::variable::Db as Current, VariableConfig},
-    },
+    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
+    qmdb::current::{VariableConfig, unordered::variable::Db as Current},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZU64};
+use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -56,9 +53,9 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
 }
 
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
+fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
     let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(f64::from(percent) / 100.0)
+    Ok(probability!(u64::from(percent), 100))
 }
 
 /// State-changing operations that exercise disk writes.
@@ -85,9 +82,9 @@ struct FuzzInput {
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
     #[arbitrary(with = bounded_nonzero_rate)]
-    sync_failure_rate: f64,
+    sync_failure_rate: Probability,
     #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: f64,
+    write_failure_rate: Probability,
     operations: Vec<CurrentOperation>,
 }
 
@@ -120,6 +117,9 @@ fn make_config(
         },
         grafted_metadata_partition: format!("crash-grafted-merkle-metadata-{suffix}"),
         translator: TwoCap,
+        init_cache_size: Some(NZUsize!(3)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -150,35 +150,41 @@ fn apply_pending(
     }
 }
 
-/// Commit pending writes. Returns `true` on success, `false` on error.
+/// Commit pending writes. Returns the db on success; `None` on error (the db
+/// is dropped, simulating a crash).
 async fn commit_pending<F: Graftable>(
-    db: &mut Db<F>,
+    db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     pending: &mut HashMap<RawKey, Option<RawValue>>,
     committed: &mut HashMap<RawKey, RawValue>,
-) -> bool {
+) -> Option<Db<F>> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = match batch.merkleize(db, None).await {
+    let merkleized = match batch.merkleize(&db, None).await {
         Ok(m) => m,
         Err(_) => {
             forget_pending(pending, committed);
-            return false;
+            return None;
         }
     };
-    let result = db.apply_batch(merkleized).await;
-    if result.is_err() {
-        forget_pending(pending, committed);
-        return false;
-    }
-    if db.commit().await.is_err() {
-        forget_pending(pending, committed);
-        return false;
-    }
+    let db = match db.apply_batch(merkleized).await {
+        Ok((db, _)) => db,
+        Err(_) => {
+            forget_pending(pending, committed);
+            return None;
+        }
+    };
+    let db = match db.commit().await {
+        Ok(db) => db,
+        Err(_) => {
+            forget_pending(pending, committed);
+            return None;
+        }
+    };
     apply_pending(pending, committed);
-    true
+    Some(db)
 }
 
 fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
@@ -223,7 +229,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let fault_cfg = ctx.storage_fault_config();
             *fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(write_failure_rate),
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: write_failure_rate,
+                    retention_rate: probability!(0.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
                 ..Default::default()
             };
 
@@ -237,43 +247,40 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             for op in &operations {
-                match op {
+                db = match op {
                     CurrentOperation::Update { key, value } => {
                         pending_writes.push((Key::new(*key), Some(Value::new(*value))));
                         pending.insert(*key, Some(*value));
+                        db
                     }
                     CurrentOperation::Delete { key } => {
                         pending_writes.push((Key::new(*key), None));
                         pending.insert(*key, None);
+                        db
                     }
                     CurrentOperation::Commit => {
-                        if !commit_pending(
-                            &mut db,
-                            &mut pending_writes,
-                            &mut pending,
-                            &mut committed,
-                        )
-                        .await
-                        {
+                        let Some(db) =
+                            commit_pending(db, &mut pending_writes, &mut pending, &mut committed)
+                                .await
+                        else {
                             break;
-                        }
+                        };
+                        db
                     }
                     CurrentOperation::Prune => {
-                        if !commit_pending(
-                            &mut db,
-                            &mut pending_writes,
-                            &mut pending,
-                            &mut committed,
-                        )
-                        .await
-                        {
+                        let Some(db) =
+                            commit_pending(db, &mut pending_writes, &mut pending, &mut committed)
+                                .await
+                        else {
                             break;
-                        }
-                        if db.prune(db.sync_boundary()).await.is_err() {
-                            break;
+                        };
+                        let boundary = db.sync_boundary();
+                        match db.prune(boundary).await {
+                            Ok(db) => db,
+                            Err(_) => break,
                         }
                     }
-                }
+                };
             }
 
             committed
@@ -287,7 +294,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let mut db: Db<F> = Db::init(
+            let db: Db<F> = Db::init(
                 ctx.child("recovered"),
                 make_config(
                     &ctx,
@@ -301,8 +308,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             )
             .await
             .expect("recovery must succeed");
-
-            let hasher = qmdb::hasher::<Sha256>();
 
             // Verify all committed KV pairs survived the crash and are provable.
             let root = db.root();
@@ -318,26 +323,26 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 );
 
                 let proof = db
-                    .key_value_proof(&hasher, k.clone())
+                    .key_value_proof(k.clone())
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    Db::<F>::verify_key_value_proof(&hasher, k, v, &proof, &root),
+                    Db::<F>::verify_key_value_proof(k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
 
             // Verify range proofs over the recovered DB.
             let floor = *db.sync_boundary();
-            let size = *db.bounds().await.end;
+            let size = *db.bounds().end;
             for i in floor..size {
                 let loc = Location::<F>::new(i);
                 let (proof, ops, chunks) = db
-                    .range_proof(&hasher, loc, NZU64!(4))
+                    .range_proof(loc, NZU64!(4))
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    Db::<F>::verify_range_proof(&hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::<F>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }
@@ -351,10 +356,12 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(batch)
+            let (db, _) = db
+                .apply_batch(batch)
                 .await
                 .expect("apply_batch after recovery should succeed");
-            db.commit()
+            let db = db
+                .commit()
                 .await
                 .expect("commit after recovery should succeed");
 

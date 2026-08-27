@@ -1,8 +1,8 @@
 use commonware_coding::{Config, PhasedScheme};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{NZUsize, NZU16};
-use criterion::{criterion_main, BatchSize, Criterion};
-use rand::{RngCore, SeedableRng as _};
+use commonware_utils::{NZU16, NZUsize};
+use criterion::{BatchSize, Criterion, criterion_main};
+use rand::{Rng, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 use shard_selection::SELECTIONS;
 

@@ -4,14 +4,14 @@
 //! family (MMR, MMB, etc.) reuses the shared verification and reconstruction logic in this module,
 //! while retaining any family-specific proof helpers in its submodule.
 
-use crate::merkle::{hasher::Hasher, Bagging, Error, Family, Location, Position};
+use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec,
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -170,7 +170,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     /// from `size` and `inactivity_floor`.
     pub fn matches_canonical_inactive_peaks(
         &self,
-        size: Position<F>,
+        size: Location<F>,
         inactivity_floor: Location<F>,
     ) -> bool {
         self.inactive_peaks == F::inactive_peaks(size, inactivity_floor)
@@ -215,11 +215,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             else {
                 return false;
             };
-            node_positions.extend(bp.fold_prefix.iter().map(|s| s.pos));
-            node_positions.extend(&bp.fetch_nodes);
-            if let Some(suffix_peaks) = bp.suffix_peaks() {
-                node_positions.extend(suffix_peaks);
-            }
+            node_positions.extend(bp.required_positions());
             blueprints.insert(*loc, bp);
         }
 
@@ -235,54 +231,19 @@ impl<F: Family, D: Digest> Proof<F, D> {
             .map(|(&pos, digest)| (pos, *digest))
             .collect();
 
-        // Verify each element by constructing its sub-proof in fold-based format
+        // Verify each element by reconstructing its sub-proof in the canonical layout and checking
+        // its root. Every required position was collected above and matched against `digests.len()`,
+        // so `node_digests` is complete and `build_proof` cannot fail here.
         for (element, loc) in elements {
             let bp = &blueprints[loc];
-
-            let suffix_count = usize::from(bp.suffix_peaks().is_some());
-            let mut digests = Vec::with_capacity(
-                if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len() + suffix_count,
-            );
-            if let Some((first_sub, rest)) = bp.fold_prefix.split_first() {
-                let first = *node_digests
-                    .get(&first_sub.pos)
-                    .expect("must exist by construction");
-                let acc = rest.iter().fold(first, |acc, sub| {
-                    let d = node_digests
-                        .get(&sub.pos)
-                        .expect("must exist by construction");
-                    hasher.fold(&acc, d)
-                });
-                digests.push(acc);
-            }
-            let prefix_active_count = bp.prefix_active_count();
-            let after_count = bp.after_peaks_count();
-            for &pos in &bp.fetch_nodes[..prefix_active_count + after_count] {
-                let d = node_digests.get(&pos).expect("must exist by construction");
-                digests.push(*d);
-            }
-            if let Some(suffix_peaks) = bp.suffix_peaks() {
-                let (last_pos, rest_pos) = suffix_peaks
-                    .split_last()
-                    .expect("suffix_peaks is non-empty when returned");
-                let mut acc = *node_digests
-                    .get(last_pos)
-                    .expect("must exist by construction");
-                for pos in rest_pos.iter().rev() {
-                    let d = node_digests.get(pos).expect("must exist by construction");
-                    acc = hasher.fold(d, &acc);
-                }
-                digests.push(acc);
-            }
-            for &pos in &bp.fetch_nodes[prefix_active_count + after_count..] {
-                let d = node_digests.get(&pos).expect("must exist by construction");
-                digests.push(*d);
-            }
-            let proof = Self {
-                leaves: self.leaves,
-                inactive_peaks: self.inactive_peaks,
-                digests,
-            };
+            let proof = bp
+                .build_proof(
+                    hasher,
+                    self.inactive_peaks,
+                    |pos| node_digests.get(&pos).copied(),
+                    |_pos| (),
+                )
+                .expect("every node is present by construction");
 
             match proof.reconstruct_root_inner(hasher, &[element.as_ref()], *loc, None) {
                 Ok(reconstructed_root) if &reconstructed_root == root => {}
@@ -804,7 +765,9 @@ pub(crate) struct Blueprint<F: Family> {
     suffix_peaks: Vec<Position<F>>,
     /// The peaks that overlap the proven range.
     range_peaks: Vec<Subtree<F>>,
-    /// Node positions to include in the proof: after-peaks followed by DFS siblings.
+    /// Node positions included in the proof, in layout order: the active prefix peaks, then the
+    /// after-peaks, then the DFS path siblings. [`Self::sibling_start`] is the index at which the
+    /// siblings begin (the count of active prefix peaks plus after-peaks).
     pub(crate) fetch_nodes: Vec<Position<F>>,
 }
 
@@ -925,19 +888,26 @@ impl<F: Family> Blueprint<F> {
         out
     }
 
-    /// Return the number of active prefix peak digests stored before after-peak digests.
-    pub(crate) const fn prefix_active_count(&self) -> usize {
-        self.prefix_active_peaks.len()
-    }
-
-    /// Return the number of non-collapsed after-peak digests in the proof layout.
-    pub(crate) const fn after_peaks_count(&self) -> usize {
-        self.after_peaks.len()
+    /// The index within `fetch_nodes` where the DFS sibling nodes begin, following the
+    /// prefix-active peaks and the after-peaks.
+    pub(crate) const fn sibling_start(&self) -> usize {
+        self.prefix_active_peaks.len() + self.after_peaks.len()
     }
 
     /// Return active after-peaks that are collapsed into a backward-folded suffix accumulator.
+    #[cfg(feature = "std")]
     pub(crate) fn suffix_peaks(&self) -> Option<&[Position<F>]> {
         (!self.suffix_peaks.is_empty()).then_some(&self.suffix_peaks)
+    }
+
+    /// All node positions this blueprint needs from the tree: fold-prefix peaks, fetch nodes,
+    /// and suffix peaks. Order is unspecified; callers collect into a set.
+    pub(crate) fn required_positions(&self) -> impl Iterator<Item = Position<F>> + '_ {
+        self.fold_prefix
+            .iter()
+            .map(|s| s.pos)
+            .chain(self.fetch_nodes.iter().copied())
+            .chain(self.suffix_peaks.iter().copied())
     }
 
     /// Split a proof's digest vector according to this blueprint's range-proof layout.
@@ -957,14 +927,13 @@ impl<F: Family> Blueprint<F> {
 
         let prefix_start = fold_count;
         let after_start = prefix_start + self.prefix_active_peaks.len();
-        let siblings_start = after_start + self.after_peaks.len();
-        let suffix_start = siblings_start;
+        let suffix_start = after_start + self.after_peaks.len();
         let suffix_end = suffix_start + suffix_count;
 
         Ok(ProofDigestLayout {
             fold_prefix: (!self.fold_prefix.is_empty()).then(|| &digests[0]),
             prefix_active_peaks: &digests[prefix_start..after_start],
-            after_peaks: &digests[after_start..siblings_start],
+            after_peaks: &digests[after_start..suffix_start],
             suffix_acc: (!self.suffix_peaks.is_empty()).then(|| &digests[suffix_start]),
             siblings: &digests[suffix_end..],
         })
@@ -992,7 +961,7 @@ impl<F: Family> Blueprint<F> {
     /// Returns an error via `element_pruned` if `get_node` returns `None` for any required
     /// position.
     pub(crate) fn build_proof<D, H, E>(
-        self,
+        &self,
         hasher: &H,
         inactive_peaks: usize,
         get_node: impl Fn(Position<F>) -> Option<D>,
@@ -1017,10 +986,9 @@ impl<F: Family> Blueprint<F> {
             digests.push(acc);
         }
 
-        for sub in &self.prefix_active_peaks {
-            digests.push(get_node(sub.pos).ok_or_else(|| element_pruned(sub.pos))?);
-        }
-        for &pos in &self.after_peaks {
+        // Active prefix peaks and after-peaks occupy the front of `fetch_nodes`.
+        let sibling_start = self.sibling_start();
+        for &pos in &self.fetch_nodes[..sibling_start] {
             digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
         }
         if let Some((last_pos, rest)) = self.suffix_peaks.split_last() {
@@ -1032,7 +1000,7 @@ impl<F: Family> Blueprint<F> {
             digests.push(acc);
         }
 
-        let sibling_start = self.prefix_active_peaks.len() + self.after_peaks.len();
+        // DFS path siblings occupy the tail of `fetch_nodes`.
         for &pos in &self.fetch_nodes[sibling_start..] {
             digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
         }
@@ -1094,11 +1062,7 @@ pub(crate) fn nodes_required_for_multi_proof<F: Family>(
             return Err(super::Error::LocationOverflow(*loc));
         }
         let bp = Blueprint::new(leaves, inactive_peaks, bagging, *loc..*loc + 1)?;
-        if let Some(suffix_peaks) = bp.suffix_peaks() {
-            acc.extend(suffix_peaks);
-        }
-        acc.extend(bp.fold_prefix.into_iter().map(|s| s.pos));
-        acc.extend(bp.fetch_nodes);
+        acc.extend(bp.required_positions());
         Ok(acc)
     })
 }
@@ -1121,23 +1085,23 @@ where
 mod tests {
     use super::*;
     use crate::merkle::{
+        Bagging::{BackwardFold, ForwardFold},
+        Family, Location, LocationRangeExt as _,
         hasher::Standard,
         mem::Mem,
         mmb, mmr,
-        proof::{nodes_required_for_multi_proof, Blueprint, Proof},
-        Bagging::{BackwardFold, ForwardFold},
-        Family, Location, LocationRangeExt as _,
+        proof::{Blueprint, Proof, nodes_required_for_multi_proof},
     };
     use alloc::vec;
     use commonware_codec::{Decode, Encode, EncodeSize};
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
 
     fn test_digest(v: u8) -> D {
-        <Sha256 as commonware_cryptography::Hasher>::hash(&[v])
+        <Sha256 as commonware_cryptography::Hasher>::hash(&[&[v]])
     }
 
     /// Build an in-memory Merkle structure with `n` elements (element i = i.to_be_bytes()).
@@ -1219,7 +1183,7 @@ mod tests {
         if start + width <= *leaves {
             return Location::new(start);
         }
-        Location::new(*leaves - width)
+        leaves - width
     }
 
     fn range_proofs_verify_for_supported_root_shapes<F: Family>() {
@@ -1930,7 +1894,7 @@ mod tests {
 
         // Verify mangling the location to something invalid should fail.
         let mut wrong_size_proof = multi_proof.clone();
-        wrong_size_proof.leaves = Location::new(*F::MAX_LEAVES + 2);
+        wrong_size_proof.leaves = F::MAX_LEAVES + 2;
         assert!(!wrong_size_proof.verify_multi_inclusion(
             &hasher,
             &[
@@ -2067,7 +2031,7 @@ mod tests {
 
         // 252 leaves. Leaf 240 sits in a peak preceded by prefix peaks.
         let elements: Vec<D> = (0..252u16)
-            .map(|i| <Sha256 as commonware_cryptography::Hasher>::hash(&i.to_be_bytes()))
+            .map(|i| <Sha256 as commonware_cryptography::Hasher>::hash(&[&i.to_be_bytes()]))
             .collect();
         let batch = {
             let mut batch = mem.new_batch();

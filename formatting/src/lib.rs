@@ -92,7 +92,7 @@ commonware_macros::stability_scope!(BETA {
 
 #[cfg(test)]
 mod tests {
-    use crate::{from_hex, Hex};
+    use crate::{Hex, from_hex};
 
     #[test]
     fn test_hex_roundtrip() {

@@ -16,10 +16,11 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
-    buffer::paged::{Append, CacheRef},
-    deterministic, Blob, Buf, Error, Runner, Storage,
+    Blob, Buf, Error, ReadOptions, Runner, Storage, WriteOptions,
+    buffer::paged::{CacheRef, Writer},
+    deterministic,
 };
-use commonware_utils::{NZUsize, NZU16};
+use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 /// CRC record size.
@@ -114,7 +115,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("cannot open blob");
 
-        let append = Append::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
+        let mut append = Writer::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
             .await
             .expect("cannot create append wrapper");
 
@@ -139,12 +140,16 @@ fn fuzz(input: FuzzInput) {
 
         // Read the byte, flip the bit, write it back.
         let byte_buf = blob
-            .read_at(corrupt_offset, 1)
+            .read_at(corrupt_offset, 1, ReadOptions::default())
             .await
             .expect("cannot read byte to corrupt")
             .coalesce();
         let corrupted_byte = byte_buf.as_ref()[0] ^ (1 << corrupt_bit);
-        blob.write_at(corrupt_offset, vec![corrupted_byte])
+        blob.write_at(
+            corrupt_offset,
+            vec![corrupted_byte],
+            WriteOptions::default(),
+        )
             .await
             .expect("cannot write corrupted byte");
         blob.sync().await.expect("cannot sync corruption");
@@ -160,7 +165,7 @@ fn fuzz(input: FuzzInput) {
 
         // The append wrapper may truncate if the corruption affected the last page's CRC
         // during initialization, so we handle both cases.
-        let append = match Append::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await
+        let mut append = match Writer::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await
         {
             Ok(a) => a,
             Err(_) => {
@@ -169,7 +174,7 @@ fn fuzz(input: FuzzInput) {
             }
         };
 
-        let reported_size = append.size().await;
+        let reported_size = append.size();
 
         // Step 4: Perform read operations and verify results.
         for read_op in &input.reads {
@@ -193,7 +198,12 @@ fn fuzz(input: FuzzInput) {
             if read_op.use_reader {
                 // Replay is for streaming replay, not random access.
                 // Test integrity via Replay by ensuring bytes and reading.
-                let replay_result = append.replay(NZUsize!(READER_BUFFER_CAPACITY)).await;
+                let replay_result = append
+                    .replay(
+                        NZUsize!(READER_BUFFER_CAPACITY),
+                        ReadOptions::default(),
+                    )
+                    .await;
                 let mut replay = match replay_result {
                     Ok(r) => r,
                     Err(_) => continue, // Replay creation failed due to corruption, skip.

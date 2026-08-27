@@ -10,8 +10,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
     /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
     ///   crash-durable.
-    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`; it needs admin and is skipped
-    ///   otherwise, so it is **not** crash-durable.
     ///
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
     /// >= 5.8. A missing `dir` is treated as success.
@@ -34,56 +32,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     "made storage filesystem durable at startup (syncfs)"
                 );
                 Ok(())
-            } else if #[cfg(unix)] {
+            } else {
                 // SAFETY: `sync` takes no arguments and cannot fail.
                 unsafe { libc::sync() };
                 tracing::debug!(
                     storage_directory = %dir.display(),
                     "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
-                );
-                Ok(())
-            } else if #[cfg(windows)] {
-                // Resolve the volume containing `dir` (e.g. `C:\...` -> `\\.\C:`). `sync_all` on a
-                // volume handle is `FlushFileBuffers`, which flushes every open file on the volume.
-                // Best-effort (see fn docs): opening the volume needs admin, so a failure (or a
-                // non-disk storage path) is logged, not fatal.
-                use std::path::{Component, Prefix};
-                let volume = dir.components().next().and_then(|component| match component {
-                    Component::Prefix(prefix) => match prefix.kind() {
-                        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
-                            Some(format!(r"\\.\{}:", drive as char))
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                });
-                let flushed = volume.as_deref().map(|volume| {
-                    std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(volume)
-                        .and_then(|handle| handle.sync_all())
-                });
-                match flushed {
-                    Some(Ok(())) => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        "made storage volume durable at startup (FlushFileBuffers)"
-                    ),
-                    Some(Err(e)) => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        error = %e,
-                        "best-effort volume flush skipped at startup; not crash-durable"
-                    ),
-                    None => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        "unable to guarantee storage durability at startup"
-                    ),
-                }
-                Ok(())
-            } else {
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "no whole-filesystem durable flush on this platform; recovered-data durability not guaranteed"
                 );
                 Ok(())
             }
@@ -103,169 +57,10 @@ stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouri
     pub mod tokio;
 });
 stability_scope!(BETA {
-    use crate::{Buf, BufMut};
-    use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
-    use commonware_formatting::hex;
-    use std::ops::RangeInclusive;
-
     pub mod metered;
 
-    /// Errors that can occur when validating a blob header.
-    #[derive(Debug)]
-    pub(crate) enum HeaderError {
-        InvalidMagic {
-            expected: [u8; 4],
-            found: [u8; 4],
-        },
-        UnsupportedRuntimeVersion {
-            expected: u16,
-            found: u16,
-        },
-        VersionMismatch {
-            expected: RangeInclusive<u16>,
-            found: u16,
-        },
-    }
-
-    impl HeaderError {
-        /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
-        pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
-            match self {
-                Self::InvalidMagic { expected, found } => crate::Error::BlobCorrupt(
-                    partition.into(),
-                    hex(name),
-                    format!("invalid magic: expected {expected:?}, found {found:?}"),
-                ),
-                Self::UnsupportedRuntimeVersion { expected, found } => crate::Error::BlobCorrupt(
-                    partition.into(),
-                    hex(name),
-                    format!("unsupported runtime version: expected {expected}, found {found}"),
-                ),
-                Self::VersionMismatch { expected, found } => {
-                    crate::Error::BlobVersionMismatch { expected, found }
-                }
-            }
-        }
-    }
-
-    /// Fixed-size header at the start of each [crate::Blob].
-    ///
-    /// On-disk layout (8 bytes, big-endian):
-    /// - Bytes 0-3: [Header::MAGIC]
-    /// - Bytes 4-5: Runtime Version (u16)
-    /// - Bytes 6-7: Blob Version (u16)
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) struct Header {
-        magic: [u8; Self::MAGIC_LENGTH],
-        runtime_version: u16,
-        pub(crate) blob_version: u16,
-    }
-
-    impl Header {
-        /// Size of the header in bytes.
-        pub(crate) const SIZE: usize = 8;
-
-        /// Size of the header as u64 for offset calculations.
-        pub(crate) const SIZE_U64: u64 = Self::SIZE as u64;
-
-        /// Length of magic bytes.
-        pub(crate) const MAGIC_LENGTH: usize = 4;
-
-        /// Length of version fields.
-        #[cfg(test)]
-        pub(crate) const VERSION_LENGTH: usize = 2;
-
-        /// Magic bytes identifying a valid commonware blob.
-        pub(crate) const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
-
-        /// The current version of the header format.
-        pub(crate) const RUNTIME_VERSION: u16 = 0;
-
-        /// Returns true if a blob is missing a valid header (new or corrupted).
-        pub(crate) const fn missing(raw_len: u64) -> bool {
-            raw_len < Self::SIZE_U64
-        }
-
-        /// Creates a header for a new blob using the latest version from the range.
-        /// Returns (header, blob_version).
-        pub(crate) const fn new(versions: &std::ops::RangeInclusive<u16>) -> (Self, u16) {
-            let blob_version = *versions.end();
-            let header = Self {
-                magic: Self::MAGIC,
-                runtime_version: Self::RUNTIME_VERSION,
-                blob_version,
-            };
-            (header, blob_version)
-        }
-
-        /// Parses and validates an existing header, returning the blob version and logical size.
-        pub(crate) fn from(
-            raw_bytes: [u8; Self::SIZE],
-            raw_len: u64,
-            versions: &RangeInclusive<u16>,
-        ) -> Result<(u16, u64), HeaderError> {
-            let header: Self = Self::decode(raw_bytes.as_slice())
-                .expect("header decode should never fail for correct size input");
-            header.validate(versions)?;
-            Ok((header.blob_version, raw_len - Self::SIZE_U64))
-        }
-
-        /// Validates the magic bytes, runtime version, and blob version.
-        pub(crate) fn validate(
-            &self,
-            blob_versions: &RangeInclusive<u16>,
-        ) -> Result<(), HeaderError> {
-            if self.magic != Self::MAGIC {
-                return Err(HeaderError::InvalidMagic {
-                    expected: Self::MAGIC,
-                    found: self.magic,
-                });
-            }
-            if self.runtime_version != Self::RUNTIME_VERSION {
-                return Err(HeaderError::UnsupportedRuntimeVersion {
-                    expected: Self::RUNTIME_VERSION,
-                    found: self.runtime_version,
-                });
-            }
-            if !blob_versions.contains(&self.blob_version) {
-                return Err(HeaderError::VersionMismatch {
-                    expected: blob_versions.clone(),
-                    found: self.blob_version,
-                });
-            }
-            Ok(())
-        }
-    }
-
-    impl FixedSize for Header {
-        const SIZE: usize = Self::SIZE;
-    }
-
-    impl CodecWrite for Header {
-        fn write(&self, buf: &mut impl BufMut) {
-            buf.put_slice(&self.magic);
-            buf.put_u16(self.runtime_version);
-            buf.put_u16(self.blob_version);
-        }
-    }
-
-    impl CodecRead for Header {
-        type Cfg = ();
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-            if buf.remaining() < Self::SIZE {
-                return Err(commonware_codec::Error::EndOfBuffer);
-            }
-            let mut magic = [0u8; Self::MAGIC_LENGTH];
-            buf.copy_to_slice(&mut magic);
-            let runtime_version = buf.get_u16();
-            let blob_version = buf.get_u16();
-            Ok(Self {
-                magic,
-                runtime_version,
-                blob_version,
-            })
-        }
-    }
+    mod header;
+    pub(crate) use header::{Header, Layout};
 
     /// Validate that a partition name contains only allowed characters.
     ///
@@ -283,88 +78,12 @@ stability_scope!(BETA {
     }
 });
 
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Header {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let version: u16 = u.arbitrary()?;
-        Ok(Self::new(&(version..=version)).0)
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Header, HeaderError};
-    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
-    use commonware_codec::{DecodeExt, Encode};
+    use crate::{
+        Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Storage, WriteOptions,
+    };
     use futures::FutureExt;
-
-    #[test]
-    fn test_header_fields() {
-        let (header, _) = Header::new(&(42..=42));
-        assert_eq!(header.magic, Header::MAGIC);
-        assert_eq!(header.runtime_version, Header::RUNTIME_VERSION);
-        assert_eq!(header.blob_version, 42);
-    }
-
-    #[test]
-    fn test_header_validate_success() {
-        let (header, _) = Header::new(&(5..=5));
-        assert!(header.validate(&(3..=7)).is_ok());
-        assert!(header.validate(&(5..=5)).is_ok());
-    }
-
-    #[test]
-    fn test_header_validate_magic_mismatch() {
-        let (mut header, _) = Header::new(&(5..=5));
-        header.magic = *b"XXXX";
-        let result = header.validate(&(3..=7));
-        assert!(matches!(
-            result,
-            Err(HeaderError::InvalidMagic { expected, found })
-            if expected == Header::MAGIC && found == *b"XXXX"
-        ));
-    }
-
-    #[test]
-    fn test_header_validate_runtime_version_mismatch() {
-        let (mut header, _) = Header::new(&(5..=5));
-        header.runtime_version = 99;
-        let result = header.validate(&(3..=7));
-        assert!(matches!(
-            result,
-            Err(HeaderError::UnsupportedRuntimeVersion { expected, found })
-            if expected == Header::RUNTIME_VERSION && found == 99
-        ));
-    }
-
-    #[test]
-    fn test_header_validate_blob_version_out_of_range() {
-        let (header, _) = Header::new(&(10..=10));
-        let result = header.validate(&(3..=7));
-        assert!(matches!(
-            result,
-            Err(HeaderError::VersionMismatch { expected, found })
-            if expected == (3..=7) && found == 10
-        ));
-    }
-
-    #[test]
-    fn test_header_bytes_round_trip() {
-        let (header, _) = Header::new(&(123..=123));
-        let bytes = header.encode();
-        let decoded: Header = Header::decode(bytes.as_ref()).unwrap();
-        assert_eq!(header, decoded);
-    }
-
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::Header;
-        use commonware_codec::conformance::CodecConformance;
-
-        commonware_conformance::conformance_tests! {
-            CodecConformance<Header>
-        }
-    }
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(storage: S)
@@ -399,10 +118,12 @@ pub(crate) mod tests {
         test_resize_then_open(&storage).await;
         test_partition_name_validation(&storage).await;
         test_blob_version_mismatch(&storage).await;
+        test_aligned_layout(&storage).await;
         test_read_zero_length(&storage).await;
         test_read_at_buf_returns_same_buffer(&storage).await;
         test_read_at_buf_insufficient_capacity(&storage).await;
         test_read_at_buf_larger_capacity(&storage).await;
+        test_read_options(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -414,8 +135,10 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(0, b"hello world").await.unwrap();
-        let read = blob.read_at(0, 11).await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
+        let read = blob.read_at(0, 11, ReadOptions::default()).await.unwrap();
 
         assert_eq!(
             read.coalesce(),
@@ -448,7 +171,9 @@ pub(crate) mod tests {
     {
         let (blob, _) = storage.open("read_after_remove", b"by_name").await.unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         storage
@@ -459,7 +184,10 @@ pub(crate) mod tests {
         // The name is gone but the open handle keeps reading the removed blob's bytes.
         let blobs = storage.scan("read_after_remove").await.unwrap();
         assert!(blobs.is_empty(), "Blob was not removed as expected");
-        let read = blob.read_at(0, data.len()).await.unwrap();
+        let read = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(
             read.coalesce().as_ref(),
             data.as_slice(),
@@ -478,7 +206,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).rev().collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         storage
@@ -486,7 +216,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let read = blob.read_at(0, data.len()).await.unwrap();
+        let read = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(
             read.coalesce().as_ref(),
             data.as_slice(),
@@ -505,7 +238,9 @@ pub(crate) mod tests {
             .open("recreate_after_remove", b"name")
             .await
             .unwrap();
-        old.write_at(0, b"old contents").await.unwrap();
+        old.write_at(0, b"old contents", WriteOptions::default())
+            .await
+            .unwrap();
         old.sync().await.unwrap();
 
         storage
@@ -519,16 +254,18 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(len, 0, "recreated blob must start empty");
-        new.write_at(0, b"new contents").await.unwrap();
+        new.write_at(0, b"new contents", WriteOptions::default())
+            .await
+            .unwrap();
         new.sync().await.unwrap();
 
-        let old_read = old.read_at(0, 12).await.unwrap();
+        let old_read = old.read_at(0, 12, ReadOptions::default()).await.unwrap();
         assert_eq!(
             old_read.coalesce().as_ref(),
             b"old contents",
             "pre-removal handle must keep observing the removed blob"
         );
-        let new_read = new.read_at(0, 12).await.unwrap();
+        let new_read = new.read_at(0, 12, ReadOptions::default()).await.unwrap();
         assert_eq!(new_read.coalesce().as_ref(), b"new contents");
     }
 
@@ -543,10 +280,12 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read through the handle before removal so the removal crosses an actively-used handle.
-        let read = blob.read_at(0, 16).await.unwrap();
+        let read = blob.read_at(0, 16, ReadOptions::default()).await.unwrap();
         assert_eq!(read.coalesce().as_ref(), &data[..16]);
 
         storage
@@ -555,13 +294,19 @@ pub(crate) mod tests {
             .unwrap();
 
         // Unsynced bytes are still served in full.
-        let read = blob.read_at(0, data.len()).await.unwrap();
+        let read = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(
             read.coalesce().as_ref(),
             data.as_slice(),
             "unsynced bytes must remain readable after removal"
         );
-        let read = blob.read_at(data.len() as u64 - 1, 1).await.unwrap();
+        let read = blob
+            .read_at(data.len() as u64 - 1, 1, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(read.coalesce().as_ref(), &data[data.len() - 1..]);
     }
 
@@ -577,7 +322,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
-        first.write_at(0, data.clone()).await.unwrap();
+        first
+            .write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         first.sync().await.unwrap();
         let second = first.clone();
         // Opened independently: a distinct handle to the same blob, not a clone.
@@ -596,10 +344,16 @@ pub(crate) mod tests {
         drop(first);
 
         for handle in [&second, &third, &independent] {
-            let read = handle.read_at(0, data.len()).await.unwrap();
+            let read = handle
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(read.coalesce().as_ref(), data.as_slice());
             assert!(
-                handle.read_at(data.len() as u64, 1).await.is_err(),
+                handle
+                    .read_at(data.len() as u64, 1, ReadOptions::default())
+                    .await
+                    .is_err(),
                 "out-of-bounds read must still fail after removal"
             );
         }
@@ -620,7 +374,9 @@ pub(crate) mod tests {
             let (blob, len) = storage.open(partition, b"name").await.unwrap();
             assert_eq!(len, 0, "each recreation must start empty");
             let data = vec![generation; 32];
-            blob.write_at(0, data.clone()).await.unwrap();
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             storage.remove(partition, Some(b"name")).await.unwrap();
             handles.push((blob, data));
@@ -629,14 +385,19 @@ pub(crate) mod tests {
         // Churn the name further with the removed generations still held.
         for _ in 0..5 {
             let (blob, _) = storage.open(partition, b"name").await.unwrap();
-            blob.write_at(0, vec![0xFF; 8]).await.unwrap();
+            blob.write_at(0, vec![0xFF; 8], WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
             storage.remove(partition, Some(b"name")).await.unwrap();
         }
 
         for (blob, data) in &handles {
-            let read = blob.read_at(0, data.len()).await.unwrap();
+            let read = blob
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(
                 read.coalesce().as_ref(),
                 data.as_slice(),
@@ -654,28 +415,40 @@ pub(crate) mod tests {
     {
         let partition = "read_after_remove_partition_multi";
         let (small_a, _) = storage.open(partition, b"a").await.unwrap();
-        small_a.write_at(0, b"alpha").await.unwrap();
+        small_a
+            .write_at(0, b"alpha", WriteOptions::default())
+            .await
+            .unwrap();
         small_a.sync().await.unwrap();
         // Deliberately never synced: partition removal must not lose unsynced bytes either.
         let (small_b, _) = storage.open(partition, b"b").await.unwrap();
-        small_b.write_at(0, b"bravo").await.unwrap();
+        small_b
+            .write_at(0, b"bravo", WriteOptions::default())
+            .await
+            .unwrap();
 
         const LARGE_LEN: usize = 1 << 20;
         let (large, _) = storage.open(partition, b"large").await.unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(LARGE_LEN).collect();
-        large.write_at(0, data.clone()).await.unwrap();
+        large
+            .write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         large.sync().await.unwrap();
 
         storage.remove(partition, None).await.unwrap();
 
-        let read = small_a.read_at(0, 5).await.unwrap();
+        let read = small_a.read_at(0, 5, ReadOptions::default()).await.unwrap();
         assert_eq!(read.coalesce().as_ref(), b"alpha");
-        let read = small_b.read_at(0, 5).await.unwrap();
+        let read = small_b.read_at(0, 5, ReadOptions::default()).await.unwrap();
         assert_eq!(read.coalesce().as_ref(), b"bravo");
 
         // Start, unaligned interior, and final-byte reads of the large blob.
         for (offset, len) in [(0usize, 4096), (123_457, 8192), (LARGE_LEN - 1, 1)] {
-            let read = large.read_at(offset as u64, len).await.unwrap();
+            let read = large
+                .read_at(offset as u64, len, ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(
                 read.coalesce().as_ref(),
                 &data[offset..offset + len],
@@ -686,9 +459,12 @@ pub(crate) mod tests {
         // Recreating the partition and a same-named blob yields an independent blob.
         let (fresh, len) = storage.open(partition, b"a").await.unwrap();
         assert_eq!(len, 0, "recreated blob must start empty");
-        fresh.write_at(0, b"fresh").await.unwrap();
+        fresh
+            .write_at(0, b"fresh", WriteOptions::default())
+            .await
+            .unwrap();
         fresh.sync().await.unwrap();
-        let read = small_a.read_at(0, 5).await.unwrap();
+        let read = small_a.read_at(0, 5, ReadOptions::default()).await.unwrap();
         assert_eq!(
             read.coalesce().as_ref(),
             b"alpha",
@@ -730,13 +506,15 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
-        blob.write_at(0, b"concurrent write").await.unwrap();
+        blob.write_at(0, b"concurrent write", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read and write concurrently
         let write_task = tokio::spawn({
             let blob = blob.clone();
             async move {
-                blob.write_at(0, IoBuf::from(b"concurrent write"))
+                blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default())
                     .await
                     .unwrap();
             }
@@ -744,7 +522,7 @@ pub(crate) mod tests {
 
         let read_task = tokio::spawn({
             let blob = blob.clone();
-            async move { blob.read_at(0, 16).await.unwrap() }
+            async move { blob.read_at(0, 16, ReadOptions::default()).await.unwrap() }
         });
 
         write_task.await.unwrap();
@@ -766,9 +544,15 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
-        blob.write_at(0, large_data.clone()).await.unwrap();
+        blob.write_at(0, large_data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
 
-        let read = blob.read_at(0, 10 * 1024 * 1024).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 10 * 1024 * 1024, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
 
         assert_eq!(read, large_data.as_slice(), "Large data read/write failed");
     }
@@ -785,13 +569,21 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(0, b"initial data").await.unwrap();
+        blob.write_at(0, b"initial data", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Overwrite part of the data
-        blob.write_at(8, b"overwrite").await.unwrap();
+        blob.write_at(8, b"overwrite", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
-        let read = blob.read_at(0, 17).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 17, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
 
         assert_eq!(
             read, b"initial overwrite",
@@ -811,10 +603,12 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write some data
-        blob.write_at(0, b"hello").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Attempt to read beyond the written data
-        let result = blob.read_at(6, 10).await;
+        let result = blob.read_at(6, 10, ReadOptions::default()).await;
         assert!(
             result.is_err(),
             "Reading beyond written data should return an error"
@@ -822,7 +616,7 @@ pub(crate) mod tests {
 
         // Same check via read_at_buf
         let buf = IoBufMut::with_capacity(10);
-        let result = blob.read_at_buf(6, 10, buf).await;
+        let result = blob.read_at_buf(6, 10, buf, ReadOptions::default()).await;
         assert!(
             result.is_err(),
             "read_at_buf beyond written data should return an error"
@@ -841,10 +635,16 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write data at a large offset
-        blob.write_at(10_000, b"offset data").await.unwrap();
+        blob.write_at(10_000, b"offset data", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
-        let read = blob.read_at(10_000, 11).await.unwrap().coalesce();
+        let read = blob
+            .read_at(10_000, 11, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read, b"offset data", "Data at large offset is incorrect");
     }
 
@@ -860,7 +660,9 @@ pub(crate) mod tests {
             .unwrap();
 
         // Empty writes should be accepted without extending the blob.
-        blob.write_at_sync(1024, Vec::<u8>::new()).await.unwrap();
+        blob.write_at(1024, Vec::<u8>::new(), WriteOptions::SYNC)
+            .await
+            .unwrap();
         drop(blob);
 
         let (blob, len) = storage
@@ -870,10 +672,16 @@ pub(crate) mod tests {
         assert_eq!(len, 0);
 
         // Non-empty writes must be visible after reopen without a separate sync call.
-        blob.write_at_sync(0, b"hello").await.unwrap();
-        blob.write_at_sync(5, vec![IoBuf::from(b" "), IoBuf::from(b"world")])
+        blob.write_at(0, b"hello", WriteOptions::SYNC)
             .await
             .unwrap();
+        blob.write_at(
+            5,
+            vec![IoBuf::from(b" "), IoBuf::from(b"world")],
+            WriteOptions::SYNC,
+        )
+        .await
+        .unwrap();
         drop(blob);
 
         // Reopening a blob in the same process may still observe dirty kernel
@@ -883,7 +691,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(len, 11);
-        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 11, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read.as_ref(), b"hello world");
     }
 
@@ -896,14 +708,20 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         blob.start_sync().await.await.unwrap();
         drop(blob);
 
         // The bytes must survive a reopen, just as they would after `sync`.
         let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
         assert_eq!(len, 11);
-        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 11, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read.as_ref(), b"hello world");
     }
 
@@ -919,13 +737,21 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(0, b"first").await.unwrap();
+        blob.write_at(0, b"first", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Append data
-        blob.write_at(5, b"second").await.unwrap();
+        blob.write_at(5, b"second", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
-        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 11, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read, b"firstsecond", "Appended data is incorrect");
     }
 
@@ -935,16 +761,20 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let test = |partition, bufs: Vec<IoBuf>, context| async move {
+        let test = |partition, bufs: Vec<IoBuf>, options, context| async move {
             // Coalesce the input to test later when reading
             let expected = IoBufs::from(bufs.clone()).coalesce();
             let (blob, _) = storage.open(partition, b"test_blob").await.unwrap();
 
             // Write data
-            blob.write_at(0, bufs).await.unwrap();
+            blob.write_at(0, bufs, options).await.unwrap();
 
             // Read back the data
-            let read = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+            let read = blob
+                .read_at(0, expected.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             assert_eq!(read.as_ref(), expected.as_ref(), "{context}");
         };
 
@@ -955,6 +785,7 @@ pub(crate) mod tests {
                 IoBuf::from(b" "),
                 IoBuf::from(b"world"),
             ],
+            WriteOptions::default(),
             "Vectored write content is incorrect",
         )
         .await;
@@ -968,20 +799,30 @@ pub(crate) mod tests {
                 IoBuf::from(b"def"),
                 IoBuf::default(),
             ],
+            WriteOptions::default(),
             "Vectored write with empties is incorrect",
         )
         .await;
 
-        let chunk_count = 128;
+        // Both filesystem backends cap one submission at 1,024 iovecs.
+        let chunk_count = 1_025;
         let mut bufs = Vec::with_capacity(chunk_count);
         for i in 0..chunk_count {
-            bufs.push(IoBuf::from(vec![i as u8; i]));
+            bufs.push(IoBuf::from(vec![i as u8]));
         }
 
         test(
             "test_vectored_write_many_chunks",
-            bufs,
+            bufs.clone(),
+            WriteOptions::default(),
             "Vectored write over batch size is incorrect",
+        )
+        .await;
+        test(
+            "test_vectored_sync_write_many_chunks",
+            bufs,
+            WriteOptions::SYNC,
+            "Synchronized vectored write over batch size is incorrect",
         )
         .await;
     }
@@ -1005,11 +846,13 @@ pub(crate) mod tests {
         let expected = IoBufs::from(bufs.clone()).coalesce();
 
         // Write vectored data at a large offset
-        blob.write_at(5_000, bufs).await.unwrap();
+        blob.write_at(5_000, bufs, WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob
-            .read_at(5_000, expected.len())
+            .read_at(5_000, expected.len(), ReadOptions::default())
             .await
             .unwrap()
             .coalesce();
@@ -1021,7 +864,11 @@ pub(crate) mod tests {
         );
 
         // Prefix gap should be zero-filled.
-        let prefix = blob.read_at(0, 5_000).await.unwrap().coalesce();
+        let prefix = blob
+            .read_at(0, 5_000, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(prefix.as_ref(), [0u8; 5_000]);
     }
 
@@ -1034,14 +881,26 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
-        blob.write_at(0, b"first").await.unwrap();
-        blob.write_at(10, b"second").await.unwrap();
+        blob.write_at(0, b"first", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(10, b"second", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
-        let read = blob.read_at(0, 5).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 5, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read, b"first", "Data at offset 0 is incorrect");
 
-        let read = blob.read_at(10, 6).await.unwrap().coalesce();
+        let read = blob
+            .read_at(10, 6, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read, b"second", "Data at offset 10 is incorrect");
     }
 
@@ -1062,15 +921,19 @@ pub(crate) mod tests {
 
         // Write data in chunks
         for i in 0..num_chunks {
-            blob.write_at((i * chunk_size) as u64, data.clone())
-                .await
-                .unwrap();
+            blob.write_at(
+                (i * chunk_size) as u64,
+                data.clone(),
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
         }
 
         // Read back the data in chunks
         for i in 0..num_chunks {
             let read = blob
-                .read_at((i * chunk_size) as u64, chunk_size)
+                .read_at((i * chunk_size) as u64, chunk_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -1089,7 +952,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let result = blob.read_at(0, 1).await;
+        let result = blob.read_at(0, 1, ReadOptions::default()).await;
         assert!(
             result.is_err(),
             "Reading from an empty blob should return an error"
@@ -1097,7 +960,7 @@ pub(crate) mod tests {
 
         // Same check via read_at_buf
         let buf = IoBufMut::with_capacity(1);
-        let result = blob.read_at_buf(0, 1, buf).await;
+        let result = blob.read_at_buf(0, 1, buf, ReadOptions::default()).await;
         assert!(
             result.is_err(),
             "read_at_buf from an empty blob should return an error"
@@ -1116,11 +979,19 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write overlapping data
-        blob.write_at(0, b"overlap").await.unwrap();
-        blob.write_at(4, b"map").await.unwrap();
+        blob.write_at(0, b"overlap", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(4, b"map", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
-        let read = blob.read_at(0, 7).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 7, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read, b"overmap", "Overlapping writes are incorrect");
     }
 
@@ -1136,7 +1007,9 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Write some data
-            blob.write_at(0, b"hello world").await.unwrap();
+            blob.write_at(0, b"hello world", WriteOptions::default())
+                .await
+                .unwrap();
 
             // Resize the blob
             blob.resize(5).await.unwrap();
@@ -1153,7 +1026,11 @@ pub(crate) mod tests {
         assert_eq!(len, 5, "Blob length after resize is incorrect");
 
         // Read back the data
-        let read = blob.read_at(0, 5).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 5, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read, b"hello", "Resized data is incorrect");
     }
 
@@ -1233,20 +1110,20 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         // Create a blob with version 1
-        let (blob, _, version) = storage
+        let (blob, _, blob_version) = storage
             .open_versioned("test_version_mismatch", b"blob", 1..=1)
             .await
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(blob_version, 1);
         blob.sync().await.unwrap();
         drop(blob);
 
         // Reopen with a range that includes version 1
-        let (_, _, version) = storage
+        let (_, _, blob_version) = storage
             .open_versioned("test_version_mismatch", b"blob", 0..=2)
             .await
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(blob_version, 1);
 
         // Try to open with version range that excludes version 1
         let result = storage
@@ -1262,6 +1139,61 @@ pub(crate) mod tests {
         );
     }
 
+    /// Test aligned-layout blob creation, reopen, and resize through logical offsets.
+    async fn test_aligned_layout<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        // Create an aligned blob and write/read through logical offsets.
+        let (blob, size, _) = storage
+            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, 0);
+        blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        let read = blob
+            .read_at(0, 11, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read.as_ref(), b"hello world");
+        drop(blob);
+
+        // Reopen honors the recorded layout and logical size.
+        let (blob, size, _) = storage
+            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, 11);
+        let read = blob
+            .read_at(6, 5, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read.as_ref(), b"world");
+
+        // Resize preserves logical semantics.
+        blob.resize(5).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+        let (blob, size, _) = storage
+            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, 5);
+        let read = blob
+            .read_at(0, 5, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read.as_ref(), b"hello");
+        drop(blob);
+    }
+
     /// Test that read_at with zero length returns an empty buffer.
     async fn test_read_zero_length<S>(storage: &S)
     where
@@ -1273,15 +1205,20 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
 
         // read_at with len=0 should succeed and return empty
-        let output = blob.read_at(0, 0).await.unwrap();
+        let output = blob.read_at(0, 0, ReadOptions::default()).await.unwrap();
         assert_eq!(output.len(), 0);
 
         // read_at_buf with len=0 should also succeed
         let buf = IoBufMut::with_capacity(16);
-        let output = blob.read_at_buf(0, 0, buf).await.unwrap();
+        let output = blob
+            .read_at_buf(0, 0, buf, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(output.len(), 0);
     }
 
@@ -1297,12 +1234,17 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write test data
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Test with single buffer - verify same buffer is returned
         let input_buf = IoBufMut::zeroed(11);
         let input_ptr = input_buf.as_ref().as_ptr();
-        let output = blob.read_at_buf(0, 11, input_buf).await.unwrap();
+        let output = blob
+            .read_at_buf(0, 11, input_buf, ReadOptions::default())
+            .await
+            .unwrap();
         assert!(
             output.is_single(),
             "Single input should return single output"
@@ -1322,7 +1264,10 @@ pub(crate) mod tests {
         let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!input_bufs.is_single(), "Should be multi-chunk");
 
-        let mut output = blob.read_at_buf(0, 11, input_bufs).await.unwrap();
+        let mut output = blob
+            .read_at_buf(0, 11, input_bufs, ReadOptions::default())
+            .await
+            .unwrap();
         assert!(
             !output.is_single(),
             "Multi-chunk input should return multi-chunk output"
@@ -1353,7 +1298,10 @@ pub(crate) mod tests {
         let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!input_bufs.is_single(), "Should be multi-chunk");
 
-        let output = blob.read_at_buf(0, 2, input_bufs).await.unwrap();
+        let output = blob
+            .read_at_buf(0, 2, input_bufs, ReadOptions::default())
+            .await
+            .unwrap();
         assert!(
             !output.is_single(),
             "Multi-chunk input should remain multi-chunk when len only uses first chunk"
@@ -1377,13 +1325,16 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Single buffer with capacity 5, request 11 bytes
         let buf = IoBufMut::with_capacity(5);
-        let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, buf))
-            .catch_unwind()
-            .await;
+        let result =
+            std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, buf, ReadOptions::default()))
+                .catch_unwind()
+                .await;
         assert!(
             result.is_err(),
             "Expected panic for insufficient single buffer capacity"
@@ -1391,9 +1342,10 @@ pub(crate) mod tests {
 
         // Chunked buffers with total capacity 8, request 11 bytes
         let bufs = IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
-        let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, bufs))
-            .catch_unwind()
-            .await;
+        let result =
+            std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, bufs, ReadOptions::default()))
+                .catch_unwind()
+                .await;
         assert!(
             result.is_err(),
             "Expected panic for insufficient multi-chunk buffer capacity"
@@ -1411,19 +1363,70 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Buffer with capacity 64, request only 11 bytes
         let buf = IoBufMut::with_capacity(64);
         assert_eq!(buf.len(), 0, "with_capacity should start at len 0");
-        let output = blob.read_at_buf(0, 11, buf).await.unwrap();
+        let output = blob
+            .read_at_buf(0, 11, buf, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(output.len(), 11);
         assert_eq!(output.coalesce(), b"hello world");
 
         // Buffer with capacity 64, request only 5 bytes (partial read)
         let buf = IoBufMut::with_capacity(64);
-        let output = blob.read_at_buf(0, 5, buf).await.unwrap();
+        let output = blob
+            .read_at_buf(0, 5, buf, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(output.len(), 5);
         assert_eq!(output.coalesce(), b"hello");
+    }
+
+    /// Test that read options do not change functional read behavior.
+    async fn test_read_options<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage.open("test_read_options", b"blob").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
+
+        // Exact reads must return the same bytes under either cache policy.
+        let default = blob
+            .read_at(0, 11, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+        let uncached = blob
+            .read_at(0, 11, ReadOptions::DONT_CACHE)
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(default.as_ref(), uncached.as_ref());
+
+        // Zero-length and past-EOF behavior is policy-independent.
+        let default = blob.read_at(0, 0, ReadOptions::default()).await.unwrap();
+        let uncached = blob.read_at(0, 0, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(default.len(), 0);
+        assert_eq!(uncached.len(), 0);
+
+        assert!(blob.read_at(0, 12, ReadOptions::default()).await.is_err());
+        assert!(blob.read_at(0, 12, ReadOptions::DONT_CACHE).await.is_err());
+
+        // Vectored destinations preserve their shape and content under either policy.
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            let bufs =
+                IoBufsMut::from(vec![IoBufMut::with_capacity(5), IoBufMut::with_capacity(6)]);
+            let output = blob.read_at_buf(0, 11, bufs, options).await.unwrap();
+            assert!(!output.is_single());
+            assert_eq!(output.coalesce(), b"hello world");
+        }
     }
 }

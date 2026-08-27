@@ -529,7 +529,7 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{reed_solomon::ReedSolomon, PhasedAsScheme, Scheme, Zoda};
+        use crate::{PhasedAsScheme, Scheme, Zoda, reed_solomon::ReedSolomon};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 

@@ -1,12 +1,12 @@
 use crate::{
+    Context,
     index::Ordered as Index,
-    journal::contiguous::{Contiguous, Reader},
+    journal::contiguous::Contiguous,
     merkle::{Family, Location},
     qmdb::{
-        any::{db::Db, ValueEncoding},
+        any::{ValueEncoding, db::Db},
         operation::{Key, Operation as OperationTrait},
     },
-    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -19,27 +19,27 @@ use futures::{
 pub mod fixed;
 pub mod variable;
 
-pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
+pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as Update};
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 
 impl<
-        F: Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<F, K, V>>,
-        I: Index<Value = Location<F>>,
-        H: Hasher,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, C, I, H, Update<K, V>, N, S>
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    I: Index<Value = Location<F>>,
+    H: Hasher,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, C, I, H, Update<K, V>, N, S>
 where
     Operation<F, K, V>: Codec,
 {
     async fn get_update_op(
-        reader: &impl Reader<Item = Operation<F, K, V>>,
+        reader: &impl Contiguous<Item = Operation<F, K, V>>,
         loc: Location<F>,
     ) -> Result<Update<K, V>, crate::qmdb::Error<F>> {
         match reader.read(*loc).await? {
@@ -71,10 +71,9 @@ where
         locs: impl IntoIterator<Item = Location<F>>,
         key: &K,
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
-        let reader = self.log.reader().await;
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
-            let data = Self::get_update_op(&reader, loc).await?;
+            let data = Self::get_update_op(&self.log, loc).await?;
             if Self::span_contains(&data.key, &data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
@@ -127,9 +126,8 @@ where
     ) -> Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        let reader = self.log.reader().await;
         for loc in locs {
-            let op = reader.read(*loc).await?;
+            let op = self.log.read(*loc).await?;
             assert!(
                 op.is_update(),
                 "location does not reference update operation. loc={loc}"
@@ -202,10 +200,9 @@ where
         &self,
         locs: impl IntoIterator<Item = &Location<F>>,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
-        let reader = self.log.reader().await;
         let futures = locs
             .into_iter()
-            .map(|loc| Self::get_update_op(&reader, *loc));
+            .map(|loc| Self::get_update_op(&self.log, *loc));
         let mut updates = try_join_all(futures).await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
@@ -323,12 +320,12 @@ mod test {
         merkle::Family,
         qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::boxed;
-    use commonware_runtime::{deterministic::Context, Supervisor as _};
+    use commonware_runtime::{Supervisor as _, deterministic::Context};
     use commonware_utils::{sequence::FixedBytes, test_rng};
     use core::{future::Future, pin::Pin};
-    use rand::Rng;
+    use rand::RngExt as _;
 
     /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
     /// ascending query sequence, including queries past the last candidate (cyclic wrap).
@@ -336,14 +333,14 @@ mod test {
     fn find_next_key_ascending_matches_binary_search() {
         let mut rng = test_rng();
         for _ in 0..50 {
-            let mut candidates: Vec<u64> = (0..rng.gen_range(1..40))
-                .map(|_| rng.gen_range(0..60u64))
+            let mut candidates: Vec<u64> = (0..rng.random_range(1..40))
+                .map(|_| rng.random_range(0..60u64))
                 .collect();
             candidates.sort_unstable();
             candidates.dedup();
 
-            let mut queries: Vec<u64> = (0..rng.gen_range(1..80))
-                .map(|_| rng.gen_range(0..70u64))
+            let mut queries: Vec<u64> = (0..rng.random_range(1..80))
+                .map(|_| rng.random_range(0..70u64))
                 .collect();
             queries.sort_unstable();
 
@@ -374,11 +371,12 @@ mod test {
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
-        mut db: D,
+        db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
         assert!(db.get_metadata().await.unwrap().is_none());
-        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
@@ -390,18 +388,19 @@ mod test {
             let _batch = db.new_batch().write(d1, Some(d2));
             // Don't merkleize/apply -- simulates uncommitted write
         }
-        let mut db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.root(), root);
 
         // Test applying an empty batch on an empty db.
         let metadata = Sha256::fill(3u8);
         let merkleized = db.new_batch().merkleize(&db, Some(metadata)).await.unwrap();
-        let range = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, range) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
-        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
+        let boundary = db.sync_boundary();
+        db.prune(boundary).await.unwrap();
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
@@ -411,12 +410,12 @@ mod test {
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         for _ in 1..100 {
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            let _ = db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
         }
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         db.destroy().await.unwrap();
     }
 
@@ -426,7 +425,7 @@ mod test {
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
-        mut db: D,
+        db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
@@ -446,8 +445,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
 
@@ -458,8 +457,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
@@ -469,8 +468,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
@@ -481,8 +480,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
         let merkleized = db
@@ -491,14 +490,14 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // Empty commit batch (no preceding uncommitted writes).
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Make sure key1 is already active.
         assert!(db.get(&key1).await.unwrap().is_some());
@@ -511,8 +510,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert!(db.get(&key2).await.unwrap().is_some());
         let merkleized = db
             .new_batch()
@@ -520,15 +519,15 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
         // Empty commit batch.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Multiple deletions of the same key should be a no-op.
         assert!(db.get(&key1).await.unwrap().is_none());
@@ -539,12 +538,12 @@ mod test {
 
         // Make sure closing/reopening gets us back to the same state.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        let op_count = db.bounds().await.end;
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let op_count = db.bounds().end;
         let root = db.root();
-        let mut db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
-        assert_eq!(db.bounds().await.end, op_count);
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
+        assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
@@ -554,8 +553,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
@@ -563,8 +562,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
@@ -572,8 +571,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
@@ -581,8 +580,8 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
@@ -590,33 +589,34 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Empty commit batch.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        let op_count = db.bounds().await.end;
+        let op_count = db.bounds().end;
         let root = db.root();
-        let mut db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
+        let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
 
         assert_eq!(db.root(), root);
-        assert_eq!(db.bounds().await.end, op_count);
+        assert_eq!(db.bounds().end, op_count);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         assert!(db.root() != root);
 
         // Pruning inactive ops should not affect current state or root.
         let root = db.root();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -629,7 +629,7 @@ mod test {
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
-        mut db: D,
+        db: D,
     ) {
         // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
         // collisions.
@@ -647,15 +647,15 @@ mod test {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let _ = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         db.destroy().await.unwrap();
     }
 }

@@ -1,14 +1,14 @@
 //! Test fixtures for Secp256r1 certificate signing schemes.
 
 use crate::{
-    certificate::{mocks::Fixture, Scheme},
+    Signer as _,
+    certificate::{Scheme, mocks::Fixture},
     ed25519,
     secp256r1::standard::{PrivateKey, PublicKey},
-    Signer as _,
 };
 use commonware_math::algebra::Random;
-use commonware_utils::{ordered::BiMap, TryCollect as _};
-use rand::{CryptoRng, RngCore};
+use commonware_utils::{TryCollect as _, ordered::BiMap};
+use rand_core::CryptoRng;
 
 /// Builds ed25519 identities and matching Secp256r1 signing schemes.
 pub fn fixture<S, R>(
@@ -19,7 +19,7 @@ pub fn fixture<S, R>(
     verifier: impl Fn(&[u8], BiMap<ed25519::PublicKey, PublicKey>) -> S,
 ) -> Fixture<S>
 where
-    R: RngCore + CryptoRng,
+    R: CryptoRng,
     S: Scheme<PublicKey = ed25519::PublicKey>,
 {
     assert!(n > 0);

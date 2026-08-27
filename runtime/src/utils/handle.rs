@@ -1,22 +1,22 @@
 use crate::{
+    Error,
     telemetry::metrics::raw::Gauge,
     utils::{extract_panic_message, supervision::Tree},
-    Error,
 };
 use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, Once},
 };
 use futures::{
-    future::{select, Either},
+    FutureExt as _,
+    future::{Either, poll_fn, select},
     pin_mut,
     stream::{AbortHandle, Abortable, Aborted},
-    FutureExt as _,
 };
 use std::{
     any::Any,
     future::Future,
-    panic::{resume_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, resume_unwind},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -49,6 +49,22 @@ where
         future: Abortable<Completion<T>>,
         abort_handle: AbortHandle,
     },
+}
+
+/// Aborts every owned handle when a group is no longer supervised.
+struct HandleGroup<T>(Vec<Handle<T>>)
+where
+    T: Send + 'static;
+
+impl<T> Drop for HandleGroup<T>
+where
+    T: Send + 'static,
+{
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
 }
 
 /// Normalizes receiver-backed and future-backed completions behind one abortable future.
@@ -168,6 +184,56 @@ where
         let (sender, receiver) = oneshot::channel();
         let _ = sender.send(result);
         Self::from_receiver(receiver)
+    }
+
+    /// Waits for the first handle to complete and aborts all handles before returning.
+    ///
+    /// Dropping the returned future also aborts every handle. Selection is biased toward handles
+    /// that appear earlier in the iterator.
+    ///
+    /// Runtime supervision already aborts a task's descendants when that task exits. This method
+    /// is intended for an owned group whose teardown boundary is the first handle completion,
+    /// independent of whether the caller exits immediately afterward.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # futures::executor::block_on(async {
+    /// use commonware_runtime::Handle;
+    ///
+    /// let handles = [
+    ///     Handle::ready(Ok(7)),
+    ///     Handle::from_future(futures::future::pending()),
+    /// ];
+    /// assert_eq!(Handle::select(handles).await.unwrap(), 7);
+    /// # });
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] if `handles` is empty.
+    pub fn select(
+        handles: impl IntoIterator<Item = Self>,
+    ) -> impl Future<Output = Result<T, Error>> + Send + 'static {
+        // Construct the guard before returning so dropping the future without polling still aborts
+        // every handle.
+        let mut handles = HandleGroup(handles.into_iter().collect::<Vec<_>>());
+
+        async move {
+            if handles.0.is_empty() {
+                return Err(Error::Closed);
+            }
+
+            poll_fn(move |cx| {
+                for handle in &mut handles.0 {
+                    if let Poll::Ready(result) = Pin::new(handle).poll(cx) {
+                        return Poll::Ready(result);
+                    }
+                }
+                Poll::Pending
+            })
+            .await
+        }
     }
 
     /// Returns a handle that resolves to [`Error::Closed`] without spawning work.
@@ -372,7 +438,7 @@ impl Aborter {
 #[cfg(test)]
 mod tests {
     use super::Handle;
-    use crate::{deterministic, Error, Metrics as _, Runner, Spawner, Supervisor as _};
+    use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
     use futures::future;
 
@@ -470,6 +536,55 @@ mod tests {
                 Some(0),
                 "expected tasks_running gauge to return to 0 after abort: {metrics}",
             );
+        });
+    }
+
+    #[test]
+    fn select_aborts_remaining_tasks() {
+        const LABEL: &str = "tasks_running_select_remaining";
+
+        deterministic::Runner::default().start(|context| async move {
+            let completed = context.child("select_completed").spawn(|_| async {});
+            let pending = context.child(LABEL).spawn(|_| future::pending());
+
+            Handle::select([completed, pending])
+                .await
+                .expect("task failed");
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(0),
+                "select should abort remaining tasks: {metrics}",
+            );
+        });
+    }
+
+    #[test]
+    fn select_empty_returns_closed() {
+        deterministic::Runner::default().start(|_| async move {
+            assert!(matches!(Handle::<()>::select([]).await, Err(Error::Closed)));
+        });
+    }
+
+    #[test]
+    fn dropping_select_aborts_tasks_before_polling() {
+        const FIRST_LABEL: &str = "tasks_running_select_drop_first";
+        const SECOND_LABEL: &str = "tasks_running_select_drop_second";
+
+        deterministic::Runner::default().start(|context| async move {
+            let first = context
+                .child(FIRST_LABEL)
+                .spawn(|_| future::pending::<()>());
+            let second = context
+                .child(SECOND_LABEL)
+                .spawn(|_| future::pending::<()>());
+
+            drop(Handle::select([first, second]));
+
+            let metrics = context.encode();
+            assert_eq!(running_tasks_for_label(&metrics, FIRST_LABEL), Some(0));
+            assert_eq!(running_tasks_for_label(&metrics, SECOND_LABEL), Some(0));
         });
     }
 

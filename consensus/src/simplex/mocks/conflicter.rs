@@ -5,11 +5,11 @@ use crate::simplex::{
     types::{Finalize, Notarize, Proposal, Vote},
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{certificate::Scheme, Hasher};
+use commonware_cryptography::{Hasher, certificate::Scheme};
 use commonware_math::algebra::Random;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use rand_core::CryptoRngCore;
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
+use rand_core::CryptoRng;
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -17,7 +17,7 @@ pub struct Config<S: Scheme> {
     pub scheme: S,
 }
 
-pub struct Conflicter<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
+pub struct Conflicter<E: Clock + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     _hasher: PhantomData<H>,
@@ -25,7 +25,7 @@ pub struct Conflicter<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> 
 
 impl<E, S, H> Conflicter<E, S, H>
 where
-    E: Clock + CryptoRngCore + Spawner,
+    E: Clock + CryptoRng + Spawner,
     S: scheme::Scheme<H::Digest>,
     H: Hasher,
 {

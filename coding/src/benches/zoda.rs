@@ -1,7 +1,7 @@
 use crate::{bench_decode_generic, bench_encode_generic};
 use commonware_coding::{PhasedAsScheme, Zoda};
 use commonware_cryptography::Sha256;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 
 fn bench_encode(c: &mut Criterion) {
     bench_encode_generic::<PhasedAsScheme<Zoda<Sha256>>>("zoda::encode", c);

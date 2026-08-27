@@ -4,7 +4,7 @@ use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 const P: u64 = 4_611_686_018_427_389_243;
 const Q: u64 = 9_223_372_036_854_778_487;
@@ -61,7 +61,7 @@ impl From<u64> for F {
 impl Object for F {}
 
 impl Random for F {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut bytes = [0u8; 8];
         rng.fill_bytes(&mut bytes);
         Self(u64::from_le_bytes(bytes) % P)

@@ -14,10 +14,10 @@ use commonware_cryptography::bls12381::{
         ops::{compute_public, sign_message},
         variant::{MinPk, MinSig, Variant},
     },
-    tle::{decrypt, encrypt, Block, Ciphertext},
+    tle::{Block, Ciphertext, decrypt, encrypt},
 };
+use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -157,13 +157,14 @@ fn fuzz(op: FuzzOperation) {
             let master_public = compute_public::<MinPk>(&master_secret);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinPk>(
                 &mut rng,
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
@@ -185,13 +186,14 @@ fn fuzz(op: FuzzOperation) {
             let master_public = compute_public::<MinSig>(&master_secret);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinSig>(
                 &mut rng,
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
@@ -214,13 +216,14 @@ fn fuzz(op: FuzzOperation) {
             let master_public1 = compute_public::<MinPk>(&master_secret1);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinPk>(
                 &mut rng,
                 master_public1,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let wrong_signature = sign_message::<MinPk>(&master_secret2, &namespace, &target);
             let _ = decrypt::<MinPk>(&wrong_signature, &ciphertext);
@@ -237,13 +240,14 @@ fn fuzz(op: FuzzOperation) {
             let master_public1 = compute_public::<MinSig>(&master_secret1);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinSig>(
                 &mut rng,
                 master_public1,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let wrong_signature = sign_message::<MinSig>(&master_secret2, &namespace, &target);
             let _ = decrypt::<MinSig>(&wrong_signature, &ciphertext);
@@ -261,13 +265,14 @@ fn fuzz(op: FuzzOperation) {
             let master_public = compute_public::<MinPk>(&master_secret);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinPk>(
                 &mut rng,
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let mut encoded = Vec::new();
             commonware_codec::Write::write(&ciphertext, &mut encoded);
@@ -292,14 +297,15 @@ fn fuzz(op: FuzzOperation) {
         } => {
             let master_public = compute_public::<MinSig>(&master_secret);
             let message_block = Block::new(message);
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
 
             let ciphertext = encrypt::<_, MinSig>(
                 &mut rng,
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let mut encoded = Vec::new();
             commonware_codec::Write::write(&ciphertext, &mut encoded);

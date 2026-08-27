@@ -456,7 +456,12 @@ impl Write for Bitmap {
         // Preserve the codec's big-endian word order while collapsing 1024 small
         // `put_slice` calls into one bulk write.
         let mut bytes = [0u8; ENCODED_BYTES];
-        for (dst, &word) in bytes.chunks_exact_mut(8).zip(self.words.iter()) {
+        for (dst, &word) in bytes
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(self.words.iter())
+        {
             dst.copy_from_slice(&word.to_be_bytes());
         }
         buf.put_slice(&bytes);
@@ -476,7 +481,7 @@ impl Read for Bitmap {
         let bytes = <[u8; ENCODED_BYTES]>::read(buf)?;
 
         let mut words = [0u64; WORDS];
-        for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
+        for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0.iter()) {
             let mut word_bytes = [0u8; 8];
             word_bytes.copy_from_slice(chunk);
             *word = u64::from_be_bytes(word_bytes);
@@ -562,6 +567,8 @@ impl arbitrary::Arbitrary<'_> for Bitmap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_rng;
+    use rand::RngExt as _;
 
     #[test]
     fn test_new_and_empty() {
@@ -947,13 +954,10 @@ mod tests {
     fn test_run_count_matches_scan_after_random_inserts() {
         // Property: incremental run_count tracking from `insert` must agree with the
         // bulk `count_runs` scan over the same word array.
-        use crate::test_rng;
-        use rand::Rng;
-
         let mut rng = test_rng();
         let mut b = Bitmap::new();
         for _ in 0..2000 {
-            let v: u16 = rng.gen();
+            let v: u16 = rng.random();
             b.insert(v);
         }
         // The cached field is what callers see; the scan is the ground truth.

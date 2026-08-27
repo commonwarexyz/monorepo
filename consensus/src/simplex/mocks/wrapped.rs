@@ -1,17 +1,23 @@
-use crate::{simplex::elector, types::Round};
-use commonware_codec::{types::lazy::Lazy, Encode, Read};
+use crate::{
+    simplex::elector::{self, Terms},
+    types::Round,
+};
+use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
-    certificate::{Attestation, Scheme as CertificateScheme, Verification, Verifier},
-    sha256::Sha256,
     Digest, Hasher as _,
+    certificate::{
+        AssemblyError, Attestation, Scheme as CertificateScheme, Verification, Verifier,
+    },
+    sha256::Sha256,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{modulo, test_rng, Faults, Participant};
+use commonware_utils::{Participant, iter::NonEmpty, modulo, non_empty, test_rng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
     Honest,
     CorruptSignature,
+    RecoveryFailure,
 }
 
 #[derive(Clone, Debug)]
@@ -69,10 +75,7 @@ impl<S> Scheme<S> {
 
         // Hash the signer and signature bytes to derive a deterministic starting
         // point for the single-bit flip search.
-        let mut hasher = Sha256::default();
-        hasher.update(&signer.encode());
-        hasher.update(&encoded);
-        let digest = hasher.finalize();
+        let digest = Sha256::hash(&[&signer.encode(), &encoded]);
 
         // Start from a deterministic but non-trivial bit so tests do not always
         // mutate the same low-order bit first.
@@ -131,6 +134,10 @@ where
     S: CertificateScheme,
     E: elector::Elector<S>,
 {
+    fn terms(&self) -> Terms {
+        self.inner.terms()
+    }
+
     fn elect(
         &self,
         round: Round,
@@ -145,10 +152,11 @@ where
     S: CertificateScheme,
 {
     type Subject<'a, D: Digest> = S::Subject<'a, D>;
+    type Faults = S::Faults;
     type PublicKey = S::PublicKey;
     type Certificate = S::Certificate;
 
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -156,12 +164,11 @@ where
         strategy: &impl commonware_parallel::Strategy,
     ) -> bool
     where
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
-        M: Faults,
     {
         self.inner
-            .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
+            .verify_certificate(rng, subject, certificate, strategy)
     }
 
     fn is_batchable() -> bool {
@@ -194,7 +201,7 @@ where
     fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>> {
         let attestation = self.inner.sign(subject.clone())?;
         let signature = match self.behavior {
-            Behavior::Honest => attestation.signature,
+            Behavior::Honest | Behavior::RecoveryFailure => attestation.signature,
             Behavior::CorruptSignature => {
                 let signature = attestation
                     .signature
@@ -218,7 +225,7 @@ where
         strategy: &impl commonware_parallel::Strategy,
     ) -> bool
     where
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
     {
         self.inner.verify_attestation(
@@ -237,7 +244,7 @@ where
         strategy: &impl commonware_parallel::Strategy,
     ) -> Verification<Self>
     where
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
@@ -262,23 +269,25 @@ where
         )
     }
 
-    fn assemble<I, M>(
+    fn assemble<I>(
         &self,
-        attestations: I,
+        attestations: NonEmpty<I>,
         strategy: &impl commonware_parallel::Strategy,
-    ) -> Option<Self::Certificate>
+    ) -> Result<Self::Certificate, AssemblyError>
     where
-        I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
-        M: Faults,
+        I: Iterator<Item = Attestation<Self>> + Send,
     {
-        self.inner.assemble::<_, M>(
-            attestations.into_iter().map(|attestation| Attestation {
+        let result = self.inner.assemble(
+            non_empty![@attestations.into_iter().map(|attestation| Attestation {
                 signer: attestation.signer,
                 signature: attestation.signature,
-            }),
+            })],
             strategy,
-        )
+        );
+        if self.behavior == Behavior::RecoveryFailure {
+            return result.and(Err(AssemblyError::RecoveryFailed));
+        }
+        result
     }
 
     fn is_attributable() -> bool {

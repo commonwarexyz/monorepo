@@ -1,22 +1,22 @@
 use arbitrary::Arbitrary;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{ed25519, Signer};
+use commonware_cryptography::{Signer, ed25519};
 use commonware_p2p::{
+    Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
     authenticated::{
         discovery,
         lookup::{self, Network as LookupNetwork},
     },
-    Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    deterministic::{self, Context},
     Clock, Handle, IoBuf, Quota, Runner, Supervisor as _,
+    deterministic::{self, Context},
 };
 use commonware_utils::{
+    NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},
-    NZUsize, TryCollect, NZU32,
 };
-use rand::{seq::SliceRandom, Rng};
+use rand::{RngExt as _, seq::SliceRandom};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
@@ -57,7 +57,6 @@ const MIN_PEERS: usize = 4;
 const MAX_MSG_SIZE: u32 = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
 const TRACKED_PEER_SETS: NonZeroUsize = NZUsize!(5);
-const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Operations that can be performed on the p2p network during fuzzing.
@@ -240,6 +239,11 @@ impl NetworkScheme for Discovery {
             peer.info.address,
             peer.info.address,
             bootstrappers,
+            peer.topo
+                .peers
+                .len()
+                .try_into()
+                .expect("topology must contain at least one peer"),
             MAX_MSG_SIZE,
         );
         // Override some settings for fuzzing environment
@@ -265,7 +269,7 @@ impl NetworkScheme for Discovery {
         }
 
         let quota = Quota::per_second(NZU32!(100));
-        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
+        let (sender, receiver) = network.register(0, quota);
 
         // Start the network background task
         let handle = network.start();
@@ -311,6 +315,11 @@ impl NetworkScheme for Lookup {
             peer.info.private_key.clone(),
             b"fuzz_namespace",
             peer.info.address,
+            peer.topo
+                .peers
+                .len()
+                .try_into()
+                .expect("topology must contain at least one peer"),
             MAX_MSG_SIZE,
         );
         config.allow_private_ips = true; // Required for localhost testing
@@ -351,7 +360,7 @@ impl NetworkScheme for Lookup {
         }
 
         let quota = Quota::per_second(NZU32!(100));
-        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
+        let (sender, receiver) = network.register(0, quota);
 
         // Start the network background task
         let handle = network.start();
@@ -414,7 +423,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         let mut peer_infos = Vec::new();
 
         for i in 0..input.peers {
-            let private_key = ed25519::PrivateKey::from_seed(context.gen());
+            let private_key = ed25519::PrivateKey::from_seed(context.random());
             let public_key = private_key.public_key();
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
 
@@ -609,7 +618,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     // Build a random subset of peer IDs (using a set to avoid duplicates)
                     let mut peer_ids = HashSet::new();
                     for _ in 0..peer_set_size {
-                        let id = context.gen::<usize>() % topology.peers.len();
+                        let id = context.random::<u64>() as usize % topology.peers.len();
                         peer_ids.insert(id as PeerId);
                     }
                     let peer_ids: Vec<_> = peer_ids.into_iter().collect();

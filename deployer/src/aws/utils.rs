@@ -6,7 +6,7 @@ use tokio::{
     fs::File,
     io::AsyncWriteExt,
     process::Command,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 use tracing::{info, warn};
 
@@ -43,7 +43,7 @@ fn scp_target(ip: &str, remote_path: &str) -> String {
     format!("ubuntu@{}:{remote_path}", scp_host(ip))
 }
 
-fn ssh_attach_code_ok(code: Option<i32>) -> bool {
+const fn ssh_attach_code_ok(code: Option<i32>) -> bool {
     matches!(code, Some(0 | 130))
 }
 

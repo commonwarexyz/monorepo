@@ -315,11 +315,7 @@ impl Plan {
                     }
                 }
                 assert!(result.len() <= limit);
-
-                let values: Vec<_> = result.iter().collect();
-                for window in values.windows(2) {
-                    assert!(window[0] < window[1], "union not sorted");
-                }
+                assert!(result.iter().is_sorted_by(|a, b| a < b), "union not sorted");
             }
 
             Self::Intersection {
@@ -345,11 +341,10 @@ impl Plan {
                     assert!(b.contains(v), "intersection contains value not in b: {}", v);
                 }
                 assert!(result.len() <= limit);
-
-                let values: Vec<_> = result.iter().collect();
-                for window in values.windows(2) {
-                    assert!(window[0] < window[1], "intersection not sorted");
-                }
+                assert!(
+                    result.iter().is_sorted_by(|a, b| a < b),
+                    "intersection not sorted"
+                );
             }
 
             Self::Difference {
@@ -374,20 +369,17 @@ impl Plan {
                     assert!(!b.contains(v), "difference contains value in b: {}", v);
                 }
                 assert!(result.len() <= limit);
-
-                let values: Vec<_> = result.iter().collect();
-                for window in values.windows(2) {
-                    assert!(window[0] < window[1], "difference not sorted");
-                }
+                assert!(
+                    result.iter().is_sorted_by(|a, b| a < b),
+                    "difference not sorted"
+                );
             }
 
             Self::Iterator { values } => {
                 let bitmap = build_bitmap(&values);
                 let collected: Vec<_> = bitmap.iter().collect();
                 assert_eq!(collected.len() as u64, bitmap.len());
-                for window in collected.windows(2) {
-                    assert!(window[0] < window[1], "iterator not sorted");
-                }
+                assert!(collected.is_sorted_by(|a, b| a < b), "iterator not sorted");
                 for &v in &collected {
                     assert!(bitmap.contains(v));
                 }
@@ -411,9 +403,10 @@ impl Plan {
                     );
                     assert!(bitmap.contains(v));
                 }
-                for window in collected.windows(2) {
-                    assert!(window[0] < window[1], "iter_range not sorted");
-                }
+                assert!(
+                    collected.is_sorted_by(|a, b| a < b),
+                    "iter_range not sorted"
+                );
             }
 
             Self::MinMax { values } => {
@@ -515,9 +508,7 @@ impl Plan {
 
                 let collected: Vec<_> = bitmap.iter().collect();
                 assert_eq!(collected.len() as u64, bitmap.len());
-                for window in collected.windows(2) {
-                    assert!(window[0] < window[1], "iterator not sorted");
-                }
+                assert!(collected.is_sorted_by(|a, b| a < b), "iterator not sorted");
                 for &v in &collected {
                     assert!(bitmap.contains(v));
                 }

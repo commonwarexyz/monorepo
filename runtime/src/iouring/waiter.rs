@@ -5,7 +5,7 @@
 //! requests are still tracked and whether each currently has an operation SQE
 //! outstanding.
 
-use super::{request::Request, Tick, UserData};
+use super::{Tick, UserData, request::Request};
 use io_uring::squeue::Entry as SqueueEntry;
 use tracing::warn;
 
@@ -387,13 +387,13 @@ impl Waiters {
 mod tests {
     use super::*;
     use crate::{
-        iouring::request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest},
         IoBuf, IoBufMut, IoBufs,
+        iouring::request::{Cache, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest},
     };
     use commonware_utils::channel::oneshot;
     use std::{
         os::fd::{FromRawFd, IntoRawFd},
-        panic::{catch_unwind, AssertUnwindSafe},
+        panic::{AssertUnwindSafe, catch_unwind},
         sync::Arc,
     };
 
@@ -696,6 +696,7 @@ mod tests {
                     len: 8,
                     read: 0,
                     buf: IoBufMut::with_capacity(8),
+                    cache: Cache::Enabled,
                     result: None,
                     sender: tx,
                 }),
@@ -845,6 +846,7 @@ mod tests {
                     len: 8,
                     read: 0,
                     buf: IoBufMut::with_capacity(8),
+                    cache: Cache::Enabled,
                     result: None,
                     sender: tx,
                 }),

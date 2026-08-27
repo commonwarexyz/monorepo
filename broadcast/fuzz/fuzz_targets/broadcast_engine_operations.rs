@@ -2,22 +2,24 @@
 
 use arbitrary::Arbitrary;
 use commonware_broadcast::{
-    buffered::{Config, Engine, Mailbox},
     Broadcaster,
+    buffered::{Config, Engine, Mailbox},
 };
 use commonware_codec::{Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
+    Digestible, Hasher, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{simulated::Network, Recipients};
-use commonware_runtime::{deterministic, Buf, BufMut, Clock, Quota, Runner, Supervisor as _};
-use commonware_utils::{channel::oneshot, futures::Pool, vec::Bounded, NZUsize};
+use commonware_p2p::{Recipients, simulated::Network};
+use commonware_runtime::{Buf, BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
+use commonware_utils::{
+    NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, probability, vec::Bounded,
+};
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
-use rand::{seq::SliceRandom, SeedableRng};
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use rand::seq::SliceRandom;
+use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -35,7 +37,7 @@ const MAX_SLEEP_DURATION_MS: u64 = 1000;
 const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
 
 /// Subscription result paired with the digest requested so completions can be validated.
-type Subscription = (Digest, Result<FuzzMessage, oneshot::error::RecvError>);
+type Subscription = (Digest, Result<Arc<FuzzMessage>, oneshot::error::RecvError>);
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -53,7 +55,7 @@ pub struct FuzzMessage {
 impl Digestible for FuzzMessage {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[&self.encode()])
     }
 }
 
@@ -150,7 +152,7 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
 #[derive(Debug)]
 pub struct FuzzInput {
     peer_seeds: Vec<u64>,
-    network_success_rate: f64,
+    network_success_rate: Probability,
     network_latency_ms: u64,
     network_jitter_ms: u64,
     cache_size: usize,
@@ -161,7 +163,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let num_peers = u.int_in_range(1..=5)?;
         let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
-        let network_success_rate = u.int_in_range(30..=100)? as f64 / 100.0;
+        let network_success_rate = probability!(u.int_in_range(30..=100)?, 100);
         let network_latency_ms = u.int_in_range(1..=100)?;
         let network_jitter_ms = u.int_in_range(0..=50)?;
         let cache_size = u.int_in_range(5..=10)?;
@@ -190,7 +192,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
             Recipients::One(peers[index].clone())
         }
         RecipientPattern::Some(seed) => {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(*seed);
+            let mut rng = TestRng::new(*seed);
             let mut shuffled_peers = peers.to_vec();
             shuffled_peers.shuffle(&mut rng);
 
@@ -203,7 +205,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 
 // Keep subscriptions alive without spawning one task per receiver. Ready
 // subscriptions are validated, while unresolved ones remain pending.
-fn drain_ready_subscriptions(pending: &mut Pool<Subscription>) {
+fn drain_ready_subscriptions(pending: &mut Pool<'_, Subscription>) {
     while let Some((digest, result)) = pending.next_completed().now_or_never() {
         if let Ok(message) = result {
             assert_eq!(message.digest(), digest);
@@ -227,6 +229,7 @@ fn fuzz(input: FuzzInput) {
             context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(peers.len()),
                 disconnect_on_block: false,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -321,10 +324,10 @@ fn fuzz(input: FuzzInput) {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
-                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        if let Some(message) = mailbox.get(digest).await {
-                            assert_eq!(message.digest(), digest);
-                        }
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned()
+                        && let Some(message) = mailbox.get(digest).await
+                    {
+                        assert_eq!(message.digest(), digest);
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {

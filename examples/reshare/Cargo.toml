@@ -20,8 +20,9 @@ commonware-actor.workspace = true
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
 commonware-consensus.workspace = true
-commonware-cryptography.workspace = true
+commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-formatting.workspace = true
+commonware-glue.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-p2p.workspace = true
@@ -31,7 +32,7 @@ commonware-runtime.workspace = true
 commonware-storage.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-rand.workspace = true
+rand = { workspace = true, features = ["std_rng", "alloc"] }
 rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

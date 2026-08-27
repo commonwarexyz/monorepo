@@ -8,19 +8,20 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     merkle::{Graftable, Location},
     qmdb::{
-        any::{unordered::fixed::Operation, value::FixedEncoding, FixedValue},
-        current::FixedConfig as Config,
         Error,
+        any::{FixedValue, unordered::fixed::Operation, value::FixedEncoding},
+        current::FixedConfig as Config,
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
@@ -37,15 +38,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 >;
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context + Spawner,
+    K: Array,
+    V: FixedValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, K, V, H, T, N, S>
 {
     /// Initializes a [Db] authenticated database from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -83,20 +84,23 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable,
-            E: Context,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            const N: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, N, S>
+        F: Graftable,
+        E: Context + Spawner,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
-        pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
+        pub async fn init(
+            context: E,
+            config: Config<T, S, core::num::NonZeroUsize>,
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
     }
@@ -107,14 +111,18 @@ pub mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::current::{tests::fixed_config, unordered::tests as shared},
-        translator::TwoCap,
+        qmdb::current::{
+            tests::{fixed_config, fixed_config_partitioned},
+            unordered::tests as shared,
+        },
+        translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
-    use commonware_utils::test_rng_seeded;
-    use rand::RngCore as _;
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Metrics, Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::TestRng;
+    use rand::Rng as _;
     use std::collections::HashMap;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
@@ -138,7 +146,7 @@ pub mod test {
     #[test_traced("INFO")]
     pub fn test_current_unordered_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db(ctx.child("current"), "metrics".to_string()).await;
+            let db = open_db(ctx.child("current"), "metrics".to_string()).await;
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
             let batch = db
@@ -147,10 +155,11 @@ pub mod test {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(batch).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
-            db.sync().await.unwrap();
-            db.prune(db.sync_boundary()).await.unwrap();
+            let db = db.sync().await.unwrap();
+            let boundary = db.sync_boundary();
+            let _db = db.prune(boundary).await.unwrap();
 
             let metrics = ctx.encode();
             for expected in [
@@ -171,31 +180,30 @@ pub mod test {
         });
     }
 
-    /// Reads on a batch cache resolved locations that `merkleize` consumes to skip re-reading
-    /// those keys. The root must match a write-only batch's `merkleize`, both rooted at the DB
-    /// (D=0) and through one pending ancestor (D=1).
+    /// Reads on a batch must not perturb `merkleize`: the root must match a write-only batch's
+    /// `merkleize`, both rooted at the DB (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]
-    pub fn test_current_unordered_fixed_resolved_merkleize_parity() {
+    pub fn test_current_unordered_fixed_read_merkleize_parity() {
         fn key(i: u64) -> Digest {
-            Sha256::hash(&i.to_be_bytes())
+            Sha256::hash(&[&i.to_be_bytes()])
         }
         fn val(i: u64) -> Digest {
-            Sha256::hash(&(i + 10000).to_be_bytes())
+            Sha256::hash(&[&(i + 10000).to_be_bytes()])
         }
 
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db(ctx.child("current"), "fused-parity".to_string()).await;
+            let db = open_db(ctx.child("current"), "fused-parity".to_string()).await;
 
             let mut seed = db.new_batch();
             for i in 0..2000u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db, None).await.unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
-                let mut rng = test_rng_seeded(salt);
+                let mut rng = TestRng::new(salt);
                 let mut out = Vec::new();
                 for _ in 0..600 {
                     let r = rng.next_u32() % 100;
@@ -252,6 +260,95 @@ pub mod test {
         });
     }
 
+    crate::qmdb::current::tests::staged_merkleize_parity_test!(
+        test_current_unordered_fixed_staged_merkleize_parity,
+        open_db
+    );
+
+    /// A staged read that resolved in a grandparent's diff must survive that grandparent
+    /// committing and being freed before `Staged::merkleize`, through the current layer:
+    /// the re-derived bases feed the grafted bitmap and `compute_current_layer`, so the
+    /// staged root must match the explicit path's and the full lifecycle must read back.
+    /// Mirrors the `any::unordered::variable` coverage of this interleaving (see
+    /// `StagedLoc`).
+    #[test_traced("WARN")]
+    pub fn test_current_unordered_fixed_staged_ancestor_commit_before_merkleize() {
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&[&i.to_be_bytes()])
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&[&(i + 10000).to_be_bytes()])
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db(ctx.child("current"), "staged-ancestor".to_string()).await;
+
+            // Committed base state, so the grandparent's write of key(0) supersedes a
+            // committed location. Its create of key(100) supersedes none.
+            let mut seed = db.new_batch();
+            for i in 0..8u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Grandparent -> parent chain. The parent touches neither staged key, so the
+            // staged reads resolve in the grandparent's diff.
+            let grandparent = db
+                .new_batch()
+                .write(key(0), Some(val(1_000)))
+                .write(key(100), Some(val(1_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1_002)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let read_keys = [key(0), key(100)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let (values, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&keys, &db)
+                .await
+                .unwrap();
+            assert_eq!(values, vec![Some(val(1_000)), Some(val(1_001))]);
+
+            // Commit and free the grandparent: the staged resolutions' locations migrate
+            // into the committed region, retiring their recorded bases.
+            let (db, _) = db.apply_batch(grandparent).await.unwrap();
+
+            let updates = vec![(0, Some(val(2_000))), (1, Some(val(2_001)))];
+            let staged = staged
+                .merkleize(updates, Vec::new(), None, &db)
+                .await
+                .unwrap();
+
+            // The explicit path over the same post-commit state must agree.
+            let explicit_root = parent
+                .new_batch::<Sha256>()
+                .write(key(0), Some(val(2_000)))
+                .write(key(100), Some(val(2_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(staged.root(), explicit_root);
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let (db, _) = db.apply_batch(staged).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(2_000)));
+            assert_eq!(db.get(&key(100)).await.unwrap(), Some(val(2_001)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1_002)));
+        });
+    }
+
     /// The sync boundary recorded from a merkleized batch must match the boundary the database
     /// reports once that batch is applied. These can diverge if the batch boundary is derived from
     /// physical bitmap pruning rather than the batch's declared inactivity floor, because the floor
@@ -266,7 +363,7 @@ pub mod test {
             let key = Sha256::fill(1u8);
             let mut last_batch_boundary = mmr::Location::new(0);
             for i in 0..300u64 {
-                let value = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&[&i.to_be_bytes()]);
                 let batch = db
                     .new_batch()
                     .write(key, Some(value))
@@ -274,9 +371,9 @@ pub mod test {
                     .await
                     .unwrap();
                 last_batch_boundary = batch.sync_boundary();
-                db.apply_batch(batch).await.unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
             }
-            db.sync().await.unwrap();
+            let db = db.sync().await.unwrap();
 
             // The boundary must have advanced, otherwise the inactivity floor never crossed a chunk
             // and the equality below would hold trivially.
@@ -323,5 +420,119 @@ pub mod test {
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
         shared::test_proving_repeated_updates(open_db);
+    }
+
+    /// Build a `P`-partitioned current db with churny ops across two commits (so the second commit's
+    /// updates and deletes inactivate locations from the first), prune it, then assert that
+    /// reopening it at a range of worker counts reconstructs the identical root and key-value
+    /// state. Unlike the `any` equivalence tests, the current root commits to the activity bitmap,
+    /// so this exercises the parallel build's bitmap reconstruction (`for_each_value` +
+    /// last-commit) over a pruned prefix, not just the snapshot index and MMR.
+    #[commonware_macros::boxed]
+    async fn check_current_parallel_init_equivalence<const P: usize>(
+        context: deterministic::Context,
+        partition: &'static str,
+        concurrency_sweep: &[usize],
+    ) {
+        type PartDb<const P: usize, S> = partitioned::Db<
+            mmr::Family,
+            deterministic::Context,
+            Digest,
+            Digest,
+            Sha256,
+            OneCap,
+            P,
+            32,
+            S,
+        >;
+
+        /// The value each key holds after the two commits below.
+        fn expected_value(i: u64) -> Option<Digest> {
+            if i % 7 == 1 {
+                None
+            } else if i.is_multiple_of(3) {
+                Some(Sha256::hash(&[&((i + 1) * 11).to_be_bytes()]))
+            } else {
+                Some(Sha256::hash(&[&(i * 7).to_be_bytes()]))
+            }
+        }
+
+        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+            .await
+            .unwrap();
+
+        // Commit 1: insert.
+        let mut batch = db.new_batch();
+        for i in 0u64..2000 {
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
+        let mut batch = db.new_batch();
+        for i in (0u64..2000).step_by(3) {
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let v = Sha256::hash(&[&((i + 1) * 11).to_be_bytes()]);
+            batch = batch.write(k, Some(v));
+        }
+        for i in (1u64..2000).step_by(7) {
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            batch = batch.write(k, None);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Prune so the reopens rebuild the grafted root over a bitmap with a pruned prefix.
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        let db = db.sync().await.unwrap();
+        let root = db.root();
+        drop(db);
+
+        // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
+        // match the original root and serve the expected value for every key.
+        for &concurrency in concurrency_sweep {
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+            cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
+            let ctx = context
+                .child("reopen")
+                .with_attribute("concurrency", concurrency);
+            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            assert_eq!(
+                db.root(),
+                root,
+                "current root mismatch at P={P} concurrency={concurrency}"
+            );
+            for i in 0u64..2000 {
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected_value(i),
+                    "value mismatch for key {i}"
+                );
+            }
+            drop(db);
+        }
+    }
+
+    /// The unordered sweep runs at P=1 only: `P=2` allocates 65,536 hash sub-indexes per index
+    /// instance, which is too memory-heavy for the default suite, and the range/offset arithmetic
+    /// is shared with the ordered variant's P=2 coverage.
+    #[test_traced("WARN")]
+    fn test_current_unordered_partitioned_p1_parallel_init_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            check_current_parallel_init_equivalence::<1>(
+                context,
+                "current_unordered_parallel_equiv_p1",
+                &[1, 2, 3, 5],
+            )
+            .await;
+        });
     }
 }

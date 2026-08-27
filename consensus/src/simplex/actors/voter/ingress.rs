@@ -1,16 +1,16 @@
 use crate::{
+    Epochable, Viewable,
     simplex::{
         metrics::TimeoutReason,
         types::{Certificate, Proposal},
     },
     types::{Round as Rnd, View},
-    Epochable, Viewable,
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use std::collections::VecDeque;
-use tracing::{info_span, Span};
+use tracing::{Span, info_span};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -95,11 +95,11 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
     where
         F: FnMut(Message<S, D>) -> Option<Message<S, D>>,
     {
-        if let Some(finalization) = self.finalization.take() {
-            if let Some(finalization) = push(finalization) {
-                self.finalization = Some(finalization);
-                return;
-            }
+        if let Some(finalization) = self.finalization.take()
+            && let Some(finalization) = push(finalization)
+        {
+            self.finalization = Some(finalization);
+            return;
         }
 
         while let Some(message) = self.messages.pop_front() {
@@ -141,6 +141,35 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             return;
         }
 
+        // For the same view, LeaderNullify is stronger than Inactivity. A
+        // buffered proposal may suppress inactivity, but the leader's explicit
+        // refusal must still abandon the view.
+        if let Self::Timeout {
+            round: new_round,
+            reason: new_reason,
+            ..
+        } = &message
+            && let Some(index) = overflow.messages.iter().position(|old_message| {
+                matches!(
+                    old_message,
+                    Self::Timeout { round, .. } if round.view() == new_round.view()
+                )
+            })
+        {
+            if *new_reason == TimeoutReason::LeaderNullify
+                && matches!(
+                    &overflow.messages[index],
+                    Self::Timeout {
+                        reason: TimeoutReason::Inactivity,
+                        ..
+                    }
+                )
+            {
+                overflow.messages[index] = message;
+            }
+            return;
+        }
+
         // Ignore the message if it is a duplicate
         if overflow
             .messages
@@ -156,16 +185,6 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                         ..
                     },
                 ) => new_proposal.view() == old_proposal.view(),
-                (
-                    Self::Timeout {
-                        round: new_round, ..
-                    },
-                    Self::Timeout {
-                        round: old_round, ..
-                    },
-                ) => {
-                    new_round.view() == old_round.view() // only retain the first queued timeout reason
-                }
                 (
                     Self::Verified {
                         certificate: new_certificate,
@@ -237,7 +256,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                 "simplex.voter.mailbox.recovered",
                 epoch = certificate.epoch().traced(),
                 view = certificate.view().traced(),
-                certificate = certificate.kind()
+                certificate = %certificate.kind()
             ),
             certificate,
             from_resolver: false,
@@ -251,7 +270,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                 "simplex.voter.mailbox.resolved",
                 epoch = certificate.epoch().traced(),
                 view = certificate.view().traced(),
-                certificate = certificate.kind()
+                certificate = %certificate.kind()
             ),
             certificate,
             from_resolver: true,
@@ -272,7 +291,7 @@ mod tests {
     use commonware_actor::mailbox::Policy;
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_utils::{non_empty, test_rng};
     use std::collections::VecDeque;
 
     type TestScheme = ed25519::Scheme;
@@ -302,7 +321,8 @@ mod tests {
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("nullify"))
             .collect();
         Certificate::Nullification(
-            Nullification::from_nullifies(&verifier, &votes, &Sequential).expect("nullification"),
+            Nullification::from_nullifies(&verifier, non_empty![@&votes], &Sequential)
+                .expect("nullification"),
         )
     }
 
@@ -314,7 +334,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
             .collect();
         Certificate::Finalization(
-            Finalization::from_finalizes(&verifier, &votes, &Sequential).expect("finalization"),
+            Finalization::from_finalizes(&verifier, non_empty![@&votes], &Sequential)
+                .expect("finalization"),
         )
     }
 
@@ -497,5 +518,50 @@ mod tests {
 
         let overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
+    }
+
+    #[test]
+    fn leader_nullify_replaces_inactivity_for_same_view() {
+        // A leader refusal upgrades an inactivity timeout already in the queue.
+        let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
+        Message::handle(
+            &mut overflow,
+            timeout_msg(View::new(4), TimeoutReason::Inactivity),
+        );
+        Message::handle(
+            &mut overflow,
+            timeout_msg(View::new(4), TimeoutReason::LeaderNullify),
+        );
+
+        let mut overflow = drain(overflow);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Timeout {
+                round,
+                reason: TimeoutReason::LeaderNullify,
+                ..
+            }) if round.view() == View::new(4)
+        ));
+        assert!(overflow.is_empty());
+
+        // A later inactivity timeout cannot downgrade a queued leader refusal.
+        let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
+        Message::handle(
+            &mut overflow,
+            timeout_msg(View::new(4), TimeoutReason::LeaderNullify),
+        );
+        Message::handle(
+            &mut overflow,
+            timeout_msg(View::new(4), TimeoutReason::Inactivity),
+        );
+        let mut overflow = drain(overflow);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Timeout {
+                reason: TimeoutReason::LeaderNullify,
+                ..
+            })
+        ));
+        assert!(overflow.is_empty());
     }
 }

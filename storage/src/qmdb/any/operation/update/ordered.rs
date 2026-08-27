@@ -1,8 +1,8 @@
 use crate::qmdb::{
     any::{
-        operation::{update::sealed::Sealed, Update as UpdateTrait},
-        value::{FixedEncoding, ValueEncoding, VariableEncoding},
         FixedValue, VariableValue,
+        operation::{Update as UpdateTrait, update::sealed::Sealed},
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
     operation::Key,
 };
@@ -44,8 +44,20 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = K;
 
+    /// An ordered delete must rewrite the deleted key's predecessor via a snapshot-bucket scan
+    /// the resolved location cannot skip, so its deletes gain nothing from staging.
+    const STAGES_DELETES: bool = false;
+
+    /// An ordered staged read caches the resolved op's next-key pointer, which an ancestor
+    /// diff entry does not carry, so ancestor resolutions fall back to normal mutations.
+    const STAGES_ANCESTORS: Option<K> = None;
+
     fn key(&self) -> &K {
         &self.key
+    }
+
+    fn into_key(self) -> K {
+        self.key
     }
 
     fn value(&self) -> &V::Value {

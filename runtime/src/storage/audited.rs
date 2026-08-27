@@ -1,5 +1,4 @@
-use crate::{deterministic::Auditor, Error, Handle, IoBufs, IoBufsMut};
-use sha2::digest::Update;
+use crate::{Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions, deterministic::Auditor};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -31,8 +30,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
-            hasher.update(&versions.start().to_be_bytes());
-            hasher.update(&versions.end().to_be_bytes());
+            hasher.update(versions.start().to_be_bytes());
+            hasher.update(versions.end().to_be_bytes());
         });
         self.inner
             .open_versioned(partition, name, versions)
@@ -54,8 +53,12 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.auditor.event(b"remove", |hasher| {
             hasher.update(partition.as_bytes());
-            if let Some(name) = name {
-                hasher.update(name);
+            match name {
+                Some(name) => {
+                    hasher.update([1]);
+                    hasher.update(name);
+                }
+                None => hasher.update([0]),
             }
         });
         self.inner.remove(partition, name).await
@@ -78,14 +81,20 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            hasher.update(&len.to_be_bytes());
+            hasher.update(offset.to_be_bytes());
+            hasher.update(len.to_be_bytes());
+            hasher.update([options.0]);
         });
-        self.inner.read_at(offset, len).await
+        self.inner.read_at(offset, len, options).await
     }
 
     async fn read_at_buf(
@@ -93,48 +102,41 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let bufs = bufs.into();
         self.auditor.event(b"read_at_buf", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            hasher.update(&len.to_be_bytes());
+            hasher.update(offset.to_be_bytes());
+            hasher.update(len.to_be_bytes());
+            hasher.update([options.0]);
         });
-        self.inner.read_at_buf(offset, len, bufs).await
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
         let bufs = bufs.into();
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            bufs.for_each_chunk(|chunk| hasher.update(chunk));
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
+            hasher.update([options.0]);
         });
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        self.auditor.event(b"write_at_sync", |hasher| {
-            hasher.update(self.partition.as_bytes());
-            hasher.update(&self.name);
-            hasher.update(&offset.to_be_bytes());
-            bufs.for_each_chunk(|chunk| hasher.update(chunk));
-        });
-        self.inner.write_at_sync(offset, bufs).await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.auditor.event(b"resize", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(&len.to_be_bytes());
+            hasher.update(len.to_be_bytes());
         });
         self.inner.resize(len).await
     }
@@ -159,14 +161,15 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+        ReadOptions, Storage as _, WriteOptions,
         deterministic::Auditor,
+        mocks::RecordingContext,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
         telemetry::metrics::Registry,
-        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
-        Storage as _,
     };
     use commonware_utils::sync::Mutex;
     use std::sync::Arc;
@@ -186,6 +189,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_audited_storage_separates_partition_and_blob_names() {
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+
+        storage1.open("a", b"bc").await.unwrap();
+        storage2.open("ab", b"c").await.unwrap();
+
+        assert_ne!(auditor1.state(), auditor2.state());
+    }
+
+    #[tokio::test]
+    async fn test_write_options_change_audit_event() {
+        let mut states = Vec::new();
+        for options in [
+            WriteOptions::default(),
+            WriteOptions::SYNC,
+            WriteOptions::DONT_CACHE,
+            WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+        ] {
+            let auditor = Arc::new(Auditor::default());
+            let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"data", options).await.unwrap();
+            states.push(auditor.state());
+        }
+
+        states.sort_unstable();
+        states.dedup();
+        assert_eq!(states.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_read_options_change_audit_event() {
+        for use_provided_buffer in [false, true] {
+            let mut states = Vec::new();
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                let auditor = Arc::new(Auditor::default());
+                let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+                let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+                blob.write_at(0, b"data", WriteOptions::default())
+                    .await
+                    .unwrap();
+
+                if use_provided_buffer {
+                    blob.read_at_buf(0, 4, IoBufMut::with_capacity(4), options)
+                        .await
+                        .unwrap();
+                } else {
+                    blob.read_at(0, 4, options).await.unwrap();
+                }
+                states.push(auditor.state());
+            }
+            assert_ne!(states[0], states[1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_audited_blob_forwards_read_options() {
+        let (inner, recordings) = RecordingContext::new(MemStorage::new(test_pool()));
+        let storage = AuditedStorage::new(inner, Arc::new(Auditor::default()));
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"data", WriteOptions::default())
+            .await
+            .unwrap();
+        recordings.clear();
+
+        // Both read entry points must preserve their independently selected policy.
+        blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
+        blob.read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recordings.snapshot().reads,
+            vec![ReadOptions::DONT_CACHE, ReadOptions::default()]
+        );
+    }
+
+    #[tokio::test]
     async fn test_audited_start_sync() {
         // Two independent storages run the same sequence of operations.
         let auditor1 = Arc::new(Auditor::default());
@@ -195,8 +279,14 @@ mod tests {
 
         let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
-        blob1.write_at(0, b"hello world").await.unwrap();
-        blob2.write_at(0, b"hello world").await.unwrap();
+        blob1
+            .write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
+        blob2
+            .write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // `start_sync` must record an auditor event, so the state advances.
         let before = auditor1.state();
@@ -233,8 +323,14 @@ mod tests {
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
-        blob1.write_at(0, b"hello world").await.unwrap();
-        blob2.write_at(0, b"hello world").await.unwrap();
+        blob1
+            .write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
+        blob2
+            .write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
@@ -242,13 +338,13 @@ mod tests {
         );
 
         // Read data from the blobs
-        let read = blob1.read_at(0, 11).await.unwrap();
+        let read = blob1.read_at(0, 11, ReadOptions::default()).await.unwrap();
         assert_eq!(
             read.coalesce(),
             b"hello world",
             "Blob1 content does not match"
         );
-        let read = blob2.read_at(0, 11).await.unwrap();
+        let read = blob2.read_at(0, 11, ReadOptions::default()).await.unwrap();
         assert_eq!(
             read.coalesce(),
             b"hello world",
@@ -323,12 +419,16 @@ mod tests {
 
     #[derive(Clone)]
     struct RecordingBlob {
-        write_chunk_counts: Arc<Mutex<Vec<usize>>>,
-        sync_write_chunk_counts: Arc<Mutex<Vec<usize>>>,
+        writes: Arc<Mutex<Vec<(usize, WriteOptions)>>>,
     }
 
     impl crate::Blob for RecordingBlob {
-        async fn read_at(&self, _offset: u64, _len: usize) -> Result<IoBufsMut, Error> {
+        async fn read_at(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
             unreachable!("not used in test");
         }
 
@@ -337,6 +437,7 @@ mod tests {
             _offset: u64,
             _len: usize,
             _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
             unreachable!("not used in test");
         }
@@ -345,21 +446,11 @@ mod tests {
             &self,
             _offset: u64,
             bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
         ) -> Result<(), Error> {
-            self.write_chunk_counts
+            self.writes
                 .lock()
-                .push(bufs.into().chunk_count());
-            Ok(())
-        }
-
-        async fn write_at_sync(
-            &self,
-            _offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.sync_write_chunk_counts
-                .lock()
-                .push(bufs.into().chunk_count());
+                .push((bufs.into().chunk_count(), options));
             Ok(())
         }
 
@@ -377,47 +468,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_audited_blob_writes_preserve_chunking() {
-        let write_chunk_counts = Arc::new(Mutex::new(Vec::new()));
-        let sync_write_chunk_counts = Arc::new(Mutex::new(Vec::new()));
+    async fn test_audited_blob_writes_preserve_chunking_and_options() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
         let blob = super::Blob {
             auditor: Arc::new(crate::deterministic::Auditor::default()),
             partition: "partition".into(),
             name: b"blob".to_vec(),
             inner: RecordingBlob {
-                write_chunk_counts: write_chunk_counts.clone(),
-                sync_write_chunk_counts: sync_write_chunk_counts.clone(),
+                writes: writes.clone(),
             },
         };
 
-        blob.write_at(
-            0,
-            IoBufs::from(vec![
-                IoBuf::from(b"a".to_vec()),
-                IoBuf::from(b"b".to_vec()),
-                IoBuf::from(b"c".to_vec()),
-                IoBuf::from(b"d".to_vec()),
-            ]),
-        )
-        .await
-        .unwrap();
+        let chunked = IoBufs::from(vec![
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"b".to_vec()),
+            IoBuf::from(b"c".to_vec()),
+            IoBuf::from(b"d".to_vec()),
+        ]);
+        blob.write_at(0, chunked.clone(), WriteOptions::default())
+            .await
+            .unwrap();
 
-        assert_eq!(*write_chunk_counts.lock(), vec![4]);
-        assert!(sync_write_chunk_counts.lock().is_empty());
+        blob.write_at(0, chunked, WriteOptions::SYNC).await.unwrap();
 
-        blob.write_at_sync(
-            0,
-            IoBufs::from(vec![
-                IoBuf::from(b"a".to_vec()),
-                IoBuf::from(b"b".to_vec()),
-                IoBuf::from(b"c".to_vec()),
-                IoBuf::from(b"d".to_vec()),
-            ]),
-        )
-        .await
-        .unwrap();
+        let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
+        blob.write_at(0, IoBuf::from(b"e".to_vec()), options)
+            .await
+            .unwrap();
 
-        assert_eq!(*write_chunk_counts.lock(), vec![4]);
-        assert_eq!(*sync_write_chunk_counts.lock(), vec![4]);
+        assert_eq!(
+            *writes.lock(),
+            vec![
+                (4, WriteOptions::default()),
+                (4, WriteOptions::SYNC),
+                (1, options),
+            ]
+        );
     }
 }

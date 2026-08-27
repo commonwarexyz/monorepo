@@ -118,8 +118,8 @@ use crate::{Config, PhasedScheme, ValidatingScheme};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
-    transcript::{Summary, Transcript},
     Digest, Hasher,
+    transcript::{Summary, Transcript, Version},
 };
 use commonware_math::{
     fields::goldilocks::F,
@@ -127,7 +127,6 @@ use commonware_math::{
 };
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, Proof};
-use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
@@ -181,11 +180,12 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
 }
 
 fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
-    let mut h = H::new();
+    let mut h = H::default();
     for x in row {
         h.update(&x.to_le_bytes());
     }
-    h.finalize()
+    let (_, digest) = h.finalize();
+    digest
 }
 
 mod topology;
@@ -345,7 +345,7 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
         .try_into()
         .expect("encoded_rows exceeds u32::MAX; data too large for ZODA");
     let mut out = (0..total).collect::<Vec<_>>();
-    out.shuffle(&mut transcript.noise(b"shuffle"));
+    transcript.shuffle(b"shuffle", &mut out);
     out
 }
 
@@ -354,7 +354,7 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
 /// This matrix is random, using the transcript as a deterministic source of randomness.
 fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix<F> {
     Matrix::rand(
-        &mut transcript.noise(b"checking matrix"),
+        transcript.noise(b"checking matrix"),
         topology.data_cols,
         topology.column_samples,
     )
@@ -391,7 +391,7 @@ impl<D: Digest> CheckingData<D> {
         checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
-        let mut transcript = Transcript::new(NAMESPACE);
+        let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
@@ -399,7 +399,7 @@ impl<D: Digest> CheckingData<D> {
         if *commitment != expected_commitment {
             return Err(Error::InvalidShard);
         }
-        let mut transcript = Transcript::resume(expected_commitment);
+        let mut transcript = Transcript::resume(expected_commitment, Version::V1);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
             return Err(Error::InvalidShard);
@@ -457,10 +457,9 @@ impl<D: Digest> CheckingData<D> {
             .collect();
 
         // Verify the multi-proof
-        let mut hasher = H::new();
         if weak_shard
             .inclusion_proof
-            .verify_multi_inclusion(&mut hasher, &proof_elements, &self.root)
+            .verify_multi_inclusion::<H>(&proof_elements, &self.root)
             .is_err()
         {
             return Err(Error::InvalidWeakShard);
@@ -499,10 +498,17 @@ pub enum Error {
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
 
-#[derive(Clone, Copy)]
 pub struct Zoda<H> {
     _marker: PhantomData<H>,
 }
+
+impl<H> Clone for Zoda<H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<H> Copy for Zoda<H> {}
 
 impl<H> std::fmt::Debug for Zoda<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -552,14 +558,14 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         let root = bmt.root();
 
         // Step 4: Commit to the root, and the size of the data.
-        let mut transcript = Transcript::new(NAMESPACE);
+        let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
         let commitment = transcript.summarize();
 
         // Step 5: Generate a checking matrix and checksum with the commitment.
-        let mut transcript = Transcript::resume(commitment);
+        let mut transcript = Transcript::resume(commitment, Version::V1);
         let checking_matrix = checking_matrix(&transcript, &topology);
         let checksum = Arc::new(data.mul(&checking_matrix));
         // Bind index sampling to this checksum to prevent follower-specific malleability.
@@ -570,31 +576,27 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
 
         // Step 6: Produce the shards in parallel.
-        let shard_results: Vec<Result<StrongShard<H::Digest>, Error>> =
-            strategy.map_collect_vec(0..topology.total_shards, |shard_idx| {
-                let indices = &shuffled_indices
-                    [shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
-                let rows = Matrix::init(
-                    indices.len(),
-                    topology.data_cols,
-                    indices
-                        .iter()
-                        .flat_map(|&i| encoded_data[i as usize].iter().copied()),
-                );
-                let inclusion_proof = bmt
-                    .multi_proof(indices)
-                    .map_err(Error::FailedToCreateInclusionProof)?;
-                Ok(StrongShard {
-                    data_bytes,
-                    root,
-                    inclusion_proof,
-                    rows,
-                    checksum: checksum.clone(),
-                })
-            });
-        let shards = shard_results
-            .into_iter()
-            .collect::<Result<Vec<_>, Error>>()?;
+        let shards = strategy.try_map_collect_vec(0..topology.total_shards, |shard_idx| {
+            let indices =
+                &shuffled_indices[shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
+            let rows = Matrix::init(
+                indices.len(),
+                topology.data_cols,
+                indices
+                    .iter()
+                    .flat_map(|&i| encoded_data[i as usize].iter().copied()),
+            );
+            let inclusion_proof = bmt
+                .multi_proof(indices)
+                .map_err(Error::FailedToCreateInclusionProof)?;
+            Ok(StrongShard {
+                data_bytes,
+                root,
+                inclusion_proof,
+                rows,
+                checksum: checksum.clone(),
+            })
+        })?;
         Ok((commitment, shards))
     }
 
@@ -815,9 +817,50 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_conformance::Conformance;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
+        struct EncodeCheck;
+
+        impl Conformance for EncodeCheck {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let config = Config {
+                    minimum_shards: NZU16!(2),
+                    extra_shards: NZU16!(1),
+                };
+                let data: Vec<_> = (0..seed as usize % 768)
+                    .map(|i| (seed as u8).wrapping_add(i as u8))
+                    .collect();
+
+                let (commitment, shards) =
+                    Zoda::<Sha256>::encode(b"conformance", &config, &data[..], &STRATEGY).unwrap();
+
+                let mut log = commitment.encode().to_vec();
+                for (i, shard) in shards.into_iter().enumerate() {
+                    let index: u16 = i.try_into().unwrap();
+                    let (checking_data, _, weak_shard) =
+                        Zoda::<Sha256>::weaken(b"conformance", &config, &commitment, index, shard)
+                            .unwrap();
+                    let checked_shard = Zoda::<Sha256>::check(
+                        &config,
+                        &commitment,
+                        &checking_data,
+                        index,
+                        weak_shard.clone(),
+                    )
+                    .unwrap();
+
+                    log.extend(index.encode());
+                    log.extend(weak_shard.encode());
+                    log.extend(checked_shard.shard.encode());
+                    log.extend(checked_shard.commitment.encode());
+                }
+                log
+            }
+        }
+
         commonware_conformance::conformance_tests! {
+            EncodeCheck => 256,
             CodecConformance<StrongShard<Sha256Digest>>,
             CodecConformance<WeakShard<Sha256Digest>>,
         }

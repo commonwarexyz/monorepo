@@ -2,20 +2,22 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
 //! (ordered/unordered, fixed/variable).
 //!
-//! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
+//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
 
 use crate::{
+    Context,
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable, Reader as _},
+        contiguous::{Contiguous, Mutable, fixed, variable},
     },
-    merkle::{self, full, Location},
+    merkle::{self, Location, full},
     qmdb::{
         self,
         any::{
-            db::{Db, Metrics},
-            operation::{update::Update, Operation},
+            FixedConfig, FixedValue, VariableConfig, VariableValue,
+            db::Db,
+            operation::{Operation, update::Update},
             ordered::{
                 fixed::{
                     Db as OrderedFixedDb, Operation as OrderedFixedOp, Update as OrderedFixedUpdate,
@@ -35,42 +37,45 @@ use crate::{
                     Update as UnorderedVariableUpdate,
                 },
             },
-            FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
-        operation::{Committable, Key},
+        metrics::Metrics,
+        operation::Key,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::{range::NonEmptyRange, Array};
+use commonware_runtime::Spawner;
+use commonware_utils::{Array, range::NonEmptyRange};
+use core::num::{NonZeroU64, NonZeroUsize};
 
 #[cfg(test)]
 pub(crate) mod tests;
 
 /// Shared helper to build a [Db] from sync components.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<F, E, U, I, H, C, T, S>(
+async fn build_db<F, E, U, I, H, C, S>(
     context: E,
     merkle_config: full::Config<S>,
     log: C,
-    translator: T,
+    translator: I::Translator,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
-    apply_batch_size: usize,
+    apply_batch_size: NonZeroU64,
+    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_buffer: NonZeroUsize,
+    cache_size: Option<NonZeroUsize>,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
-    E: Context,
-    U: Update + Send + Sync + 'static,
-    I: IndexFactory<T, Value = Location<F>>,
+    E: Context + Spawner,
+    U: Update,
+    I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
-    T: Translator,
-    C: Mutable<Item = Operation<F, U>>,
+    C: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Codec + Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     let hasher = qmdb::hasher::<H>();
 
@@ -90,11 +95,22 @@ where
         merkle,
         log,
         hasher,
-        apply_batch_size as u64,
+        apply_batch_size.get(),
     )
     .await?;
+    let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
-    let db = Db::init_from_log(index, log, None, metrics).await?;
+    let db = Db::init_from_log(
+        snapshot_context,
+        index,
+        log,
+        None,
+        init_concurrency,
+        init_buffer,
+        cache_size,
+        metrics,
+    )
+    .await?;
 
     Ok(db)
 }
@@ -107,7 +123,7 @@ macro_rules! impl_sync_database {
         impl<F, E, K, V, H, T, S> qmdb::sync::Database for $db<F, E, K, V, H, T, S>
         where
             F: merkle::Family,
-            E: Context,
+            E: Context + Spawner,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,
@@ -129,11 +145,14 @@ macro_rules! impl_sync_database {
                 log: Self::Journal,
                 pinned_nodes: Option<Vec<Self::Digest>>,
                 range: NonEmptyRange<Location<F>>,
-                apply_batch_size: usize,
+                apply_batch_size: NonZeroU64,
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
-                build_db::<F, _, $update<K, V>, _, H, _, T, S>(
+                let cache_size = config.init_cache_size;
+                let init_buffer = config.init_buffer;
+                let init_concurrency = config.init_concurrency;
+                build_db::<F, _, $update<K, V>, _, H, _, S>(
                     context,
                     merkle_config,
                     log,
@@ -141,54 +160,37 @@ macro_rules! impl_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    init_concurrency,
+                    init_buffer,
+                    cache_size,
                 )
                 .await
             }
 
-            async fn local_boundary_nodes(
+            async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+                Ok(self)
+            }
+
+            async fn local_pinned_nodes(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
                 journal: &Self::Journal,
             ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-                if target.range.start() == Location::new(0) {
-                    return Ok(None);
-                }
-
-                let reader = journal.reader().await;
-                let bounds = reader.bounds();
-                if Location::new(bounds.start) > target.range.start()
-                    || Location::new(bounds.end) != target.range.end()
+                if target.range.start() == Location::new(0)
+                    || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
                 {
                     return Ok(None);
                 }
-                drop(reader);
 
-                let hasher = qmdb::hasher::<H>();
-                let merkle = full::Merkle::<F, _, _, S>::init(
-                    context.child("local_boundary_merkle"),
-                    &hasher,
+                // The target's range starts at the inactivity floor.
+                qmdb::sync::local_pinned_nodes::<F, _, H, S>(
+                    context,
                     config.merkle_config.clone(),
-                )
-                .await?;
-                let bounds = merkle.bounds();
-                if bounds.start > target.range.start() || bounds.end != target.range.end() {
-                    return Ok(None);
-                }
-
-                let inactive_peaks = F::inactive_peaks(
-                    F::location_to_position(target.range.end()),
+                    target,
                     target.range.start(),
-                );
-                if merkle.root(&hasher, inactive_peaks)? != target.root {
-                    return Ok(None);
-                }
-
-                merkle
-                    .pinned_nodes_at(target.range.start())
-                    .await
-                    .map(Some)
-                    .map_err(Into::into)
+                )
+                .await
             }
 
             fn root(&self) -> Self::Digest {

@@ -5,11 +5,11 @@ pub mod db;
 #[cfg(test)]
 pub(crate) mod tests {
     use commonware_codec::Codec;
-    use commonware_cryptography::{sha256, Hasher};
+    use commonware_cryptography::{Hasher as _, sha256};
     use commonware_utils::Array;
     use core::fmt::Debug;
 
-    pub trait TestKey: Array + Copy + Send + Sync {
+    pub trait TestKey: Array + Copy {
         fn from_seed(seed: u64) -> Self;
     }
 
@@ -19,7 +19,7 @@ pub(crate) mod tests {
 
     impl TestKey for sha256::Digest {
         fn from_seed(seed: u64) -> Self {
-            commonware_cryptography::Sha256::hash(&seed.to_be_bytes())
+            commonware_cryptography::Sha256::hash(&[&seed.to_be_bytes()])
         }
     }
 

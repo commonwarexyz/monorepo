@@ -2,12 +2,12 @@
 
 use crate::{
     bls12381::primitives::{group::Private, ops::compute_public, variant::Variant},
-    certificate::{mocks::Fixture, Scheme},
+    certificate::{Scheme, mocks::Fixture},
     ed25519,
 };
 use commonware_math::algebra::Random;
-use commonware_utils::{ordered::BiMap, TryCollect as _};
-use rand::{CryptoRng, RngCore};
+use commonware_utils::{TryCollect as _, ordered::BiMap};
+use rand_core::CryptoRng;
 
 /// Builds ed25519 identities and matching BLS12-381 multisig schemes.
 pub fn fixture<S, V, R>(
@@ -19,7 +19,7 @@ pub fn fixture<S, V, R>(
 ) -> Fixture<S>
 where
     V: Variant,
-    R: RngCore + CryptoRng,
+    R: CryptoRng,
     S: Scheme<PublicKey = ed25519::PublicKey>,
 {
     assert!(n > 0);

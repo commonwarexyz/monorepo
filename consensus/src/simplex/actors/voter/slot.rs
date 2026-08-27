@@ -5,10 +5,16 @@ use tracing::warn;
 /// Proposal verification status within a round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Status {
+    /// No proposal recorded.
     #[default]
     None,
+    /// Proposal recorded, verification pending.
     Unverified,
-    Verified(bool),
+    /// Proposal verified: built locally, restored from our own vote, or
+    /// verified by the automaton.
+    Verified,
+    /// Conflicting proposals were observed for the round, suppressing our
+    /// notarize and finalize votes.
     Equivocated,
 }
 
@@ -18,13 +24,16 @@ pub enum Change<D>
 where
     D: Digest,
 {
+    /// First proposal recorded for the round.
     New,
+    /// Proposal matches the recorded one.
     Unchanged,
+    /// Proposal conflicts with the recorded one. `retained` is what the slot
+    /// now holds and `dropped` is the discarded proposal.
     Equivocated {
         dropped: Proposal<D>,
         retained: Proposal<D>,
     },
-    Skipped,
 }
 
 /// Tracks proposal state, build/verify flags, and conflicts.
@@ -65,11 +74,6 @@ where
         self.proposal.is_some() && self.status != Status::Equivocated
     }
 
-    /// Returns whether the current proposal was built locally.
-    pub const fn is_local(&self) -> bool {
-        matches!(self.status, Status::Verified(true))
-    }
-
     pub const fn should_build(&self) -> bool {
         !self.requested_build && self.proposal.is_none()
     }
@@ -78,18 +82,26 @@ where
         self.requested_build = true;
     }
 
+    /// Returns whether verification has yet to be requested for this slot.
+    ///
+    /// Unlike [`Self::should_build`], this does not test for an absent
+    /// proposal: verification is driven by a proposal the caller already
+    /// holds, whereas building is what produces one.
+    pub const fn should_verify(&self) -> bool {
+        !self.requested_verify
+    }
+
     /// Records a proposal that has already been verified.
     ///
     /// Additional observations of the same proposal are ignored here.
     /// Conflicting proposals are handled separately as equivocation.
-    fn verified(&mut self, proposal: Proposal<D>, local: bool) {
+    fn verified(&mut self, proposal: Proposal<D>) {
         if let Some(existing) = &self.proposal {
             // This can happen if we receive a certificate for a conflicting proposal. Normally,
             // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
             warn!(
                 ?existing,
                 ?proposal,
-                ?local,
                 "ignoring verified proposal because slot already populated"
             );
             return;
@@ -97,19 +109,19 @@ where
 
         // Otherwise, we record the proposal and flip the build/verify flags.
         self.proposal = Some(proposal);
-        self.status = Status::Verified(local);
+        self.status = Status::Verified;
         self.requested_build = true;
         self.requested_verify = true;
     }
 
     /// Records a proposal built locally by this participant.
     pub fn built(&mut self, proposal: Proposal<D>) {
-        self.verified(proposal, true);
+        self.verified(proposal);
     }
 
     /// Records a proposal we verified and voted for, but did not build locally.
     pub fn notarized(&mut self, proposal: Proposal<D>) {
-        self.verified(proposal, false);
+        self.verified(proposal);
     }
 
     pub const fn request_verify(&mut self) -> bool {
@@ -124,20 +136,46 @@ where
         if self.status != Status::Unverified {
             return false;
         }
-        self.status = Status::Verified(false);
+        self.status = Status::Verified;
         true
     }
 
-    pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> Change<D> {
-        // Once we detect equivocation we refuse to record any additional
-        // proposals, even if they target the original payload.
+    /// Records a proposal observed via a vote.
+    ///
+    /// A conflicting vote never replaces the recorded proposal, but marks the
+    /// slot [Status::Equivocated]. Once equivocation is recorded, votes are
+    /// ignored entirely (returning `None`), even if they target the recorded
+    /// payload.
+    pub fn update_vote(&mut self, proposal: &Proposal<D>) -> Option<Change<D>> {
         if self.status == Status::Equivocated {
-            return Change::Skipped;
+            return None;
         }
+        Some(match &self.proposal {
+            None => {
+                self.proposal = Some(proposal.clone());
+                self.status = Status::Unverified;
+                Change::New
+            }
+            Some(existing) if existing == proposal => Change::Unchanged,
+            Some(existing) => {
+                let retained = existing.clone();
+                self.status = Status::Equivocated;
+                Change::Equivocated {
+                    dropped: proposal.clone(),
+                    retained,
+                }
+            }
+        })
+    }
 
-        // Recovered certificates authenticate the proposal, but they do not
-        // automatically confer verification status (which may require ensuring
-        // additional data is available).
+    /// Records a proposal recovered from a certificate.
+    ///
+    /// Certificates are authoritative: a conflicting certificate replaces the
+    /// recorded proposal, even after equivocation was recorded, and marks the
+    /// slot [Status::Equivocated]. Recovered certificates authenticate the
+    /// proposal but do not confer verification status (which may require
+    /// ensuring additional data is available).
+    pub fn update_certificate(&mut self, proposal: &Proposal<D>) -> Change<D> {
         match &self.proposal {
             None => {
                 self.proposal = Some(proposal.clone());
@@ -146,20 +184,15 @@ where
             }
             Some(existing) if existing == proposal => Change::Unchanged,
             Some(existing) => {
-                let mut dropped = existing.clone();
-                let mut retained = proposal.clone();
-                if recovered {
-                    // If we receive a certificate for a conflicting proposal, we replace
-                    // the local proposal.
-                    self.proposal = Some(retained.clone());
-                    self.requested_build = true;
-                    self.requested_verify = true;
-                } else {
-                    // If this isn't a certificate, we keep the proposal as-is.
-                    (retained, dropped) = (dropped, retained);
-                }
+                let dropped = existing.clone();
+                self.proposal = Some(proposal.clone());
+                self.requested_build = true;
+                self.requested_verify = true;
                 self.status = Status::Equivocated;
-                Change::Equivocated { dropped, retained }
+                Change::Equivocated {
+                    dropped,
+                    retained: proposal.clone(),
+                }
             }
         }
     }
@@ -202,10 +235,9 @@ mod tests {
             Some(stored) => assert_eq!(stored, &proposal),
             None => panic!("proposal missing after recording"),
         }
-        assert_eq!(slot.status(), Status::Verified(true));
+        assert_eq!(slot.status(), Status::Verified);
         assert!(!slot.should_build());
         assert!(!slot.request_verify());
-        assert!(slot.is_local());
     }
 
     #[test]
@@ -217,10 +249,9 @@ mod tests {
         slot.built(proposal.clone());
 
         assert_eq!(slot.proposal(), Some(&proposal));
-        assert_eq!(slot.status(), Status::Verified(true));
+        assert_eq!(slot.status(), Status::Verified);
         assert!(!slot.should_build());
         assert!(!slot.request_verify());
-        assert!(slot.is_local());
     }
 
     #[test]
@@ -233,9 +264,8 @@ mod tests {
         slot.built(proposal.clone());
 
         assert!(!slot.should_build());
-        assert_eq!(slot.status(), Status::Verified(true));
+        assert_eq!(slot.status(), Status::Verified);
         assert_eq!(slot.proposal(), Some(&proposal));
-        assert!(slot.is_local());
     }
 
     #[test]
@@ -244,15 +274,19 @@ mod tests {
         let round = Rnd::new(Epoch::new(13), View::new(2));
         let proposal = Proposal::new(round, View::new(1), Sha256Digest::from([12u8; 32]));
 
-        assert!(matches!(slot.update(&proposal, false), Change::New));
-        assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
+        assert!(matches!(slot.update_vote(&proposal), Some(Change::New)));
+        assert!(matches!(
+            slot.update_certificate(&proposal),
+            Change::Unchanged
+        ));
         assert_eq!(slot.status(), Status::Unverified);
-        assert!(!slot.is_local());
 
         assert!(slot.mark_verified());
-        assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
-        assert_eq!(slot.status(), Status::Verified(false));
-        assert!(!slot.is_local());
+        assert!(matches!(
+            slot.update_certificate(&proposal),
+            Change::Unchanged
+        ));
+        assert_eq!(slot.status(), Status::Verified);
     }
 
     #[test]
@@ -262,10 +296,10 @@ mod tests {
         let proposal_a = Proposal::new(round, View::new(2), Sha256Digest::from([13u8; 32]));
         let proposal_b = Proposal::new(round, View::new(2), Sha256Digest::from([14u8; 32]));
 
-        assert!(matches!(slot.update(&proposal_a, true), Change::New));
-        let result = slot.update(&proposal_b, false);
+        assert!(matches!(slot.update_certificate(&proposal_a), Change::New));
+        let result = slot.update_vote(&proposal_b);
         match result {
-            Change::Equivocated { dropped, retained } => {
+            Some(Change::Equivocated { dropped, retained }) => {
                 assert_eq!(retained, proposal_a);
                 assert_eq!(dropped, proposal_b);
             }
@@ -273,7 +307,6 @@ mod tests {
         }
         assert_eq!(slot.status(), Status::Equivocated);
         assert_eq!(slot.proposal(), Some(&proposal_a));
-        assert!(!slot.is_local());
     }
 
     #[test]
@@ -288,10 +321,9 @@ mod tests {
         assert!(!slot.should_build());
 
         // Compromised node produces a certificate before our local propose returns.
-        assert!(matches!(slot.update(&compromised, true), Change::New));
+        assert!(matches!(slot.update_certificate(&compromised), Change::New));
         assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
-        assert!(!slot.is_local());
 
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
@@ -299,7 +331,6 @@ mod tests {
         slot.built(honest);
         assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
-        assert!(!slot.is_local());
     }
 
     #[test]
@@ -309,12 +340,15 @@ mod tests {
         let leader_proposal = Proposal::new(round, View::new(4), Sha256Digest::from([16u8; 32]));
         let conflicting = Proposal::new(round, View::new(4), Sha256Digest::from([99u8; 32]));
 
-        assert!(matches!(slot.update(&leader_proposal, false), Change::New));
+        assert!(matches!(
+            slot.update_vote(&leader_proposal),
+            Some(Change::New)
+        ));
         assert_eq!(slot.status(), Status::Unverified);
         assert!(slot.request_verify());
         assert!(!slot.request_verify());
 
-        let change = slot.update(&conflicting, true);
+        let change = slot.update_certificate(&conflicting);
         match change {
             Change::Equivocated { dropped, retained } => {
                 assert_eq!(dropped, leader_proposal);
@@ -323,10 +357,12 @@ mod tests {
             other => panic!("expected equivocation, got {other:?}"),
         }
         assert_eq!(slot.status(), Status::Equivocated);
-        assert!(!slot.is_local());
         // Verifier completion arriving afterwards must be ignored.
         assert!(!slot.mark_verified());
-        assert!(matches!(slot.update(&conflicting, true), Change::Skipped));
+        assert!(matches!(
+            slot.update_certificate(&conflicting),
+            Change::Unchanged
+        ));
     }
 
     #[test]
@@ -336,8 +372,8 @@ mod tests {
         let proposal_a = Proposal::new(round, View::new(2), Sha256Digest::from([15u8; 32]));
         let proposal_b = Proposal::new(round, View::new(2), Sha256Digest::from([16u8; 32]));
 
-        assert!(matches!(slot.update(&proposal_a, false), Change::New));
-        match slot.update(&proposal_b, true) {
+        assert!(matches!(slot.update_vote(&proposal_a), Some(Change::New)));
+        match slot.update_certificate(&proposal_b) {
             Change::Equivocated { dropped, retained } => {
                 assert_eq!(dropped, proposal_a);
                 assert_eq!(retained, proposal_b);
@@ -347,7 +383,35 @@ mod tests {
         assert_eq!(slot.status(), Status::Equivocated);
         assert_eq!(slot.proposal(), Some(&proposal_b));
         assert!(!slot.should_build());
-        assert!(!slot.is_local());
+    }
+
+    #[test]
+    fn recovered_certificate_overrides_equivocated_vote() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(Epoch::new(27), View::new(5));
+        let ours = Proposal::new(round, View::new(4), Sha256Digest::from([19u8; 32]));
+        let winner = Proposal::new(round, View::new(4), Sha256Digest::from([20u8; 32]));
+
+        // Our own (replayed) vote holds the slot, then the leader's conflicting
+        // proposal arrives as a vote: equivocation retains our proposal.
+        assert!(matches!(slot.update_vote(&ours), Some(Change::New)));
+        assert!(matches!(
+            slot.update_vote(&winner),
+            Some(Change::Equivocated { .. })
+        ));
+        assert_eq!(slot.proposal(), Some(&ours));
+
+        // A certificate for the conflicting proposal is authoritative: the slot
+        // must adopt it even though equivocation was already recorded.
+        match slot.update_certificate(&winner) {
+            Change::Equivocated { dropped, retained } => {
+                assert_eq!(dropped, ours);
+                assert_eq!(retained, winner);
+            }
+            other => panic!("expected equivocation override, got {other:?}"),
+        }
+        assert_eq!(slot.proposal(), Some(&winner));
+        assert_eq!(slot.status(), Status::Equivocated);
     }
 
     #[test]
@@ -357,14 +421,20 @@ mod tests {
         let proposal_a = Proposal::new(round, View::new(3), Sha256Digest::from([17u8; 32]));
         let proposal_b = Proposal::new(round, View::new(3), Sha256Digest::from([18u8; 32]));
 
-        assert!(matches!(slot.update(&proposal_a, false), Change::New));
+        assert!(matches!(slot.update_vote(&proposal_a), Some(Change::New)));
         assert!(matches!(
-            slot.update(&proposal_b, true),
+            slot.update_certificate(&proposal_b),
             Change::Equivocated { .. }
         ));
-        assert!(matches!(slot.update(&proposal_b, true), Change::Skipped));
+        assert!(matches!(
+            slot.update_certificate(&proposal_b),
+            Change::Unchanged
+        ));
         assert_eq!(slot.status(), Status::Equivocated);
-        assert!(!slot.is_local());
+
+        // Votes stay suppressed once equivocation is recorded.
+        assert!(slot.update_vote(&proposal_a).is_none());
+        assert_eq!(slot.proposal(), Some(&proposal_b));
     }
 
     #[test]
@@ -379,14 +449,13 @@ mod tests {
 
         // Recovering a proposal from a certificate makes it available for finalize
         // gating even before the follower-side verify path runs.
-        assert!(matches!(slot.update(&proposal_a, true), Change::New));
+        assert!(matches!(slot.update_certificate(&proposal_a), Change::New));
         assert!(slot.has_unequivocated_proposal());
-        assert!(!slot.is_local());
 
         // A conflicting proposal immediately revokes that property.
         assert!(matches!(
-            slot.update(&proposal_b, false),
-            Change::Equivocated { .. }
+            slot.update_vote(&proposal_b),
+            Some(Change::Equivocated { .. })
         ));
         assert!(!slot.has_unequivocated_proposal());
     }

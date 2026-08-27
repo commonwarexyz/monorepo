@@ -1,19 +1,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
-    qmdb::{
-        self,
-        current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
-    },
+    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
+    qmdb::current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -101,21 +98,23 @@ fn generate_seed_kv(index: u64) -> (RawKey, RawValue) {
 }
 
 async fn commit_pending<F: Graftable>(
-    db: &mut Db<F>,
+    db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
     pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
-) {
+) -> Db<F> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    db.apply_batch(merkleized)
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let (db, _) = db
+        .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail");
+    let db = db.commit().await.expect("commit fsync should not fail");
     committed_state.extend(pending_expected.drain());
+    db
 }
 
 fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
@@ -125,7 +124,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let initial_writes = data.initial_writes;
     let operations = data.operations.clone();
     runner.start(|context| async move {
-        let hasher = qmdb::hasher::<Sha256>();
         let page_cache = CacheRef::from_pooler(
             &context,
             PAGE_SIZE,
@@ -148,6 +146,9 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             },
             grafted_metadata_partition: format!("fuzz-current-{suffix}-grafted-merkle-metadata"),
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(3)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         };
 
         let mut db: Db<F> = Db::init(context.child("storage"), cfg)
@@ -169,18 +170,18 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             all_keys.insert(key);
         }
         if !pending_writes.is_empty() {
-            commit_pending(
-                &mut db,
+            db = commit_pending(
+                db,
                 &mut pending_writes,
                 &mut committed_state,
                 &mut pending_expected,
             )
             .await;
-            committed_op_count = db.bounds().await.end;
+            committed_op_count = db.bounds().end;
         }
 
         for op in &operations {
-            match op {
+            db = match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
@@ -188,6 +189,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     pending_writes.push((k, Some(v)));
                     pending_expected.insert(*key, Some(*value));
                     all_keys.insert(*key);
+                    db
                 }
 
                 CurrentOperation::Delete { key } => {
@@ -200,6 +202,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         pending_expected.insert(*key, None);
                         all_keys.insert(*key);
                     }
+                    db
                 }
 
                 CurrentOperation::Get { key } => {
@@ -223,55 +226,59 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     }
 
                     all_keys.insert(*key);
+                    db
                 }
 
                 CurrentOperation::OpCount => {
-                    let actual = db.bounds().await.end;
+                    let actual = db.bounds().end;
                     assert_eq!(
                         actual, committed_op_count,
                         "Op count mismatch: expected {committed_op_count}, got {actual}"
                     );
+                    db
                 }
 
                 CurrentOperation::Commit => {
-                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    committed_op_count = db.bounds().end;
+                    db
                 }
 
                 CurrentOperation::Prune => {
-                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
-                    db.prune(db.sync_boundary()).await.expect("Prune should not fail");
+                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    committed_op_count = db.bounds().end;
+                    let boundary = db.sync_boundary();
+                    db.prune(boundary).await.expect("Prune should not fail")
                 }
 
                 CurrentOperation::Root => {
-                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    committed_op_count = db.bounds().end;
                     let _root = db.root();
+                    db
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
-                    let current_op_count = db.bounds().await.end;
+                    let current_op_count = db.bounds().end;
                     if current_op_count == 0 {
                         continue;
                     }
 
-                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
-                    let current_op_count = db.bounds().await.end;
+                    let current_op_count = db.bounds().end;
                     let start_loc = Location::<F>::new(start_loc % *current_op_count);
                     let oldest_loc = db.sync_boundary();
                     if start_loc >= oldest_loc {
                         let (proof, ops, chunks) = db
-                            .range_proof(&hasher, start_loc, *max_ops)
+                            .range_proof(start_loc, *max_ops)
                             .await
                             .expect("Range proof should not fail");
 
                         assert!(
                             Db::<F>::verify_range_proof(
-                                &hasher,
                                 &proof,
                                 start_loc,
                                 &ops,
@@ -281,6 +288,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                                 "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
                             );
                     }
+                    db
                 }
 
                 CurrentOperation::ArbitraryProof {
@@ -291,19 +299,19 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     max_ops,
                     chunk_xor,
                 } => {
-                    let current_op_count = db.bounds().await.end;
+                    let current_op_count = db.bounds().end;
                     if current_op_count == 0 {
                         continue;
                     }
-                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    committed_op_count = db.bounds().end;
 
-                    let current_op_count = db.bounds().await.end;
+                    let current_op_count = db.bounds().end;
                     let start_loc = Location::<F>::new(start_loc % current_op_count.as_u64());
                     let root = db.root();
 
                     if let Ok((range_proof, ops, chunks)) = db
-                        .range_proof(&hasher, start_loc, *max_ops)
+                        .range_proof(start_loc, *max_ops)
                         .await {
                         // Try to verify the proof when providing bad proof digests.
                         let bad_digests = bad_digests.iter().map(|d| Digest::from(*d)).collect();
@@ -311,7 +319,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             let mut bad_digest_proof = range_proof.clone();
                             bad_digest_proof.proof.digests = bad_digests;
                             assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
                                 &bad_digest_proof,
                                 start_loc,
                                 &ops,
@@ -321,12 +328,11 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         }
 
                         let bad_pending_digest = (*bad_pending_digest).map(Digest::from);
-                        if let Ok(bad_pending) = <F::PendingChunk<Digest>>::try_from(bad_pending_digest) {
-                            if range_proof.pending_chunk_digest != bad_pending {
+                        if let Ok(bad_pending) = <F::PendingChunk<Digest>>::try_from(bad_pending_digest)
+                            && range_proof.pending_chunk_digest != bad_pending {
                                 let mut bad_pending_proof = range_proof.clone();
                                 bad_pending_proof.pending_chunk_digest = bad_pending;
                                 assert!(!Db::<F>::verify_range_proof(
-                                    &hasher,
                                     &bad_pending_proof,
                                     start_loc,
                                     &ops,
@@ -334,14 +340,12 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                                     &root
                                 ), "proof with bad pending chunk digest should not verify");
                             }
-                        }
 
                         let bad_partial_digest = (*bad_partial_digest).map(Digest::from);
                         if range_proof.partial_chunk_digest != bad_partial_digest {
                             let mut bad_partial_proof = range_proof.clone();
                             bad_partial_proof.partial_chunk_digest = bad_partial_digest;
                             assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
                                 &bad_partial_proof,
                                 start_loc,
                                 &ops,
@@ -360,7 +364,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         }).collect();
                         if chunks != bad_chunks {
                             assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
                                 &range_proof,
                                 start_loc,
                                 &ops,
@@ -370,20 +373,20 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         }
 
                     }
+                    db
                 }
 
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
-                    match db.key_value_proof(&hasher, k.clone()).await {
+                    match db.key_value_proof(k.clone()).await {
                         Ok(proof) => {
                             let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
                             let verification_result = Db::<F>::verify_key_value_proof(
-                                &hasher,
                                 k,
                                 value,
                                 &proof,
@@ -401,13 +404,14 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             panic!("Unexpected error during key value proof generation: {e:?}");
                         }
                     }
+                    db
                 }
-            }
+            };
         }
 
         // Final commit to ensure all pending operations are persisted.
         if !pending_writes.is_empty() {
-            commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+            db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
         }
 
 

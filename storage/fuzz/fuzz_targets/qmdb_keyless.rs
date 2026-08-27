@@ -4,19 +4,18 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    BufferPooler, Runner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{
-        self, full::Config as MerkleConfig, mmb, mmr, Bagging::BackwardFold, Family, Location,
-    },
+    merkle::{Family, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
+        Error,
         keyless::variable::{Config, Db as Keyless},
-        verify_proof, Error,
+        verify_proof,
     },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -218,11 +217,33 @@ fn test_config<S: Strategy>(
     }
 }
 
-fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy: S) {
+/// Reopen the database.
+async fn reopen<F: Family, S: Strategy>(
+    context: &deterministic::Context,
+    suffix: &str,
+    strategy: &S,
+    restarts: &mut usize,
+) -> Db<F, S> {
+    let cfg = test_config(suffix, context, strategy.clone());
+    let db = Db::init(
+        context.child("db").with_attribute("instance", *restarts),
+        cfg,
+    )
+    .await
+    .expect("Failed to init keyless db");
+    *restarts += 1;
+    db
+}
+
+fn fuzz_family<F: Family, S: Strategy>(
+    input: &FuzzInput,
+    suffix: &str,
+    strategy: impl FnOnce(&deterministic::Context) -> S,
+) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
+        let strategy = strategy(&context);
         let cfg = test_config(suffix, &context, strategy.clone());
         let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
             .await
@@ -232,14 +253,15 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
         let mut pending_appends: Vec<Vec<u8>> = Vec::new();
 
         for op in &input.ops {
-            match op {
+            db = match op {
                 Operation::Append { value_bytes } => {
                     pending_appends.push(value_bytes.clone());
+                    db
                 }
 
                 Operation::Commit { metadata_bytes, floor_kind } => {
                     let pending_count = pending_appends.len() as u64;
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let commit_loc = end.as_u64() + pending_count;
                     let current_floor = db.inactivity_floor_loc();
 
@@ -267,32 +289,38 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor);
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await;
 
                     match expect_err {
                         None => {
-                            db.apply_batch(merkleized).await.expect("Commit should not fail");
-                            db.commit().await.expect("Commit should not fail");
+                            let (db, _) = db
+                                .apply_batch(merkleized)
+                                .await
+                                .expect("Commit should not fail");
+                            db.commit().await.expect("Commit should not fail")
                         }
                         Some(kind) => {
-                            // Snapshot state; the reject must not mutate.
+                            // Snapshot state; the reject must not mutate persisted state.
                             let before_last_commit = db.last_commit_loc();
                             let before_floor = db.inactivity_floor_loc();
                             let before_root = db.root();
-                            let err = db
-                                .apply_batch(merkleized)
-                                .await
-                                .expect_err("bad floor must be rejected");
+                            let err = match db.apply_batch(merkleized).await {
+                                Ok(_) => panic!("bad floor must be rejected"),
+                                Err(err) => err,
+                            };
                             assert_bad_floor_error(&err, kind);
+                            // Reopen and verify the reject persisted nothing.
+                            let db = reopen(&context, suffix, &strategy, &mut restarts).await;
                             assert_eq!(db.last_commit_loc(), before_last_commit);
                             assert_eq!(db.inactivity_floor_loc(), before_floor);
                             assert_eq!(db.root(), before_root);
+                            db
                         }
                     }
                 }
 
                 Operation::BadChainedCommit { ancestor_kind } => {
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let current_floor = db.inactivity_floor_loc();
 
                     // Parent batch: base = end, 1 append lands at `end`, commit lands at `end + 1`.
@@ -320,37 +348,42 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])
-                        .merkleize(&db, None, parent_floor);
+                        .merkleize(&db, None, parent_floor).await;
                     // child: valid on its own; only the ancestor should trip the check.
                     let child_floor = parent_floor; // stay ≥ parent_floor even if parent is bad
                     let child = parent
                         .new_batch::<Sha256>()
                         .append(vec![1u8; 1])
-                        .merkleize(&db, None, child_floor);
+                        .merkleize(&db, None, child_floor).await;
 
                     let before_last_commit = db.last_commit_loc();
                     let before_floor = db.inactivity_floor_loc();
                     let before_root = db.root();
-                    let err = db
-                        .apply_batch(child)
-                        .await
-                        .expect_err("bad ancestor floor must be rejected");
+                    let err = match db.apply_batch(child).await {
+                        Ok(_) => panic!("bad ancestor floor must be rejected"),
+                        Err(err) => err,
+                    };
                     assert_bad_floor_error(&err, kind);
+                    // Reopen and verify the reject persisted nothing.
+                    let db = reopen(&context, suffix, &strategy, &mut restarts).await;
                     assert_eq!(db.last_commit_loc(), before_last_commit);
                     assert_eq!(db.inactivity_floor_loc(), before_floor);
                     assert_eq!(db.root(), before_root);
+                    db
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
                         let _ = db.get(loc.into()).await;
                     }
+                    db
                 }
 
                 Operation::GetMetadata => {
                     let _ = db.get_metadata().await;
+                    db
                 }
 
                 Operation::Prune => {
@@ -362,14 +395,16 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     // Advance the floor to the new commit location so the subsequent prune
                     // actually removes data. This exercises more of the code path than pruning
                     // at a stale floor would.
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let floor = Location::<F>::new(end.as_u64() + pending_count);
-                    let merkleized = batch.merkleize(&db, None, floor);
-                    db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
-                    db.prune(db.inactivity_floor_loc())
+                    let merkleized = batch.merkleize(&db, None, floor).await;
+                    let (db, _) = db
+                        .apply_batch(merkleized)
                         .await
-                        .expect("Prune should not fail");
+                        .expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
+                    let floor = db.inactivity_floor_loc();
+                    db.prune(floor).await.expect("Prune should not fail")
                 }
 
                 Operation::Sync => {
@@ -377,21 +412,27 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-                    db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.sync().await.expect("Sync should not fail");
+                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let (db, _) = db
+                        .apply_batch(merkleized)
+                        .await
+                        .expect("Commit should not fail");
+                    db.sync().await.expect("Sync should not fail")
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().await.end;
+                    let _ = db.bounds().end;
+                    db
                 }
 
                 Operation::LastCommitLoc => {
                     let _ = db.last_commit_loc();
+                    db
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.bounds().await.start;
+                    let _ = db.bounds().start;
+                    db
                 }
 
                 Operation::Root => {
@@ -399,17 +440,21 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-                    db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let (db, _) = db
+                        .apply_batch(merkleized)
+                        .await
+                        .expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
                     let _ = db.root();
+                    db
                 }
 
                 Operation::Proof {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }
@@ -417,17 +462,19 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-                    db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let (db, _) = db
+                        .apply_batch(merkleized)
+                        .await
+                        .expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc: Location<F> = Location::new(start_loc);
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
-                                verify_proof(
-                                    &hasher,
+                                verify_proof::<Sha256, _, _>(
                                     &proof,
                                     start_loc,
                                     &ops,
@@ -435,6 +482,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                     }
+                    db
                 }
 
                 Operation::HistoricalProof {
@@ -442,7 +490,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }
@@ -450,11 +498,14 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-                    db.apply_batch(merkleized).await.expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let (db, _) = db
+                        .apply_batch(merkleized)
+                        .await
+                        .expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
                     // Use post-commit op_count so it's consistent with the root.
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                     let size: Location<F> = Location::new(size);
                     let start_loc = (*start_offset as u64) % *size;
@@ -465,8 +516,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
-                                verify_proof(
-                                    &hasher,
+                                verify_proof::<Sha256, _, _>(
                                     &proof,
                                     start_loc,
                                     &ops,
@@ -474,37 +524,38 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }
+                    db
                 }
 
                 Operation::SimulateFailure{} => {
                     pending_appends.clear();
                     drop(db);
 
-                    let cfg = test_config(suffix, &context, strategy.clone());
-                    db = Db::init(
-                        context.child("db").with_attribute("instance", restarts),
-                        cfg,
-                    )
-                    .await
-                    .expect("Failed to init keyless db");
-                    restarts += 1;
+                    reopen(&context, suffix, &strategy, &mut restarts).await
                 }
-            }
+            };
         }
 
         let mut batch = db.new_batch();
         for v in pending_appends.drain(..) {
             batch = batch.append(v);
         }
-        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-        db.apply_batch(merkleized).await.expect("Commit should not fail");
+        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+        let (db, _) = db
+            .apply_batch(merkleized)
+            .await
+            .expect("Commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
     });
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", Sequential);
-    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", Sequential);
-    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", Rayon::new(NZUsize!(2)).unwrap());
-    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", Rayon::new(NZUsize!(2)).unwrap());
+    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", |_| Sequential);
+    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", |_| Sequential);
+    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", |context| {
+        context.strategy(NZUsize!(2))
+    });
+    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", |context| {
+        context.strategy(NZUsize!(2))
+    });
 });

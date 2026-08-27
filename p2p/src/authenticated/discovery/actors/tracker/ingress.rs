@@ -1,5 +1,6 @@
 use super::Reservation;
 use crate::{
+    PeerSetSubscription, TrackedPeers,
     authenticated::{
         dialing::Dialable,
         discovery::{
@@ -7,11 +8,11 @@ use crate::{
             types,
         },
     },
-    PeerSetSubscription, TrackedPeers,
+    sizing::peer_set_size,
 };
 use commonware_actor::{
-    mailbox::{self, Policy},
     Feedback,
+    mailbox::{self, Policy},
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::channel::{mpsc, oneshot};
@@ -268,11 +269,36 @@ impl<C: PublicKey> Releaser<C> {
 #[derive(Debug, Clone)]
 pub struct Oracle<C: PublicKey> {
     sender: mailbox::Sender<Message<C>>,
+    local: C,
+    max_peers_per_set: usize,
 }
 
 impl<C: PublicKey> Oracle<C> {
-    pub(super) const fn new(sender: mailbox::Sender<Message<C>>) -> Self {
-        Self { sender }
+    pub(super) const fn new(
+        sender: mailbox::Sender<Message<C>>,
+        local: C,
+        max_peers_per_set: usize,
+    ) -> Self {
+        Self {
+            sender,
+            local,
+            max_peers_per_set,
+        }
+    }
+
+    /// The bounded channel capacities are derived from `max_peers_per_set`, so enforce the bound
+    /// before enqueueing an update that would violate that sizing invariant.
+    fn assert_peer_set_size(&self, peers: &TrackedPeers<C>) {
+        let peer_count = peer_set_size(
+            peers.primary.iter(),
+            peers.secondary.iter(),
+            Some(&self.local),
+        );
+        assert!(
+            peer_count <= self.max_peers_per_set,
+            "peer set too large: {peer_count} > {}",
+            self.max_peers_per_set
+        );
     }
 }
 
@@ -303,10 +329,9 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     where
         R: Into<TrackedPeers<Self::PublicKey>> + Send,
     {
-        self.sender.enqueue(Message::Register {
-            index,
-            peers: peers.into(),
-        })
+        let peers = peers.into();
+        self.assert_peer_set_size(&peers);
+        self.sender.enqueue(Message::Register { index, peers })
     }
 }
 
@@ -315,5 +340,51 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
 
     fn block(&mut self, public_key: Self::PublicKey) -> Feedback {
         self.sender.enqueue(Message::Block { public_key })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Manager as _;
+    use commonware_cryptography::{
+        Signer as _,
+        ed25519::{PrivateKey, PublicKey},
+    };
+    use commonware_utils::{NZUsize, ordered::Set};
+
+    fn oracle(
+        local: PublicKey,
+        max_peers_per_set: usize,
+    ) -> (Oracle<PublicKey>, mailbox::Receiver<Message<PublicKey>>) {
+        let (sender, receiver) =
+            mailbox::new::<Message<PublicKey>>(crate::utils::mocks::Metrics, NZUsize!(1));
+        (Oracle::new(sender, local, max_peers_per_set), receiver)
+    }
+
+    #[test]
+    #[should_panic(expected = "peer set too large: 3 > 2")]
+    fn test_peer_set_limit_includes_local_identity() {
+        let local = PrivateKey::from_seed(0).public_key();
+        let (mut oracle, _receiver) = oracle(local, 2);
+        let peer_1 = PrivateKey::from_seed(1).public_key();
+        let peer_2 = PrivateKey::from_seed(2).public_key();
+
+        oracle.track(0, Set::try_from([peer_1, peer_2]).unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "peer set too large: 3 > 2")]
+    fn test_peer_set_limit_counts_secondary_peers() {
+        let local = PrivateKey::from_seed(0).public_key();
+        let (mut oracle, _receiver) = oracle(local.clone(), 2);
+        let peer_1 = PrivateKey::from_seed(1).public_key();
+        let peer_2 = PrivateKey::from_seed(2).public_key();
+        let peers = TrackedPeers::new(
+            Set::try_from([local]).unwrap(),
+            Set::try_from([peer_1, peer_2]).unwrap(),
+        );
+
+        oracle.track(0, peers);
     }
 }

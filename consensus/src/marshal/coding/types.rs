@@ -1,15 +1,18 @@
 //! Types for erasure coding.
 
 use crate::{
-    types::{coding::Commitment, Height},
     Block, CertifiableBlock, Heightable,
+    types::{Height, coding::Commitment},
 };
 use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
-use std::{marker::PhantomData, sync::Arc};
+use std::{
+    marker::PhantomData,
+    sync::{Arc, OnceLock},
+};
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
@@ -96,7 +99,7 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
         buf: &mut impl bytes::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let commitment = Commitment::read(buf)?;
+        let commitment = Commitment::<B, C, H>::read(buf)?;
         let index = u16::read(buf)?;
         let inner = C::Shard::read_cfg(buf, cfg)?;
 
@@ -121,10 +124,8 @@ impl<B: Digestible, C: Scheme, H: Hasher> Eq for Shard<B, C, H> {}
 #[cfg(feature = "arbitrary")]
 impl<B: Digestible, C: Scheme, H: Hasher> arbitrary::Arbitrary<'_> for Shard<B, C, H>
 where
-    B::Digest: for<'a> arbitrary::Arbitrary<'a>,
+    Commitment<B, C, H>: for<'a> arbitrary::Arbitrary<'a>,
     C::Shard: for<'a> arbitrary::Arbitrary<'a>,
-    C::Commitment: for<'a> arbitrary::Arbitrary<'a>,
-    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -146,10 +147,8 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     commitment: C::Commitment,
     /// The coded shards.
     ///
-    /// These shards are optional to enable lazy construction. If the block is
-    /// constructed with [`Self::new_trusted`], the shards are computed lazily
-    /// via [`Self::shards`].
-    shards: Option<Arc<[C::Shard]>>,
+    /// These shards are lazily-constructed when [`CodedBlock`] is formed with [`Self::new_trusted`].
+    shards: OnceLock<Arc<[C::Shard]>>,
     /// Phantom data for the hasher.
     _hasher: PhantomData<H>,
 }
@@ -175,19 +174,22 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
             inner: Arc::new(inner),
             config,
             commitment,
-            shards: Some(shards.into()),
+            shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
             _hasher: PhantomData,
         }
     }
 
-    /// Create a new [`CodedBlock`] from an owned or shared [`Block`] and
-    /// trusted [`Commitment`].
-    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: Commitment<B, C, H>) -> Self {
+    /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`Commitment`].
+    pub fn new_trusted(inner: B, commitment: Commitment<B, C, H>) -> Self {
+        Self::new_trusted_shared(Arc::new(inner), commitment)
+    }
+
+    fn new_trusted_shared(inner: Arc<B>, commitment: Commitment<B, C, H>) -> Self {
         Self {
-            inner: inner.into(),
+            inner,
             config: commitment.config(),
             commitment: commitment.root(),
-            shards: None,
+            shards: OnceLock::new(),
             _hasher: PhantomData,
         }
     }
@@ -200,21 +202,17 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Returns a reference to the shards in this coded block.
     ///
     /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
-    pub fn shards(&mut self, strategy: &impl Strategy) -> &[C::Shard] {
-        match self.shards {
-            Some(ref shards) => shards,
-            None => {
-                let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
+    pub fn shards(&self, strategy: &impl Strategy) -> &[C::Shard] {
+        self.shards.get_or_init(|| {
+            let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
 
-                assert_eq!(
-                    commitment, self.commitment,
-                    "coded block constructed with trusted commitment does not match commitment"
-                );
+            assert_eq!(
+                commitment, self.commitment,
+                "coded block constructed with trusted commitment does not match commitment"
+            );
 
-                self.shards = Some(shards.into());
-                self.shards.as_ref().unwrap()
-            }
-        }
+            shards.into()
+        })
     }
 
     /// Returns a [`Shard`] at the given index, if the index is valid.
@@ -225,7 +223,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         Some(Shard::new(
             self.commitment(),
             index,
-            self.shards.as_ref()?.get(usize::from(index))?.clone(),
+            self.shards.get()?.get(usize::from(index))?.clone(),
         ))
     }
 
@@ -234,13 +232,23 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         &self.inner
     }
 
+    /// Returns a shared reference to the inner [`Block`].
+    pub fn inner_shared(&self) -> Arc<B> {
+        Arc::clone(&self.inner)
+    }
+
+    /// Takes the shared inner [`Block`].
+    pub fn into_inner_shared(self) -> Arc<B> {
+        self.inner
+    }
+
     /// Takes the inner [`Block`].
     pub fn into_inner(self) -> B {
         Arc::unwrap_or_clone(self.inner)
     }
 }
 
-impl<B: CertifiableBlock + Clone, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
     for StoredCodedBlock<B, C, H>
 {
     fn from(block: CodedBlock<B, C, H>) -> Self {
@@ -264,7 +272,7 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> Committable for CodedBlock<B, C,
     type Commitment = Commitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
-        Commitment::from((
+        Commitment::<B, C, H>::from((
             self.digest(),
             self.commitment,
             hash_context::<H, _>(&self.inner.context()),
@@ -357,7 +365,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             inner: Arc::new(inner),
             config,
             commitment,
-            shards: Some(shards.into()),
+            shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
             _hasher: PhantomData,
         })
     }
@@ -387,7 +395,7 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> CertifiableBlock for CodedBlock<
 pub fn hash_context<H: Hasher, C: EncodeSize + Write>(context: &C) -> H::Digest {
     let mut buf = Vec::with_capacity(context.encode_size());
     context.write(&mut buf);
-    H::hash(&buf)
+    H::hash(&[&buf])
 }
 
 impl<B: Block + PartialEq, C: Scheme, H: Hasher> PartialEq for CodedBlock<B, C, H> {
@@ -432,10 +440,9 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
 
     /// Convert back to a [`CodedBlock`] using the trusted commitment.
     ///
-    /// The returned [`CodedBlock`] will have `shards: None`, meaning shards
-    /// will be lazily generated if needed via [`CodedBlock::shards`].
+    /// The returned [`CodedBlock`] generates shards lazily if they are needed.
     pub fn into_coded_block(self) -> CodedBlock<B, C, H> {
-        CodedBlock::new_trusted(self.inner, self.commitment)
+        CodedBlock::new_trusted_shared(self.inner, self.commitment)
     }
 
     /// Returns a reference to the inner block.
@@ -447,7 +454,7 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
 /// Converts a [`StoredCodedBlock`] back to a [`CodedBlock`].
 impl<B: Block, C: Scheme, H: Hasher> From<StoredCodedBlock<B, C, H>> for CodedBlock<B, C, H> {
     fn from(stored: StoredCodedBlock<B, C, H>) -> Self {
-        Self::new_trusted(stored.inner, stored.commitment)
+        Self::new_trusted_shared(stored.inner, stored.commitment)
     }
 }
 
@@ -498,7 +505,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for StoredCodedBlock<B, C, H> {
         block_cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, block_cfg)?;
-        let commitment = Commitment::read(buf)?;
+        let commitment = Commitment::<B, C, H>::read(buf)?;
 
         // Light verification to detect storage corruption
         if inner.digest() != commitment.block() {
@@ -563,12 +570,12 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
+    use crate::marshal::mocks::block::EmptyBlock;
     use bytes::Buf;
     use commonware_codec::{Decode, Encode, Error};
     use commonware_coding::{CodecConfig, ReedSolomon};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
-    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
+    use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
+    use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
 
     const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
         maximum_shard_size: 1024 * 1024, // 1 MiB
@@ -576,8 +583,8 @@ mod test {
 
     type H = Sha256;
     type RS = ReedSolomon<H>;
-    type Block = MockBlock<<H as Hasher>::Digest, ()>;
-    type RShard = Shard<Block, RS, H>;
+    type TestBlock = EmptyBlock<H>;
+    type RShard = Shard<TestBlock, RS, H>;
 
     #[test]
     fn test_shard_wrapper_codec_roundtrip() {
@@ -647,11 +654,11 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
 
         let encoded = coded_block.encode();
-        let decoded = CodedBlock::<Block, RS, H>::decode_cfg(
+        let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             encoded,
             &CodedBlockCfg {
                 inner: (),
@@ -674,12 +681,13 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let expected = CodedBlock::<Block, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
-            .commitment();
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let expected =
+            CodedBlock::<TestBlock, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
+                .commitment();
         let encoded = (block, EMBEDDED_CONFIG).encode();
 
-        let Err(err) = CodedBlock::<Block, RS, H>::decode_cfg(
+        let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             encoded.as_ref(),
             &CodedBlockCfg {
                 inner: (),
@@ -696,20 +704,55 @@ mod test {
     }
 
     #[test]
-    fn test_coded_block_clone_shares_storage() {
+    fn test_coded_block_decode_rejects_coding_root_mismatch() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        let commitment = coded.commitment();
+        let wrong_root = Sha256::hash(&[b"wrong root"]);
+        assert_ne!(wrong_root, commitment.root());
+        let expected = Commitment::<TestBlock, RS, H>::from((
+            commitment.block(),
+            wrong_root,
+            commitment.context(),
+            commitment.config(),
+        ));
+
+        let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
+            coded.encode(),
+            &CodedBlockCfg {
+                inner: (),
+                expected,
+            },
+        ) else {
+            panic!("coding root mismatch should be rejected");
+        };
+
+        assert!(
+            matches!(err, Error::Invalid("CodedBlock", "coding root mismatch")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_coded_block_clone_shares_shards() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let cloned = coded_block.clone();
 
         assert!(Arc::ptr_eq(&coded_block.inner, &cloned.inner));
         assert!(Arc::ptr_eq(
-            coded_block.shards.as_ref().unwrap(),
-            cloned.shards.as_ref().unwrap()
+            coded_block.shards.get().unwrap(),
+            cloned.shards.get().unwrap()
         ));
     }
 
@@ -720,9 +763,9 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
-        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block.clone());
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block.clone());
 
         assert_eq!(stored.commitment(), coded_block.commitment());
         assert_eq!(stored.digest(), coded_block.digest());
@@ -730,7 +773,7 @@ mod test {
         assert_eq!(stored.parent(), coded_block.parent());
 
         let encoded = stored.encode();
-        let decoded = StoredCodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
+        let decoded = StoredCodedBlock::<TestBlock, RS, H>::decode_cfg(encoded, &()).unwrap();
 
         assert!(stored == decoded);
         assert_eq!(decoded.commitment(), coded_block.commitment());
@@ -744,14 +787,14 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let original_commitment = coded_block.commitment();
         let original_digest = coded_block.digest();
 
-        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block);
+        let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block);
         let encoded = stored.encode();
-        let decoded = StoredCodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
+        let decoded = StoredCodedBlock::<TestBlock, RS, H>::decode_cfg(encoded, &()).unwrap();
         let restored = decoded.into_coded_block();
 
         assert_eq!(restored.commitment(), original_commitment);
@@ -765,9 +808,9 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
-        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block);
 
         let mut encoded = stored.encode().to_vec();
 
@@ -776,7 +819,7 @@ mod test {
         encoded[block_size] ^= 0xFF;
 
         // Decoding should fail due to digest mismatch
-        let result = StoredCodedBlock::<Block, RS, H>::decode_cfg(&mut encoded.as_slice(), &());
+        let result = StoredCodedBlock::<TestBlock, RS, H>::decode_cfg(&mut encoded.as_slice(), &());
         assert!(result.is_err());
     }
 
@@ -811,7 +854,7 @@ mod test {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Shard<Block, ReedSolomon<Sha256>, Sha256>>,
+            CodecConformance<Shard<TestBlock, ReedSolomon<Sha256>, Sha256>>,
         }
     }
 }

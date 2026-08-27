@@ -1,12 +1,11 @@
 //! `profile` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory,
+    CREATED_FILE_NAME, Config, DESTROYED_FILE_NAME, Error, MONITORING_REGION, deployer_directory,
     ec2::{self, *},
     s3::{self, *},
     services::*,
     utils::{download_file, scp_download, ssh_execute},
-    Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use std::{
@@ -104,7 +103,7 @@ pub async fn profile(
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, &bucket_name, MONITORING_REGION).await?;
 
-    // Cache samply archive in S3 (like other tools, we cache the archive and extract on the instance)
+    // Cache samply archive in S3 and extract it on the instance
     let samply_s3_key = samply_bin_s3_key(SAMPLY_VERSION, arch);
     let samply_url = if object_exists(&s3_client, &bucket_name, &samply_s3_key).await? {
         info!(key = samply_s3_key.as_str(), "samply already in S3");

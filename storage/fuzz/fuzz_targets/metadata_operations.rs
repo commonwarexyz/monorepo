@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::sequence::U64;
 use libfuzzer_sys::fuzz_target;
@@ -65,7 +65,7 @@ fn fuzz(input: FuzzInput) {
                     model.clear();
                 }
                 MetadataOperation::Sync => {
-                    metadata.sync().await.unwrap();
+                    metadata = metadata.sync().await.unwrap();
                 }
                 MetadataOperation::Destroy => {
                     metadata.destroy().await.unwrap();

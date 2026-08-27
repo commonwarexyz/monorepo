@@ -6,14 +6,14 @@
 //! Timed: do `batches` more merkleize + apply iterations on top of the pre-built chain, with a
 //! single random update per batch so each overlay covers a tiny fraction of chunks.
 
-use crate::common::{seed_db, write_random_updates, Digest, WRITE_BUFFER_SIZE};
+use crate::common::{Digest, WRITE_BUFFER_SIZE, seed_db, write_random_updates};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
+    BufferPooler, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -24,9 +24,8 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -53,13 +52,13 @@ type CurUFix256Mmb =
 type CurOFix256Mmb =
     OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config<Rayon> {
+fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        strategy: ctx.create_strategy(THREADS).unwrap(),
+        strategy: ctx.strategy(THREADS),
         page_cache: pc,
     }
 }
@@ -78,7 +77,7 @@ fn pc(ctx: &impl BufferPooler) -> CacheRef {
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {
@@ -86,6 +85,9 @@ fn cur_fix_cfg(
         journal_config: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
+        init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -159,13 +161,13 @@ async fn run_chained_growth<
     C: DbAny<F, Key = Digest, Value = Digest>,
     Fork: Fn(&C::Merkleized) -> C::Batch,
 >(
-    mut db: C,
+    db: C,
     grow: u64,
     fork_child: Fork,
 ) -> Duration {
-    seed_db(&mut db, NUM_KEYS).await;
-    db.sync().await.unwrap();
-    let mut rng = StdRng::seed_from_u64(99);
+    let db = seed_db(db, NUM_KEYS).await;
+    let mut db = db.sync().await.unwrap();
+    let mut rng = TestRng::new(99);
 
     // Pre-build a deep chain (untimed).
     let initial = write_random_updates(db.new_batch(), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
@@ -174,13 +176,13 @@ async fn run_chained_growth<
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
         let child = child_batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(parent).await.unwrap();
+        (db, _) = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
 
     // Flush buffered data so the timed region doesn't inherit setup fsync cost.
-    db.commit().await.unwrap();
-    db.sync().await.unwrap();
+    db = db.commit().await.unwrap();
+    db = db.sync().await.unwrap();
 
     // Timed: grow more batches on top of the pre-built chain.
     let start = Instant::now();
@@ -189,10 +191,10 @@ async fn run_chained_growth<
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
         let child = child_batch.merkleize(&db, None).await.unwrap();
         black_box(child.root());
-        db.apply_batch(parent).await.unwrap();
+        (db, _) = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
-    db.apply_batch(parent).await.unwrap();
+    let (db, _) = db.apply_batch(parent).await.unwrap();
     let total = start.elapsed();
 
     db.destroy().await.unwrap();

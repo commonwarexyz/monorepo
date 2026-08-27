@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -177,22 +177,22 @@ fn fuzz(input: FuzzInput) {
         let mut reference = ReferenceQueue::new();
 
         for op in input.operations.iter() {
-            match op {
+            queue = match op {
                 QueueOperation::Enqueue { value } => {
-                    let pos = queue.enqueue(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.enqueue(vec![*value]).await.unwrap();
                     let ref_pos = reference.enqueue(*value);
                     assert_eq!(pos, ref_pos, "enqueue position mismatch");
+                    queue
                 }
 
                 QueueOperation::Append { value } => {
-                    let pos = queue.append(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.append(vec![*value]).await.unwrap();
                     let ref_pos = reference.enqueue(*value);
                     assert_eq!(pos, ref_pos, "append position mismatch");
+                    queue
                 }
 
-                QueueOperation::Commit => {
-                    queue.commit().await.unwrap();
-                }
+                QueueOperation::Commit => queue.commit().await.unwrap(),
 
                 QueueOperation::Dequeue => {
                     let result = queue.dequeue().await.unwrap();
@@ -208,17 +208,18 @@ fn fuzz(input: FuzzInput) {
                             panic!("dequeue mismatch: got {actual:?}, expected {expected:?}");
                         }
                     }
+                    queue
                 }
 
                 QueueOperation::Ack { pos_offset } => {
-                    let size = queue.size().await;
+                    let size = queue.size();
                     if size == 0 {
                         continue;
                     }
                     // Map offset to a valid position range
                     let pos = (*pos_offset as u64) % size;
 
-                    let result = queue.ack(pos).await;
+                    let result = queue.ack(pos);
                     let ref_result = reference.ack(pos);
 
                     assert_eq!(
@@ -226,14 +227,15 @@ fn fuzz(input: FuzzInput) {
                         ref_result,
                         "ack result mismatch for pos {pos}"
                     );
+                    queue
                 }
 
                 QueueOperation::AckUpTo { pos_offset } => {
-                    let size = queue.size().await;
+                    let size = queue.size();
                     // Map offset to valid range [0, size]
                     let up_to = (*pos_offset as u64) % (size + 1);
 
-                    let result = queue.ack_up_to(up_to).await;
+                    let result = queue.ack_up_to(up_to);
                     let ref_result = reference.ack_up_to(up_to);
 
                     assert_eq!(
@@ -241,24 +243,20 @@ fn fuzz(input: FuzzInput) {
                         ref_result,
                         "ack_up_to result mismatch for up_to {up_to}"
                     );
+                    queue
                 }
 
                 QueueOperation::Reset => {
                     queue.reset();
                     reference.reset();
+                    queue
                 }
 
-                QueueOperation::Sync => {
-                    queue.sync().await.unwrap();
-                }
-            }
+                QueueOperation::Sync => queue.sync().await.unwrap(),
+            };
 
             // Verify invariants after each operation
-            assert_eq!(
-                queue.size().await,
-                reference.size(),
-                "size mismatch after {op:?}"
-            );
+            assert_eq!(queue.size(), reference.size(), "size mismatch after {op:?}");
             assert_eq!(
                 queue.ack_floor(),
                 reference.ack_floor(),
@@ -270,13 +268,13 @@ fn fuzz(input: FuzzInput) {
                 "read_position mismatch after {op:?}"
             );
             assert_eq!(
-                queue.is_empty().await,
+                queue.is_empty(),
                 reference.is_empty(),
                 "is_empty mismatch after {op:?}"
             );
 
             // Verify is_acked consistency for a sample of positions
-            for pos in 0..queue.size().await.min(20) {
+            for pos in 0..queue.size().min(20) {
                 assert_eq!(
                     queue.is_acked(pos),
                     reference.is_acked(pos),

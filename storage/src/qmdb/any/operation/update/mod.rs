@@ -13,7 +13,7 @@ mod unordered;
 pub use unordered::Update as Unordered;
 
 /// An operation that updates a key-value pair.
-pub trait Update: sealed::Sealed + Clone + Send + Sync {
+pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// The key type.
     type Key: Key;
 
@@ -26,8 +26,20 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
     type Cached: Send + Sync;
 
+    /// Whether merkleize may emit a staged delete directly at its read-resolved location.
+    /// When false, staged deletes fall back to normal mutations.
+    const STAGES_DELETES: bool;
+
+    /// Whether merkleize may stage a read that resolved in an uncommitted ancestor's diff.
+    /// `Some` supplies the cached payload recorded for such a read. `None` leaves those
+    /// slots unresolved, so their updates fall back to normal mutations.
+    const STAGES_ANCESTORS: Option<Self::Cached>;
+
     /// The updated key.
     fn key(&self) -> &Self::Key;
+
+    /// Consumes the update and returns its owned key.
+    fn into_key(self) -> Self::Key;
 
     /// The updated value.
     fn value(&self) -> &Self::Value;

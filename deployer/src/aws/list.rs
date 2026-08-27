@@ -1,6 +1,6 @@
 //! `list` subcommand for `ec2`
 
-use crate::aws::{deployer_directory, Error, Metadata, DESTROYED_FILE_NAME, METADATA_FILE_NAME};
+use crate::aws::{DESTROYED_FILE_NAME, Error, METADATA_FILE_NAME, Metadata, deployer_directory};
 use chrono::{DateTime, Local, Utc};
 use std::{
     cmp::Reverse,

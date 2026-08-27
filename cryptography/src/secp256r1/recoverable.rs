@@ -6,13 +6,13 @@ cfg_if::cfg_if! {
     }
 }
 use super::common::{
-    impl_private_key_wrapper, impl_public_key_wrapper, PrivateKeyInner, PublicKeyInner, CURVE_NAME,
-    PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH,
+    CURVE_NAME, PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
+    impl_private_key_wrapper, impl_public_key_wrapper,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
-use commonware_utils::{union_unique, Array, Span};
+use commonware_utils::{Array, Span, union_unique};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -49,17 +49,14 @@ impl PrivateKey {
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
-        let (mut signature, mut recovery_id) = self
-            .0
-            .key
-            .expose(|key| key.sign_recoverable(&payload))
-            .expect("signing must succeed");
+        let (mut signature, mut recovery_id) =
+            self.0.key.expose(|key| key.sign_recoverable(&payload));
 
         // The signing algorithm generates k, then calculates r <- x(k * G). Normalizing s by negating it is equivalent
         // to negating k. This has no effect on x(k * G) but y(-k * G) = -y(k * G), hence the need to flip the bit if
         // we move s into the lower half of the curve order.
-        if let Some(normalized) = signature.normalize_s() {
-            signature = normalized;
+        if signature.s().is_high().into() {
+            signature = signature.normalize_s();
             recovery_id = RecoveryId::new(!recovery_id.is_y_odd(), recovery_id.is_x_reduced());
         }
 
@@ -230,7 +227,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKey(PrivateKeyInner::random(&mut rand));
@@ -247,7 +244,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{secp256r1::common::tests::*, Recoverable, Signer as _, Verifier as _};
+    use crate::{Recoverable, Signer as _, Verifier as _, secp256r1::common::tests::*};
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
     use ecdsa::RecoveryId;
@@ -287,9 +284,11 @@ mod tests {
             "flipped y-parity must fail recovery"
         );
 
-        assert!(!private_key
-            .public_key()
-            .verify(NAMESPACE, message, &signature));
+        assert!(
+            !private_key
+                .public_key()
+                .verify(NAMESPACE, message, &signature)
+        );
     }
 
     #[test]
@@ -437,7 +436,7 @@ mod tests {
         let signature = private_key.sign_inner(None, message);
         assert_eq!(
             signature.signature.to_bytes().to_vec(),
-            exp_sig.normalize_s().unwrap().to_bytes().to_vec()
+            exp_sig.normalize_s().to_bytes().to_vec()
         );
 
         let (message, exp_sig) = (
@@ -667,9 +666,7 @@ mod tests {
                 assert!(Signature::decode(sig.as_ref()).is_err());
                 assert!(Signature::decode(Bytes::from(sig)).is_err());
 
-                if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
-                    ecdsa_signature = normalized_sig;
-                }
+                ecdsa_signature = ecdsa_signature.normalize_s();
             }
             let recovery_id =
                 RecoveryId::trial_recovery_from_msg(&public_key.0.key, &message, &ecdsa_signature)

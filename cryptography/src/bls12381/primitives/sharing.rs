@@ -1,18 +1,20 @@
-use crate::bls12381::primitives::{group::Scalar, variant::Variant, Error};
+use crate::bls12381::primitives::{Error, group::Scalar, variant::Variant};
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use cfg_if::cfg_if;
-use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode,
+};
 use commonware_macros::stability;
 #[stability(ALPHA)]
 use commonware_math::algebra::{FieldNTT, Ring};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
+use commonware_utils::{NZU32, Participant, ordered::Set};
 #[stability(ALPHA)]
-use commonware_utils::{ordered::BiMap, TryFromIterator};
-use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
+use commonware_utils::{TryFromIterator, ordered::BiMap};
 #[cfg(feature = "std")]
 use core::iter;
 use core::num::NonZeroU32;
@@ -25,10 +27,9 @@ use std::vec::Vec;
 ///
 /// More specifically, this configures how evaluation points of a polynomial
 /// are assigned to participant identities.
-#[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Mode {
-    #[default]
     NonZeroCounter = 0,
 
     /// Assigns participants to powers of a root of unity.
@@ -42,6 +43,22 @@ pub enum Mode {
         commonware_stability_RESERVED
     )))]
     RootsOfUnity = 1,
+}
+
+impl From<Mode> for CodecMode {
+    fn from(mode: Mode) -> Self {
+        match mode {
+            Mode::NonZeroCounter => mode!(0),
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            Mode::RootsOfUnity => mode!(1),
+        }
+    }
 }
 
 impl Mode {
@@ -204,7 +221,7 @@ impl FixedSize for Mode {
 
 impl Write for Mode {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        buf.put_u8(*self as u8);
+        buf.put_u8(CodecMode::from(*self).into());
     }
 }
 
@@ -215,7 +232,7 @@ impl Write for Mode {
 ///
 /// This allows upgrading to a new version of the library, including more modes,
 /// while using this version to determine which modes are supported at runtime.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModeVersion(u8);
 
 impl ModeVersion {
@@ -234,7 +251,8 @@ impl ModeVersion {
         Self(1)
     }
 
-    const fn supports(&self, mode: &Mode) -> bool {
+    /// Returns whether this version supports `mode`.
+    pub const fn supports(&self, mode: &Mode) -> bool {
         match mode {
             Mode::NonZeroCounter => true,
             #[cfg(not(any(
@@ -325,10 +343,13 @@ impl<V: Variant> Sharing<V> {
         self.mode.all_scalars(self.total)
     }
 
-    /// Return the number of participants required to recover the secret
-    /// using the given fault model.
-    pub fn required<M: Faults>(&self) -> u32 {
-        M::quorum(self.total.get())
+    /// Return the number of participants required to recover the secret.
+    ///
+    /// This is one more than the polynomial's [`Poly::degree_exact`].
+    pub fn required(&self) -> u32 {
+        // A polynomial has at most u32::MAX coefficients, so its exact degree
+        // is at most u32::MAX - 1.
+        self.poly.degree_exact() + 1
     }
 
     /// Return the total number of participants in this sharing.
@@ -368,7 +389,8 @@ impl<V: Variant> Sharing<V> {
 
     /// Get the partial public key associated with a given participant.
     ///
-    /// This will return `None` if the index is greater >= [`Self::total`].
+    /// Returns [`Error::InvalidIndex`] if the index is greater than or equal to
+    /// [`Self::total`].
     pub fn partial_public(&self, i: Participant) -> Result<V::Public, Error> {
         cfg_if! {
             if #[cfg(feature = "std")] {
@@ -440,9 +462,9 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::variant::MinSig;
     use commonware_invariants::minifuzz;
-    use commonware_utils::ordered::Map;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{TestRng, ordered::Map};
 
     #[test]
     fn test_roots_of_unity_interpolator_large_total_returns_none() {
@@ -458,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_mode_read_rejects_mode_above_max_supported_mode() {
-        let encoded = [Mode::RootsOfUnity as u8];
+        let encoded = [1];
         Mode::read_cfg(&mut &encoded[..], &ModeVersion::v0())
             .expect_err("roots mode must be rejected when max mode is counter");
     }
@@ -482,6 +504,21 @@ mod tests {
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_required_uses_exact_degree() {
+        // Subtraction preserves the three coefficient slots while setting every
+        // coefficient to zero.
+        let polynomial = Poly::<Scalar>::new(TestRng::new(0), 2);
+        let padded_zero = polynomial.clone() - &polynomial;
+        assert_eq!(padded_zero.required().get(), 3);
+
+        // The padded zero polynomial has exact degree zero, so recovering its
+        // secret requires only one share.
+        let sharing =
+            Sharing::<MinSig>::new(Mode::NonZeroCounter, NZU32!(4), Poly::commit(padded_zero));
+        assert_eq!(sharing.required(), 1);
     }
 
     #[test]
@@ -509,7 +546,7 @@ mod tests {
             let max_degree = u32::try_from(subset.len() - 1).expect("subset len fits in u32");
             let degree = u.int_in_range(0u32..=max_degree)?;
             let seed: u64 = u.arbitrary()?;
-            let poly: Poly<Scalar> = Poly::new(&mut StdRng::seed_from_u64(seed), degree);
+            let poly: Poly<Scalar> = Poly::new(TestRng::new(seed), degree);
 
             let all_shares = Map::from_iter_dedup((0..total.get()).map(|i| {
                 let participant = Participant::new(i);
@@ -545,8 +582,7 @@ mod tests {
 mod fuzz {
     use super::*;
     use arbitrary::Arbitrary;
-    use commonware_utils::{N3f1, NZU32};
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{Faults, N3f1, NZU32, TestRng};
 
     impl<'a> Arbitrary<'a> for Mode {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
@@ -563,7 +599,7 @@ mod fuzz {
             let total: u32 = u.int_in_range(1..=100)?;
             let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            let poly = Poly::new(&mut StdRng::seed_from_u64(seed), N3f1::quorum(total) - 1);
+            let poly = Poly::new(TestRng::new(seed), N3f1::quorum(total) - 1);
             Ok(Self::new(
                 mode,
                 NZU32!(total),

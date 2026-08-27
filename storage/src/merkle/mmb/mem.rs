@@ -10,9 +10,9 @@ pub type Config<D> = crate::merkle::mem::Config<super::Family, D>;
 mod tests {
     use super::*;
     use crate::merkle::{
+        Bagging::ForwardFold,
         hasher::{Hasher as _, Standard},
         mmb::{Error, Location, Position},
-        Bagging::ForwardFold,
     };
     use commonware_cryptography::Sha256;
 
@@ -164,12 +164,14 @@ mod tests {
     fn test_init_size_validation() {
         let hasher = H::new(ForwardFold);
 
-        assert!(Mmb::<D>::init(Config {
-            nodes: vec![],
-            pruning_boundary: Location::new(0),
-            pinned_nodes: vec![],
-        })
-        .is_ok());
+        assert!(
+            Mmb::<D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
+            .is_ok()
+        );
 
         assert!(matches!(
             Mmb::init(Config {
@@ -180,27 +182,31 @@ mod tests {
             Err(Error::InvalidSize(_))
         ));
 
-        assert!(Mmb::init(Config {
-            nodes: vec![
-                hasher.digest(b"leaf1"),
-                hasher.digest(b"leaf2"),
-                hasher.digest(b"parent"),
-            ],
-            pruning_boundary: Location::new(0),
-            pinned_nodes: vec![],
-        })
-        .is_ok());
+        assert!(
+            Mmb::init(Config {
+                nodes: vec![
+                    hasher.digest(b"leaf1"),
+                    hasher.digest(b"leaf2"),
+                    hasher.digest(b"parent"),
+                ],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
+            .is_ok()
+        );
 
         let (_, mmb) = build_mmb(64);
         let nodes: Vec<_> = (0..*mmb.size())
             .map(|i| *mmb.get_node_unchecked(Position::new(i)))
             .collect();
-        assert!(Mmb::init(Config {
-            nodes,
-            pruning_boundary: Location::new(0),
-            pinned_nodes: vec![],
-        })
-        .is_ok());
+        assert!(
+            Mmb::init(Config {
+                nodes,
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
+            .is_ok()
+        );
 
         let (_, mut mmb) = build_mmb(11);
         mmb.prune(Location::new(4)).unwrap();
@@ -209,12 +215,14 @@ mod tests {
             .collect();
         let pinned_nodes = mmb.node_digests_to_pin(Location::new(4));
 
-        assert!(Mmb::init(Config {
-            nodes: nodes.clone(),
-            pruning_boundary: Location::new(4),
-            pinned_nodes: pinned_nodes.clone(),
-        })
-        .is_ok());
+        assert!(
+            Mmb::init(Config {
+                nodes: nodes.clone(),
+                pruning_boundary: Location::new(4),
+                pinned_nodes: pinned_nodes.clone(),
+            })
+            .is_ok()
+        );
 
         assert!(matches!(
             Mmb::init(Config {

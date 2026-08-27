@@ -2,31 +2,74 @@
 
 use super::{METRICS_PORT, SYSTEM_PORT};
 use crate::aws::{
-    utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
     PortConfig,
+    utils::{DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL, exact_cidr},
 };
-use aws_config::BehaviorVersion;
 pub use aws_config::Region;
+use aws_config::{BehaviorVersion, retry::RetryConfig};
+pub use aws_sdk_ec2::{
+    Client as Ec2Client,
+    types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType},
+};
 use aws_sdk_ec2::{
-    error::BuildError,
+    Error as Ec2Error,
+    error::{BuildError, ProvideErrorMetadata as _, SdkError},
+    operation::run_instances::RunInstancesError,
     primitives::Blob,
     types::{
         BlockDeviceMapping, EbsBlockDevice, EphemeralNvmeSupport, Filter, InstanceStateName,
         InstanceTypeInfo, ResourceType, SecurityGroup, SummaryStatus, Tag, TagSpecification,
         VpcPeeringConnectionStateReasonCode,
     },
-    Error as Ec2Error,
-};
-pub use aws_sdk_ec2::{
-    types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType},
-    Client as Ec2Client,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     time::Duration,
 };
 use tokio::time::sleep;
-use tracing::debug;
+use tracing::{debug, warn};
+
+#[cfg(not(test))]
+const LAUNCH_RETRY_INTERVAL: Duration = RETRY_INTERVAL;
+#[cfg(test)]
+const LAUNCH_RETRY_INTERVAL: Duration = Duration::ZERO;
+
+type LaunchSdkError = SdkError<RunInstancesError>;
+
+// RunInstances disables SDK retries below, so its owner retains the SDK's standard transient
+// service categories while handling capacity responses at the availability-zone level.
+const FATAL_LAUNCH_ERROR_CODE_PREFIXES: &[&str] = &[
+    "UnauthorizedOperation",
+    "OptInRequired",
+    "VcpuLimitExceeded",
+    "InstanceLimitExceeded",
+    "MaxSpotInstanceCountExceeded",
+    "VolumeLimitExceeded",
+    "InvalidParameterValue",
+    "InvalidAMIID",
+    "InvalidSubnetID",
+    "InvalidGroup",
+    "InvalidKeyPair",
+];
+const RETRYABLE_LAUNCH_ERROR_CODES: &[&str] = &[
+    "Throttling",
+    "ThrottlingException",
+    "ThrottledException",
+    "RequestThrottledException",
+    "TooManyRequestsException",
+    "ProvisionedThroughputExceededException",
+    "TransactionInProgressException",
+    "RequestLimitExceeded",
+    "BandwidthLimitExceeded",
+    "LimitExceededException",
+    "RequestThrottled",
+    "SlowDown",
+    "PriorRequestNotComplete",
+    "EC2ThrottledException",
+    "RequestTimeout",
+    "RequestTimeoutException",
+];
+const RETRYABLE_LAUNCH_STATUS_CODES: &[u16] = &[500, 502, 503, 504];
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_client(region: Region) -> Ec2Client {
@@ -506,7 +549,8 @@ async fn try_launch_instances(
     count: i32,
     name: &str,
     tag: &str,
-) -> Result<Vec<String>, Ec2Error> {
+    client_token: &str,
+) -> Result<Vec<String>, LaunchSdkError> {
     // Build the root EBS mapping with optional provisioned performance settings.
     let mut ebs = EbsBlockDevice::builder()
         .volume_size(storage_size)
@@ -519,6 +563,8 @@ async fn try_launch_instances(
         ebs = ebs.throughput(storage_throughput);
     }
 
+    // Send one request because `launch_instances` owns subnet selection, retry classification,
+    // and retry cadence.
     let resp = client
         .run_instances()
         .image_id(ami_id)
@@ -526,6 +572,7 @@ async fn try_launch_instances(
         .key_name(key_name)
         .min_count(count)
         .max_count(count)
+        .client_token(client_token)
         .network_interfaces(
             aws_sdk_ec2::types::InstanceNetworkInterfaceSpecification::builder()
                 .associate_public_ip_address(true)
@@ -549,6 +596,8 @@ async fn try_launch_instances(
                 .ebs(ebs.build())
                 .build(),
         )
+        .customize()
+        .config_override(aws_sdk_ec2::config::Builder::new().retry_config(RetryConfig::disabled()))
         .send()
         .await?;
     Ok(resp
@@ -559,30 +608,52 @@ async fn try_launch_instances(
         .collect())
 }
 
-/// Checks if an EC2 error can be resolved by trying a different subnet/AZ.
-fn is_subnet_fallback_error(e: &Ec2Error) -> bool {
-    let error_str = e.to_string();
-    error_str.contains("InsufficientInstanceCapacity")
-        || error_str.contains("InsufficientFreeAddressesInSubnet")
+/// Extracts the structured EC2 code from a RunInstances service error.
+fn launch_error_code(error: &LaunchSdkError) -> Option<&str> {
+    match error {
+        SdkError::ServiceError(context) => context.err().code(),
+        _ => None,
+    }
 }
 
-/// Checks if an EC2 error is fatal and should not be retried.
-fn is_fatal_ec2_error(e: &Ec2Error) -> bool {
-    let error_str = e.to_string();
-    error_str.contains("VcpuLimitExceeded")
-        || error_str.contains("InstanceLimitExceeded")
-        || error_str.contains("MaxSpotInstanceCountExceeded")
-        || error_str.contains("VolumeLimitExceeded")
-        || error_str.contains("InvalidParameterValue")
-        || error_str.contains("InvalidAMIID")
-        || error_str.contains("InvalidSubnetID")
-        || error_str.contains("InvalidGroup")
-        || error_str.contains("InvalidKeyPair")
+/// Checks if an EC2 error may resolve after capacity changes in the region.
+fn is_capacity_error(error: &LaunchSdkError) -> bool {
+    launch_error_code(error) == Some("InsufficientInstanceCapacity")
+}
+
+/// Checks if an EC2 error makes a subnet unusable for the remainder of this launch.
+fn is_subnet_unavailable_error(error: &LaunchSdkError) -> bool {
+    launch_error_code(error) == Some("InsufficientFreeAddressesInSubnet")
+}
+
+/// Checks if an EC2 error code belongs to a fatal authorization, configuration, or quota family.
+/// Some EC2 code families append a subtype suffix, such as `InvalidAMIID.NotFound`.
+fn is_fatal_launch_error_code(code: &str) -> bool {
+    FATAL_LAUNCH_ERROR_CODE_PREFIXES
+        .iter()
+        .any(|prefix| code.starts_with(prefix))
+}
+
+/// Checks if retrying the same idempotent RunInstances request may resolve the failure.
+fn is_retryable_launch_error(error: &LaunchSdkError) -> bool {
+    match error {
+        SdkError::TimeoutError(_) | SdkError::ResponseError(_) => true,
+        SdkError::DispatchFailure(context) => {
+            context.is_io() || context.is_timeout() || context.as_other().is_some()
+        }
+        SdkError::ServiceError(context) => {
+            let code = context.err().code();
+            !code.is_some_and(is_fatal_launch_error_code)
+                && (code.is_some_and(|code| RETRYABLE_LAUNCH_ERROR_CODES.contains(&code))
+                    || RETRYABLE_LAUNCH_STATUS_CODES.contains(&context.raw().status().as_u16()))
+        }
+        _ => false,
+    }
 }
 
 /// Launches EC2 instances with specified configurations.
 /// Filters subnets to those supporting the instance type, distributes across them starting at
-/// `start_idx`, and falls back to other subnets on capacity errors.
+/// `start_idx`, and retries complete eligible-AZ scans on capacity errors.
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_instances(
     client: &Ec2Client,
@@ -624,58 +695,92 @@ pub async fn launch_instances(
         return Err(super::Error::UnsupportedInstanceType(instance_type_str));
     }
 
-    // Try each subnet starting at start_idx offset (for round-robin distribution across instances)
     let len = eligible.len();
     let mut last_error = None;
-    for i in 0..len {
-        let (az, subnet_id) = eligible[(start_idx + i) % len];
-        let mut attempt = 0u32;
-        loop {
-            match try_launch_instances(
-                client,
-                ami_id,
-                instance_type.clone(),
-                storage_size,
-                storage_class.clone(),
-                storage_iops,
-                storage_throughput,
-                key_name,
-                subnet_id,
-                sg_id,
-                count,
-                name,
-                tag,
-            )
-            .await
-            {
-                Ok(ids) => return Ok((ids, az.to_string())),
-                Err(e) => {
-                    if is_fatal_ec2_error(&e) {
-                        return Err(super::Error::AwsEc2(e));
-                    }
-                    if is_subnet_fallback_error(&e) {
-                        // Capacity error in this AZ, try next subnet
-                        debug!(
+    let mut unavailable = vec![false; len];
+    let mut scan = 0u64;
+    loop {
+        // Each scan probes every usable subnet once. Capacity errors keep a subnet eligible for the
+        // next scan, while address exhaustion permanently removes it.
+        scan = scan.saturating_add(1);
+        let mut retry_capacity = false;
+        for i in 0..len {
+            let eligible_index = (start_idx + i) % len;
+            if unavailable[eligible_index] {
+                continue;
+            }
+            let (az, subnet_id) = eligible[eligible_index];
+
+            // A probe owns one client token across ambiguous retries. Moving to another subnet
+            // changes the request parameters and starts a new probe with a new token.
+            let client_token = uuid::Uuid::new_v4().to_string();
+            loop {
+                match try_launch_instances(
+                    client,
+                    ami_id,
+                    instance_type.clone(),
+                    storage_size,
+                    storage_class.clone(),
+                    storage_iops,
+                    storage_throughput,
+                    key_name,
+                    subnet_id,
+                    sg_id,
+                    count,
+                    name,
+                    tag,
+                    &client_token,
+                )
+                .await
+                {
+                    Ok(ids) => return Ok((ids, az.to_string())),
+                    Err(e) if is_capacity_error(&e) => {
+                        retry_capacity = true;
+                        warn!(
                             name = name,
-                            subnets_remaining = len - i - 1,
+                            az,
+                            scan,
                             error = %e,
-                            "capacity error, trying next subnet"
+                            "insufficient instance capacity, trying next subnet"
                         );
-                        last_error = Some(e);
+                        last_error = Some(e.into());
                         break;
                     }
-                    debug!(
-                        name = name,
-                        attempt = attempt + 1,
-                        error = %e,
-                        "launch_instances failed, retrying"
-                    );
-                    attempt = attempt.saturating_add(1);
-                    let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
-                    sleep(backoff).await;
+                    Err(e) if is_subnet_unavailable_error(&e) => {
+                        unavailable[eligible_index] = true;
+                        debug!(
+                            name = name,
+                            az,
+                            error = %e,
+                            "subnet unavailable, trying next subnet"
+                        );
+                        last_error = Some(e.into());
+                        break;
+                    }
+                    Err(e) if !is_retryable_launch_error(&e) => {
+                        return Err(super::Error::AwsEc2(e.into()));
+                    }
+                    Err(e) => {
+                        debug!(
+                            name = name,
+                            error = %e,
+                            "launch_instances failed, retrying"
+                        );
+                        sleep(LAUNCH_RETRY_INTERVAL).await;
+                    }
                 }
             }
         }
+
+        // Start another scan only after a capacity failure. All other completed scans are terminal.
+        if !retry_capacity {
+            break;
+        }
+        debug!(
+            name,
+            scan, "capacity unavailable in every usable AZ, waiting before retry"
+        );
+        sleep(LAUNCH_RETRY_INTERVAL).await;
     }
 
     Err(last_error.map_or(super::Error::NoSubnetsAvailable, super::Error::AwsEc2))
@@ -1231,5 +1336,383 @@ pub async fn wait_for_enis_deleted(ec2_client: &Ec2Client, sg_id: &str) -> Resul
             return Ok(());
         }
         sleep(RETRY_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        InstanceType, LaunchSdkError, Region, VolumeType, is_retryable_launch_error,
+        launch_instances,
+    };
+    use crate::aws::Error;
+    use aws_config::{BehaviorVersion, retry::RetryConfig};
+    use aws_sdk_ec2::{
+        Client,
+        config::{AsyncSleep, Credentials, Sleep},
+        error::BuildError,
+    };
+    use aws_smithy_runtime_api::{
+        client::{
+            http::{HttpConnector, HttpConnectorFuture, SharedHttpConnector, http_client_fn},
+            orchestrator::{HttpRequest, HttpResponse},
+            result::ConnectorError,
+            retries::ErrorKind,
+        },
+        http::StatusCode,
+    };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::{
+            Arc, OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    const CAPACITY_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code><Message>capacity unavailable</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
+    const SUBNET_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>InsufficientFreeAddressesInSubnet</Code><Message>subnet unavailable</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
+    const TRANSIENT_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>InternalError</Code><Message>transient failure</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
+    const THROTTLED_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>RequestLimitExceeded</Code><Message>request limit exceeded</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
+    const UNAUTHORIZED_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>not authorized</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
+    const OPT_IN_REQUIRED_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>OptInRequired</Code><Message>region is not enabled</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
+    const VCPU_LIMIT_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>VcpuLimitExceeded</Code><Message>quota exceeded</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
+    const LAUNCH_SUCCESS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><instancesSet><item><instanceId>i-test</instanceId></item></instancesSet></RunInstancesResponse>"#;
+
+    #[derive(Clone, Copy, Debug)]
+    enum ResponseSpec {
+        Http { status: u16, body: &'static str },
+        IoError,
+        TransientOther,
+    }
+
+    fn replay_response(status: u16, body: &'static str) -> ResponseSpec {
+        ResponseSpec::Http { status, body }
+    }
+
+    fn client_token(request_body: &str) -> &str {
+        request_body
+            .split('&')
+            .find_map(|field| field.strip_prefix("ClientToken="))
+            .expect("RunInstances should carry a client token")
+    }
+
+    fn http_response(status: u16, body: &'static str) -> HttpResponse {
+        HttpResponse::new(StatusCode::try_from(status).unwrap(), body.into())
+    }
+
+    #[derive(Clone, Debug)]
+    struct ReplayConnector {
+        responses: Arc<Vec<ResponseSpec>>,
+        requests: Arc<AtomicUsize>,
+        request_bodies: Arc<Vec<OnceLock<String>>>,
+    }
+
+    #[derive(Debug)]
+    struct InstantSleep;
+
+    impl AsyncSleep for InstantSleep {
+        fn sleep(&self, _duration: std::time::Duration) -> Sleep {
+            Sleep::new(std::future::ready(()))
+        }
+    }
+
+    impl ReplayConnector {
+        fn new(responses: Vec<ResponseSpec>) -> Self {
+            let request_bodies = (0..responses.len()).map(|_| OnceLock::new()).collect();
+            Self {
+                responses: Arc::new(responses),
+                requests: Arc::new(AtomicUsize::new(0)),
+                request_bodies: Arc::new(request_bodies),
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(Ordering::Relaxed)
+        }
+
+        fn request_bodies(&self) -> Vec<String> {
+            self.request_bodies
+                .iter()
+                .filter_map(OnceLock::get)
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl HttpConnector for ReplayConnector {
+        fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+            let index = self.requests.fetch_add(1, Ordering::Relaxed);
+            if let Some(request_body) = self.request_bodies.get(index) {
+                request_body
+                    .set(
+                        String::from_utf8_lossy(request.body().bytes().unwrap_or_default())
+                            .into_owned(),
+                    )
+                    .expect("each scripted request has a unique index");
+            }
+            let response = self.responses.get(index).copied();
+            HttpConnectorFuture::new(async move {
+                match response {
+                    Some(ResponseSpec::Http { status, body }) => Ok(http_response(status, body)),
+                    Some(ResponseSpec::IoError) => Err(ConnectorError::io(
+                        std::io::Error::other("scripted connection failure").into(),
+                    )),
+                    Some(ResponseSpec::TransientOther) => Err(ConnectorError::other(
+                        "scripted incomplete response".into(),
+                        Some(ErrorKind::TransientError),
+                    )),
+                    None => Err(ConnectorError::other(
+                        "no scripted EC2 response remains".into(),
+                        None,
+                    )),
+                }
+            })
+        }
+    }
+
+    fn client_with_retry(
+        responses: Vec<ResponseSpec>,
+        retry_config: RetryConfig,
+    ) -> (Client, ReplayConnector) {
+        let connector = ReplayConnector::new(responses);
+        let http_client = http_client_fn({
+            let connector = connector.clone();
+            move |_, _| SharedHttpConnector::new(connector.clone())
+        });
+        let config = aws_sdk_ec2::Config::builder()
+            .behavior_version(BehaviorVersion::v2026_01_12())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new(
+                "access-key",
+                "secret-key",
+                None,
+                None,
+                "test",
+            ))
+            .retry_config(retry_config)
+            .sleep_impl(InstantSleep)
+            .http_client(http_client)
+            .build();
+        (Client::from_conf(config), connector)
+    }
+
+    fn client(responses: Vec<ResponseSpec>) -> (Client, ReplayConnector) {
+        client_with_retry(responses, RetryConfig::disabled())
+    }
+
+    async fn launch(client: &Client) -> Result<(Vec<String>, String), Error> {
+        let subnets = vec![
+            ("us-east-1a".to_string(), "subnet-a".to_string()),
+            ("us-east-1b".to_string(), "subnet-b".to_string()),
+        ];
+        let instance_type = "c8a.8xlarge";
+        let az_support = BTreeMap::from([
+            (
+                "us-east-1a".to_string(),
+                BTreeSet::from([instance_type.to_string()]),
+            ),
+            (
+                "us-east-1b".to_string(),
+                BTreeSet::from([instance_type.to_string()]),
+            ),
+        ]);
+
+        launch_instances(
+            client,
+            "ami-test",
+            InstanceType::from(instance_type),
+            10,
+            VolumeType::Gp3,
+            None,
+            None,
+            "key-test",
+            &subnets,
+            &az_support,
+            0,
+            "sg-test",
+            1,
+            "instance-test",
+            "tag-test",
+        )
+        .await
+    }
+
+    #[test]
+    fn request_construction_failure_is_not_retryable() {
+        let error = LaunchSdkError::construction_failure(BuildError::other("invalid request"));
+        assert!(!is_retryable_launch_error(&error));
+
+        let error = LaunchSdkError::dispatch_failure(ConnectorError::other(
+            "credential resolution failed".into(),
+            None,
+        ));
+        assert!(!is_retryable_launch_error(&error));
+
+        let error = LaunchSdkError::timeout_error(std::io::Error::other("timeout"));
+        assert!(is_retryable_launch_error(&error));
+
+        let error = LaunchSdkError::dispatch_failure(ConnectorError::io(
+            std::io::Error::other("connection reset").into(),
+        ));
+        assert!(is_retryable_launch_error(&error));
+    }
+
+    #[tokio::test]
+    async fn capacity_retry_revisits_eligible_subnets() {
+        let (client, connector) = client(vec![
+            replay_response(400, CAPACITY_ERROR),
+            replay_response(400, CAPACITY_ERROR),
+            replay_response(200, LAUNCH_SUCCESS),
+        ]);
+
+        let (instances, az) = launch(&client)
+            .await
+            .expect("capacity should be retried after every eligible AZ fails");
+
+        assert_eq!(instances, ["i-test"]);
+        assert_eq!(az, "us-east-1a");
+        assert_eq!(connector.request_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn capacity_scan_owns_run_instances_retries() {
+        let (client, connector) = client_with_retry(
+            vec![
+                replay_response(500, CAPACITY_ERROR),
+                replay_response(200, LAUNCH_SUCCESS),
+            ],
+            RetryConfig::standard().with_max_attempts(2),
+        );
+
+        let (instances, az) = launch(&client)
+            .await
+            .expect("capacity failure should advance to the next AZ");
+
+        assert_eq!(instances, ["i-test"]);
+        assert_eq!(az, "us-east-1b");
+        assert_eq!(connector.request_count(), 2);
+        let bodies = connector.request_bodies();
+        assert_ne!(client_token(&bodies[0]), client_token(&bodies[1]));
+    }
+
+    #[tokio::test]
+    async fn same_subnet_retries_reuse_client_token() {
+        let (client, connector) = client(vec![
+            ResponseSpec::IoError,
+            replay_response(200, LAUNCH_SUCCESS),
+        ]);
+
+        launch(&client)
+            .await
+            .expect("a transient failure should retry the same subnet");
+
+        let bodies = connector.request_bodies();
+        let client_tokens: Vec<_> = bodies.iter().map(|body| client_token(body)).collect();
+        assert_eq!(client_tokens.len(), 2);
+        assert_eq!(client_tokens[0], client_tokens[1]);
+    }
+
+    #[tokio::test]
+    async fn typed_connector_other_retries_same_request() {
+        let (client, connector) = client(vec![
+            ResponseSpec::TransientOther,
+            replay_response(200, LAUNCH_SUCCESS),
+        ]);
+
+        launch(&client)
+            .await
+            .expect("a typed transient connector failure should retry the same subnet");
+
+        let bodies = connector.request_bodies();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(client_token(&bodies[0]), client_token(&bodies[1]));
+    }
+
+    #[tokio::test]
+    async fn permanent_service_errors_are_not_retried() {
+        for (status, body) in [(400, UNAUTHORIZED_ERROR), (400, OPT_IN_REQUIRED_ERROR)] {
+            let (client, connector) = client(vec![replay_response(status, body)]);
+            let result = tokio::time::timeout(Duration::from_millis(50), launch(&client))
+                .await
+                .expect("permanent service error must return immediately");
+            assert!(result.is_err());
+            assert_eq!(connector.request_count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn fatal_service_code_overrides_retryable_status() {
+        for body in [UNAUTHORIZED_ERROR, OPT_IN_REQUIRED_ERROR, VCPU_LIMIT_ERROR] {
+            let (client, connector) = client(vec![replay_response(500, body)]);
+
+            let result = tokio::time::timeout(Duration::from_millis(50), launch(&client))
+                .await
+                .expect("a fatal service code must return immediately despite its status");
+
+            assert!(result.is_err());
+            assert_eq!(connector.request_count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_service_errors_retry_the_same_request() {
+        for (status, body) in [(500, TRANSIENT_ERROR), (400, THROTTLED_ERROR)] {
+            let (client, connector) = client(vec![
+                replay_response(status, body),
+                replay_response(200, LAUNCH_SUCCESS),
+            ]);
+
+            launch(&client)
+                .await
+                .expect("transient service errors should retry the same subnet");
+
+            let bodies = connector.request_bodies();
+            assert_eq!(bodies.len(), 2);
+            assert_eq!(client_token(&bodies[0]), client_token(&bodies[1]));
+        }
+    }
+
+    #[tokio::test]
+    async fn full_subnet_is_not_retried() {
+        let (client, connector) = client(vec![
+            replay_response(400, SUBNET_ERROR),
+            replay_response(400, CAPACITY_ERROR),
+            replay_response(200, LAUNCH_SUCCESS),
+        ]);
+
+        let (instances, az) = launch(&client)
+            .await
+            .expect("the remaining AZ should be retried");
+
+        assert_eq!(instances, ["i-test"]);
+        assert_eq!(az, "us-east-1b");
+        assert_eq!(connector.request_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn capacity_retries_until_capacity_returns() {
+        let failures = 20;
+        let mut events: Vec<_> = (0..failures)
+            .map(|_| replay_response(400, CAPACITY_ERROR))
+            .collect();
+        events.push(replay_response(200, LAUNCH_SUCCESS));
+        let (client, connector) = client(events);
+
+        let (instances, az) = launch(&client)
+            .await
+            .expect("regional capacity exhaustion should remain retryable");
+
+        assert_eq!(instances, ["i-test"]);
+        assert_eq!(az, "us-east-1a");
+        assert_eq!(connector.request_count(), failures + 1);
     }
 }

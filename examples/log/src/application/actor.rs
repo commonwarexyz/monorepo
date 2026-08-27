@@ -1,19 +1,18 @@
 use super::{
+    Config, Scheme,
     ingress::{Mailbox, Message},
     reporter::Reporter,
-    Config, Scheme,
 };
 use commonware_actor::mailbox::{self, Receiver};
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use rand::Rng;
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use rand_core::Rng;
 use tracing::info;
 
 /// Application actor.
 pub struct Application<R: Rng + Spawner + Metrics, H: Hasher> {
     context: ContextCell<R>,
-    hasher: H,
     mailbox: Receiver<Message<H::Digest>>,
 }
 
@@ -22,7 +21,7 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
     #[allow(clippy::type_complexity)]
     pub fn new(
         context: R,
-        config: Config<H>,
+        config: Config,
     ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let mailbox = Mailbox::new(sender);
@@ -30,7 +29,6 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
         (
             Self {
                 context: ContextCell::new(context),
-                hasher: config.hasher,
                 mailbox: receiver,
             },
             config.scheme,
@@ -50,11 +48,10 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
                 Message::Propose { response } => {
                     // Generate a random message (secret to us)
                     let mut msg = vec![0; 16];
-                    self.context.fill(&mut msg[..]);
+                    self.context.fill_bytes(&mut msg);
 
                     // Hash the message
-                    self.hasher.update(&msg);
-                    let digest = self.hasher.finalize();
+                    let digest = H::hash(&[&msg]);
                     info!(msg = hex(&msg), payload = ?digest, "proposed");
 
                     // Send digest to consensus

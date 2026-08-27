@@ -1,15 +1,15 @@
 //! Mailbox for the shard buffer engine.
 
 use crate::{
-    marshal::coding::types::CodedBlock,
-    types::{coding::Commitment, Round},
     CertifiableBlock,
+    marshal::{coding::types::CodedBlock, core::Retirement},
+    types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 /// A message that can be sent to the coding [`Engine`].
 ///
@@ -24,7 +24,7 @@ where
     /// A request to broadcast a proposed [`CodedBlock`] to all peers.
     Proposed {
         /// The erasure coded block.
-        block: CodedBlock<B, C, H>,
+        block: Arc<CodedBlock<B, C, H>>,
         /// The round in which the block was proposed.
         round: Round,
     },
@@ -53,20 +53,20 @@ where
         /// The [`Commitment`] of the block to get.
         commitment: Commitment<B, C, H>,
         /// The response channel.
-        response: oneshot::Sender<Option<CodedBlock<B, C, H>>>,
+        response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
     /// A request to get a reconstructed block by its digest, if available.
     GetByDigest {
         /// The digest of the block to get.
         digest: B::Digest,
         /// The response channel.
-        response: oneshot::Sender<Option<CodedBlock<B, C, H>>>,
+        response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
     /// A request to open a subscription for assigned shard verification.
     ///
-    /// For participants, this resolves once the leader-delivered shard for
-    /// the local participant index has been verified. Reconstructing the full
-    /// block from gossiped shards does not resolve this subscription: that
+    /// For participants, this resolves once the shard for the local participant
+    /// index has been verified. Reconstructing the full block from gossiped
+    /// shards does not resolve this subscription: that
     /// block may still be used for later certification, but it is not enough
     /// to claim the participant received the shard it is expected to echo.
     ///
@@ -84,7 +84,7 @@ where
         /// The block's digest.
         commitment: Commitment<B, C, H>,
         /// The response channel.
-        response: oneshot::Sender<CodedBlock<B, C, H>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
     /// by its digest.
@@ -92,12 +92,13 @@ where
         /// The block's digest.
         digest: B::Digest,
         /// The response channel.
-        response: oneshot::Sender<CodedBlock<B, C, H>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to prune all caches at and below the given commitment.
-    Prune {
-        /// Inclusive prune target [`Commitment`].
-        through: Commitment<B, C, H>,
+    /// A request to retire cached blocks and reconstruction state after durable application
+    /// progress.
+    Retire {
+        /// The retirement to apply.
+        update: Retirement<Commitment<B, C, H>>,
     },
 }
 
@@ -119,7 +120,7 @@ where
             Self::Proposed { .. }
             | Self::Discovered { .. }
             | Self::Notarized { .. }
-            | Self::Prune { .. } => false,
+            | Self::Retire { .. } => false,
         }
     }
 }
@@ -192,7 +193,6 @@ where
 /// A mailbox for sending messages to the [`Engine`].
 ///
 /// [`Engine`]: super::Engine
-#[derive(Clone)]
 pub struct Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -201,6 +201,20 @@ where
     P: PublicKey,
 {
     pub(super) sender: Sender<Message<B, C, H, P>>,
+}
+
+impl<B, C, H, P> Clone for Mailbox<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
 }
 
 impl<B, C, H, P> Mailbox<B, C, H, P>
@@ -217,10 +231,19 @@ where
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
     pub fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
+        self.proposed_shared(round, Arc::new(block));
+    }
+
+    pub(crate) fn proposed_shared(&self, round: Round, block: Arc<CodedBlock<B, C, H>>) {
         let _ = self.sender.enqueue(Message::Proposed { block, round });
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
+    ///
+    /// `round` MUST come from a trusted consensus observation, and its epoch
+    /// MUST be validated for `commitment`. The engine classifies the commitment's
+    /// shards against that epoch's participant set, so an unvalidated epoch can
+    /// misclassify shards from honest peers.
     pub fn discovered(&self, commitment: Commitment<B, C, H>, leader: P, round: Round) {
         let _ = self.sender.enqueue(Message::Discovered {
             commitment,
@@ -230,6 +253,9 @@ where
     }
 
     /// Inform the engine that a [`Commitment`] was notarized.
+    ///
+    /// `round` MUST come from a trusted consensus observation, and its epoch
+    /// MUST be validated for `commitment`.
     ///
     /// This is the leaderless reconstruction signal used by certification. It
     /// lets the engine drain sender-indexed gossip shards from its peer buffers
@@ -242,7 +268,7 @@ where
     }
 
     /// Request a reconstructed block by its [`Commitment`].
-    pub async fn get(&self, commitment: Commitment<B, C, H>) -> Option<CodedBlock<B, C, H>> {
+    pub async fn get(&self, commitment: Commitment<B, C, H>) -> Option<Arc<CodedBlock<B, C, H>>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetByCommitment {
             commitment,
@@ -252,7 +278,7 @@ where
     }
 
     /// Request a reconstructed block by its digest.
-    pub async fn get_by_digest(&self, digest: B::Digest) -> Option<CodedBlock<B, C, H>> {
+    pub async fn get_by_digest(&self, digest: B::Digest) -> Option<Arc<CodedBlock<B, C, H>>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
@@ -262,9 +288,9 @@ where
 
     /// Subscribe to assigned shard verification for a commitment.
     ///
-    /// For participants, this resolves once the leader-delivered shard for
-    /// the local participant index has been verified. Reconstructing the full
-    /// block from gossiped shards does not resolve this subscription: that
+    /// For participants, this resolves once the shard for the local participant
+    /// index has been verified. Reconstructing the full block from gossiped
+    /// shards does not resolve this subscription: that
     /// block may still be used for later certification, but it is not enough
     /// to claim the participant received the shard it is expected to echo.
     ///
@@ -288,7 +314,7 @@ where
     pub fn subscribe(
         &self,
         commitment: Commitment<B, C, H>,
-    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             commitment,
@@ -298,7 +324,10 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
-    pub fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    pub fn subscribe_by_digest(
+        &self,
+        digest: B::Digest,
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByDigest {
             digest,
@@ -307,8 +336,16 @@ where
         receiver
     }
 
-    /// Request to prune all caches at and below the given commitment.
-    pub fn prune(&self, through: Commitment<B, C, H>) {
-        let _ = self.sender.enqueue(Message::Prune { through });
+    /// Retire cached blocks and reconstruction state after durable application progress.
+    ///
+    /// Entries last observed at or before [`Retirement::round_floor`] are eligible for
+    /// retirement. Entries in [`Retirement::exact_retirements`] are eligible regardless of
+    /// observation round.
+    ///
+    /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
+    /// close only for exact retirements. Other block subscriptions remain open for local ingress.
+    /// Digest subscriptions remain open, and later consensus notifications may recreate state.
+    pub fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
+        let _ = self.sender.enqueue(Message::Retire { update });
     }
 }

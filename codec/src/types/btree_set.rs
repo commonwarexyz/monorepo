@@ -6,10 +6,10 @@
 extern crate alloc;
 
 use crate::{
+    RangeCfg,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_set,
-    RangeCfg,
 };
 use alloc::collections::BTreeSet;
 use bytes::{Buf, BufMut};
@@ -75,8 +75,8 @@ impl<K: Read + Clone + Ord + Eq> Read for BTreeSet<K> {
 mod tests {
     use super::*;
     use crate::{
-        codec::{Decode, Encode},
         FixedSize,
+        codec::{Decode, Encode},
     };
     use bytes::{Bytes, BytesMut};
     use core::fmt::Debug;

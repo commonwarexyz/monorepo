@@ -1,18 +1,20 @@
 use crate::{
-    merkle::{Family, Location},
+    merkle::Family,
     qmdb::{
         any::{
+            VariableValue,
             operation::{
-                update, Operation, OperationCodec, Update, COMMIT_CONTEXT, DELETE_CONTEXT,
-                UPDATE_CONTEXT,
+                COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
+                update,
             },
             value::VariableEncoding,
-            VariableValue,
         },
-        operation::Key,
+        operation::{
+            Key, commit_variable_payload_size, read_commit_variable, write_commit_variable,
+        },
     },
 };
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
 
 impl<F, V, S> OperationCodec<F, S> for VariableEncoding<V>
@@ -38,8 +40,7 @@ where
             }
             Operation::CommitFloor(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
-                metadata.write(buf);
-                UInt(**floor_loc).write(buf);
+                write_commit_variable(metadata, *floor_loc, buf);
             }
         }
     }
@@ -58,8 +59,7 @@ where
                 Ok(Operation::Update(payload))
             }
             COMMIT_CONTEXT => {
-                let metadata = Option::<V>::read_cfg(buf, &cfg.1)?;
-                let floor_loc = Location::read(buf)?;
+                let (metadata, floor_loc) = read_commit_variable(buf, &cfg.1)?;
                 Ok(Operation::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
@@ -79,7 +79,7 @@ where
         1 + match self {
             Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
+            Self::CommitFloor(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }
@@ -96,7 +96,7 @@ where
         1 + match self {
             Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
+            Self::CommitFloor(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }

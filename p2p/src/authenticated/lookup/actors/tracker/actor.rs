@@ -1,20 +1,20 @@
 use super::{
+    Config,
     directory::{self, Directory},
     ingress::{Mailbox, Message, Oracle},
-    Config,
 };
 use crate::{
-    authenticated::lookup::actors::{listener, peer, tracker::ingress::Releaser},
     PeerSetUpdate,
+    authenticated::lookup::actors::{listener, peer, tracker::ingress::Releaser},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
 };
 use commonware_utils::channel::{fallible::FallibleExt, mpsc};
-use rand::Rng;
+use rand_core::Rng;
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -60,16 +60,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // Create the mailboxes
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let oracle = Oracle::new(sender.clone());
+        let local = cfg.crypto.public_key();
+        let oracle = Oracle::new(sender.clone(), local.clone(), cfg.max_peers_per_set);
         let releaser = Releaser::new(sender.clone());
 
         // Create the directory
-        let directory = Directory::init(
-            context.child("directory"),
-            cfg.crypto.public_key(),
-            directory_cfg,
-            releaser,
-        );
+        let directory = Directory::init(context.child("directory"), local, directory_cfg, releaser);
 
         (
             Self {
@@ -237,20 +233,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 mod tests {
     use super::*;
     use crate::{
-        authenticated::lookup::actors::peer, AddressableManager, AddressableTrackedPeers, Ingress,
-        Provider,
+        AddressableManager, AddressableTrackedPeers, Ingress, Provider,
+        authenticated::lookup::actors::peer,
     };
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        deterministic::{self},
         Clock, Runner, Supervisor as _,
+        deterministic::{self},
     };
     use commonware_utils::{
-        ordered::{Map, Set},
         NZUsize,
+        ordered::{Map, Set},
     };
     use futures::{FutureExt, StreamExt};
     use std::{
@@ -265,6 +261,7 @@ mod tests {
             Config {
                 crypto,
                 mailbox_size: NZUsize!(1024),
+                max_peers_per_set: 1024,
                 tracked_peer_sets: NZUsize!(2),
                 peer_connection_cooldown: Duration::from_millis(200),
                 allow_private_ips: true,
@@ -760,6 +757,7 @@ mod tests {
 
             let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
             cfg.tracked_peer_sets = NZUsize!(1);
+            cfg.max_peers_per_set = 2;
 
             let TestHarness {
                 mailbox,

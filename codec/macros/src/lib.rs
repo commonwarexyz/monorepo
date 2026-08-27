@@ -6,12 +6,12 @@
 )]
 
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
-use proc_macro_crate::{crate_name, FoundCrate};
 use quote::quote;
 use syn::{
-    parenthesized, parse_macro_input, parse_quote, DeriveInput, Error, Generics, Ident, Type,
-    WhereClause, WherePredicate,
+    DeriveInput, Error, Generics, Ident, Type, WhereClause, WherePredicate, parenthesized,
+    parse_macro_input, parse_quote,
 };
 
 /// Resolves the path to the `commonware-codec` crate, accounting for renames and use within

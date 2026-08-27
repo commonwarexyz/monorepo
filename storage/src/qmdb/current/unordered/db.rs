@@ -4,19 +4,19 @@
 //! used by both fixed and variable unordered QMDB implementations.
 
 use crate::{
+    Context,
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    merkle::{self, hasher::Standard as StandardHasher, Location},
+    merkle::{self, Location},
     qmdb::{
+        Error,
         any::{
+            ValueEncoding,
             operation::update::Unordered as UnorderedUpdate,
             unordered::{Operation, Update},
-            ValueEncoding,
         },
         current::proof::OperationProof,
-        Error,
     },
-    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -35,16 +35,16 @@ pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
 
 // Shared read-only functionality.
 impl<
-        F: merkle::Graftable,
-        E: Context,
-        C: Contiguous<Item = Operation<F, K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: UnorderedIndex<Value = Location<F>>,
-        H: Hasher,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, C, K, V, I, H, N, S>
+    F: merkle::Graftable,
+    E: Context,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    K: Array,
+    V: ValueEncoding,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, C, K, V, I, H, N, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -56,7 +56,6 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &StandardHasher<H>,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<F, H::Digest, N>,
@@ -64,21 +63,21 @@ where
     ) -> bool {
         let op = Operation::Update(UnorderedUpdate(key, value));
 
-        proof.verify(hasher, op, root)
+        proof.verify::<H, _>(op, root)
     }
 }
 
 impl<
-        F: merkle::Graftable,
-        E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: UnorderedIndex<Value = Location<F>>,
-        H: Hasher,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, C, K, V, I, H, N, S>
+    F: merkle::Graftable,
+    E: Context,
+    C: Mutable<Item = Operation<F, K, V>>,
+    K: Array,
+    V: ValueEncoding,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, C, K, V, I, H, N, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -91,13 +90,12 @@ where
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        hasher: &StandardHasher<H>,
         key: K,
     ) -> Result<KeyValueProof<F, H::Digest, N>, Error<F>> {
         let op_loc = self.any.get_with_loc(&key).await?;
         let Some((_, loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
-        self.operation_proof(hasher, loc).await
+        self.operation_proof(loc).await
     }
 }

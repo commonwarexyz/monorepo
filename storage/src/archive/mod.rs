@@ -7,6 +7,7 @@
 //! return any of the associated values.
 
 use commonware_codec::Codec;
+use commonware_runtime::Handle;
 use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
@@ -36,14 +37,17 @@ pub enum Error {
     Freezer(#[from] crate::freezer::Error),
     #[error("record corrupted")]
     RecordCorrupted,
-    #[error("already pruned to: {0}")]
-    AlreadyPrunedTo(u64),
     #[error("record too large")]
     RecordTooLarge,
 }
 
 /// A write-once key-value store addressed by both an index and a key.
-pub trait Archive: Send {
+///
+/// Mutating functions consume the archive and return it only on success: an error (or a
+/// dropped future) destroys the handle. Pruning implementations satisfy puts below the prune
+/// floor without storing: pruning declared that range obsolete, so nothing is mutated and
+/// nothing below the floor is ever readable.
+pub trait Archive: Send + Sized {
     /// The type of the key.
     type Key: Array;
 
@@ -56,24 +60,37 @@ pub trait Archive: Send {
     /// indices can be stored via [MultiArchive::put_multi]. Keys need not be unique: the same key
     /// may be stored at multiple indices, and a subsequent [Archive::get] or [Archive::has] call
     /// with an [Identifier::Key] identifier may return any of the values associated with that key.
+    ///
+    /// A put below the prune floor is satisfied without storing (see the trait docs).
     fn put(
-        &mut self,
+        self,
         index: u64,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    ) -> impl Future<Output = Result<Self, Error>> + Send;
 
     /// Perform a [Archive::put] and [Archive::sync] in a single operation.
     fn put_sync(
-        &mut self,
+        self,
         index: u64,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        async move {
-            self.put(index, key, value).await?;
-            self.sync().await
-        }
+    ) -> impl Future<Output = Result<Self, Error>> + Send {
+        async move { self.put(index, key, value).await?.sync().await }
+    }
+
+    /// Perform a [Archive::put] and [Archive::start_sync] in a single operation.
+    ///
+    /// If the index already exists (making the put a no-op), the returned handle still reports
+    /// the durability of all previously accepted writes, including the original write for this
+    /// index if its sync is still in flight.
+    fn put_start_sync(
+        self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send {
+        async move { self.put(index, key, value).await?.start_sync().await }
     }
 
     /// Retrieve an item from [Archive].
@@ -117,7 +134,22 @@ pub trait Archive: Send {
     fn last_index(&self) -> Option<u64>;
 
     /// Sync all pending writes.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
+
+    /// Request that all pending writes are synced.
+    ///
+    /// The returned handle completes once every write accepted before this call is durable,
+    /// including writes covered by a sync that is still in flight. Implementations without a
+    /// non-blocking sync path may complete the sync before returning an already-finished handle.
+    ///
+    /// An error reported by the returned [Handle] is fatal to the archive: the caller must
+    /// stop using the returned archive.
+    fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send {
+        async move {
+            let archive = self.sync().await?;
+            Ok((archive, Handle::ready(Ok(()))))
+        }
+    }
 
     /// Remove all persistent data created by this [Archive].
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
@@ -137,29 +169,48 @@ pub trait MultiArchive: Archive {
         index: u64,
     ) -> impl Future<Output = Result<Option<Vec<Self::Value>>, Error>> + Send + use<'_, Self>;
 
+    /// Check whether `key` is stored at `index`.
+    ///
+    /// Unlike [Archive::has] with [Identifier::Key], the check is scoped to a
+    /// single index. Unlike [MultiArchive::get_all], no values are fetched.
+    fn has_at<'a>(
+        &'a self,
+        index: u64,
+        key: &'a Self::Key,
+    ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, Self>;
+
     /// Store an item, allowing multiple items at the same index.
     ///
     /// Multiple items may share the same `index`. If the same key is stored at
     /// multiple indices, any associated value may be returned when queried with
     /// [Identifier::Key].
+    ///
+    /// A put below the prune floor is satisfied without storing (see the trait docs).
     fn put_multi(
-        &mut self,
+        self,
         index: u64,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    ) -> impl Future<Output = Result<Self, Error>> + Send;
 
     /// Perform a [MultiArchive::put_multi] and [Archive::sync] in a single operation.
     fn put_multi_sync(
-        &mut self,
+        self,
         index: u64,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        async move {
-            self.put_multi(index, key, value).await?;
-            self.sync().await
-        }
+    ) -> impl Future<Output = Result<Self, Error>> + Send {
+        async move { self.put_multi(index, key, value).await?.sync().await }
+    }
+
+    /// Perform a [MultiArchive::put_multi] and [Archive::start_sync] in a single operation.
+    fn put_multi_start_sync(
+        self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send {
+        async move { self.put_multi(index, key, value).await?.start_sync().await }
     }
 }
 
@@ -170,13 +221,13 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
+        Metrics as _, Runner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         telemetry::metrics::has_metric_value,
-        Metrics as _, Runner, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-    use rand::Rng;
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+    use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
@@ -256,7 +307,7 @@ mod tests {
         assert!(!has);
 
         // Put the key-data pair
-        archive
+        archive = archive
             .put(index, key.clone(), data)
             .await
             .expect("Failed to put data");
@@ -334,13 +385,13 @@ mod tests {
         let data2 = 2;
 
         // Put the key-data pair
-        archive
+        archive = archive
             .put(index, key.clone(), data1)
             .await
             .expect("Failed to put data");
 
         // Put the key-data pair again (should be idempotent)
-        archive
+        archive = archive
             .put(index, key.clone(), data2)
             .await
             .expect("Duplicate put should not fail");
@@ -394,8 +445,8 @@ mod tests {
         // Store the same key at two different indices; distinct values only so
         // the test can observe which entry wins a key lookup.
         let key = test_key("dupe-xindex");
-        archive.put(2, key.clone(), 20).await.expect("put(2)");
-        archive.put(5, key.clone(), 50).await.expect("put(5)");
+        archive = archive.put(2, key.clone(), 20).await.expect("put(2)");
+        archive = archive.put(5, key.clone(), 50).await.expect("put(5)");
 
         // Both indices must resolve individually.
         assert_eq!(
@@ -537,7 +588,7 @@ mod tests {
             ];
 
             for (index, key, data) in &keys {
-                archive
+                archive = archive
                     .put(*index, key.clone(), *data)
                     .await
                     .expect("Failed to put data");
@@ -621,21 +672,21 @@ mod tests {
             // Insert 100 keys with gaps
             let mut last_index = 0u64;
             while keys.len() < 100 {
-                let gap: u64 = context.gen_range(1..=10);
+                let gap: u64 = context.random_range(1..=10);
                 let index = last_index + gap;
                 last_index = index;
 
                 let mut key_bytes = [0u8; 64];
                 context.fill(&mut key_bytes);
                 let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.random();
 
                 if keys.contains_key(&index) {
                     continue;
                 }
                 keys.insert(index, (key.clone(), data));
 
-                archive
+                archive = archive
                     .put(index, key, data)
                     .await
                     .expect("Failed to put data");
@@ -676,13 +727,13 @@ mod tests {
                 assert_eq!(start_next, next_actual_index);
 
                 // If there's a gap, check an index within the gap
-                if let Some(next_index) = next_actual_index {
-                    if next_index > block_end_index + 1 {
-                        let in_gap_index = block_end_index + 1;
-                        let (current_end, start_next) = archive.next_gap(in_gap_index);
-                        assert!(current_end.is_none());
-                        assert_eq!(start_next, Some(next_index));
-                    }
+                if let Some(next_index) = next_actual_index
+                    && next_index > block_end_index + 1
+                {
+                    let in_gap_index = block_end_index + 1;
+                    let (current_end, start_next) = archive.next_gap(in_gap_index);
+                    assert!(current_end.is_none());
+                    assert_eq!(start_next, Some(next_index));
                 }
                 i = j + 1;
             }
@@ -746,20 +797,20 @@ mod tests {
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                let data: i32 = context.gen();
+                let data: i32 = context.random();
 
-                archive
+                archive = archive
                     .put(index, key.clone(), data)
                     .await
                     .expect("Failed to put data");
                 keys.insert(key, (index, data));
 
                 // Randomly sync the archive
-                if context.gen_bool(0.1) {
-                    archive.sync().await.expect("Failed to sync archive");
+                if context.random_bool(0.1) {
+                    archive = archive.sync().await.expect("Failed to sync archive");
                 }
             }
-            archive.sync().await.expect("Failed to sync archive");
+            archive = archive.sync().await.expect("Failed to sync archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -861,15 +912,15 @@ mod tests {
         let key_b = test_key("bbb");
         let key_c = test_key("ccc");
 
-        archive
+        archive = archive
             .put_multi(index, key_a.clone(), 10)
             .await
             .expect("put_multi a");
-        archive
+        archive = archive
             .put_multi(index, key_b.clone(), 20)
             .await
             .expect("put_multi b");
-        archive
+        archive = archive
             .put_multi(index, key_c.clone(), 30)
             .await
             .expect("put_multi c");
@@ -911,8 +962,8 @@ mod tests {
         mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
     ) {
         let key = test_key("dup");
-        archive.put_multi(5, key.clone(), 10).await.unwrap();
-        archive.put_multi(7, key.clone(), 20).await.unwrap();
+        archive = archive.put_multi(5, key.clone(), 10).await.unwrap();
+        archive = archive.put_multi(7, key.clone(), 20).await.unwrap();
 
         // Duplicate key is allowed across indices.
         assert_eq!(archive.get(Identifier::Index(5)).await.unwrap(), Some(10));
@@ -941,12 +992,12 @@ mod tests {
 
     async fn test_get_all_impl(mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>) {
         // Three items at the same index
-        archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
-        archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
-        archive.put_multi(5, test_key("ccc"), 30).await.unwrap();
+        archive = archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
+        archive = archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
+        archive = archive.put_multi(5, test_key("ccc"), 30).await.unwrap();
 
         // One item at a different index
-        archive.put_multi(7, test_key("ddd"), 40).await.unwrap();
+        archive = archive.put_multi(7, test_key("ddd"), 40).await.unwrap();
 
         // get_all returns all values at the index in insertion order
         let all = archive.get_all(5).await.unwrap();
@@ -977,17 +1028,17 @@ mod tests {
         mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
     ) {
         // put_multi two items at the same index
-        archive
+        archive = archive
             .put_multi(1, test_key("aaa"), 10)
             .await
             .expect("put_multi");
-        archive
+        archive = archive
             .put_multi(1, test_key("bbb"), 20)
             .await
             .expect("put_multi");
 
         // Archive::put is a no-op when index already exists
-        archive
+        archive = archive
             .put(1, test_key("ccc"), 30)
             .await
             .expect("Archive::put should no-op");
@@ -1049,9 +1100,9 @@ mod tests {
                 compression,
             )
             .await;
-            archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
-            archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
-            archive.put_multi(7, test_key("ccc"), 30).await.unwrap();
+            archive = archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
+            archive = archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
+            archive = archive.put_multi(7, test_key("ccc"), 30).await.unwrap();
             archive.sync().await.unwrap();
         }
 
@@ -1102,16 +1153,16 @@ mod tests {
         mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
     ) {
         // Mix Archive::put (single-item) and MultiArchive::put_multi
-        archive.put(1, test_key("single"), 100).await.unwrap();
-        archive
+        archive = archive.put(1, test_key("single"), 100).await.unwrap();
+        archive = archive
             .put_multi(2, test_key("multi-a"), 200)
             .await
             .unwrap();
-        archive
+        archive = archive
             .put_multi(2, test_key("multi-b"), 201)
             .await
             .unwrap();
-        archive
+        archive = archive
             .put_multi(3, test_key("multi-c"), 300)
             .await
             .unwrap();
@@ -1169,47 +1220,53 @@ mod tests {
 
     fn assert_send<T: Send>(_: T) {}
 
+    // Mutators consume the archive, so each consuming future is constructed in
+    // its own match arm (only one arm ever runs, but all are type-checked). Every arm
+    // but the last needs its own key/value, so clippy's per-path analysis flags
+    // the clones as redundant.
     #[allow(dead_code)]
-    fn assert_archive_futures_are_send<T: super::Archive>(
-        archive: &mut T,
-        key: T::Key,
-        value: T::Value,
-    ) where
+    fn assert_archive_futures_are_send<T: super::Archive>(archive: T, key: T::Key, value: T::Value)
+    where
         T::Key: Clone,
         T::Value: Clone,
     {
-        assert_send(archive.put(1, key.clone(), value.clone()));
-        assert_send(archive.put_sync(2, key.clone(), value));
         assert_send(archive.get(Identifier::Index(1)));
         assert_send(archive.get(Identifier::Key(&key)));
         assert_send(archive.has(Identifier::Index(1)));
         assert_send(archive.has(Identifier::Key(&key)));
-        assert_send(archive.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_archive_destroy_is_send<T: super::Archive>(archive: T) {
-        assert_send(archive.destroy());
+        #[allow(clippy::redundant_clone)]
+        match 0u8 {
+            0 => assert_send(archive.put(1, key.clone(), value.clone())),
+            1 => assert_send(archive.put_sync(2, key.clone(), value.clone())),
+            2 => assert_send(archive.put_start_sync(3, key, value)),
+            3 => assert_send(archive.sync()),
+            4 => assert_send(archive.start_sync()),
+            _ => assert_send(archive.destroy()),
+        }
     }
 
     #[allow(dead_code)]
     fn assert_multi_archive_futures_are_send<T: super::MultiArchive>(
-        archive: &mut T,
+        archive: T,
         key: T::Key,
         value: T::Value,
     ) where
         T::Key: Clone,
         T::Value: Clone,
     {
-        assert_archive_futures_are_send(archive, key.clone(), value.clone());
         assert_send(archive.get_all(1));
-        assert_send(archive.put_multi(1, key.clone(), value.clone()));
-        assert_send(archive.put_multi_sync(2, key, value));
+        #[allow(clippy::redundant_clone)]
+        match 0u8 {
+            0 => assert_send(archive.put_multi(1, key.clone(), value.clone())),
+            1 => assert_send(archive.put_multi_sync(2, key.clone(), value.clone())),
+            2 => assert_send(archive.put_multi_start_sync(3, key.clone(), value.clone())),
+            _ => assert_archive_futures_are_send(archive, key, value),
+        }
     }
 
     #[allow(dead_code)]
     fn assert_prunable_archive_futures_are_send(
-        archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+        archive: prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
         key: FixedBytes<64>,
         value: i32,
     ) {
@@ -1218,7 +1275,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn assert_prunable_multi_archive_futures_are_send(
-        archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+        archive: prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
         key: FixedBytes<64>,
         value: i32,
     ) {
@@ -1226,25 +1283,11 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn assert_prunable_archive_destroy_is_send(
-        archive: prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
-    ) {
-        assert_archive_destroy_is_send(archive);
-    }
-
-    #[allow(dead_code)]
     fn assert_immutable_archive_futures_are_send(
-        archive: &mut immutable::Archive<Context, FixedBytes<64>, i32>,
+        archive: immutable::Archive<Context, FixedBytes<64>, i32>,
         key: FixedBytes<64>,
         value: i32,
     ) {
         assert_archive_futures_are_send(archive, key, value);
-    }
-
-    #[allow(dead_code)]
-    fn assert_immutable_archive_destroy_is_send(
-        archive: immutable::Archive<Context, FixedBytes<64>, i32>,
-    ) {
-        assert_archive_destroy_is_send(archive);
     }
 }

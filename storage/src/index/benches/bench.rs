@@ -1,10 +1,11 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
-    telemetry::metrics::{Metric, Registered, Registration},
     Metrics, Name, Supervisor,
+    telemetry::metrics::{Metric, Registered, Registration},
 };
 use criterion::criterion_main;
 
+mod grinding;
 mod hashmap_insert;
 mod hashmap_insert_fixed;
 mod hashmap_iteration;
@@ -48,6 +49,7 @@ impl Metrics for DummyMetrics {
 }
 
 criterion_main!(
+    grinding::benches,
     hashmap_iteration::benches,
     hashmap_insert_fixed::benches,
     hashmap_insert::benches,

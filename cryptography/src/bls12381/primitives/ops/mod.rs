@@ -23,9 +23,9 @@ pub mod batch;
 pub mod threshold;
 
 use super::{
-    group::{Private, DST},
-    variant::Variant,
     Error,
+    group::{DST, Private},
+    variant::Variant,
 };
 use commonware_codec::Encode;
 use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
@@ -37,7 +37,7 @@ pub fn compute_public<V: Variant>(private: &Private) -> V::Public {
 }
 
 /// Returns a new keypair derived from the provided randomness.
-pub fn keypair<R: rand_core::CryptoRngCore, V: Variant>(rng: &mut R) -> (Private, V::Public) {
+pub fn keypair<R: rand_core::CryptoRng, V: Variant>(rng: &mut R) -> (Private, V::Public) {
     let private = Private::random(rng);
     let public = compute_public::<V>(&private);
     (private, public)
@@ -135,7 +135,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
     use commonware_formatting::from_hex;
-    use commonware_math::algebra::CryptoGroup;
+    use commonware_math::algebra::{Additive, CryptoGroup};
     use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, union_unique};
     use rstest::rstest;
@@ -367,6 +367,31 @@ mod tests {
         );
     }
 
+    fn batch_verify_rejects_identity_signature<V: Variant>() {
+        let mut rng = test_rng();
+        let (_, public) = keypair::<_, V>(&mut rng);
+        let namespace = b"test";
+        let message = b"message";
+        let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
+
+        assert!(matches!(
+            V::batch_verify(
+                &mut rng,
+                &[public],
+                &[hm],
+                &[V::Signature::zero()],
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_identity_signature() {
+        batch_verify_rejects_identity_signature::<MinPk>();
+        batch_verify_rejects_identity_signature::<MinSig>();
+    }
+
     fn parse_sign_vector(
         private_key: &str,
         msg: &str,
@@ -495,7 +520,7 @@ mod tests {
             // Verify using batch verification
             let hm = hash::<MinPk>(MinPk::MESSAGE, &message);
             let batch_result = MinPk::batch_verify(
-                &mut rand::thread_rng(),
+                &mut test_rng(),
                 &[public_key],
                 &[hm],
                 &[signature],
@@ -568,7 +593,7 @@ mod tests {
         }
 
         MinPk::batch_verify(
-            &mut rand::thread_rng(),
+            &mut test_rng(),
             &valid_publics,
             &valid_hms,
             &valid_signatures,
@@ -576,14 +601,16 @@ mod tests {
         )
         .expect("batch verify of valid vectors should succeed");
 
-        assert!(MinPk::batch_verify(
-            &mut rand::thread_rng(),
-            &all_publics,
-            &all_hms,
-            &all_signatures,
-            &Sequential,
-        )
-        .is_err());
+        assert!(
+            MinPk::batch_verify(
+                &mut test_rng(),
+                &all_publics,
+                &all_hms,
+                &all_signatures,
+                &Sequential,
+            )
+            .is_err()
+        );
     }
 
     // sign_case_8cd3d4d0d9a5b265

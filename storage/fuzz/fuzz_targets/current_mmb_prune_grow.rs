@@ -14,14 +14,14 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb},
-    qmdb::current::{unordered::fixed::Db as CurrentDb, BitmapPrunedBits, FixedConfig as Config},
+    qmdb::current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
@@ -164,25 +164,29 @@ fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
         },
         grafted_metadata_partition: format!("fuzz-current-mmb-pruning-{name}-grafted-metadata"),
         translator: TwoCap,
+        init_cache_size: Some(NZUsize!(3)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
-async fn apply_pending(db: &mut Db, writes: &[(Key, Option<Value>)]) {
+async fn apply_pending(db: Db, writes: &[(Key, Option<Value>)]) -> Db {
     let mut batch = db.new_batch();
     for (key, value) in writes.iter().cloned() {
         batch = batch.write(key, value);
     }
-    let merkleized = batch.merkleize(db, None).await.unwrap();
-    db.apply_batch(merkleized)
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let (db, _) = db
+        .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail");
+    db.commit().await.expect("commit fsync should not fail")
 }
 
-async fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
+fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
     assert_eq!(
-        db.bounds().await.end,
-        reference_db.bounds().await.end,
+        db.bounds().end,
+        reference_db.bounds().end,
         "op count mismatch after {context}"
     );
     assert_eq!(
@@ -198,29 +202,30 @@ async fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
 }
 
 async fn commit_pending(
-    db: &mut Db,
-    reference_db: &mut Db,
+    db: Db,
+    reference_db: Db,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<LogicalKey, Option<RawValue>>,
     pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
-) {
+) -> (Db, Db) {
     if pending_writes.is_empty() {
-        assert_matches_reference(db, reference_db, "empty commit").await;
-        return;
+        assert_matches_reference(&db, &reference_db, "empty commit");
+        return (db, reference_db);
     }
 
     let writes = std::mem::take(pending_writes);
-    apply_pending(db, &writes).await;
-    apply_pending(reference_db, &writes).await;
+    let db = apply_pending(db, &writes).await;
+    let reference_db = apply_pending(reference_db, &writes).await;
     committed_state.extend(pending_expected.drain());
-    assert_matches_reference(db, reference_db, "commit").await;
+    assert_matches_reference(&db, &reference_db, "commit");
+    (db, reference_db)
 }
 
-async fn prune_to_floor(db: &mut Db, reference_db: &Db, context: &str) {
-    db.prune(db.sync_boundary())
-        .await
-        .expect("prune should not fail");
-    assert_matches_reference(db, reference_db, context).await;
+async fn prune_to_floor(db: Db, reference_db: &Db, context: &str) -> Db {
+    let boundary = db.sync_boundary();
+    let db = db.prune(boundary).await.expect("prune should not fail");
+    assert_matches_reference(&db, reference_db, context);
+    db
 }
 
 async fn reopen_pruned_db(
@@ -232,7 +237,7 @@ async fn reopen_pruned_db(
 ) -> Db {
     let root_before = db.root();
     let ops_root_before = db.ops_root();
-    let bounds_before = db.bounds().await;
+    let bounds_before = db.bounds();
     let pruned_bits_before = db.pruned_bits();
     drop(db);
 
@@ -253,7 +258,7 @@ async fn reopen_pruned_db(
         "ops root changed after reopen"
     );
     assert_eq!(
-        reopened.bounds().await,
+        reopened.bounds(),
         bounds_before,
         "bounds changed after reopen"
     );
@@ -262,17 +267,17 @@ async fn reopen_pruned_db(
         pruned_bits_before,
         "pruned bits changed after reopen"
     );
-    assert_matches_reference(&reopened, reference_db, "reopen").await;
+    assert_matches_reference(&reopened, reference_db, "reopen");
     reopened
 }
 
 async fn bootstrap_pruned_state(
-    db: &mut Db,
-    reference_db: &mut Db,
+    mut db: Db,
+    mut reference_db: Db,
     committed_state: &mut HashMap<LogicalKey, Option<RawValue>>,
     pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
     all_keys: &mut HashSet<LogicalKey>,
-) {
+) -> (Db, Db) {
     // `step as u8` intentionally wraps for step >= 256; uniqueness is not required here,
     // we just need to drive the inactivity floor forward.
     for step in 0..BOOTSTRAP_COMMITS {
@@ -284,7 +289,7 @@ async fn bootstrap_pruned_state(
         let mut pending_writes = vec![(encode_key(key), Some(Value::new(value)))];
         pending_expected.insert(key, Some(value));
         all_keys.insert(key);
-        commit_pending(
+        (db, reference_db) = commit_pending(
             db,
             reference_db,
             &mut pending_writes,
@@ -292,9 +297,9 @@ async fn bootstrap_pruned_state(
             pending_expected,
         )
         .await;
-        prune_to_floor(db, reference_db, "bootstrap").await;
+        db = prune_to_floor(db, &reference_db, "bootstrap").await;
         if db.pruned_bits() > 0 {
-            return;
+            return (db, reference_db);
         }
     }
     panic!("bootstrap should create a genuinely pruned state");
@@ -308,12 +313,12 @@ struct ReopenEnv<'a> {
 
 async fn drive_post_prune_window(
     mut db: Db,
-    reference_db: &mut Db,
+    mut reference_db: Db,
     committed_state: &mut HashMap<LogicalKey, Option<RawValue>>,
     pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
     all_keys: &mut HashSet<LogicalKey>,
     reopen: &mut ReopenEnv<'_>,
-) -> Db {
+) -> (Db, Db) {
     let midpoint = POST_PRUNE_WINDOW_STEPS / 2;
     for step in 0..POST_PRUNE_WINDOW_STEPS {
         let key = step % LOGICAL_KEY_SPACE;
@@ -334,15 +339,15 @@ async fn drive_post_prune_window(
         all_keys.insert(key);
 
         let mut writes = vec![write];
-        commit_pending(
-            &mut db,
+        (db, reference_db) = commit_pending(
+            db,
             reference_db,
             &mut writes,
             committed_state,
             pending_expected,
         )
         .await;
-        prune_to_floor(&mut db, reference_db, "forced-post-prune-window").await;
+        db = prune_to_floor(db, &reference_db, "forced-post-prune-window").await;
 
         // Reopen midway through the window to exercise the metadata round-trip while
         // delayed merges are still in progress.
@@ -352,13 +357,13 @@ async fn drive_post_prune_window(
                 db,
                 reopen.context,
                 reopen.config,
-                reference_db,
+                &reference_db,
                 *reopen.count,
             )
             .await;
         }
     }
-    db
+    (db, reference_db)
 }
 
 fn fuzz(data: FuzzInput) {
@@ -393,9 +398,9 @@ fn fuzz(data: FuzzInput) {
             count: &mut 0usize,
         };
 
-        bootstrap_pruned_state(
-            &mut db,
-            &mut reference_db,
+        (db, reference_db) = bootstrap_pruned_state(
+            db,
+            reference_db,
             &mut committed_state,
             &mut pending_expected,
             &mut all_keys,
@@ -403,7 +408,7 @@ fn fuzz(data: FuzzInput) {
         .await;
 
         for op in &data.operations {
-            match op {
+            (db, reference_db) = match op {
                 CurrentOperation::Update { key, value } => {
                     if issued_writes >= MAX_ACTUAL_WRITES {
                         continue;
@@ -412,6 +417,7 @@ fn fuzz(data: FuzzInput) {
                     pending_expected.insert(*key, Some(*value));
                     all_keys.insert(*key);
                     issued_writes += 1;
+                    (db, reference_db)
                 }
                 CurrentOperation::UpdateBurst { key, value, count } => {
                     for offset in 0..*count {
@@ -426,6 +432,7 @@ fn fuzz(data: FuzzInput) {
                         all_keys.insert(derived_key);
                         issued_writes += 1;
                     }
+                    (db, reference_db)
                 }
                 CurrentOperation::Delete { key } => {
                     if issued_writes >= MAX_ACTUAL_WRITES {
@@ -439,6 +446,7 @@ fn fuzz(data: FuzzInput) {
                     pending_expected.insert(live_key, None);
                     all_keys.insert(live_key);
                     issued_writes += 1;
+                    (db, reference_db)
                 }
                 CurrentOperation::DeleteBurst { key, count } => {
                     for offset in 0..*count {
@@ -456,42 +464,45 @@ fn fuzz(data: FuzzInput) {
                         all_keys.insert(live_key);
                         issued_writes += 1;
                     }
+                    (db, reference_db)
                 }
                 CurrentOperation::Commit | CurrentOperation::Root => {
-                    commit_pending(
-                        &mut db,
-                        &mut reference_db,
+                    let (db, reference_db) = commit_pending(
+                        db,
+                        reference_db,
                         &mut pending_writes,
                         &mut committed_state,
                         &mut pending_expected,
                     )
                     .await;
-                    prune_to_floor(&mut db, &reference_db, "commit+prune").await;
+                    let db = prune_to_floor(db, &reference_db, "commit+prune").await;
                     if db.pruned_bits() > 0 && !forced_window_ran {
                         forced_window_ran = true;
-                        db = drive_post_prune_window(
+                        drive_post_prune_window(
                             db,
-                            &mut reference_db,
+                            reference_db,
                             &mut committed_state,
                             &mut pending_expected,
                             &mut all_keys,
                             &mut reopen_env,
                         )
-                        .await;
+                        .await
+                    } else {
+                        (db, reference_db)
                     }
                 }
                 CurrentOperation::CloseReopen => {
-                    commit_pending(
-                        &mut db,
-                        &mut reference_db,
+                    let (db, reference_db) = commit_pending(
+                        db,
+                        reference_db,
                         &mut pending_writes,
                         &mut committed_state,
                         &mut pending_expected,
                     )
                     .await;
-                    prune_to_floor(&mut db, &reference_db, "close-reopen-prep").await;
+                    let db = prune_to_floor(db, &reference_db, "close-reopen-prep").await;
                     *reopen_env.count += 1;
-                    db = reopen_pruned_db(
+                    let db = reopen_pruned_db(
                         db,
                         reopen_env.context,
                         reopen_env.config,
@@ -499,14 +510,15 @@ fn fuzz(data: FuzzInput) {
                         *reopen_env.count,
                     )
                     .await;
+                    (db, reference_db)
                 }
-            }
+            };
         }
 
         if !pending_writes.is_empty() {
-            commit_pending(
-                &mut db,
-                &mut reference_db,
+            (db, reference_db) = commit_pending(
+                db,
+                reference_db,
                 &mut pending_writes,
                 &mut committed_state,
                 &mut pending_expected,
@@ -514,10 +526,10 @@ fn fuzz(data: FuzzInput) {
             .await;
         }
 
-        prune_to_floor(&mut db, &reference_db, "final").await;
+        let db = prune_to_floor(db, &reference_db, "final").await;
         assert_eq!(
-            db.bounds().await.end,
-            reference_db.bounds().await.end,
+            db.bounds().end,
+            reference_db.bounds().end,
             "final op count mismatch"
         );
 

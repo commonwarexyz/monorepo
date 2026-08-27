@@ -4,16 +4,16 @@
 //! Tests both MMR and MMB families.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::merkle::{
-    full::Config, hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold,
-    Family as MerkleFamily, Location,
+    Bagging::ForwardFold, Family as MerkleFamily, Location, full::Config,
+    hasher::Standard as StandardHasher, mmb, mmr,
 };
-use commonware_utils::NZU64;
+use commonware_utils::{NZU64, Probability, probability};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -42,9 +42,9 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
 }
 
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
+fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
     let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(f64::from(percent) / 100.0)
+    Ok(probability!(u64::from(percent), 100))
 }
 
 /// Operations that can be performed on the Merkle structure.
@@ -79,10 +79,10 @@ struct FuzzInput {
     write_buffer: usize,
     /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
-    sync_failure_rate: f64,
+    sync_failure_rate: Probability,
     /// Failure rate for write operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: f64,
+    write_failure_rate: Probability,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
 }
@@ -116,7 +116,7 @@ struct ExpectedBounds {
 }
 
 async fn run_operations<F: MerkleFamily>(
-    merkle: &mut Merkle<F>,
+    mut merkle: Merkle<F>,
     hasher: &StandardHasher<Sha256>,
     operations: &[MerkleOperation],
 ) -> ExpectedBounds {
@@ -127,21 +127,21 @@ async fn run_operations<F: MerkleFamily>(
     let mut min_pruned = 0u64;
     let mut max_pruned = merkle.bounds().start.as_u64();
 
+    // A failed operation breaks out of the loop.
     for op in operations.iter() {
-        let failed = match op {
+        merkle = match op {
             MerkleOperation::Add { data } => {
                 let batch = merkle.new_batch().add(hasher, data);
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
-                merkle.apply_batch(&batch).unwrap();
+                let merkle = merkle.apply_batch(&batch).unwrap();
                 max_size = max_size.max(merkle.size().as_u64());
                 max_leaves = max_leaves.max(merkle.leaves().as_u64());
-                false
+                merkle
             }
 
-            MerkleOperation::Sync => {
-                if merkle.sync().await.is_err() {
-                    true
-                } else {
+            MerkleOperation::Sync => match merkle.sync().await {
+                Err(_) => break,
+                Ok(merkle) => {
                     let size = merkle.size().as_u64();
                     let leaves = merkle.leaves().as_u64();
                     let pruned = merkle.bounds().start.as_u64();
@@ -151,30 +151,30 @@ async fn run_operations<F: MerkleFamily>(
                     max_leaves = max_leaves.max(leaves);
                     min_pruned = pruned;
                     max_pruned = max_pruned.max(pruned);
-                    false
+                    merkle
                 }
-            }
+            },
 
             MerkleOperation::PruneToLoc { loc } => {
                 let leaves = *merkle.leaves();
                 let current_pruned = *merkle.bounds().start;
                 let safe_loc = (*loc).min(leaves);
 
-                if safe_loc <= current_pruned {
-                    false
-                } else {
+                if safe_loc > current_pruned {
                     match merkle.prune(Location::new(safe_loc)).await {
                         Err(_) => {
                             max_pruned = max_pruned.max(safe_loc);
-                            true
+                            break;
                         }
-                        Ok(_) => {
+                        Ok(merkle) => {
                             let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
-                            false
+                            merkle
                         }
                     }
+                } else {
+                    merkle
                 }
             }
 
@@ -182,28 +182,24 @@ async fn run_operations<F: MerkleFamily>(
                 let leaves = merkle.leaves().as_u64();
                 let current_pruned = merkle.bounds().start.as_u64();
 
-                if leaves == 0 || current_pruned >= leaves {
-                    false
-                } else {
+                if leaves != 0 && current_pruned < leaves {
                     match merkle.prune_all().await {
                         Err(_) => {
                             max_pruned = max_pruned.max(leaves);
-                            true
+                            break;
                         }
-                        Ok(_) => {
+                        Ok(merkle) => {
                             let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
-                            false
+                            merkle
                         }
                     }
+                } else {
+                    merkle
                 }
             }
         };
-
-        if failed {
-            break;
-        }
     }
 
     ExpectedBounds {
@@ -238,7 +234,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = operations.clone();
         async move {
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-            let mut merkle = Merkle::<F>::init(
+            let merkle = Merkle::<F>::init(
                 ctx.child("merkle"),
                 &hasher,
                 merkle_config(
@@ -256,11 +252,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let storage_fault_cfg = ctx.storage_fault_config();
             *storage_fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(write_failure_rate),
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: write_failure_rate,
+                    retention_rate: probability!(0.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
                 ..Default::default()
             };
 
-            run_operations(&mut merkle, &hasher, &operations).await
+            run_operations(merkle, &hasher, &operations).await
         }
     });
 
@@ -331,7 +331,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let test_data = [0xABu8; DATA_SIZE];
         let batch = merkle.new_batch().add(&hasher, &test_data);
         let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
-        merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.apply_batch(&batch).unwrap();
         merkle.destroy().await.expect("should be able to destroy");
     });
 }

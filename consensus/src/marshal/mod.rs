@@ -66,12 +66,13 @@
 //!   uncertified blocks from the network.
 
 use crate::{
-    types::{Height, Round},
     Block,
+    types::{Height, Round},
 };
 use commonware_cryptography::Digest;
 use commonware_storage::archive;
-use commonware_utils::{acknowledgement::Exact, Acknowledgement};
+use commonware_utils::{Acknowledgement, acknowledgement::Exact};
+use std::sync::Arc;
 
 mod config;
 pub use config::{Config, Start};
@@ -135,6 +136,10 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip and the finalization round.
+    ///
+    /// This update can be reported before the finalized block and finalization archives complete
+    /// a durable sync. Applications must not use this update as a storage durability signal.
+    /// [`Update::Block`] provides that guarantee.
     Tip(Round, Height, B::Digest),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
@@ -142,11 +147,11 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// until the application explicitly acknowledges the update. If the [Acknowledgement] is dropped before
     /// handling, marshal will exit (assuming the application is shutting down).
     ///
-    /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
-    /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
+    /// Cloning the update shares the immutable block, so applications can fan it out without requiring
+    /// block clones. Marshal only considers the block delivered once every acknowledgement is handled.
     ///
     /// Marshal only emits a block after it has durably persisted the said block. This ensures applications
     /// that make stateful changes based on a block in other locations can access the same block on restart (often
     /// some logic on startup attempts on infallible read on the last processed block).
-    Block(B, A),
+    Block(Arc<B>, A),
 }

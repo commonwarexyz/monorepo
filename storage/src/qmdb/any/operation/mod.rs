@@ -73,6 +73,14 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
         }
     }
 
+    fn into_key(self) -> Option<Self::Key> {
+        match self {
+            Self::Delete(k) => Some(k),
+            Self::Update(p) => Some(p.into_key()),
+            Self::CommitFloor(_, _) => None,
+        }
+    }
+
     fn is_update(&self) -> bool {
         matches!(self, Self::Update(_))
     }
@@ -80,7 +88,9 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
     fn is_delete(&self) -> bool {
         matches!(self, Self::Delete(_))
     }
+}
 
+impl<F: Family, S: Update> crate::qmdb::operation::Floored<F> for Operation<F, S> {
     fn has_floor(&self) -> Option<Location<F>> {
         match self {
             Self::CommitFloor(_, loc) => Some(*loc),
@@ -141,7 +151,7 @@ impl<F: Family, S: Update> fmt::Display for Operation<F, S> {
 mod tests {
     use super::*;
     use crate::qmdb::any::value::{FixedEncoding, VariableEncoding};
-    use commonware_codec::{Codec, RangeCfg, Read};
+    use commonware_codec::{Codec, Decode, FixedSize, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;
 
     type F = crate::merkle::mmr::Family;
@@ -191,6 +201,21 @@ mod tests {
         roundtrip(&delete, &());
         roundtrip(&update, &());
         roundtrip(&commit, &());
+    }
+
+    #[test]
+    fn fixed_commit_nonzero_trailing_padding_rejected() {
+        type K = FixedBytes<8>;
+        type V = u64;
+        type Op = Ordered<F, K, FixedEncoding<V>>;
+
+        // With 8-byte keys the update variant is the largest, so commit records carry trailing
+        // padding beyond the commit payload.
+        let op = Op::CommitFloor(None, crate::mmr::Location::new(7));
+        let mut buf: Vec<u8> = op.encode().to_vec();
+        assert!(buf.len() > 1 + 1 + u64::SIZE + u64::SIZE);
+        *buf.last_mut().unwrap() = 0x01;
+        assert!(Op::decode_cfg(buf.as_ref(), &()).is_err());
     }
 
     #[test]

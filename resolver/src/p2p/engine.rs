@@ -1,27 +1,27 @@
 use super::{
+    Producer,
     config::Config,
     fetcher::{Config as FetcherConfig, Fetcher},
     inflight::Inflight,
     ingress::{FetchKey, Mailbox, Message},
-    metrics, wire, Producer,
+    metrics, wire,
 };
-use crate::{subscribers, Consumer, Delivery};
+use crate::{Consumer, Delivery, Outcome, subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
     Blocker, Provider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
-use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
+use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
 use futures::future::{self, Either};
-use rand::Rng;
+use rand_core::Rng;
 use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
 
@@ -78,7 +78,7 @@ where
     /// Once the future is resolved, the data (or an error) is sent to the peer.
     /// Has unbounded size; the number of concurrent requests should be limited
     /// by the `Producer` which may drop requests.
-    serves: FuturesPool<Serve<P>>,
+    serves: FuturesPool<'static, Serve<P>>,
 
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
@@ -214,9 +214,16 @@ where
                     self.fetcher.add_retry(key);
                 }
             },
-            // Handle pending deadline
-            _ = deadline_pending => {
-                self.fetcher.fetch(&mut sender);
+            // Handle completed consumer deliveries before accepting new work:
+            // a fetch issued in reaction to a delivery's outcome must find the
+            // completed key no longer in flight, not be deduplicated against
+            // it and dropped when it completes.
+            delivery = self.inflight.next_delivery() => {
+                // If the delivery was aborted, its inflight entry was dropped (via
+                // Retain or shutdown) before the consumer finished validating.
+                if let Ok((peer, elapsed, delivery, result)) = delivery {
+                    self.handle_delivery(peer, elapsed, delivery, result);
+                }
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox.recv() else {
@@ -274,16 +281,9 @@ where
                     }
                 }
             },
-            // Handle completed consumer deliveries
-            delivery = self.inflight.next_delivery() => {
-                // If the delivery was aborted, its inflight entry was dropped (via
-                // Retain or shutdown) before the consumer finished validating.
-                let (peer, delivery, result) = match delivery {
-                    Ok(delivery) => delivery,
-                    Err(_) => continue,
-                };
-                self.handle_delivery(peer, delivery, result);
-            },
+            // Wake the loop when pending work becomes ready. The send is
+            // performed in `on_end` after the selected event is handled.
+            _ = deadline_pending => {},
             // Handle completed server requests
             serve = self.serves.next_completed() => {
                 let Serve {
@@ -319,21 +319,31 @@ where
                     }
                 };
 
-                // Skip if there is a decoding error
-                let msg = match msg {
-                    Ok(msg) => msg,
+                match msg {
+                    Ok(msg) => match msg.payload {
+                        wire::Payload::Request(key) => {
+                            self.handle_network_request(peer, msg.id, key)
+                        }
+                        wire::Payload::Response(response) => {
+                            self.handle_network_response(peer, msg.id, response)
+                        }
+                        wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
+                    },
                     Err(err) => {
                         trace!(?err, ?peer, "decode failed");
-                        continue;
                     }
                 };
-                match msg.payload {
-                    wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
-                    wire::Payload::Response(response) => {
-                        self.handle_network_response(peer, msg.id, response)
-                    }
-                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
-                };
+            },
+            on_end => {
+                // Attempt at most one due outbound request after each selected
+                // event so sustained event traffic cannot starve pending work.
+                if self
+                    .fetcher
+                    .get_pending_deadline()
+                    .is_some_and(|deadline| deadline <= self.context.current())
+                {
+                    self.fetcher.fetch(&mut sender);
+                }
             },
         }
     }
@@ -397,7 +407,7 @@ where
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
-        let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
+        let Some((key, elapsed)) = self.fetcher.pop_response(id, &peer) else {
             // It's possible that the key does not exist if the request was pruned.
             return;
         };
@@ -407,70 +417,98 @@ where
             self.inflight.cancel(&key);
             return;
         };
-        let delivery = Delivery {
-            key: key.clone(),
-            subscribers,
-        };
+        let delivery = Delivery { key, subscribers };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight.deliver(delivery, peer, response);
+        self.inflight.deliver(delivery, peer, elapsed, response);
     }
 
     /// Handle completed delivery to the consumer.
-    fn handle_delivery(&mut self, peer: P, delivery: Delivery<Key, Con::Subscriber>, valid: bool) {
+    fn handle_delivery(
+        &mut self,
+        peer: P,
+        elapsed: std::time::Duration,
+        delivery: Delivery<Key, Con::Subscriber>,
+        outcome: Outcome,
+    ) {
         let Delivery {
             key,
             subscribers: delivered,
             ..
         } = delivery;
 
-        if valid {
-            let already_accepted = self.inflight.response_accepted(&key);
+        let already_accepted = self.inflight.response_accepted(&key);
+        if !already_accepted && outcome != Outcome::Ignored {
+            self.fetcher.record_response(&peer, elapsed);
+        }
 
-            // Remove only the subscribers that accepted this response. If other
-            // subscribers still need the key, deliver the same accepted response
-            // locally with the remaining annotations.
-            let remaining = self
-                .subscribers
-                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+        match outcome {
+            Outcome::Complete => {
+                // Remove only the subscribers that accepted this response. If other
+                // subscribers still need the key, deliver the same accepted response
+                // locally with the remaining annotations.
+                let remaining = self
+                    .subscribers
+                    .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
 
-            if let Some(subscribers) = remaining {
-                if !already_accepted {
-                    self.metrics.fetch.inc(Status::Success);
-                    self.inflight.accept_response(&key, self.context.as_ref());
+                if let Some(subscribers) = remaining {
+                    if !already_accepted {
+                        self.metrics.fetch.inc(Status::Success);
+                        self.inflight.accept_response(&key, self.context.as_ref());
+                    }
+                    self.inflight.redeliver(Delivery { key, subscribers });
+                } else {
+                    // All subscribers observed a valid response; clear any targeting
+                    // state retained for this key.
+                    if !already_accepted {
+                        self.metrics.fetch.inc(Status::Success);
+                    }
+                    self.inflight.complete(self.context.as_ref(), &key);
+                    self.fetcher.clear_targets(&key);
                 }
-                self.inflight.redeliver(Delivery { key, subscribers });
-            } else {
-                // All subscribers observed a valid response; clear any targeting
-                // state retained for this key.
-                if !already_accepted {
-                    self.metrics.fetch.inc(Status::Success);
+            }
+            Outcome::Ambiguous => {
+                // The peer served valid data for the wire key, but local
+                // subscribers still need different evidence. Do not cache the
+                // response or penalize the peer; retry the same key.
+                self.metrics.fetch.inc(Status::Ambiguous);
+                self.inflight.discard_response(&key);
+                self.fetcher.add_retry(key);
+            }
+            Outcome::Invalid => {
+                // A previously accepted response is only redelivered locally to subscribers that
+                // joined while validation was pending. A later invalid outcome therefore reflects
+                // conflicting consumer verdicts, not invalid peer data. Retire the fetch without
+                // blocking the peer or retrying the accepted response.
+                if already_accepted {
+                    warn!(
+                        ?key,
+                        "previously accepted response was rejected during local redelivery"
+                    );
+                    self.metrics.fetch.inc(Status::Failure);
+                    self.inflight.complete(self.context.as_ref(), &key);
+                    self.subscribers.remove(&key);
+                    self.fetcher.clear_targets(&key);
+                    return;
                 }
-                self.inflight.complete(self.context.as_ref(), &key);
+
+                // If the data is invalid, block the peer and try again. Blocking the
+                // peer also removes any targets associated with it.
+                commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
+                self.fetcher.block(peer);
+                self.metrics.fetch.inc(Status::Failure);
+                self.inflight.discard_response(&key);
+                self.fetcher.add_retry(key);
+            }
+            Outcome::Ignored => {
+                // The consumer no longer needs the key. Retire the entire fetch without
+                // scoring or blocking the response's source.
+                self.metrics.fetch.inc(Status::Dropped);
+                self.inflight.cancel(&key);
+                self.subscribers.remove(&key);
                 self.fetcher.clear_targets(&key);
             }
-            return;
         }
-
-        if self.inflight.response_accepted(&key) {
-            warn!(
-                ?key,
-                "previously accepted response was rejected during local redelivery"
-            );
-            self.metrics.fetch.inc(Status::Failure);
-            self.inflight.complete(self.context.as_ref(), &key);
-            self.subscribers.remove(&key);
-            self.fetcher.clear_targets(&key);
-            return;
-        }
-
-        // If the data is invalid, block the peer and try again. Blocking the
-        // peer also removes any targets associated with it.
-        commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
-        self.fetcher.block(peer);
-        self.metrics.fetch.inc(Status::Failure);
-        self.inflight.discard_response(&key);
-        self.fetcher.add_retry(key);
     }
 
     /// Handle a network response from a peer that did not have the data.
@@ -478,7 +516,7 @@ where
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
-        let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
+        let Some(key) = self.fetcher.pop_missing(id, &peer) else {
             // It's possible that the key does not exist if the request was pruned.
             return;
         };

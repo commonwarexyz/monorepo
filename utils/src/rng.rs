@@ -1,28 +1,128 @@
 //! Utilities for random number generation.
 
-use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use std::mem::size_of;
+use commonware_macros::stability;
+#[stability(ALPHA)]
+use core::{convert::Infallible, mem::size_of};
+#[stability(BETA)]
+use rand::{CryptoRng, rand_core::UnwrapErr, rngs::SysRng};
+#[stability(ALPHA)]
+use rand::{SeedableRng, TryCryptoRng, TryRng, rngs::StdRng};
+
+/// Returns an infallible handle to the operating system's entropy source.
+///
+/// Use this whenever randomness must come directly from the OS (e.g. key
+/// generation) rather than from a seeded or userspace RNG.
+///
+/// # Panics
+///
+/// Panics if the operating system fails to provide randomness.
+#[stability(BETA)]
+pub fn sys_rng() -> impl CryptoRng {
+    UnwrapErr(SysRng)
+}
+
+/// A deterministic RNG for testing.
+///
+/// Like [FuzzRng], this is a named type so tests and helpers can refer to it
+/// in signatures. The underlying generator is private, so consumers can only
+/// interact with it through the RNG traits. Construct it with [test_rng] or
+/// [TestRng::new].
+#[stability(ALPHA)]
+#[derive(Debug)]
+pub struct TestRng(StdRng);
+
+#[stability(ALPHA)]
+impl TryRng for TestRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        self.0.try_next_u32()
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        self.0.try_next_u64()
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.try_fill_bytes(dest)
+    }
+}
+
+#[stability(ALPHA)]
+impl TryCryptoRng for TestRng {}
+
+#[stability(ALPHA)]
+impl TestRng {
+    /// Returns a deterministic RNG seeded with the provided value.
+    ///
+    /// Use this when you need multiple independent RNG streams in the same test,
+    /// or when a helper function needs its own RNG that won't collide with the caller's.
+    pub fn new(seed: u64) -> Self {
+        Self(StdRng::seed_from_u64(seed))
+    }
+}
 
 /// Returns a seeded RNG for deterministic testing.
 ///
 /// Uses seed 0 by default to ensure reproducible test results.
-pub fn test_rng() -> StdRng {
-    StdRng::seed_from_u64(0)
+#[stability(ALPHA)]
+pub fn test_rng() -> TestRng {
+    TestRng::new(0)
 }
 
-/// Returns a seeded RNG with a custom seed for deterministic testing.
+/// A bounded deterministic RNG that returns a caller-supplied sequence of `u64` samples.
 ///
-/// Use this when you need multiple independent RNG streams in the same test,
-/// or when a helper function needs its own RNG that won't collide with the caller's.
-pub fn test_rng_seeded(seed: u64) -> StdRng {
-    StdRng::seed_from_u64(seed)
+/// Each `u32` consumes one sample and returns its low 32 bits. Byte fills encode samples in
+/// little-endian order and discard unused bytes from the final sample.
+///
+/// Sampling beyond the supplied sequence panics.
+#[stability(ALPHA)]
+#[derive(Debug)]
+pub struct ScriptedRng {
+    samples: std::vec::IntoIter<u64>,
 }
+
+#[stability(ALPHA)]
+impl ScriptedRng {
+    /// Creates a bounded RNG from the provided samples.
+    pub fn new(samples: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            samples: samples.into_iter().collect::<Vec<_>>().into_iter(),
+        }
+    }
+}
+
+#[stability(ALPHA)]
+impl TryRng for ScriptedRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.try_next_u64()? as u32)
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self
+            .samples
+            .next()
+            .expect("scripted RNG consumed more samples than expected"))
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        rand::rand_core::utils::fill_bytes_via_next_word(dest, || self.try_next_u64())
+    }
+}
+
+// SAFETY: ScriptedRng is not cryptographically secure. It implements CryptoRng only because test
+// runtimes require CryptoRng-bounded RNGs. This type must never be used outside tests.
+#[stability(ALPHA)]
+impl TryCryptoRng for ScriptedRng {}
 
 /// Applies a SplitMix64-style finalizer to a deterministic input word.
 ///
 /// This is useful for cheaply decorrelating derived deterministic seeds while
 /// preserving reproducibility.
 #[inline]
+#[stability(ALPHA)]
 pub const fn mix64(mut word: u64) -> u64 {
     word ^= word >> 30;
     word = word.wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -32,6 +132,7 @@ pub const fn mix64(mut word: u64) -> u64 {
 }
 
 /// Width of each source window in bytes.
+#[stability(ALPHA)]
 const BLOCK_BYTES: usize = size_of::<u64>();
 
 /// An RNG that expands a fuzzer byte slice into an infinite deterministic stream.
@@ -85,6 +186,7 @@ const BLOCK_BYTES: usize = size_of::<u64>();
 /// `fill_bytes` serves output from cached block bytes so callers get a stable
 /// byte stream regardless of whether they request randomness as `next_u64`,
 /// `next_u32`, or arbitrary byte slices.
+#[stability(ALPHA)]
 pub struct FuzzRng {
     bytes: Vec<u8>,
     ctr: u64,
@@ -92,6 +194,7 @@ pub struct FuzzRng {
     cache_pos: usize,
 }
 
+#[stability(ALPHA)]
 impl FuzzRng {
     /// Creates a new `FuzzRng` from a byte buffer.
     pub const fn new(bytes: Vec<u8>) -> Self {
@@ -131,22 +234,8 @@ impl FuzzRng {
         self.ctr = self.ctr.wrapping_add(1);
         mix64(word ^ ctr ^ crate::GOLDEN_RATIO)
     }
-}
 
-impl RngCore for FuzzRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut buf = [0u8; 4];
-        self.fill_bytes(&mut buf);
-        u32::from_be_bytes(buf)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut buf = [0u8; BLOCK_BYTES];
-        self.fill_bytes(&mut buf);
-        u64::from_be_bytes(buf)
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn fill_bytes_stream(&mut self, dest: &mut [u8]) {
         let mut written = 0;
         while written < dest.len() {
             if self.cache_pos == self.cache.len() {
@@ -167,9 +256,26 @@ impl RngCore for FuzzRng {
             written += take;
         }
     }
+}
 
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
+#[stability(ALPHA)]
+impl TryRng for FuzzRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut buf = [0u8; 4];
+        self.fill_bytes_stream(&mut buf);
+        Ok(u32::from_be_bytes(buf))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut buf = [0u8; BLOCK_BYTES];
+        self.fill_bytes_stream(&mut buf);
+        Ok(u64::from_be_bytes(buf))
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        self.fill_bytes_stream(dest);
         Ok(())
     }
 }
@@ -177,11 +283,29 @@ impl RngCore for FuzzRng {
 // SAFETY: FuzzRng is not cryptographically secure. It implements CryptoRng
 // only because the consensus fuzzer requires CryptoRng-bounded RNG. This type
 // must never be used outside of fuzz/test contexts.
-impl CryptoRng for FuzzRng {}
+#[stability(ALPHA)]
+impl TryCryptoRng for FuzzRng {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
+
+    #[test]
+    fn test_scripted_rng_output_forms() {
+        let mut rng = ScriptedRng::new([
+            0x0123_4567_89ab_cdef,
+            0xfedc_ba98_7654_3210,
+            0x0807_0605_0403_0201,
+        ]);
+
+        assert_eq!(rng.try_next_u64().unwrap(), 0x0123_4567_89ab_cdef);
+        assert_eq!(rng.try_next_u32().unwrap(), 0x7654_3210);
+
+        let mut bytes = [0; 5];
+        rng.try_fill_bytes(&mut bytes).unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4, 5]);
+    }
 
     #[test]
     fn test_empty_bytes_not_constant() {
@@ -373,7 +497,7 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_conformance::Conformance;
-        use rand::Rng;
+        use rand::RngExt as _;
 
         /// Conformance wrapper for FuzzRng that tests output stability.
         ///
@@ -384,8 +508,8 @@ mod tests {
 
         impl Conformance for FuzzRngConformance {
             async fn commit(seed: u64) -> Vec<u8> {
-                let mut seed_rng = test_rng_seeded(seed);
-                let len = seed_rng.gen_range(1..=64);
+                let mut seed_rng = TestRng::new(seed);
+                let len = seed_rng.random_range(1..=64);
                 let mut input = vec![0u8; len];
                 seed_rng.fill_bytes(&mut input);
 

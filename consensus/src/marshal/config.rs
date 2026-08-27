@@ -1,11 +1,11 @@
 use crate::{
+    Block,
     simplex::types::Finalization,
     types::{Epoch, Epocher, ViewDelta},
-    Block,
 };
 use commonware_cryptography::{
-    certificate::{Provider, Scheme},
     Digest, Digestible,
+    certificate::{Provider, Scheme},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -71,7 +71,7 @@ where
     /// Minimum number of views to retain temporary data after the application processes a block.
     ///
     /// Useful for keeping around information that peers may desire to have.
-    pub view_retention_timeout: ViewDelta,
+    pub view_retention: ViewDelta,
 
     /// Prunable archive partition prefix.
     pub prunable_items_per_section: NonZeroU64,
@@ -107,9 +107,9 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{coding::types::CodedBlock, mocks::block::Block as MockBlock},
+        marshal::{coding::types::CodedBlock, mocks::block::Block},
         simplex::{scheme::ed25519, types::Context},
-        types::{coding::Commitment, FixedEpocher},
+        types::{FixedEpocher, coding::Commitment},
     };
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn config_compiles_with_distinct_application_and_start_blocks() {
-        type AB = MockBlock<Sha256Digest, Context<Sha256Digest, PublicKey>>;
+        type AB = Block<Sha256Digest, Context<Sha256Digest, PublicKey>>;
         type TestCommitment = Commitment<AB, ReedSolomon<Sha256>, Sha256>;
         type B = CodedBlock<AB, ReedSolomon<Sha256>, Sha256>;
         type Provider = ConstantProvider<ed25519::Scheme, Epoch>;

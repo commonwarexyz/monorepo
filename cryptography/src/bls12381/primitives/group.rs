@@ -5,28 +5,32 @@
 //!
 //! # Warning
 //!
-//! Ensure that points are checked to belong to the correct subgroup
-//! (G1 or G2) to prevent small subgroup attacks. This is particularly important
-//! when handling deserialized points or points received from untrusted sources. This
-//! is already taken care of for you if you use the provided `deserialize` function.
+//! Points received from untrusted sources must be checked for membership in the correct subgroup
+//! to prevent small-subgroup attacks. The [`Read`] implementations for [`G1`] and [`G2`] perform
+//! this check and also reject the identity.
+//!
+//! [`G1`] and [`G2`] include the identity because group operations require it. Values produced by
+//! group operations can still be the identity, so an API that treats it as invalid must reject it
+//! at its own boundary.
 
 use super::variant::Variant;
 use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
-    blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
-    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
-    blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    BLS12_381_G1, BLS12_381_G2, BLST_ERROR, Pairing, blst_bendian_from_fp12,
+    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
+    blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
+    blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
+    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
     blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
     blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
-    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
+    blst_scalar_from_fr,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -49,7 +53,7 @@ use core::{
     ptr,
 };
 use ctutils::{Choice, CtEq};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 fn all_zero(bytes: &[u8]) -> Choice {
@@ -213,6 +217,15 @@ where
 /// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
 pub type DST = &'static [u8];
 
+/// Configuration for [`Scalar`]'s [`Read`] implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarReadCfg {
+    /// Accept any in-range scalar, including zero.
+    AllowZero,
+    /// Reject the zero scalar.
+    RejectZero,
+}
+
 /// Wrapper around [blst_fr] that represents an element of the BLS12‑381
 /// scalar field `F_r`.
 ///
@@ -225,7 +238,7 @@ pub type DST = &'static [u8];
 /// the order of the BLS12‑381 G1/G2 groups.
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct Scalar(blst_fr);
+pub struct Scalar(pub(crate) blst_fr);
 
 #[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for Scalar {
@@ -250,8 +263,8 @@ const SCALAR_BITS: usize = 255;
 
 /// Number of scalar bits for SmallScalar (128 bits).
 ///
-/// 128 bits provides sufficient security (2^-128 collision probability)
-/// while roughly halving MSM computation time compared to full 255-bit scalars.
+/// 128 bits provides a soundness error of at most 2^-128 for random
+/// linear-combination checks while roughly halving MSM computation time.
 const SMALL_SCALAR_BITS: usize = 128;
 
 /// Number of bytes for SmallScalar (16 bytes = 128 bits).
@@ -263,11 +276,10 @@ const IKM_LENGTH: usize = 64;
 /// Minimum number of points required to use parallel MSM.
 const MIN_PARALLEL_POINTS: usize = 32;
 
-/// A 128-bit scalar for use in batch verification random challenges.
+/// A 128-bit scalar in `[0, 2^128)`.
 ///
-/// This provides 128-bit security which is sufficient for preventing
-/// forgery attacks in batch verification while reducing computational cost
-/// compared to full 255-bit scalars.
+/// Every `SmallScalar` can be converted to a valid [`Scalar`]. Its reduced width
+/// roughly halves MSM computation time compared to full 255-bit scalars.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmallScalar {
     /// Stored as blst_scalar with only lower 128 bits populated.
@@ -275,14 +287,20 @@ pub struct SmallScalar {
 }
 
 impl SmallScalar {
-    /// Generates a random 128-bit scalar.
-    pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        // blst_scalar is 32 bytes
-        let mut bytes = [0u8; 32];
+    /// Generates a uniformly random scalar in `[0, 2^128)`.
+    ///
+    /// Zero is intentionally included. Predictable challenges are unsafe regardless of their value,
+    /// but zero from uniform, independent sampling does not weaken the check. An invalid random
+    /// linear-combination check has at least one non-zero error term. Fixing every other challenge
+    /// leaves at most one value in this range for that term that can make the check pass, so the
+    /// soundness error remains at most `2^-128`.
+    pub fn random(mut rng: impl CryptoRng) -> Self {
+        // blst_scalar is 32 bytes.
+        let mut bytes = [0u8; SCALAR_LENGTH];
         // Fill the last 16 bytes (128 bits) with entropy.
         // In big-endian, bytes[16..32] are the least significant.
         // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
-        rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
+        rng.fill_bytes(&mut bytes[(SCALAR_LENGTH - SMALL_SCALAR_LENGTH)..]);
 
         let mut scalar = blst_scalar::default();
         // SAFETY: bytes is a valid 32-byte array.
@@ -374,6 +392,31 @@ const COSET_SHIFT_INV: Scalar = Scalar(blst_fr {
         0x66d0_f1e6_60ec_4796,
     ],
 });
+
+/// Big-endian bytes of `(r - 1) / 2`. A scalar is "positive" (in the sense of
+/// [`Scalar::is_positive`]) iff its canonical representative exceeds this value.
+const HALF_MODULUS_BE: [u8; SCALAR_LENGTH] = [
+    0x39, 0xf6, 0xd3, 0xa9, 0x94, 0xce, 0xbe, 0xa4, 0x19, 0x9c, 0xec, 0x04, 0x04, 0xd0, 0xec, 0x02,
+    0xa9, 0xde, 0xd2, 0x01, 0x7f, 0xff, 0x2d, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00,
+];
+
+/// Little-endian limbs of `(r - 1) / 2`, the exponent of the Legendre symbol
+/// `s^((r-1)/2)` used by [`Scalar::is_square`].
+const LEGENDRE_EXP: [u64; 4] = [
+    0x7fff_ffff_8000_0000,
+    0xa9de_d201_7fff_2dff,
+    0x199c_ec04_04d0_ec02,
+    0x39f6_d3a9_94ce_bea4,
+];
+
+/// Little-endian limbs of `(Q + 1) / 2`, where `r - 1 = Q * 2^32` with `Q` odd.
+/// `s^((Q+1)/2)` is the initial Tonelli-Shanks candidate root in [`Scalar::sqrt`].
+const SQRT_EXP: [u64; 4] = [
+    0x7fff_2dff_8000_0000,
+    0x04d0_ec02_a9de_d201,
+    0x94ce_bea4_199c_ec04,
+    0x0000_0000_39f6_d3a9,
+];
 
 /// A point on the BLS12-381 G1 curve.
 #[derive(Clone, Copy, Eq, PartialEq, FixedArray)]
@@ -497,7 +540,7 @@ impl Read for Private {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read(buf)?;
+        let scalar = Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?;
         Ok(Self::new(scalar))
     }
 }
@@ -507,7 +550,7 @@ impl FixedSize for Private {
 }
 
 impl Random for Private {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         Self::new(Scalar::random(rng))
     }
 }
@@ -524,6 +567,7 @@ pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
     /// Creates a scalar from input key material.
+    ///
     /// Uses IETF BLS KeyGen which loops internally until a non-zero value is produced.
     fn from_ikm(ikm: &[u8; IKM_LENGTH]) -> Self {
         let mut sc = blst_scalar::default();
@@ -537,7 +581,7 @@ impl Scalar {
     }
 
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
-    pub fn map(dst: DST, msg: &[u8]) -> Self {
+    pub fn map(dst: &[u8], msg: &[u8]) -> Self {
         // The BLS12-381 scalar field has a modulus of approximately 255 bits.
         // According to RFC9380, when mapping to a field element, we need to
         // generate uniform bytes with length L = ceil((ceil(log2(p)) + k) / 8),
@@ -615,6 +659,90 @@ impl Scalar {
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
     }
+
+    /// Returns the canonical sign of the scalar.
+    ///
+    /// The "positive" representative is the lexicographically largest one: this
+    /// returns `true` iff the canonical representative is strictly greater than
+    /// `(r-1)/2` (equivalently, `self > -self`).
+    pub fn is_positive(&self) -> bool {
+        // `as_slice` yields the canonical big-endian representation, so a
+        // lexicographic byte comparison matches the numeric comparison.
+        *self.as_slice() > HALF_MODULUS_BE
+    }
+
+    /// Returns `true` if the scalar is a non-zero quadratic residue.
+    pub fn is_square(&self) -> bool {
+        // Legendre symbol: `s^((r-1)/2)` is `1` for a non-zero square, `-1` for
+        // a non-square, and `0` for `s = 0`.
+        self.exp(&LEGENDRE_EXP) == Self::one()
+    }
+
+    /// Returns a square root of the scalar, or `None` if it is not a quadratic
+    /// residue.
+    ///
+    /// Uses the Tonelli-Shanks algorithm, seeded by the field's primitive
+    /// `2^MAX_LG_ROOT_ORDER`-th root of unity (the generator of the 2-Sylow
+    /// subgroup).
+    pub fn sqrt(&self) -> Option<Self> {
+        let one = Self::one();
+
+        // Zero is its own (only) square root; the loop below assumes a non-zero
+        // element living in the multiplicative group.
+        if *self == Self::zero() {
+            return Some(Self::zero());
+        }
+
+        // `c` is a generator of the 2-Sylow subgroup (order `2^MAX_LG_ROOT_ORDER`).
+        let mut c =
+            Self::root_of_unity(Self::MAX_LG_ROOT_ORDER).expect("2-adic root of unity must exist");
+        let mut m = u32::from(Self::MAX_LG_ROOT_ORDER);
+        // `r = self^((Q+1)/2)` is the candidate root; `t = self^Q = r^2 / self`
+        // lives in the 2-Sylow subgroup and is driven to `1` by the loop.
+        let mut r = self.exp(&SQRT_EXP);
+        let mut t = {
+            let mut t = r.clone();
+            t.square();
+            t * &self.inv()
+        };
+
+        loop {
+            if t == one {
+                // `self` is a quadratic residue and `r` is its square root. The
+                // check guards against a non-residue that still drives `t` to `1`
+                // (it cannot, but verifying keeps callers honest).
+                let mut check = r.clone();
+                check.square();
+                return (check == *self).then_some(r);
+            }
+
+            // Find the least `i` in `(0, m)` with `t^(2^i) == 1`.
+            let mut i = 0u32;
+            let mut t2i = t.clone();
+            while t2i != one {
+                t2i.square();
+                i += 1;
+                if i == m {
+                    // `t` has order `2^m`, so `self` is not a quadratic residue.
+                    return None;
+                }
+            }
+
+            // `b = c^(2^(m - i - 1))`; halve the order of `t` each iteration.
+            let mut b = c.clone();
+            for _ in 0..(m - i - 1) {
+                b.square();
+            }
+            m = i;
+            c = {
+                let mut c = b.clone();
+                c.square();
+                c
+            };
+            t *= &c;
+            r *= &b;
+        }
+    }
 }
 
 impl Write for Scalar {
@@ -625,27 +753,30 @@ impl Write for Scalar {
 }
 
 impl Read for Scalar {
-    type Cfg = ();
+    type Cfg = ScalarReadCfg;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
-        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
-        // per IETF BLS12-381 spec (Draft 4+).
+        // SAFETY: bytes is a valid 32-byte array. blst_scalar_fr_check validates in-range.
         //
-        // References:
+        // For private key material, callers pass `RejectZero` to preserve the
+        // IETF BLS non-zero secret-key requirement:
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_sk_check(&scalar) {
+            if !blst_scalar_fr_check(&scalar) {
                 return Err(Invalid("Scalar", "Invalid"));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
         }
-        Ok(Self(ret))
+        let out = Self(ret);
+        if *cfg == ScalarReadCfg::RejectZero && out == Self::zero() {
+            return Err(Invalid("Scalar", "Invalid"));
+        }
+        Ok(out)
     }
 }
 
@@ -807,8 +938,8 @@ impl Field for Scalar {
 }
 
 impl Random for Scalar {
-    /// Returns a random non-zero scalar.
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    /// Returns a random **non-zero** scalar.
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
         rng.fill_bytes(ikm.as_mut());
         Self::from_ikm(&ikm)
@@ -1018,7 +1149,8 @@ impl G1 {
             return Self::zero();
         }
         let npoints = points_filtered.len();
-        let ncpus = strategy.parallelism_hint();
+        let manual = strategy.manual();
+        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1035,7 +1167,7 @@ impl G1 {
         }
 
         // Parallel MSM using tile_pippenger
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, &manual)
     }
 
     fn msm_sequential(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
@@ -1141,10 +1273,12 @@ impl Read for G1 {
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G1", "Type mismatch")),
-                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G1", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G1", "PK is Infinity")),
-                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
+                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
+                | BLST_ERROR::BLST_VERIFY_FAIL
+                | BLST_ERROR::BLST_PK_IS_INFINITY
+                | BLST_ERROR::BLST_BAD_SCALAR => {
+                    return Err(Invalid("G1", "Unexpected uncompress error"));
+                }
             }
             blst_p1_from_affine(&mut ret, &affine);
 
@@ -1438,7 +1572,8 @@ impl G2 {
             return Self::zero();
         }
         let npoints = points_filtered.len();
-        let ncpus = strategy.parallelism_hint();
+        let manual = strategy.manual();
+        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1455,7 +1590,7 @@ impl G2 {
         }
 
         // Parallel MSM using tile_pippenger
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, &manual)
     }
 
     fn msm_sequential(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {
@@ -1560,11 +1695,13 @@ impl Read for G2 {
                 BLST_ERROR::BLST_SUCCESS => {}
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
-                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G2", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G2", "Type mismatch")),
-                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G2", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G2", "PK is Infinity")),
-                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
+                BLST_ERROR::BLST_POINT_NOT_IN_GROUP
+                | BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
+                | BLST_ERROR::BLST_VERIFY_FAIL
+                | BLST_ERROR::BLST_PK_IS_INFINITY
+                | BLST_ERROR::BLST_BAD_SCALAR => {
+                    return Err(Invalid("G2", "Unexpected uncompress error"));
+                }
             }
             blst_p2_from_affine(&mut ret, &affine);
 
@@ -1773,14 +1910,16 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
-    use commonware_math::algebra::{test_suites, Random};
+    use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
+    use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
         collections::{BTreeSet, HashMap},
+        convert::Infallible,
         num::NonZeroUsize,
     };
 
@@ -1817,7 +1956,7 @@ mod tests {
     #[test]
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-        let s = Scalar::random(&mut test_rng());
+        let s = Scalar::random(test_rng());
         let mut s2 = s.clone();
         s2.double();
 
@@ -1832,16 +1971,106 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
-        let original = Scalar::random(&mut test_rng());
+        let original = Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
-        let decoded = Scalar::decode(&mut encoded).unwrap();
+        let decoded = Scalar::decode_cfg(&mut encoded, &ScalarReadCfg::RejectZero).unwrap();
         assert_eq!(original, decoded);
     }
 
     #[test]
+    fn test_scalar_codec_zero_cfg() {
+        let encoded = Scalar::zero().encode();
+
+        assert_eq!(
+            Scalar::decode_cfg(encoded.clone(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::zero()
+        );
+        assert!(Scalar::decode_cfg(encoded, &ScalarReadCfg::RejectZero).is_err());
+    }
+
+    #[test]
+    fn test_private_decode_rejects_zero_scalar() {
+        let encoded = Scalar::zero().encode();
+        assert!(Private::decode(encoded).is_err());
+    }
+
+    #[test]
+    fn test_scalar_sqrt() {
+        // The square of any element is a quadratic residue whose root squares
+        // back to it (up to sign).
+        minifuzz::test(|u| {
+            let mut sq: Scalar = u.arbitrary()?;
+            sq.square();
+            assert!(sq.is_square() || sq == Scalar::zero());
+            let mut root = sq.sqrt().expect("a square must have a root");
+            root.square();
+            assert_eq!(root, sq);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_scalar_sqrt_non_residue() {
+        // Roughly half of all elements are non-residues; find one and confirm
+        // both `is_square` and `sqrt` agree it has no root.
+        let mut found = false;
+        for i in 2u64..100 {
+            let s = Scalar::from_u64(i);
+            if !s.is_square() {
+                assert!(s.sqrt().is_none());
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected to find a non-residue");
+    }
+
+    #[test]
+    fn test_scalar_is_square_and_zero() {
+        assert!(Scalar::one().is_square());
+        assert_eq!(Scalar::zero().sqrt(), Some(Scalar::zero()));
+        // Zero is not reported as a (non-zero) quadratic residue.
+        assert!(!Scalar::zero().is_square());
+    }
+
+    #[test]
+    fn test_scalar_is_positive() {
+        // `1` is in the lower half, its negation in the upper half.
+        assert!(!Scalar::one().is_positive());
+        assert!((-Scalar::one()).is_positive());
+        // Exactly one of `s` and `-s` is positive (for non-zero `s`).
+        minifuzz::test(|u| {
+            let s: Scalar = u.arbitrary()?;
+            if s != Scalar::zero() {
+                assert_ne!(s.is_positive(), (-s).is_positive());
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_scalar_read_cfg_accepts_canonical_zero() {
+        // Round-trips canonical encodings, including zero.
+        let s = Scalar::random(test_rng());
+        let bytes = s.encode_fixed::<{ Scalar::SIZE }>();
+        assert_eq!(
+            Scalar::decode_cfg(bytes.as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            s
+        );
+        assert_eq!(
+            Scalar::decode_cfg([0u8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::zero()
+        );
+        // Non-canonical encodings (>= r) are rejected.
+        assert!(
+            Scalar::decode_cfg([0xffu8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).is_err()
+        );
+    }
+
+    #[test]
     fn test_g1_codec() {
-        let original = G1::generator() * &Scalar::random(&mut test_rng());
+        let original = G1::generator() * &Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -1849,12 +2078,22 @@ mod tests {
     }
 
     #[test]
+    fn test_g1_codec_rejects_identity() {
+        assert!(G1::decode(G1::zero().encode()).is_err());
+    }
+
+    #[test]
     fn test_g2_codec() {
-        let original = G2::generator() * &Scalar::random(&mut test_rng());
+        let original = G2::generator() * &Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g2_codec_rejects_identity() {
+        assert!(G2::decode(G2::zero().encode()).is_err());
     }
 
     /// Naive calculation of Multi-Scalar Multiplication: sum(scalar * point)
@@ -2081,12 +2320,9 @@ mod tests {
         assert_eq!(g2_set.len(), NUM_ITEMS);
 
         // Verify that `BTreeSet` iteration is sorted, which relies on `Ord`.
-        let scalars: Vec<_> = scalar_set.iter().collect();
-        assert!(scalars.windows(2).all(|w| w[0] <= w[1]));
-        let g1s: Vec<_> = g1_set.iter().collect();
-        assert!(g1s.windows(2).all(|w| w[0] <= w[1]));
-        let g2s: Vec<_> = g2_set.iter().collect();
-        assert!(g2s.windows(2).all(|w| w[0] <= w[1]));
+        assert!(scalar_set.iter().is_sorted());
+        assert!(g1_set.iter().is_sorted());
+        assert!(g2_set.iter().is_sorted());
 
         // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();
@@ -2308,6 +2544,38 @@ mod tests {
         let scalar = Scalar::from(small.clone());
         let round_tripped = scalar.as_blst_scalar();
         assert_eq!(small.as_bytes(), round_tripped.b.as_slice());
+    }
+
+    #[test]
+    fn test_small_scalar_random_includes_zero() {
+        struct ZeroOnce(bool);
+
+        impl TryRng for ZeroOnce {
+            type Error = Infallible;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Ok(0)
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Ok(u64::from(self.try_next_u32()?))
+            }
+
+            fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                assert!(!self.0, "random sampled more than once");
+                self.0 = true;
+                fill_bytes_via_next_word(dst, || self.try_next_u64())
+            }
+        }
+
+        impl TryCryptoRng for ZeroOnce {}
+
+        let mut rng = ZeroOnce(false);
+        let scalar = SmallScalar::random(&mut rng);
+
+        assert!(rng.0);
+        assert_eq!(scalar, SmallScalar::zero());
+        assert_eq!(Scalar::from(scalar), Scalar::zero());
     }
 
     #[test]

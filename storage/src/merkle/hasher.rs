@@ -8,16 +8,16 @@ use core::marker::PhantomData;
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
 /// The type parameter `F` determines which Merkle family (MMR, MMB, etc.) this hasher targets, and
-/// consequently which `Position` and `Location` types appear in method signatures. Default
-/// implementations are provided for all methods except `hash()`.
+/// consequently which `Position` and `Location` types appear in method signatures.
 pub trait Hasher<F: Family>: Clone + Send + Sync {
+    /// Digest produced by this hasher.
     type Digest: Digest;
 
-    /// Hash an arbitrary sequence of byte slices into a single digest.
+    /// Hash a sequence of byte slices into a single digest.
     ///
     /// The parts are concatenated before hashing (i.e. there is no domain separation between
     /// parts).
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest;
 
     /// The bagging policy applied when this hasher folds peaks into a root. Only affects root peak
     /// aggregation; `hash`, `leaf_digest`, and `node_digest` are unaffected.
@@ -30,26 +30,30 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        self.hash([
-            (*pos).to_be_bytes().as_slice(),
-            left.as_ref(),
-            right.as_ref(),
-        ])
+        self.hash(&[&(*pos).to_be_bytes(), left, right])
     }
+
+    /// Computes digests for two nodes at once.
+    ///
+    /// Must be equivalent to two [`node_digest`](Self::node_digest) calls.
+    fn node_digest_pair(
+        &self,
+        nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
+    ) -> (Self::Digest, Self::Digest);
 
     /// Computes the digest for a leaf given its position and the element it represents.
     fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        self.hash([(*pos).to_be_bytes().as_slice(), element])
+        self.hash(&[&(*pos).to_be_bytes(), element])
     }
 
     /// Compute the digest of a byte slice.
     fn digest(&self, data: &[u8]) -> Self::Digest {
-        self.hash(core::iter::once(data))
+        self.hash(&[data])
     }
 
     /// Folds a peak digest into a running accumulator: `Hash(acc || peak)`.
     fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        self.hash([acc.as_ref(), peak.as_ref()])
+        self.hash(&[acc, peak])
     }
 
     /// Computes a root using `inactive_peaks` and the bagging policy carried by `self`.
@@ -130,12 +134,12 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         };
 
         if committed_inactive_peaks == 0 {
-            Some(self.hash([(*leaves).to_be_bytes().as_slice(), folded_peaks.as_ref()]))
+            Some(self.hash(&[&(*leaves).to_be_bytes(), &folded_peaks]))
         } else {
-            Some(self.hash([
-                (*leaves).to_be_bytes().as_slice(),
-                (committed_inactive_peaks as u64).to_be_bytes().as_slice(),
-                folded_peaks.as_ref(),
+            Some(self.hash(&[
+                &(*leaves).to_be_bytes(),
+                &(committed_inactive_peaks as u64).to_be_bytes(),
+                &folded_peaks,
             ]))
         }
     }
@@ -147,10 +151,18 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 /// one instance can be used with MMR, MMB, or any future family.
 ///
 /// The `bagging` field selects how peaks are folded into the root.
-#[derive(Clone)]
 pub struct Standard<H: CHasher> {
     _hasher: PhantomData<H>,
     bagging: Bagging,
+}
+
+impl<H: CHasher> Clone for Standard<H> {
+    fn clone(&self) -> Self {
+        Self {
+            _hasher: PhantomData,
+            bagging: self.bagging,
+        }
+    }
 }
 
 impl<H: CHasher> Standard<H> {
@@ -167,42 +179,108 @@ impl<H: CHasher> Standard<H> {
         self.bagging
     }
 
-    /// Hash an arbitrary sequence of byte slices into a single digest.
-    pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        let mut h = H::new();
-        for part in parts {
-            h.update(part);
-        }
-        h.finalize()
+    /// Hash a sequence of byte slices into a single digest.
+    pub fn hash(&self, parts: &[&[u8]]) -> H::Digest {
+        H::hash(parts)
     }
 
     /// Compute the digest of a byte slice.
     pub fn digest(&self, data: &[u8]) -> H::Digest {
-        self.hash(core::iter::once(data))
+        self.hash(&[data])
     }
 }
 
 impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+    fn hash(&self, parts: &[&[u8]]) -> H::Digest {
         Self::hash(self, parts)
     }
 
     fn root_bagging(&self) -> Bagging {
         Self::root_bagging(self)
     }
+
+    fn node_digest_pair(
+        &self,
+        nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
+    ) -> (Self::Digest, Self::Digest) {
+        let [
+            (left_pos, left_left, left_right),
+            (right_pos, right_left, right_right),
+        ] = nodes;
+        H::hash_pair(
+            &[&(*left_pos).to_be_bytes(), left_left, left_right],
+            &[&(*right_pos).to_be_bytes(), right_left, right_right],
+        )
+    }
 }
 
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
     type Digest = T::Digest;
 
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest {
         (**self).hash(parts)
     }
 
     fn root_bagging(&self) -> Bagging {
         (**self).root_bagging()
+    }
+
+    fn node_digest(
+        &self,
+        pos: Position<F>,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        (**self).node_digest(pos, left, right)
+    }
+
+    fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
+        (**self).leaf_digest(pos, element)
+    }
+
+    fn digest(&self, data: &[u8]) -> Self::Digest {
+        (**self).digest(data)
+    }
+
+    fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
+        (**self).fold(acc, peak)
+    }
+
+    fn root<'a, I>(
+        &self,
+        leaves: Location<F>,
+        inactive_peaks: usize,
+        peak_digests: I,
+    ) -> Result<Self::Digest, Error<F>>
+    where
+        I: IntoIterator<Item = &'a Self::Digest>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        (**self).root(leaves, inactive_peaks, peak_digests)
+    }
+
+    fn root_with_folded_peaks<'a>(
+        &self,
+        leaves: Location<F>,
+        inactive_peaks_to_fold: usize,
+        committed_inactive_peaks: usize,
+        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
+    ) -> Option<Self::Digest> {
+        (**self).root_with_folded_peaks(
+            leaves,
+            inactive_peaks_to_fold,
+            committed_inactive_peaks,
+            peak_digests,
+        )
+    }
+
+    fn node_digest_pair(
+        &self,
+        nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
+    ) -> (Self::Digest, Self::Digest) {
+        (**self).node_digest_pair(nodes)
     }
 }
 
@@ -210,11 +288,11 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
 mod tests {
     use super::*;
     use crate::merkle::{
-        mmr::{Location, Position, StandardHasher as Standard},
         Bagging::{BackwardFold, ForwardFold},
+        mmr::{Location, Position, StandardHasher as Standard},
     };
     use alloc::vec::Vec;
-    use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{Hasher as CHasher, Sha256, sha256};
 
     #[test]
     fn test_leaf_digest_sha256() {
@@ -229,6 +307,20 @@ mod tests {
     #[test]
     fn test_root_sha256() {
         test_root::<Sha256>();
+    }
+
+    #[test]
+    fn test_node_digest_pair_matches_node_digest() {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let d1 = test_digest::<Sha256>(1);
+        let d2 = test_digest::<Sha256>(2);
+        let d3 = test_digest::<Sha256>(3);
+        let d4 = test_digest::<Sha256>(4);
+
+        let (left, right) =
+            hasher.node_digest_pair([(Position::new(2), &d1, &d2), (Position::new(5), &d3, &d4)]);
+        assert_eq!(left, hasher.node_digest(Position::new(2), &d1, &d2));
+        assert_eq!(right, hasher.node_digest(Position::new(5), &d3, &d4));
     }
 
     #[test]
@@ -275,7 +367,7 @@ mod tests {
     }
 
     fn test_digest<H: CHasher>(value: u8) -> H::Digest {
-        H::hash(&[value])
+        H::hash(&[&[value]])
     }
 
     fn test_leaf_digest<H: CHasher>() {

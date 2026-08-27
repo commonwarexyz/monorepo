@@ -119,6 +119,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// For [`CertifiableAutomaton`] implementations, returning a payload from
         /// `propose` also commits the local proposer to certifying that same
         /// `(round, payload)` if it later becomes notarized.
+        ///
+        /// Consensus may request a payload for a future context before earlier
+        /// contexts complete. Honor any dependencies supplied in the context
+        /// rather than rebuilding them from current local state. If consensus
+        /// later abandons a dependency, it also abandons the proposal.
+        ///
+        /// Closing the response declines this request, which consensus may
+        /// treat as final for the context. Keep the response pending when
+        /// temporary unavailability should not abandon the context.
         fn propose(
             &mut self,
             context: Self::Context,
@@ -128,7 +137,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// This request is single-shot for the given `(context, payload)`. Once the returned
         /// channel resolves or closes, consensus treats verification as concluded and will not
-        /// retry the same request.
+        /// retry the same request. After a restart, however, consensus may request verification
+        /// for the same `(context, payload)` again if the result was not durably recorded before
+        /// shutdown.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently invalid for this context.
@@ -138,6 +149,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Closing the channel is also terminal for this request and should be reserved for cases
         /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
         /// for temporary inability to decide.
+        ///
+        /// The future-context requirement on [`Self::propose`] applies here
+        /// too: the context's dependencies may not be resolvable locally yet.
         fn verify(
             &mut self,
             context: Self::Context,
@@ -161,7 +175,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
-        /// certification as concluded and will not retry the same request.
+        /// certification as concluded and will not retry the same request. After a restart,
+        /// however, consensus may request certification for the same `(round, payload)` again
+        /// if the result was not durably recorded before shutdown.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that
@@ -245,13 +261,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 });
 stability_scope!(ALPHA {
     pub mod aggregation;
-    pub mod ordered_broadcast;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::Ancestry;
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
-    use rand::Rng;
+    use rand_core::Rng;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
@@ -270,8 +285,14 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// The block type produced by the application's builder.
         type Block: Block;
 
+        /// Per-proposal input handed to [`propose`](Self::propose). Applications
+        /// that need no input set this to `()`.
+        type Input: Send;
+
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
+        ///
+        /// `input` is the per-proposal input for this build.
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
@@ -279,6 +300,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
+            input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.

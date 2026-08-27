@@ -6,7 +6,7 @@
 //! `commonware-chat` only sends messages to connected friends. If a friend is offline at the time a message is sent,
 //! `commonware-p2p::authenticated` will drop the message. You can confirm you are connected to all your friends by
 //! checking the value of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should
-//! be equal to `count(friends)- 1` (you don't connect to yourself).
+//! equal the number of distinct `--friends` entries, excluding yourself.
 //!
 //! # Synchronized Friends
 //!
@@ -55,11 +55,14 @@ mod handler;
 #[doc(hidden)]
 mod logger;
 
-use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519, Signer as _};
-use commonware_p2p::{authenticated::discovery, Manager as _};
-use commonware_runtime::{tokio, Quota, Runner as _, Supervisor as _};
-use commonware_utils::{ordered::Set, sync::Mutex, TryCollect, NZU32};
+use clap::{Arg, Command, value_parser};
+use commonware_cryptography::{Signer as _, ed25519};
+use commonware_p2p::{
+    Manager as _,
+    authenticated::{self, discovery},
+};
+use commonware_runtime::{Quota, Runner as _, Supervisor as _, tokio};
+use commonware_utils::{NZU32, TryCollect, ordered::Set, sync::Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -153,12 +156,14 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
+    let max_peers_per_set = authenticated::peer_set_limit(&recipients, &signer.public_key());
     let p2p_cfg = discovery::Config::local(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        max_peers_per_set,
         MAX_MESSAGE_SIZE,
     );
 
@@ -174,12 +179,8 @@ fn main() {
         oracle.track(0, recipients);
 
         // Initialize chat
-        const MAX_MESSAGE_BACKLOG: usize = 128;
-        let (chat_sender, chat_receiver) = network.register(
-            handler::CHANNEL,
-            Quota::per_second(NZU32!(128)),
-            MAX_MESSAGE_BACKLOG,
-        );
+        let message_rate = Quota::per_second(NZU32!(128));
+        let (chat_sender, chat_receiver) = network.register(handler::CHANNEL, message_rate);
 
         // Start network
         let network_handler = network.start();
@@ -197,4 +198,23 @@ fn main() {
         // Abort network
         network_handler.abort();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_local_identity_without_adding_recipient() {
+        let local = ed25519::PrivateKey::from_seed(1).public_key();
+        let friend = ed25519::PrivateKey::from_seed(2).public_key();
+        let recipients = Set::try_from([friend.clone()]).unwrap();
+
+        let max_peers_per_set = authenticated::peer_set_limit(&recipients, &local);
+
+        assert_eq!(max_peers_per_set.get(), 2);
+        assert_eq!(recipients.len(), 1);
+        assert!(recipients.position(&local).is_none());
+        assert!(recipients.position(&friend).is_some());
+    }
 }
