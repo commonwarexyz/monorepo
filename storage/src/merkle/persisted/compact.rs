@@ -144,11 +144,11 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         element: &[u8],
     ) -> Result<(), Error<F>> {
-        let batch =
-            UnmerkleizedBatch::wrap(self.mem.new_batch_with_strategy(self.strategy.clone()))
-                .add(hasher, element)
-                .merkleize(&self.mem, hasher);
-        Arc::make_mut(&mut self.mem).apply_batch(&batch)
+        let batch = self
+            .new_batch()
+            .add(hasher, element)
+            .merkleize(&self.mem, hasher);
+        self.apply_batch(&batch)
     }
 
     /// Return the root digest of the current state.
