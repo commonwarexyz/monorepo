@@ -347,6 +347,9 @@ pub struct Config {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
+
+    /// Buffer size for sequential reads during recovery.
+    pub replay_buffer: NonZeroUsize,
 }
 
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
@@ -461,7 +464,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
             let recoverable = writer
-                .recoverable_prefix_len(cfg.write_buffer, ReadOptions::default())
+                .recoverable_prefix_len(cfg.replay_buffer, ReadOptions::default())
                 .await?;
             let valid = Self::items_to_bytes(recoverable / Self::CHUNK_SIZE_U64)?;
             if valid == writer.size() {
@@ -1784,6 +1787,7 @@ mod tests {
             items_per_blob,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         }
     }
 
@@ -3948,6 +3952,7 @@ mod tests {
                     NZUsize!(4),
                 ),
                 write_buffer: NZUsize!(128),
+                replay_buffer: NZUsize!(128),
             };
             let partition = blob_partition(&cfg);
             let (blob, size) = context.open(&partition, &0u64.to_be_bytes()).await.unwrap();
@@ -4431,6 +4436,7 @@ mod tests {
                 items_per_blob: NZU64!(1),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
             };
 
             // === Test 1: Basic single item operation ===

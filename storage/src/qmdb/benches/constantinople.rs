@@ -346,6 +346,7 @@ fn main() {
             metadata_partition: "constantinople-merkle-metadata".into(),
             items_per_blob: ITEMS_PER_BLOB,
             write_buffer: WRITE_BUFFER,
+            replay_buffer: WRITE_BUFFER,
             strategy: ctx.strategy(threads),
             page_cache: pc.clone(),
         };
@@ -354,6 +355,7 @@ fn main() {
             items_per_blob: ITEMS_PER_BLOB,
             page_cache: pc,
             write_buffer: WRITE_BUFFER,
+            replay_buffer: WRITE_BUFFER,
         };
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
@@ -414,6 +416,7 @@ fn main() {
                         codec_config: ((), ()),
                         page_cache: pc_var,
                         write_buffer: WRITE_BUFFER,
+                        replay_buffer: WRITE_BUFFER,
                     },
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),

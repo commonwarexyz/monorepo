@@ -484,6 +484,7 @@ fn fuzz(input: FuzzInput) {
                 codec_config: ((0usize..).into(), ()),
                 page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
                 write_buffer,
+                replay_buffer: write_buffer,
             };
 
             let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
@@ -516,6 +517,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
             write_buffer,
+            replay_buffer: write_buffer,
         };
 
         let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)

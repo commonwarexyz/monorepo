@@ -48,6 +48,7 @@ fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential>
         metadata_partition: format!("metadata-bench-flush-{family}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: WRITE_BUFFER_SIZE,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }

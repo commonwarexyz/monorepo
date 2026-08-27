@@ -122,6 +122,7 @@ fn merkle_cfg(
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: WRITE_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
         page_cache,
     }
@@ -133,6 +134,7 @@ fn fix_log_cfg(suffix: &str, page_cache: CacheRef, items_per_blob: NonZeroU64) -
         items_per_blob,
         page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
@@ -149,6 +151,7 @@ fn var_log_cfg<C>(
         codec_config,
         page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: WRITE_BUFFER_SIZE,
     }
 }
 

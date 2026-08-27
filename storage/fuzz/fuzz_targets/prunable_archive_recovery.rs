@@ -6,15 +6,19 @@
 //! This target reconstructs the expected prefix directly from the raw index and value crash image
 //! before opening the archive, checks every public read and range helper, restarts before
 //! repairing truncated suffixes, and reopens the synced result.
+//!
+//! Between puts, the op stream pipelines non-blocking sync requests whose completions resolve out
+//! of order, so marker generations race held data syncs (the durability-barrier seeding class).
+//! Prunes run mid-stream and the crash itself can interrupt a blocking sync or a prune.
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob as _, Buf, BufferPooler, ReadOptions, Runner, Storage as _, Supervisor as _,
+    Blob as _, Buf, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic::{self, PartialWriteMode, WriteConfig},
-    mocks::{DelayedSyncContext, PendingSyncs, release_pending_syncs},
+    mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
 };
 use commonware_storage::{
     archive::{Archive as _, Identifier, MultiArchive as _, prunable},
@@ -44,6 +48,12 @@ struct FuzzInput {
     retention: u8,
     subset: bool,
     multi: bool,
+    /// Per-entry action applied after its put: pipeline a sync, release one held completion,
+    /// settle everything held, or prune.
+    ops: [u8; 24],
+    /// Shape of the faulted crash: an abandoned sync request, an interrupted blocking sync,
+    /// or an interrupted prune.
+    final_op: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -413,66 +423,164 @@ fn fuzz(input: FuzzInput) {
     let first_phase_entries = intended.clone();
     let first_phase_input = input.clone();
     let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
-    let (_, checkpoint) = runner.start_and_recover(move |context| async move {
-        let fault_config = context.storage_fault_config();
-        let pending = PendingSyncs::default();
-        let context = DelayedSyncContext {
-            inner: context,
-            pending: pending.clone(),
-        };
-        let cfg = config(&context, items_per_section);
-        let mut archive =
-            prunable::Archive::<EightCap, _, Key, Value>::init(context.child("archive"), cfg)
-                .await
-                .expect("initial archive init failed");
-        for (offset, entry) in first_phase_entries.into_iter().enumerate() {
-            if offset == baseline_count && baseline_count > 0 {
-                let handle;
-                (archive, handle) = archive
-                    .start_sync()
-                    .await
-                    .expect("baseline start_sync failed");
-                assert!(!pending.lock().is_empty(), "baseline syncs must be held");
-                release_pending_syncs(&pending);
-                handle.await.expect("baseline sync failed");
-            }
-            archive = if first_phase_input.multi {
-                archive
-                    .put_multi(entry.index, entry.key, entry.value)
-                    .await
-                    .expect("put_multi failed")
-            } else {
-                archive
-                    .put(entry.index, entry.key, entry.value)
-                    .await
-                    .expect("put failed")
+    let ((durable, exempt_below, pruned), checkpoint) =
+        runner.start_and_recover(move |context| async move {
+            let fault_config = context.storage_fault_config();
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
             };
-        }
-
-        // Hold both durability barriers open after their buffered writes have reached storage.
-        // The crash image can then retain independent byte subsets from the index and value
-        // journals, including a retained index entry whose value frame has a bad CRC.
-        *fault_config.write() = deterministic::FaultConfig {
-            write_rate: Some(WriteConfig {
-                failure_rate: Probability::new(0, 1).unwrap(),
-                retention_rate: Probability::new(u64::from(first_phase_input.retention % 101), 100)
-                    .unwrap(),
-                mode: if first_phase_input.subset {
-                    PartialWriteMode::Subset
+            let cfg = config(&context, items_per_section);
+            let mut archive =
+                prunable::Archive::<EightCap, _, Key, Value>::init(context.child("archive"), cfg)
+                    .await
+                    .expect("initial archive init failed");
+            let mut held: Vec<(usize, Handle<()>)> = Vec::new();
+            let mut durable = 0usize;
+            let mut exempt_below = 0u64;
+            let mut pruned = false;
+            for (offset, entry) in first_phase_entries.into_iter().enumerate() {
+                if offset == baseline_count && baseline_count > 0 {
+                    // A prior pipelined request may still hold this section's fsync open, and
+                    // the writer awaits it before starting another sync.
+                    release_pending_syncs(&pending);
+                    let handle;
+                    (archive, handle) = archive
+                        .start_sync()
+                        .await
+                        .expect("baseline start_sync failed");
+                    release_pending_syncs(&pending);
+                    handle.await.expect("baseline sync failed");
+                    durable = durable.max(offset);
+                }
+                archive = if first_phase_input.multi {
+                    archive
+                        .put_multi(entry.index, entry.key, entry.value)
+                        .await
+                        .expect("put_multi failed")
                 } else {
-                    PartialWriteMode::Prefix
-                },
-            }),
-            ..Default::default()
-        };
-        let (archive, handle) = archive.start_sync().await.expect("start_sync failed");
-        assert!(
-            !pending.lock().is_empty(),
-            "faulted journal syncs must be held"
-        );
-        drop(handle);
-        drop(archive);
-    });
+                    archive
+                        .put(entry.index, entry.key, entry.value)
+                        .await
+                        .expect("put failed")
+                };
+
+                // Every sync completion below stays parked until an op resolves it, so requests
+                // pipeline and marker generations observe completions in op-chosen order.
+                let op = first_phase_input.ops[offset % first_phase_input.ops.len()];
+                match op & 0x07 {
+                    1 => {
+                        // Release (without observing) any parked completions so the new
+                        // request cannot block on a prior fsync of the same section.
+                        // Completions resolve out of order and stay unobserved until a later
+                        // request polls them.
+                        release_pending_syncs(&pending);
+                        let handle;
+                        (archive, handle) = archive
+                            .start_sync()
+                            .await
+                            .expect("pipelined start_sync failed");
+                        held.push((offset + 1, handle));
+                    }
+                    2 => {
+                        let mut parked = pending.lock();
+                        if !parked.is_empty() {
+                            let idx = usize::from(op >> 3) % parked.len();
+                            let sync = parked.remove(idx);
+                            let _ = sync.release.send(Ok(()));
+                        }
+                    }
+                    3 => {
+                        release_pending_syncs(&pending);
+                        for (covered, handle) in held.drain(..) {
+                            handle.await.expect("pipelined sync failed");
+                            durable = durable.max(covered);
+                        }
+                    }
+                    4 => {
+                        // Settle held pipelines first: a no-op prune completes without
+                        // stalling, so the drive below may never release their completions.
+                        release_pending_syncs(&pending);
+                        for (covered, handle) in held.drain(..) {
+                            handle.await.expect("pipelined sync failed");
+                            durable = durable.max(covered);
+                        }
+                        let min = u64::from(op >> 3);
+                        archive = drive_pending_syncs(&pending, archive.prune(min))
+                            .await
+                            .expect("prune failed");
+                        pruned = true;
+                        exempt_below = exempt_below.max(min);
+                    }
+                    _ => {}
+                }
+            }
+
+            // The final request must not block on earlier parked fsyncs, and their bytes
+            // precede the fault window regardless.
+            release_pending_syncs(&pending);
+
+            // Hold both durability barriers open after their buffered writes have reached storage.
+            // The crash image can then retain independent byte subsets from the index and value
+            // journals, including a retained index entry whose value frame has a bad CRC.
+            *fault_config.write() = deterministic::FaultConfig {
+                write_rate: Some(WriteConfig {
+                    failure_rate: Probability::new(0, 1).unwrap(),
+                    retention_rate: Probability::new(
+                        u64::from(first_phase_input.retention % 101),
+                        100,
+                    )
+                    .unwrap(),
+                    mode: if first_phase_input.subset {
+                        PartialWriteMode::Subset
+                    } else {
+                        PartialWriteMode::Prefix
+                    },
+                }),
+                ..Default::default()
+            };
+            match first_phase_input.final_op % 3 {
+                1 => {
+                    // Interrupt a blocking sync mid-flight: poll until it parks on a held
+                    // completion, then drop the future (the owner-consuming contract retires the
+                    // instance) so the crash lands between its internal barriers.
+                    let mut sync = Box::pin(archive.sync());
+                    for _ in 0..usize::from(first_phase_input.final_op >> 2) % 8 + 1 {
+                        if futures::future::poll_immediate(sync.as_mut())
+                            .await
+                            .is_some()
+                        {
+                            break;
+                        }
+                    }
+                    drop(sync);
+                }
+                2 => {
+                    // Interrupt a prune mid-flight: markers must be removed durably before any
+                    // section storage disappears, so every cut point must recover.
+                    exempt_below = exempt_below.max(u64::from(first_phase_input.final_op >> 2));
+                    pruned = true;
+                    let mut prune =
+                        Box::pin(archive.prune(u64::from(first_phase_input.final_op >> 2)));
+                    for _ in 0..usize::from(first_phase_input.final_op >> 5) % 8 + 1 {
+                        if futures::future::poll_immediate(prune.as_mut())
+                            .await
+                            .is_some()
+                        {
+                            break;
+                        }
+                    }
+                    drop(prune);
+                }
+                _ => {
+                    let (archive, handle) = archive.start_sync().await.expect("start_sync failed");
+                    drop(handle);
+                    drop(archive);
+                }
+            }
+            (durable, exempt_below, pruned)
+        });
 
     let recovery_intended = intended.clone();
     let recovery_baseline = baseline.clone();
@@ -487,13 +595,16 @@ fn fuzz(input: FuzzInput) {
                 .await
                 .expect("archive recovery failed");
 
-            for entry in &recovery_baseline {
+            for entry in recovery_baseline
+                .iter()
+                .chain(recovery_intended[..durable.min(recovery_intended.len())].iter())
+            {
                 assert!(
-                    expected.contains(entry),
-                    "a value from the synchronized baseline was lost",
+                    expected.contains(entry) || entry.index < exempt_below,
+                    "a value from a completed sync was lost",
                 );
             }
-            if recovery_input.retention % 101 == 100 {
+            if recovery_input.retention % 101 == 100 && !pruned {
                 assert_eq!(
                     expected.len(),
                     recovery_intended.len(),

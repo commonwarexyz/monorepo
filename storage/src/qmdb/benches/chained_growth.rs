@@ -58,6 +58,7 @@ fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Co
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: WRITE_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
         page_cache: pc,
     }
@@ -69,6 +70,7 @@ fn fix_log_cfg(pc: CacheRef) -> FConfig {
         items_per_blob: ITEMS_PER_BLOB,
         page_cache: pc,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: WRITE_BUFFER_SIZE,
     }
 }
 

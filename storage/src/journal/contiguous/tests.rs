@@ -1365,6 +1365,7 @@ fn test_fixed_start_sync_durability() {
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         };
         test_start_sync_durability(|label| {
             let cfg = cfg.clone();
@@ -1385,6 +1386,7 @@ fn test_variable_start_sync_durability() {
             codec_config: (),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         };
         test_start_sync_durability(|label| {
             let cfg = cfg.clone();
@@ -1613,6 +1615,7 @@ fn fixed_overlap_cfg(context: &deterministic::Context, partition: &str) -> fixed
         items_per_blob: NZU64!(10),
         page_cache: CacheRef::from_pooler(context, NZU16!(44), NZUsize!(8)),
         write_buffer: NZUsize!(2048),
+        replay_buffer: NZUsize!(2048),
     }
 }
 
@@ -1624,6 +1627,7 @@ fn variable_overlap_cfg(context: &deterministic::Context, partition: &str) -> va
         codec_config: (),
         page_cache: CacheRef::from_pooler(context, NZU16!(44), NZUsize!(8)),
         write_buffer: NZUsize!(2048),
+        replay_buffer: NZUsize!(2048),
     }
 }
 
@@ -1637,6 +1641,7 @@ fn test_fixed_start_sync_overlaps_predecessor_and_tail() {
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         };
         test_start_sync_overlaps_predecessor_and_tail(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
@@ -1657,6 +1662,7 @@ fn test_variable_start_sync_overlaps_predecessor_and_tail() {
             codec_config: (),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         };
         test_start_sync_overlaps_predecessor_and_tail(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)
@@ -1823,6 +1829,7 @@ fn test_fixed_prune_waits_for_pending_sync() {
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         };
         test_prune_waits_for_pending_sync(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
@@ -1843,6 +1850,7 @@ fn test_variable_prune_waits_for_pending_sync() {
             codec_config: (),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         };
         test_prune_waits_for_pending_sync(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)
@@ -1861,6 +1869,7 @@ fn test_fixed_rewind_surfaces_failed_sync() {
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         };
         test_rewind_surfaces_failed_sync(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
@@ -1881,6 +1890,7 @@ fn test_variable_rewind_surfaces_failed_sync() {
             codec_config: (),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         };
         test_rewind_surfaces_failed_sync(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)

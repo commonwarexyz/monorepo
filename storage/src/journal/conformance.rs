@@ -33,6 +33,7 @@ fn authenticated_merkle_config(
         metadata_partition: format!("{prefix}-merkle-metadata"),
         items_per_blob: NZU64!(11),
         write_buffer: WRITE_BUFFER,
+        replay_buffer: WRITE_BUFFER,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
@@ -44,6 +45,7 @@ fn authenticated_journal_config(prefix: &str, pooler: &impl BufferPooler) -> fix
         items_per_blob: NZU64!(11),
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
+        replay_buffer: WRITE_BUFFER,
     }
 }
 
@@ -97,6 +99,7 @@ impl StorageWorkload for ContiguousFixedWorkload {
             items_per_blob: ITEMS_PER_BLOB,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
+            replay_buffer: WRITE_BUFFER,
         };
         let mut journal = fixed::Journal::<_, u64>::init(context.child("journal"), config).await?;
 
@@ -126,6 +129,7 @@ impl StorageWorkload for ContiguousVariableWorkload {
             items_per_section: ITEMS_PER_BLOB,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
+            replay_buffer: WRITE_BUFFER,
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };

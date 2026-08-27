@@ -57,6 +57,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "segmented_variable_recovery"
+path = "fuzz_targets/segmented_variable_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "prunable_archive_recovery"
 path = "fuzz_targets/prunable_archive_recovery.rs"
 test = false
