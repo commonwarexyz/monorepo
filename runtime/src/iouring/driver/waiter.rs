@@ -295,15 +295,16 @@ struct Waiter {
 pub enum StageOutcome {
     /// The waiter was canceled while parked in the backlog and completed
     /// locally without emitting an SQE. This covers local deadline expiry
-    /// (the observer sees timeout), local shutdown (the observer sees
-    /// closed), and orphan retirement (no observer, the slot is freed).
-    Complete {
+    /// (the observer sees timeout) and local shutdown (the observer sees
+    /// closed).
+    Ready {
         /// Waker to invoke outside any state borrow, when an ordinary op still
         /// observes the parked result.
         waker: Option<Waker>,
-        /// Whether the slot was freed because its observer was already dropped.
-        freed: bool,
     },
+    /// The waiter was canceled after its observer was dropped, so its slot was
+    /// freed locally without emitting an SQE.
+    Freed,
     /// A detached ticket reached a terminal state without emitting an SQE.
     /// Its output must be published before this waiter is recycled.
     Ticket {
@@ -325,18 +326,21 @@ pub enum CompletionOutcome {
     /// The logical request needs another SQE and should be placed back in the
     /// backlog.
     Requeue(WaiterId),
-    /// The logical request reached a terminal state.
-    ///
-    /// An ordinary op result was parked in its waiter, or an orphaned result
-    /// was dropped and its waiter freed.
-    Complete {
+    /// An ordinary op reached a terminal state and parked its result in the
+    /// waiter.
+    Ready {
         /// Waker to invoke outside any state borrow, if an op is waiting.
         waker: Option<Waker>,
         /// Active deadline tracking to remove from the timeout wheel, when
         /// completion happened before cancellation was requested.
         target_tick: Option<Tick>,
-        /// Whether the slot was freed because its observer was already dropped.
-        freed: bool,
+    },
+    /// An orphaned request reached a terminal state, so its output was dropped
+    /// and its waiter slot freed.
+    Freed {
+        /// Active deadline tracking to remove from the timeout wheel, when
+        /// completion happened before cancellation was requested.
+        target_tick: Option<Tick>,
     },
     /// A detached ticket reached a terminal state.
     ///
@@ -369,6 +373,16 @@ pub enum DropOutcome {
     /// The request keeps running to completion without an observer (storage
     /// writes and syncs preserve durability semantics on caller drop).
     Detached,
+}
+
+/// Waiter transitioned to shutdown cancellation.
+pub(super) struct CancelledWaiter {
+    /// Waiter whose active request was cancelled.
+    pub(super) id: WaiterId,
+    /// Scheduled deadline tick leaving active timeout tracking, if any.
+    pub(super) target_tick: Option<Tick>,
+    /// Whether an async-cancel SQE is needed for an operation in flight.
+    pub(super) needs_cancel_sqe: bool,
 }
 
 /// Outcome produced when a detached ticket is dropped.
@@ -872,12 +886,12 @@ impl Waiters {
         };
     }
 
-    /// Request cancellation for an active waiter.
+    /// Expire an active waiter and request deadline cancellation.
     ///
     /// Returns `true` when the waiter was successfully transitioned to
     /// cancel-requested. Returns `false` when the waiter id is stale, not
     /// present, already cancel-requested, or already completed.
-    pub fn cancel(&mut self, waiter_id: WaiterId) -> bool {
+    pub fn expire(&mut self, waiter_id: WaiterId) -> bool {
         let Some(slot) = self.entries.get_mut(waiter_id.index() as usize) else {
             return false;
         };
@@ -903,13 +917,13 @@ impl Waiters {
         }
     }
 
-    /// Request cancellation for every progressing waiter.
+    /// Request shutdown cancellation for every progressing waiter.
     ///
     /// Returns, for each transitioned waiter, its id, its deadline tick (so
     /// the caller can release timeout-wheel accounting), and whether it has an
     /// operation SQE in flight (requiring an async-cancel SQE). Waiters that
     /// are not in flight retire locally when restaged.
-    pub fn cancel_active(&mut self) -> Vec<(WaiterId, Option<Tick>, bool)> {
+    pub fn cancel_for_shutdown(&mut self) -> Vec<CancelledWaiter> {
         let mut cancelled = Vec::new();
         for slot in self.entries.iter_mut().filter_map(Option::as_mut) {
             if !matches!(slot.lifecycle, Lifecycle::Pending(_)) {
@@ -921,7 +935,11 @@ impl Waiters {
             slot.state = WaiterState::CancelRequested {
                 reason: CancelReason::Shutdown,
             };
-            cancelled.push((slot.id, target_tick, slot.in_flight));
+            cancelled.push(CancelledWaiter {
+                id: slot.id,
+                target_tick,
+                needs_cancel_sqe: slot.in_flight,
+            });
         }
         cancelled
     }
@@ -932,8 +950,9 @@ impl Waiters {
     /// locally:
     ///
     /// - [`StageOutcome::Submit`] leaves the waiter tracked and yields the next SQE.
-    /// - [`StageOutcome::Complete`] completes the waiter locally (deadline
-    ///   expiry, shutdown, or orphan retirement) without emitting an SQE.
+    /// - [`StageOutcome::Ready`] completes an observed waiter locally (deadline
+    ///   expiry or shutdown) without emitting an SQE.
+    /// - [`StageOutcome::Freed`] retires an orphaned waiter locally.
     /// - [`StageOutcome::Ticket`] returns terminal ticket output for publication
     ///   before its waiter is recycled.
     ///
@@ -969,10 +988,7 @@ impl Waiters {
                 if matches!(slot.observer, Observer::Orphaned) {
                     // Nobody can take the parked result, so free the slot.
                     let _ = self.take(index);
-                    StageOutcome::Complete {
-                        waker: None,
-                        freed: true,
-                    }
+                    StageOutcome::Freed
                 } else {
                     // The output moves the owned buffer out of the request,
                     // so the emptied shell drops in place. The reason selects
@@ -980,10 +996,7 @@ impl Waiters {
                     // timeout, a shutdown as closed.
                     let output = request.interrupt(reason.into_error());
                     match self.finish_output_at(waiter_id, output) {
-                        FinishedOutput::Op { waker } => StageOutcome::Complete {
-                            waker,
-                            freed: false,
-                        },
+                        FinishedOutput::Op { waker } => StageOutcome::Ready { waker },
                         FinishedOutput::Ticket {
                             completion_id,
                             output,
@@ -1090,19 +1103,11 @@ impl Waiters {
             // without an observer.
             let _ = self.take(index);
             drop(output);
-            CompletionOutcome::Complete {
-                waker: None,
-                target_tick,
-                freed: true,
-            }
+            CompletionOutcome::Freed { target_tick }
         } else {
             let output = output.expect("non-orphaned completion is terminal");
             match self.finish_output_at(waiter_id, output) {
-                FinishedOutput::Op { waker } => CompletionOutcome::Complete {
-                    waker,
-                    target_tick,
-                    freed: false,
-                },
+                FinishedOutput::Op { waker } => CompletionOutcome::Ready { waker, target_tick },
                 FinishedOutput::Ticket {
                     completion_id,
                     output,

@@ -2698,11 +2698,8 @@ fn test_cancel_staging_skips_op_retired_by_original_completion() {
         driver.inner.cancel_all(ops);
         assert_eq!(ops.pending_cancels.front(), Some(&waiter_id));
 
-        let CompletionOutcome::Complete {
-            waker,
-            target_tick,
-            freed: false,
-        } = ops.waiters.on_completion(waiter_id.user_data(), 0)
+        let CompletionOutcome::Ready { waker, target_tick } =
+            ops.waiters.on_completion(waiter_id.user_data(), 0)
         else {
             panic!("original completion did not retire cancelled recv");
         };

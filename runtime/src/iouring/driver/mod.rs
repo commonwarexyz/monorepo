@@ -422,13 +422,11 @@ impl IoUringLoop {
         submission_queue: &mut SubmissionQueue<'_>,
     ) {
         match ops.waiters.stage(waiter_id) {
-            StageOutcome::Complete { waker, freed } => {
+            StageOutcome::Ready { waker } => {
                 self.pending_waker_actions
                     .extend(waker.map(handle::WakerAction::Wake));
-                if freed {
-                    self.notify_capacity(ops);
-                }
             }
+            StageOutcome::Freed => self.notify_capacity(ops),
             StageOutcome::Ticket {
                 waiter_id,
                 completion_id,
@@ -482,7 +480,7 @@ impl IoUringLoop {
                     }
                     // The deadline already expired: transition to cancellation
                     // so staging below completes the request with timeout.
-                    None => assert!(ops.waiters.cancel(waiter_id)),
+                    None => assert!(ops.waiters.expire(waiter_id)),
                 }
             }
 
@@ -612,19 +610,18 @@ impl IoUringLoop {
                 // Request needs another SQE. Add it back to the backlog.
                 ops.backlog.push_back(waiter_id);
             }
-            CompletionOutcome::Complete {
-                waker,
-                target_tick,
-                freed,
-            } => {
+            CompletionOutcome::Ready { waker, target_tick } => {
                 if let Some(tick) = target_tick {
                     self.timeout_wheel.remove(tick);
                 }
                 self.pending_waker_actions
                     .extend(waker.map(handle::WakerAction::Wake));
-                if freed {
-                    self.notify_capacity(ops);
+            }
+            CompletionOutcome::Freed { target_tick } => {
+                if let Some(tick) = target_tick {
+                    self.timeout_wheel.remove(tick);
                 }
+                self.notify_capacity(ops);
             }
             CompletionOutcome::Ticket {
                 waiter_id,
@@ -714,7 +711,7 @@ impl IoUringLoop {
         for entry in expired_timeouts.drain(..) {
             // `false` means stale timeout entry (slot reused) or waiter already
             // transitioned to cancel-requested/completed.
-            if ops.waiters.cancel(entry.waiter_id) {
+            if ops.waiters.expire(entry.waiter_id) {
                 // Once cancel is requested, this waiter is no longer deadline-active.
                 timeout_wheel.remove(entry.target_tick);
                 // Only timed-out waiters with an outstanding op SQE need
@@ -733,12 +730,12 @@ impl IoUringLoop {
     /// async-cancel SQE queued, and waiters parked in the backlog retire
     /// locally when restaged.
     fn cancel_all(&mut self, ops: &mut Ops) {
-        for (waiter_id, target_tick, in_flight) in ops.waiters.cancel_active() {
-            if let Some(tick) = target_tick {
+        for cancelled in ops.waiters.cancel_for_shutdown() {
+            if let Some(tick) = cancelled.target_tick {
                 self.timeout_wheel.remove(tick);
             }
-            if in_flight {
-                ops.pending_cancels.push_back(waiter_id);
+            if cancelled.needs_cancel_sqe {
+                ops.pending_cancels.push_back(cancelled.id);
             }
         }
     }

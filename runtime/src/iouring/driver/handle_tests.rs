@@ -640,7 +640,7 @@ fn test_op_waker_reentrant_drop_runs_after_ops_borrow() {
     handle.with(|ops| {
         assert!(matches!(
             ops.waiters.stage(target),
-            StageOutcome::Complete { freed: true, .. }
+            StageOutcome::Freed
         ));
     });
 
@@ -652,7 +652,7 @@ fn test_op_waker_reentrant_drop_runs_after_ops_borrow() {
     handle.with(|ops| {
         assert!(matches!(
             ops.waiters.stage(op_id),
-            StageOutcome::Complete { freed: true, .. }
+            StageOutcome::Freed
         ));
         assert!(ops.waiters.is_empty());
     });
@@ -688,7 +688,7 @@ fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
     handle.with(|ops| {
         assert!(matches!(
             ops.waiters.stage(target),
-            StageOutcome::Complete { freed: true, .. }
+            StageOutcome::Freed
         ));
     });
 
@@ -699,7 +699,7 @@ fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
     handle.with(|ops| {
         assert!(matches!(
             ops.waiters.stage(ticket_waiter),
-            StageOutcome::Complete { freed: true, .. }
+            StageOutcome::Freed
         ));
         assert!(ops.waiters.is_empty());
         assert!(ops.completions.is_empty());
@@ -730,7 +730,7 @@ fn test_pending_op_clone_panic_preserves_observer() {
     handle.with(|ops| {
         assert!(matches!(
             ops.waiters.stage(waiter_id),
-            StageOutcome::Complete { freed: true, .. }
+            StageOutcome::Freed
         ));
     });
 }
@@ -763,7 +763,7 @@ fn test_pending_ticket_clone_panic_preserves_observer() {
     handle.with(|ops| {
         assert!(matches!(
             ops.waiters.stage(waiter_id),
-            StageOutcome::Complete { freed: true, .. }
+            StageOutcome::Freed
         ));
         assert!(ops.completions.is_empty());
     });
@@ -798,7 +798,7 @@ fn test_granted_admission_clone_panic_preserves_reservation_for_retry() {
         let _ = ops.waiters.mark_orphaned(blocker, &outcome);
         assert!(matches!(
             ops.waiters.stage(blocker),
-            StageOutcome::Complete { freed: true, .. }
+            StageOutcome::Freed
         ));
         let mut actions = Vec::new();
         ops.capacity.reconcile(ops.waiters.free_len(), &mut actions);
@@ -840,7 +840,7 @@ fn test_granted_admission_clone_panic_preserves_reservation_for_retry() {
     handle.with(|ops| {
         assert!(matches!(
             ops.waiters.stage(waiter_id),
-            StageOutcome::Complete { freed: true, .. }
+            StageOutcome::Freed
         ));
         assert_eq!(ops.waiters.len(), 0);
     });
