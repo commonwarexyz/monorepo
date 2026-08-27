@@ -56,6 +56,24 @@ fn create_test_directory() -> PathBuf {
     storage_directory
 }
 
+fn create_test_blob(file: File, close_admission: bool) -> (TestLoop, Blob) {
+    let mut registry = Registry::default();
+    let pool = test_pool(&mut registry.sub_registry("pool"));
+    let mut harness = TestLoop::new(iouring::RingConfig::default());
+    if close_admission {
+        harness.close_admission();
+    }
+    let blob = Blob::new(
+        "partition".into(),
+        b"blob",
+        file,
+        harness.clone_handle(),
+        pool,
+        Layout::V0.data_offset(),
+    );
+    (harness, blob)
+}
+
 #[test]
 fn test_iouring_storage() {
     // Verify the io_uring storage backend satisfies the shared storage trait suite.
@@ -592,19 +610,7 @@ fn test_read_and_write_report_closed_driver() {
 
     // Close the driver immediately so it behaves like a dead backend
     // while the blob handle still exists.
-    let mut registry = Registry::default();
-    let pool = test_pool(&mut registry.sub_registry("pool"));
-    let mut harness = TestLoop::new(iouring::RingConfig::default());
-    harness.close_admission();
-
-    let blob = Blob::new(
-        "partition".into(),
-        b"blob",
-        file,
-        harness.clone_handle(),
-        pool,
-        Layout::V0.data_offset(),
-    );
+    let (mut harness, blob) = create_test_blob(file, true);
 
     let empty = harness
         .block_on(blob.read_at(0, 0, ReadOptions::DONT_CACHE))
@@ -655,19 +661,7 @@ fn test_blob_sync_reports_closed_driver() {
     let path = storage_directory.join("disconnected");
     let file = File::create(&path).unwrap();
 
-    let mut registry = Registry::default();
-    let pool = test_pool(&mut registry.sub_registry("pool"));
-    let mut harness = TestLoop::new(iouring::RingConfig::default());
-    harness.close_admission();
-
-    let blob = Blob::new(
-        "partition".into(),
-        b"blob",
-        file,
-        harness.clone_handle(),
-        pool,
-        Layout::V0.data_offset(),
-    );
+    let (mut harness, blob) = create_test_blob(file, true);
     let err = harness
         .block_on(blob.sync())
         .expect_err("sync should fail on a closed driver");
@@ -684,19 +678,7 @@ fn test_blob_start_sync_reports_closed_driver() {
     let path = storage_directory.join("disconnected_start_sync");
     let file = File::create(&path).unwrap();
 
-    let mut registry = Registry::default();
-    let pool = test_pool(&mut registry.sub_registry("pool"));
-    let mut harness = TestLoop::new(iouring::RingConfig::default());
-    harness.close_admission();
-
-    let blob = Blob::new(
-        "partition".into(),
-        b"blob",
-        file,
-        harness.clone_handle(),
-        pool,
-        Layout::V0.data_offset(),
-    );
+    let (mut harness, blob) = create_test_blob(file, true);
     let err = harness
         .block_on(async {
             let handle = blob.start_sync().await;
@@ -719,18 +701,7 @@ fn test_resize_reports_kernel_error() {
 
     // `set_len` on a socket-backed file descriptor should fail in the
     // kernel, letting the wrapper expose `BlobResizeFailed`.
-    let mut registry = Registry::default();
-    let pool = test_pool(&mut registry.sub_registry("pool"));
-    let mut harness = TestLoop::new(iouring::RingConfig::default());
-
-    let blob = Blob::new(
-        "partition".into(),
-        b"blob",
-        file,
-        harness.clone_handle(),
-        pool,
-        Layout::V0.data_offset(),
-    );
+    let (mut harness, blob) = create_test_blob(file, false);
     let err = harness
         .block_on(blob.resize(0))
         .expect_err("resize should fail on a socket fd");
@@ -752,18 +723,7 @@ fn test_blob_sync_reports_kernel_error() {
 
     // Run the request through a live loop so it reaches the kernel and
     // fails there rather than through the closed-driver path.
-    let mut registry = Registry::default();
-    let pool = test_pool(&mut registry.sub_registry("pool"));
-    let mut harness = TestLoop::new(iouring::RingConfig::default());
-
-    let blob = Blob::new(
-        "partition".into(),
-        b"blob",
-        file,
-        harness.clone_handle(),
-        pool,
-        Layout::V0.data_offset(),
-    );
+    let (mut harness, blob) = create_test_blob(file, false);
     // The request should reach the kernel and come back as a wrapped sync failure.
     let err = harness
         .block_on(blob.sync())
@@ -779,32 +739,13 @@ fn test_blob_sync_reports_kernel_error() {
 
 #[test]
 fn test_blob_start_sync_reports_kernel_error() {
-    // Property: the detached start_sync wrapper maps a live kernel errno
-    // exactly like the awaited sync path, so both public sync surfaces
-    // share one error contract.
-    // Setup: a blob backed by a socket fd (fsync on a socket fails in
-    // the kernel), submitted through a live loop, with a fresh
-    // descriptor rather than one shared with the awaited-path test.
-    // Action: call start_sync, then await the returned handle.
-    // Expected: the handle resolves with the wrapped BlobSyncFailed
-    // context carrying the partition and blob identifiers.
+    // Use a fresh descriptor so this case is independent of the awaited sync path.
     let storage_directory = create_test_directory();
     let (socket, _peer) = UnixStream::pair().unwrap();
     // SAFETY: `into_raw_fd` transfers ownership of the socket fd into `File`.
     let file = unsafe { File::from_raw_fd(socket.into_raw_fd()) };
 
-    let mut registry = Registry::default();
-    let pool = test_pool(&mut registry.sub_registry("pool"));
-    let mut harness = TestLoop::new(iouring::RingConfig::default());
-
-    let blob = Blob::new(
-        "partition".into(),
-        b"blob",
-        file,
-        harness.clone_handle(),
-        pool,
-        Layout::V0.data_offset(),
-    );
+    let (mut harness, blob) = create_test_blob(file, false);
     let err = harness
         .block_on(async { blob.start_sync().await.await })
         .expect_err("detached sync should fail on a socket fd");
