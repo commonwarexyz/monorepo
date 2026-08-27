@@ -20,9 +20,9 @@
 //! | [`Request::Recv`] | `Recv` | Resubmit to target when exact | [`Error::RecvFailed`] | Optional | No | Transient while active | Reason |
 //! | [`Request::Accept`] | `Accept` | None | Accepted fd `0` | Optional | No | Transient while active | Reason |
 //! | [`Request::Connect`] | `Connect` | None | Success | Optional | No | Transient while active, `EALREADY` always | Reason |
-//! | [`Request::ReadAt`] | `Read` | Resubmit to requested length | [`Error::BlobInsufficientLength`] | None | No | Transient, cache fallback | Shutdown to [`Error::Closed`], deadline to `Io(ECANCELED)` |
-//! | [`Request::WriteAt`] | `Write` or `Writev`, optional `Fsync` | Resubmit to empty, then sync | [`Error::WriteFailed`] while writing, success while syncing | None | Yes | Transient, cache fallback | Shutdown to [`Error::Closed`], deadline to `Io(ECANCELED)` |
-//! | [`Request::Sync`] | `Fsync` | None | Success | None | Yes | Transient | Shutdown to [`Error::Closed`], deadline to `Io(ECANCELED)` |
+//! | [`Request::ReadAt`] | `Read` | Resubmit to requested length | [`Error::BlobInsufficientLength`] | None | No | Transient, cache fallback | [`Error::Closed`] |
+//! | [`Request::WriteAt`] | `Write` or `Writev`, optional `Fsync` | Resubmit to empty, then sync | [`Error::WriteFailed`] while writing, success while syncing | None | Yes | Transient, cache fallback | [`Error::Closed`] |
+//! | [`Request::Sync`] | `Fsync` | None | Success | None | Yes | Transient | [`Error::Closed`] |
 
 use super::waiter::{CancelReason, WaiterId, WaiterState};
 use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs};
@@ -640,13 +640,9 @@ impl ReadAtRequest {
             CqeResult::Retry => None,
             CqeResult::Error(code) if self.cache.fallback_if_unsupported(code) => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
-            // does, so operators can distinguish failure causes. A shutdown
+            // does, so operators can distinguish failure causes. Requested
             // cancellation is not a kernel failure: it surfaces as closed.
-            CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
-            CqeResult::Cancelled(CancelReason::Deadline) => {
-                let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
-                Some(Err(Error::Io(err.into())))
-            }
+            CqeResult::Cancelled(_) => Some(Err(Error::Closed)),
             CqeResult::Error(code) => {
                 let err = std::io::Error::from_raw_os_error(-code);
                 Some(Err(Error::Io(err.into())))
@@ -691,11 +687,7 @@ fn build_datasync_sqe(file: &File) -> SqueueEntry {
 fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
     match CqeResult::from_raw(result, state) {
         CqeResult::Retry => None,
-        CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
-        CqeResult::Cancelled(CancelReason::Deadline) => {
-            let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
-            Some(Err(Error::Io(err.into())))
-        }
+        CqeResult::Cancelled(_) => Some(Err(Error::Closed)),
         CqeResult::Error(code) => {
             let err = std::io::Error::from_raw_os_error(-code);
             Some(Err(Error::Io(err.into())))
@@ -766,13 +758,9 @@ impl WriteAtRequest {
             CqeResult::Error(code) if self.cache.fallback_if_unsupported(code) => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
             // does. A zero-length write carries no errno and stays the
-            // kind-specific failure. A shutdown cancellation is not a kernel
+            // kind-specific failure. Requested cancellation is not a kernel
             // failure: it surfaces as closed.
-            CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
-            CqeResult::Cancelled(CancelReason::Deadline) => {
-                let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
-                Some(Err(Error::Io(err.into())))
-            }
+            CqeResult::Cancelled(_) => Some(Err(Error::Closed)),
             CqeResult::Error(code) => {
                 let err = std::io::Error::from_raw_os_error(-code);
                 Some(Err(Error::Io(err.into())))

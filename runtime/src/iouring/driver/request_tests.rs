@@ -423,7 +423,7 @@ fn test_active_recv_paths() {
 
 #[test]
 fn test_active_read_at_paths() {
-    // Verify read-at state handling across retry, EOF, timeout-cancel, and hard failure.
+    // Verify read-at state handling across retry, EOF, and hard failure.
 
     // Retryable CQEs should requeue the positioned read.
     let mut request = Request::ReadAt(ReadAtRequest {
@@ -490,28 +490,6 @@ fn test_active_read_at_paths() {
     match unwrap_read_at(output) {
         Err((_, Error::Io(err))) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
         other => panic!("expected EIO read failure, got {other:?}"),
-    }
-
-    // Timeout cancellation should also surface as a read failure.
-    let mut request = Request::ReadAt(ReadAtRequest {
-        file: make_file_fd(),
-        offset: 0,
-        len: 5,
-        read: 0,
-        buf: IoBufMut::with_capacity(5),
-        cache: Cache::Enabled,
-    });
-    let output = request
-        .on_cqe(
-            WaiterState::CancelRequested {
-                reason: CancelReason::Deadline,
-            },
-            -libc::ECANCELED,
-        )
-        .expect("terminal CQE");
-    match unwrap_read_at(output) {
-        Err((_, Error::Io(err))) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
-        other => panic!("expected cancelled read failure, got {other:?}"),
     }
 }
 
@@ -613,7 +591,7 @@ fn test_queued_cache_fallbacks_retry() {
 
 #[test]
 fn test_active_write_at_paths() {
-    // Verify write-at state handling across retry, partial progress, timeout-cancel, and failure.
+    // Verify write-at state handling across retry, partial progress, and failure.
 
     // Retryable CQEs should requeue the positioned write.
     let mut write = WriteAtRequest {
@@ -720,28 +698,6 @@ fn test_active_write_at_paths() {
     match unwrap_write_at(output) {
         Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::EINVAL)),
         other => panic!("expected EINVAL write failure, got {other:?}"),
-    }
-
-    // Timeout cancellation should also surface as a write failure.
-    let mut request = Request::WriteAt(WriteAtRequest {
-        file: make_file_fd(),
-        offset: 0,
-        written: 0,
-        write: IoBufs::from(IoBuf::from(b"hello")).into(),
-        state: WriteAtState::Writing,
-        cache: Cache::Enabled,
-    });
-    let output = request
-        .on_cqe(
-            WaiterState::CancelRequested {
-                reason: CancelReason::Deadline,
-            },
-            -libc::ECANCELED,
-        )
-        .expect("terminal CQE");
-    match unwrap_write_at(output) {
-        Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
-        other => panic!("expected cancelled write failure, got {other:?}"),
     }
 }
 
@@ -874,7 +830,7 @@ fn test_multi_submission_sync_write_finishes_with_datasync() {
 
 #[test]
 fn test_active_sync_paths() {
-    // Verify sync state handling across retry, timeout-cancel, error conversion, and success.
+    // Verify sync state handling across retry, error conversion, and success.
 
     // Retryable CQEs should requeue the fsync request.
     let mut request = Request::Sync(SyncRequest {
@@ -885,24 +841,6 @@ fn test_active_sync_paths() {
             .on_cqe(WaiterState::Active { target_tick: None }, -libc::EINTR)
             .is_none()
     );
-
-    // Timeout cancellation should preserve the kernel ECANCELED surface for sync callers.
-    let mut request = Request::Sync(SyncRequest {
-        file: make_file_fd(),
-    });
-    let output = request
-        .on_cqe(
-            WaiterState::CancelRequested {
-                reason: CancelReason::Deadline,
-            },
-            -libc::ECANCELED,
-        )
-        .expect("terminal CQE");
-    let err = unwrap_sync(output).expect_err("expected timeout cancel error");
-    match err {
-        Error::Io(err) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
-        other => panic!("expected io error, got {other:?}"),
-    }
 
     // Hard errors should round-trip as std::io::Error values.
     let mut request = Request::Sync(SyncRequest {
