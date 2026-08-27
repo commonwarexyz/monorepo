@@ -651,9 +651,16 @@ impl Executor {
             let sleeping = sleeping
                 .as_mut()
                 .expect("alarm queue closed while the worker loop is running");
-            // Reserve before detaching the first waker. A capacity panic must
-            // not unwind a detached RawWaker while either sleeper lock is held.
-            due.reserve(sleeping.alarms.len());
+            // Reserve before detaching the first waker, but only when the
+            // earliest alarm is due. A capacity panic must not unwind a
+            // detached RawWaker while either sleeper lock is held.
+            if sleeping
+                .alarms
+                .peek()
+                .is_some_and(|next| next.time <= current)
+            {
+                due.reserve(sleeping.alarms.len());
+            }
             while let Some(next) = sleeping.alarms.peek() {
                 if next.time > current {
                     break;
