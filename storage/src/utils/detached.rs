@@ -12,14 +12,20 @@ use std::{
 
 /// Occupy `workers` Rayon workers until the returned sender is dropped.
 pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<()> {
+    // The jobs block until released, so they must never run inline on the calling task:
+    // `manual()` disables the spawn policy, and the assert rejects the remaining inline path
+    // (spawn always inlines on a single-worker pool; the parallelism plan mirrors the pool
+    // size for strategies built with `Rayon::new`).
+    assert!(
+        strategy.manual().parallelism() >= 2,
+        "block_strategy requires a multi-worker pool"
+    );
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));
     for _ in 0..workers {
         let started_tx = started_tx.clone();
         let release_rx = Arc::clone(&release_rx);
-        // The job blocks until released, so it must never run inline on the calling
-        // task: submit through `manual()` for an unconditional hand-off.
         drop(strategy.manual().spawn(1, move |_| {
             started_tx.send(()).unwrap();
             let _ = release_rx.lock().recv();

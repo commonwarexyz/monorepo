@@ -85,7 +85,7 @@ commonware_macros::stability_scope!(BETA {
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
                 sync::Arc,
-                time::{Duration, Instant},
+                time::Instant,
             };
 
             mod policy;
@@ -97,8 +97,8 @@ commonware_macros::stability_scope!(BETA {
 
     /// A strategy wrapper for manually partitioned work.
     ///
-    /// This disables adaptive serial-vs-parallel policy decisions for operations that callers have
-    /// already split into partitions.
+    /// Built via [`Strategy::manual`], this disables adaptive policy decisions (including spawn
+    /// placement) for operations that callers have already split into partitions.
     #[derive(Clone, Debug)]
     pub struct Manual<S> {
         strategy: S,
@@ -107,6 +107,10 @@ commonware_macros::stability_scope!(BETA {
 
     impl<S> Manual<S> {
         /// Creates a strategy wrapper for manually partitioned work.
+        ///
+        /// Unlike [`Strategy::manual`], this wraps `strategy` as-is: an adaptive strategy keeps
+        /// its policy, spawn placement included. Use [`Strategy::manual`] to disable adaptive
+        /// decisions.
         pub const fn new(strategy: S, parallelism: NonZeroUsize) -> Self {
             Self {
                 strategy,
@@ -131,12 +135,17 @@ commonware_macros::stability_scope!(BETA {
         where
             Self: Sized;
 
-        /// Submit one CPU-bound job to this strategy, running it inline on the calling task or
-        /// offloading it to the pool based on the measured cost of each path.
+        /// Submit one CPU-bound job to this strategy, running it inline on the calling task when
+        /// it is measured cheaper than the pool hand-off itself and offloading it to the pool
+        /// otherwise.
         ///
-        /// `len` is a size hint used only to group similar calls. It has no ordering or
-        /// correctness meaning. Jobs too small to amortize the pool hand-off run inline. To force
-        /// an unconditional hand-off, submit through [`manual`](Self::manual).
+        /// `len` groups calls into per-callsite size classes for those measurements: calls from
+        /// one call site with similar `len` must have comparable cost, or the learned inline
+        /// bound weakens. It has no ordering meaning. An inline job runs to completion before
+        /// `spawn` returns, and inline placement is reserved for jobs whose measured cost sits
+        /// under a small time budget, so big jobs always offload. To force a hand-off on a pool
+        /// with more than one worker, submit through [`manual`](Self::manual) (a single-worker
+        /// pool always runs jobs inline).
         ///
         /// The returned future resolves when the job completes. Blocking on external
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
@@ -1048,92 +1057,99 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let threads = self.thread_pool.current_num_threads();
             let caller = Location::caller();
 
-            // One worker cannot overlap (always inline); a manual strategy has no policy (keep
-            // spawn's unconditional offload). Otherwise let the policy decide.
-            let (offload_it, measure) = if threads <= 1 {
-                (false, false)
+            // One worker cannot overlap a hand-off (always inline, untimed); a manual strategy
+            // has no policy (keep spawn's unconditional hand-off). Otherwise the policy decides
+            // from the measured hand-off and job costs.
+            let (decision, policy) = if threads <= 1 {
+                (
+                    policy::SpawnDecision::Inline {
+                        measure: false,
+                    },
+                    None,
+                )
             } else {
-                self.policy.as_ref().map_or((true, false), |policy| {
-                    match policy.choose_spawn(caller, len, threads) {
-                        (policy::SpawnExecution::Inline, measure) => (false, measure),
-                        (policy::SpawnExecution::Offload, measure) => (true, measure),
-                    }
-                })
+                self.policy.as_ref().map_or(
+                    (policy::SpawnDecision::Offload { measure: false }, None),
+                    |policy| (policy.choose_spawn(caller, len, threads), Some(policy)),
+                )
             };
 
-            if !offload_it {
-                // Inline: run on the calling task and hand back a ready future.
-                let start = measure.then(Instant::now);
-                let result = f(self.clone());
-                if let (Some(start), Some(policy)) = (start, self.policy.as_ref()) {
-                    policy.record_spawn(
-                        caller,
-                        len,
-                        threads,
-                        policy::SpawnExecution::Inline,
-                        start.elapsed(),
-                        None,
-                    );
+            match decision {
+                policy::SpawnDecision::Inline { measure } => {
+                    // Inline: run on the calling task and hand back a ready future.
+                    let start = measure.then(Instant::now);
+                    let result = f(self.clone());
+                    if let (Some(start), Some(policy)) = (start, policy) {
+                        policy.record_spawn_inline(caller, len, threads, start.elapsed());
+                    }
+                    Either::Left(future::ready(result))
                 }
-                return Either::Left(future::ready(result));
-            }
+                policy::SpawnDecision::Offload { measure } => {
+                    // Offload: hand the job to the pool. The worker records the sample before
+                    // sending the result, so measurement is independent of how (or whether) the
+                    // caller polls the returned future.
+                    let handoff_start = measure.then(Instant::now);
+                    let (tx, mut rx) = oneshot::channel();
+                    let s = self.clone();
+                    let pool = self.thread_pool.clone();
+                    let recorder = if measure {
+                        policy.cloned().map(|policy| (policy, caller, len, threads))
+                    } else {
+                        None
+                    };
+                    self.thread_pool.spawn(move || {
+                        // The hand-off ends when the job starts here: channel setup, clones,
+                        // enqueue, queue wait, and worker wake. `Instant` is monotonic across
+                        // threads, so the caller-captured start is valid on this one.
+                        let handoff = handoff_start.map(|start| start.elapsed());
+                        let job_start = handoff.is_some().then(Instant::now);
 
-            // Offload: hand the job to the pool. The worker times the job's own wall so we can
-            // estimate the inline cost; the returned future times the residual wait once joined.
-            let setup_start = measure.then(Instant::now);
-            let (tx, mut rx) = oneshot::channel();
-            let s = self.clone();
-            let pool = self.thread_pool.clone();
-            self.thread_pool.spawn(move || {
-                let job_start = measure.then(Instant::now);
-                let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
-                let job_wall = job_start.map(|start| start.elapsed());
-                let _ = tx.send((result, job_wall));
-            });
-            let recorder = measure.then(|| {
-                (
-                    self.policy.clone(),
-                    caller,
-                    len,
-                    threads,
-                    setup_start.map_or(Duration::ZERO, |start| start.elapsed()),
-                )
-            });
-            Either::Right(async move {
-                // Time from the caller's first poll (when it joins) to the result: the part of the
-                // job not hidden behind the caller's interleaved work.
-                let poll_start = Instant::now();
-                let (result, job_wall) = loop {
-                    if let Ok(Some(payload)) = rx.try_recv() {
-                        break payload;
-                    }
+                        // Catch the panic so a panicking job propagates to the awaiting task
+                        // rather than aborting the process (rayon aborts on an uncaught panic in
+                        // a spawned job).
+                        let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
 
-                    // If the polling thread is a pool member, run pending pool work inline rather
-                    // than parking the only worker able to finish the job.
-                    if !matches!(pool.yield_now(), Some(Yield::Executed)) {
-                        break rx.await
-                            .unwrap_or_else(|_| panic!("strategy job dropped before completion"));
-                    }
-                };
-                match result {
-                    Ok(value) => {
-                        // Record successful runs only, matching the inline arm: a panicked
-                        // job's wall time says nothing about the job size.
-                        if let Some((Some(policy), caller, len, threads, setup)) = recorder {
-                            policy.record_spawn(
+                        // Record successful runs only, matching the inline arm: a panicked job's
+                        // wall time says nothing about the job size.
+                        if result.is_ok()
+                            && let (Some((policy, caller, len, threads)), Some(handoff), Some(start)) =
+                                (recorder, handoff, job_start)
+                        {
+                            policy.record_spawn_offload(
                                 caller,
                                 len,
                                 threads,
-                                policy::SpawnExecution::Offload,
-                                setup.saturating_add(poll_start.elapsed()),
-                                job_wall,
+                                handoff,
+                                start.elapsed(),
                             );
                         }
-                        value
-                    }
-                    Err(payload) => panic::resume_unwind(payload),
+                        let _ = tx.send(result);
+                    });
+                    Either::Right(async move {
+                        // When the polling thread is itself a member of the pool, waiting on the
+                        // channel could park the only worker able to run the job. Execute pending
+                        // pool work inline until the job completes or another worker takes over.
+                        // `yield_now` returns `None` when this thread is not a pool member, so
+                        // external callers fall through to the channel immediately.
+                        loop {
+                            if let Ok(Some(result)) = rx.try_recv() {
+                                return match result {
+                                    Ok(value) => value,
+                                    Err(payload) => panic::resume_unwind(payload),
+                                };
+                            }
+                            if !matches!(pool.yield_now(), Some(Yield::Executed)) {
+                                break;
+                            }
+                        }
+                        match rx.await {
+                            Ok(Ok(value)) => value,
+                            Ok(Err(payload)) => panic::resume_unwind(payload),
+                            Err(_) => panic!("strategy job dropped before completion"),
+                        }
+                    })
                 }
-            })
+            }
         }
 
         #[track_caller]
@@ -1394,6 +1410,41 @@ mod test {
         let (loc, job) = spawn_flagged(&strategy, false);
         assert_eq!(futures::executor::block_on(job), 7);
         assert!(spawn_recorded(&strategy, loc));
+    }
+
+    /// Once the seed and boundary runs measure a trivial job cheaper than the pool hand-off,
+    /// spawn places it inline on the calling (non-pool) thread.
+    #[test]
+    fn spawn_converges_inline_for_tiny_jobs() {
+        let strategy = parallel_strategy();
+
+        for _ in 0..100 {
+            let on_pool = futures::executor::block_on(
+                strategy.spawn(64, |_| rayon::current_thread_index().is_some()),
+            );
+            if !on_pool {
+                return;
+            }
+        }
+        panic!("a trivial job never converged to inline placement");
+    }
+
+    /// A job measured over the inline budget keeps offloading: the calling task is never blocked
+    /// on a big job even when the hand-off looks expensive.
+    #[test]
+    fn spawn_keeps_offloading_big_jobs() {
+        let strategy = parallel_strategy();
+
+        for _ in 0..20 {
+            let on_pool = futures::executor::block_on(strategy.spawn(64, |_| {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                rayon::current_thread_index().is_some()
+            }));
+            assert!(
+                on_pool,
+                "a job over the inline budget ran on the calling task"
+            );
+        }
     }
 
     fn policy_len(strategy: &Rayon) -> usize {
