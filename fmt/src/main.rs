@@ -6,7 +6,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, Read as _, Write as _},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 use tempfile::NamedTempFile;
@@ -20,18 +20,27 @@ struct Args {
     check: bool,
 
     /// Read one Rust source file from stdin and write it to stdout.
-    #[arg(long, conflicts_with_all = ["check", "paths"])]
+    #[arg(long, conflicts_with_all = ["check", "files"])]
     stdin: bool,
 
-    /// Rust files or directories to format.
-    #[arg(value_name = "PATH", conflicts_with = "stdin")]
-    paths: Vec<PathBuf>,
+    /// Rust source files to format.
+    #[arg(
+        value_name = "FILE",
+        required_unless_present = "stdin",
+        conflicts_with = "stdin"
+    )]
+    files: Vec<PathBuf>,
 }
 
 #[derive(Default)]
 struct Outcome {
     changed: Vec<PathBuf>,
     errors: Vec<String>,
+}
+
+struct Input {
+    display: PathBuf,
+    resolved: PathBuf,
 }
 
 impl Outcome {
@@ -52,7 +61,7 @@ fn main() -> ExitCode {
         };
     }
 
-    let outcome = run_files(&args.paths, args.check);
+    let outcome = run_files(&args.files, args.check);
     if args.check {
         for path in &outcome.changed {
             eprintln!("{}", path.display());
@@ -84,23 +93,25 @@ fn run_stdin() -> Result<(), String> {
 
 fn run_files(paths: &[PathBuf], check: bool) -> Outcome {
     let mut outcome = Outcome::default();
-    let files = discover(paths, &mut outcome.errors);
-    for path in files {
-        let source = match fs::read_to_string(&path) {
+    let inputs = collect_files(paths, &mut outcome.errors);
+    for input in inputs {
+        let source = match fs::read_to_string(&input.resolved) {
             Ok(source) => source,
             Err(error) => {
-                outcome
-                    .errors
-                    .push(format!("failed to read `{}`: {error}", path.display()));
+                outcome.errors.push(format!(
+                    "failed to read `{}`: {error}",
+                    input.display.display()
+                ));
                 continue;
             }
         };
         let output = match commonware_fmt::file::format(&source) {
             Ok(output) => output,
             Err(error) => {
-                outcome
-                    .errors
-                    .push(format!("failed to format `{}`: {error}", path.display()));
+                outcome.errors.push(format!(
+                    "failed to format `{}`: {error}",
+                    input.display.display()
+                ));
                 continue;
             }
         };
@@ -108,16 +119,17 @@ fn run_files(paths: &[PathBuf], check: bool) -> Outcome {
             continue;
         }
         if check {
-            outcome.changed.push(path);
+            outcome.changed.push(input.display);
             continue;
         }
-        if let Err(error) = replace(&path, output.text()) {
-            outcome
-                .errors
-                .push(format!("failed to write `{}`: {error}", path.display()));
+        if let Err(error) = replace(&input.resolved, output.text()) {
+            outcome.errors.push(format!(
+                "failed to write `{}`: {error}",
+                input.display.display()
+            ));
             continue;
         }
-        outcome.changed.push(path);
+        outcome.changed.push(input.display);
     }
     outcome
 }
@@ -133,139 +145,44 @@ fn replace(path: &Path, source: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn discover(paths: &[PathBuf], errors: &mut Vec<String>) -> Vec<PathBuf> {
-    let roots = if paths.is_empty() {
-        vec![PathBuf::from(".")]
-    } else {
-        paths.to_vec()
-    };
+fn collect_files(paths: &[PathBuf], errors: &mut Vec<String>) -> Vec<Input> {
     let mut files = BTreeMap::new();
-    for root in roots {
-        match contains_symlink(&root) {
-            Ok(true) => errors.push(format!(
-                "refusing to follow symlink in `{}`",
-                root.display()
-            )),
-            Ok(false) => collect(&root, true, &mut files, errors),
-            Err(error) => errors.push(format!("failed to inspect `{}`: {error}", root.display())),
-        }
-    }
-    let mut files: Vec<_> = files.into_values().collect();
-    files.sort_unstable();
-    files
-}
-
-fn collect(
-    path: &Path,
-    explicit: bool,
-    files: &mut BTreeMap<PathBuf, PathBuf>,
-    errors: &mut Vec<String>,
-) {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            errors.push(format!("failed to inspect `{}`: {error}", path.display()));
-            return;
-        }
-    };
-    if metadata.file_type().is_symlink() {
-        if explicit {
-            errors.push(format!("refusing to follow symlink `{}`", path.display()));
-        }
-        return;
-    }
-    if metadata.is_file() {
-        collect_file(path, explicit, files, errors);
-        return;
-    }
-    if !metadata.is_dir() {
-        if explicit {
-            errors.push(format!(
-                "`{}` is not a regular file or directory",
-                path.display()
-            ));
-        }
-        return;
-    }
-    if in_target(path) {
-        return;
-    }
-
-    let directory = match fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) => {
-            errors.push(format!(
-                "failed to read directory `{}`: {error}",
-                path.display()
-            ));
-            return;
-        }
-    };
-    let mut entries = Vec::new();
-    for entry in directory {
-        match entry {
-            Ok(entry) => entries.push(entry.path()),
-            Err(error) => errors.push(format!(
-                "failed to read an entry in `{}`: {error}",
-                path.display()
-            )),
-        }
-    }
-    entries.sort_unstable();
-    for entry in entries {
-        collect(&entry, false, files, errors);
-    }
-}
-
-fn collect_file(
-    path: &Path,
-    explicit: bool,
-    files: &mut BTreeMap<PathBuf, PathBuf>,
-    errors: &mut Vec<String>,
-) {
-    if in_target(path) {
-        return;
-    }
-    if path.extension() != Some(OsStr::new("rs")) {
-        if explicit {
+    for path in paths {
+        if path.extension() != Some(OsStr::new("rs")) {
             errors.push(format!("`{}` is not a Rust source file", path.display()));
+            continue;
         }
-        return;
-    }
-    let canonical = match fs::canonicalize(path) {
-        Ok(canonical) => canonical,
-        Err(error) => {
-            errors.push(format!("failed to resolve `{}`: {error}", path.display()));
-            return;
-        }
-    };
-    if in_target(&canonical) {
-        return;
-    }
-    files
-        .entry(canonical)
-        .and_modify(|current| {
-            if path < current.as_path() {
-                *current = path.to_owned();
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                errors.push(format!("`{}` is not a regular file", path.display()));
+                continue;
             }
-        })
-        .or_insert_with(|| path.to_owned());
-}
-
-fn contains_symlink(path: &Path) -> io::Result<bool> {
-    let mut prefix = PathBuf::new();
-    for component in path.components() {
-        prefix.push(component.as_os_str());
-        if fs::symlink_metadata(&prefix)?.file_type().is_symlink() {
-            return Ok(true);
+            Err(error) => {
+                errors.push(format!("failed to inspect `{}`: {error}", path.display()));
+                continue;
+            }
         }
+        let resolved = match fs::canonicalize(path) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                errors.push(format!("failed to resolve `{}`: {error}", path.display()));
+                continue;
+            }
+        };
+        files
+            .entry(resolved.clone())
+            .and_modify(|input: &mut Input| {
+                if path < &input.display {
+                    input.display = path.clone();
+                }
+            })
+            .or_insert_with(|| Input {
+                display: path.clone(),
+                resolved,
+            });
     }
-    Ok(false)
-}
-
-fn in_target(path: &Path) -> bool {
-    path.components()
-        .any(|component| matches!(component, Component::Normal(name) if name == "target"))
+    files.into_values().collect()
 }
 
 #[cfg(test)]
@@ -289,87 +206,79 @@ mod tests {
     }
 
     #[test]
-    fn stdin_conflicts_with_check_and_paths() {
+    fn stdin_conflicts_with_check_and_files() {
+        assert!(Args::try_parse_from(["commonware-fmt"]).is_err());
         assert!(Args::try_parse_from(["commonware-fmt", "--stdin", "--check"]).is_err());
         assert!(Args::try_parse_from(["commonware-fmt", "--stdin", "input.rs"]).is_err());
     }
 
     #[test]
-    fn discovers_rust_files_deterministically_and_skips_target() {
+    fn collects_files_deterministically_and_deduplicates_them() {
         let temp = TempDir::new();
-        fs::create_dir(temp.join("nested")).expect("nested directory should be created");
-        fs::create_dir(temp.join("target")).expect("target directory should be created");
+        fs::write(temp.join("a.rs"), "").expect("Rust file should be written");
         fs::write(temp.join("b.rs"), "").expect("Rust file should be written");
-        fs::write(temp.join("nested/a.rs"), "").expect("Rust file should be written");
-        fs::write(temp.join("nested/readme.md"), "").expect("other file should be written");
-        fs::write(temp.join("target/ignored.rs"), "").expect("target file should be written");
 
         let mut errors = Vec::new();
-        let files = discover(&[temp.0.path().to_owned(), temp.join("b.rs")], &mut errors);
+        let files = collect_files(
+            &[temp.join("b.rs"), temp.join("a.rs"), temp.join("b.rs")],
+            &mut errors,
+        );
+        let display: Vec<_> = files.into_iter().map(|file| file.display).collect();
 
         assert!(errors.is_empty());
-        assert_eq!(files, vec![temp.join("b.rs"), temp.join("nested/a.rs")]);
+        assert_eq!(display, vec![temp.join("a.rs"), temp.join("b.rs")]);
     }
 
     #[test]
-    fn reports_invalid_explicit_paths() {
+    fn reports_non_rust_missing_and_directory_inputs() {
         let temp = TempDir::new();
         fs::write(temp.join("readme.md"), "text").expect("file should be written");
+        fs::create_dir(temp.join("directory.rs")).expect("directory should be created");
 
         let mut errors = Vec::new();
-        let files = discover(
-            &[temp.join("readme.md"), temp.join("missing.rs")],
+        let files = collect_files(
+            &[
+                temp.join("readme.md"),
+                temp.join("missing.rs"),
+                temp.join("directory.rs"),
+            ],
             &mut errors,
         );
 
         assert!(files.is_empty());
-        assert_eq!(errors.len(), 2);
+        assert_eq!(errors.len(), 3);
         assert!(errors[0].contains("not a Rust source file"));
         assert!(errors[1].contains("failed to inspect"));
+        assert!(errors[2].contains("not a regular file"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn refuses_explicit_symlinks() {
+    fn resolves_and_deduplicates_symlinked_files() {
         use std::os::unix::fs::symlink;
 
         let temp = TempDir::new();
         let target = temp.join("target.rs");
         let link = temp.join("link.rs");
-        fs::write(&target, "").expect("Rust file should be written");
-        symlink(target, &link).expect("symlink should be created");
+        fs::write(&target, unformatted()).expect("Rust file should be written");
+        symlink(&target, &link).expect("symlink should be created");
 
         let mut errors = Vec::new();
-        let files = discover(std::slice::from_ref(&link), &mut errors);
+        let files = collect_files(&[temp.join("target.rs"), link.clone()], &mut errors);
 
-        assert!(files.is_empty());
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("refusing to follow symlink"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn refuses_symlinked_ancestors_and_ignores_discovered_dangling_links() {
-        use std::os::unix::fs::symlink;
-
-        let temp = TempDir::new();
-        let target = temp.join("target");
-        let link = temp.join("alias");
-        fs::create_dir(&target).expect("target directory should be created");
-        fs::write(target.join("input.rs"), "").expect("Rust file should be written");
-        symlink(&target, &link).expect("directory symlink should be created");
-        symlink(temp.join("missing"), temp.join("dangling"))
-            .expect("dangling symlink should be created");
-
-        let mut errors = Vec::new();
-        let files = discover(
-            &[link.join("input.rs"), temp.0.path().to_owned()],
-            &mut errors,
+        assert!(errors.is_empty());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].display, link);
+        assert_eq!(
+            files[0].resolved,
+            fs::canonicalize(temp.join("target.rs")).unwrap()
         );
 
-        assert!(files.is_empty());
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("refusing to follow symlink in"));
+        let outcome = run_files(std::slice::from_ref(&link), false);
+        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.changed, vec![link.clone()]);
+        assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        assert_ne!(fs::read_to_string(target).unwrap(), unformatted());
     }
 
     #[test]
@@ -406,13 +315,12 @@ mod tests {
     #[test]
     fn later_files_are_processed_after_a_formatting_error() {
         let temp = TempDir::new();
-        let root = temp.0.path().to_owned();
         let invalid = temp.join("a-invalid.rs");
         let valid = temp.join("b-valid.rs");
         fs::write(&invalid, "fn invalid(\n").expect("invalid source should be written");
         fs::write(&valid, unformatted()).expect("valid source should be written");
 
-        let outcome = run_files(std::slice::from_ref(&root), false);
+        let outcome = run_files(&[invalid, valid.clone()], false);
 
         assert_eq!(outcome.errors.len(), 1);
         assert!(outcome.errors[0].contains("a-invalid.rs"));
