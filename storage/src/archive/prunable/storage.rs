@@ -116,13 +116,10 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Whether a marker sync must be observed by a later sync request.
     marker_sync_pending: bool,
 
-    /// Per-section boundaries for sections mutated by this handle.
+    /// Per-section durable boundaries for active work or proofs not yet published as markers.
+    /// Successful blocking syncs remove entries once their metadata catches up, bounding this map
+    /// to current work and at most one completed sync batch.
     barriers: BTreeMap<u64, Barrier>,
-
-    /// Sections from the last successful blocking data sync whose latest durable boundary must be
-    /// reconsidered for marker publication. This set is replaced, rather than accumulated, after
-    /// each blocking sync so restart validation remains bounded by one completed sync batch.
-    unpublished: BTreeSet<u64>,
 
     /// Sections with writes not yet included in any sync request. Moved into `requested` when a
     /// sync is requested; the `syncs` metric counts only this set, so each section of writes is
@@ -354,7 +351,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             metadata,
             marker_sync_pending,
             barriers: BTreeMap::new(),
-            unpublished: BTreeSet::new(),
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
@@ -510,8 +506,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.keys
             .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
 
-        // A section's first append starts from the pre-append prefix proven durable at startup.
-        // Later sync completions advance this barrier before their boundary can be published.
+        // A section's first append after startup or marker publication starts from the pre-append
+        // prefix already proven durable. Later sync completions advance this barrier before their
+        // boundary can be published.
         self.pending.insert(section);
         self.barriers
             .entry(section)
@@ -556,7 +553,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.pending = self.pending.split_off(&min);
         self.requested = self.requested.split_off(&min);
         self.barriers = self.barriers.split_off(&min);
-        self.unpublished = self.unpublished.split_off(&min);
 
         // Remove all indices that are less than min
         loop {
@@ -605,7 +601,18 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let (mut archive, handle) = self.start_sync().await?;
         handle.await.map_err(crate::journal::Error::Runtime)?;
         archive.marker_sync_pending = false;
-        archive.unpublished = std::mem::take(&mut archive.requested);
+        archive.requested.clear();
+
+        // The combined completion makes every staged marker durable. Remove caught-up barriers;
+        // newly completed data remains ahead of its marker as the next publication batch.
+        let metadata = &archive.metadata;
+        archive.barriers.retain(|section, barrier| {
+            let published = metadata
+                .get(&SectionKey::new(*section))
+                .copied()
+                .unwrap_or(0);
+            barrier.boundary() > published
+        });
         Ok(archive)
     }
 
@@ -636,13 +643,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             *length = barrier.record(*length, completion.clone());
         }
 
-        // Reconsider blocking-batch sections even when the current request did not touch them.
-        publish.reserve(self.unpublished.len());
-        for &section in self.unpublished.difference(&self.requested) {
-            let barrier = self
-                .barriers
-                .get_mut(&section)
-                .expect("every unpublished section has a durability barrier");
+        // Reconsider completed publication debt even when the current request did not touch it.
+        publish.reserve(self.barriers.len() - self.requested.len());
+        for (&section, barrier) in &mut self.barriers {
+            if self.requested.contains(&section) {
+                continue;
+            }
             publish.push((section, barrier.boundary()));
         }
 

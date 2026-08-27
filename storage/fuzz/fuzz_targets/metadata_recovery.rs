@@ -171,6 +171,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                 "zero retention recovered attempted bytes"
             );
         }
+
         // Full write retention guarantees a complete candidate only when recovery does not also
         // depend on an independently unsynced resize.
         if matches!(crash, CrashKind::UnsyncedWrite)
