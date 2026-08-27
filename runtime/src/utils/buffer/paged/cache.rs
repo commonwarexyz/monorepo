@@ -26,6 +26,12 @@ use tracing::{debug, error, trace};
 /// while still coalescing the sequential misses common to bulk cold reads.
 const MAX_FAULT_RUN_PAGES: usize = 64;
 
+/// Maximum runs fetched concurrently (and admitted per lock acquisition) by
+/// [`CacheRef::fetch_pages_after_faults`]. Bounds the scratch memory held in flight, the
+/// concurrent blob reads dispatched, and how long one admission holds the cache write lock
+/// against concurrent readers.
+const MAX_FAULT_WAVE_RUNS: usize = 8;
+
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
 type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
@@ -479,48 +485,52 @@ impl CacheRef {
             }
         }
 
-        // Read all runs concurrently and validate each page's checksum before admission.
-        let fetched = try_join_all(runs.iter().map(|&(start, len)| async move {
-            let offset = start
-                .checked_mul(physical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            let read_len = len
-                .checked_mul(physical_page_size as usize)
-                .ok_or(Error::OffsetOverflow)?;
-            let bytes = blob
-                .read_at(offset, read_len, ReadOptions::DONT_CACHE)
-                .await?
-                .coalesce();
-            for i in 0..len {
-                let page = &bytes.as_ref()[i * physical_page_size as usize..]
-                    [..physical_page_size as usize];
-                let Some(checksum) = Checksum::validate_page(page) else {
-                    error!(page_num = start + i as u64, "page fetch failed checksum");
-                    return Err(Error::InvalidChecksum);
-                };
-                // Only full logical pages are cacheable. A non-last page falling back to a
-                // partial CRC indicates corruption, mirroring the single-page fetch path.
-                if checksum.len as u64 != self.page_size {
-                    error!(
-                        page_num = start + i as u64,
-                        expected = self.page_size,
-                        actual = checksum.len,
-                        "attempted to fetch partial page from blob"
-                    );
-                    return Err(Error::InvalidChecksum);
-                }
-            }
-            Ok(bytes)
-        }))
-        .await?;
-
-        // Admit every fetched page under a single lock acquisition.
+        // Fetch runs in bounded waves: each wave reads its runs concurrently, validates
+        // every page's checksum, and admits the wave under one lock acquisition. The bound
+        // caps the scratch buffers held in flight, the concurrent blob reads dispatched,
+        // and how long one admission blocks concurrent readers on the cache lock.
         let page_size = self.page_size as usize;
-        let mut cache = self.cache.write();
-        for (&(start, len), bytes) in runs.iter().zip(&fetched) {
-            for i in 0..len {
-                let page = &bytes.as_ref()[i * physical_page_size as usize..][..page_size];
-                cache.cache(blob_id, page, start + i as u64);
+        for wave in runs.chunks(MAX_FAULT_WAVE_RUNS) {
+            let fetched = try_join_all(wave.iter().map(|&(start, len)| async move {
+                let offset = start
+                    .checked_mul(physical_page_size)
+                    .ok_or(Error::OffsetOverflow)?;
+                let read_len = len
+                    .checked_mul(physical_page_size as usize)
+                    .ok_or(Error::OffsetOverflow)?;
+                let bytes = blob
+                    .read_at(offset, read_len, ReadOptions::DONT_CACHE)
+                    .await?
+                    .coalesce();
+                for i in 0..len {
+                    let page = &bytes.as_ref()[i * physical_page_size as usize..]
+                        [..physical_page_size as usize];
+                    let Some(checksum) = Checksum::validate_page(page) else {
+                        error!(page_num = start + i as u64, "page fetch failed checksum");
+                        return Err(Error::InvalidChecksum);
+                    };
+                    // Only full logical pages are cacheable. A non-last page falling back to a
+                    // partial CRC indicates corruption, mirroring the single-page fetch path.
+                    if checksum.len as u64 != self.page_size {
+                        error!(
+                            page_num = start + i as u64,
+                            expected = self.page_size,
+                            actual = checksum.len,
+                            "attempted to fetch partial page from blob"
+                        );
+                        return Err(Error::InvalidChecksum);
+                    }
+                }
+                Ok(bytes)
+            }))
+            .await?;
+
+            let mut cache = self.cache.write();
+            for (&(start, len), bytes) in wave.iter().zip(&fetched) {
+                for i in 0..len {
+                    let page = &bytes.as_ref()[i * physical_page_size as usize..][..page_size];
+                    cache.cache(blob_id, page, start + i as u64);
+                }
             }
         }
 

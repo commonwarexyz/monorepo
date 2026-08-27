@@ -2635,6 +2635,8 @@ mod tests {
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
+    use futures::StreamExt as _;
+    use std::num::NonZeroU16;
 
     /// Malformed persisted offsets surface as errors from `warm_range`, never as panics.
     #[test]
@@ -2660,8 +2662,6 @@ mod tests {
             Err(Error::OffsetOverflow)
         ));
     }
-    use futures::StreamExt as _;
-    use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
