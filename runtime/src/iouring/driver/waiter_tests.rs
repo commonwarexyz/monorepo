@@ -1,10 +1,5 @@
 use super::*;
-use crate::{
-    IoBuf, IoBufMut, IoBufs,
-    iouring::driver::request::{
-        Cache, ReadAtRequest, RecvRequest, SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
-    },
-};
+use crate::{IoBuf, IoBufMut, IoBufs, WriteOptions, iouring::driver::request::Cache};
 use futures::task::noop_waker;
 use std::{
     os::fd::OwnedFd,
@@ -18,17 +13,15 @@ fn make_sync_request() -> Request {
     let (sock_left, _sock_right) =
         std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
     let file = std::fs::File::from(OwnedFd::from(sock_left));
-    Request::Sync(SyncRequest {
-        file: Arc::new(file),
-    })
+    Request::sync(Arc::new(file))
 }
 
 fn make_send_request() -> Request {
-    Request::Send(SendRequest {
-        fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
-        write: IoBufs::from(IoBuf::from(b"hello")).into(),
-        deadline: None,
-    })
+    Request::send(
+        Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+        IoBufs::from(IoBuf::from(b"hello")),
+        None,
+    )
 }
 
 fn make_recv_request() -> Request {
@@ -36,42 +29,40 @@ fn make_recv_request() -> Request {
 }
 
 fn make_recv_request_with_deadline(deadline: Option<std::time::Instant>) -> Request {
-    Request::Recv(RecvRequest {
-        fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
-        buf: IoBufMut::with_capacity(5),
-        offset: 0,
-        len: 5,
-        exact: true,
+    Request::recv(
+        Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+        IoBufMut::with_capacity(5),
+        0,
+        5,
+        true,
         deadline,
-    })
+    )
 }
 
 fn make_read_at_request() -> Request {
     let (sock_left, _sock_right) =
         std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
     let file = std::fs::File::from(OwnedFd::from(sock_left));
-    Request::ReadAt(ReadAtRequest {
-        file: Arc::new(file),
-        offset: 0,
-        len: 8,
-        read: 0,
-        buf: IoBufMut::with_capacity(8),
-        cache: Cache::Enabled,
-    })
+    Request::read_at(
+        Arc::new(file),
+        0,
+        8,
+        IoBufMut::with_capacity(8),
+        Cache::Enabled,
+    )
 }
 
 fn make_write_at_request() -> Request {
     let (sock_left, _sock_right) =
         std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
     let file = std::fs::File::from(OwnedFd::from(sock_left));
-    Request::WriteAt(WriteAtRequest {
-        file: Arc::new(file),
-        offset: 0,
-        written: 0,
-        write: IoBufs::from(IoBuf::from(b"hello")).into(),
-        state: WriteAtState::Writing,
-        cache: Cache::Enabled,
-    })
+    Request::write_at(
+        Arc::new(file),
+        0,
+        IoBufs::from(IoBuf::from(b"hello")),
+        WriteOptions::default(),
+        Cache::Enabled,
+    )
 }
 
 fn insert(waiters: &mut Waiters, request: Request, tick: Option<Tick>) -> WaiterId {
@@ -440,11 +431,11 @@ fn test_waiters_reject_stale_in_flight_queries() {
     let deadline = std::time::Instant::now();
     let active_id = insert(
         &mut waiters,
-        Request::Send(SendRequest {
-            fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            deadline: Some(deadline),
-        }),
+        Request::send(
+            Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+            IoBufs::from(IoBuf::from(b"hello")),
+            Some(deadline),
+        ),
         None,
     );
     assert_ne!(active_id, stale_id);
@@ -635,11 +626,11 @@ fn test_waiters_deadline_scheduling() {
     // Send requests with a deadline report it exactly once.
     let deadline = std::time::Instant::now();
     let send_id = waiters.insert(
-        Request::Send(SendRequest {
-            fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            deadline: Some(deadline),
-        }),
+        Request::send(
+            Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+            IoBufs::from(IoBuf::from(b"hello")),
+            Some(deadline),
+        ),
         noop_waker(),
     );
     assert_eq!(waiters.deadline_to_schedule(send_id), Some(deadline));

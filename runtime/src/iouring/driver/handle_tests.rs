@@ -1,5 +1,5 @@
 use super::*;
-use crate::iouring::driver::{request::RecvRequest, waiter::StageOutcome};
+use crate::iouring::driver::waiter::StageOutcome;
 use futures::task::{ArcWake, waker as arc_waker};
 use std::{
     cell::Cell,
@@ -51,14 +51,14 @@ fn log_waker(id: usize, log: &Arc<Mutex<Vec<usize>>>) -> Waker {
 
 fn recv_request() -> Request {
     let (left, _right) = UnixStream::pair().unwrap();
-    Request::Recv(RecvRequest {
-        fd: Arc::new(left.into()),
-        buf: IoBufMut::with_capacity(1),
-        offset: 0,
-        len: 1,
-        exact: false,
-        deadline: None,
-    })
+    Request::recv(
+        Arc::new(left.into()),
+        IoBufMut::with_capacity(1),
+        0,
+        1,
+        false,
+        None,
+    )
 }
 
 #[test]

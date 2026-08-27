@@ -56,17 +56,14 @@ use super::{
     Tick,
     callbacks::{CapacityActionSink, CapacityActions, WakerAction, wake_batch},
     capacity::{CapacityAdmission, CapacityId, CapacityWaiters},
-    request::{
-        AcceptRequest, Cache, ConnectRequest, Output, ReadAtRequest, RecvRequest, Request,
-        SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
-    },
+    request::{Cache, Output, Request},
     waiter::{
         CompletionDropOutcome, CompletionId, DeferredPoll, DropOutcome, PollState,
         TicketCompletions, WaiterId, Waiters,
     },
     waker::Waker as RingWaker,
 };
-use crate::{Error, IoBufMut, IoBufs, WriteOptions, iouring::RawSocketAddr};
+use crate::{Error, IoBufMut, IoBufs, WriteOptions};
 use commonware_utils::sync::Mutex;
 use std::{
     cell::RefCell,
@@ -370,11 +367,7 @@ impl Handle {
         bufs: IoBufs,
         deadline: Instant,
     ) -> Result<(), Error> {
-        let request = Request::Send(SendRequest {
-            fd,
-            write: bufs.into(),
-            deadline: Some(deadline),
-        });
+        let request = Request::send(fd, bufs, Some(deadline));
         match Op::new(self, request).await {
             Output::Send(result) => result.map_err(|e| *e),
             _ => unreachable!("send op produced foreign output"),
@@ -392,18 +385,7 @@ impl Handle {
         exact: bool,
         deadline: Instant,
     ) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
-        assert!(
-            offset <= len && len <= buf.capacity(),
-            "recv invariant violated: need offset <= len <= capacity"
-        );
-        let request = Request::Recv(RecvRequest {
-            fd,
-            buf,
-            offset,
-            len,
-            exact,
-            deadline: Some(deadline),
-        });
+        let request = Request::recv(fd, buf, offset, len, exact, Some(deadline));
         match Op::new(self, request).await {
             Output::Recv(result) => result.map_err(|e| *e),
             _ => unreachable!("recv op produced foreign output"),
@@ -419,11 +401,7 @@ impl Handle {
     /// a cue to issue a fresh accept: the deadline exists so an abandoned
     /// accept cannot occupy a waiter slot forever.
     pub(crate) async fn start_accept(&self, fd: Arc<OwnedFd>, deadline: Instant) -> AcceptTicket {
-        let request = Request::Accept(AcceptRequest {
-            fd,
-            addr: RawSocketAddr::zeroed(),
-            deadline: Some(deadline),
-        });
+        let request = Request::accept(fd, Some(deadline));
         AcceptTicket(Ticket::admit(self, request).await)
     }
 
@@ -434,11 +412,7 @@ impl Handle {
         addr: SocketAddr,
         deadline: Instant,
     ) -> Result<(), Error> {
-        let request = Request::Connect(ConnectRequest {
-            fd,
-            addr: RawSocketAddr::boxed_from_socket_addr(&addr),
-            deadline: Some(deadline),
-        });
+        let request = Request::connect(fd, &addr, Some(deadline));
         match Op::new(self, request).await {
             Output::Connect(result) => result.map_err(|e| *e),
             _ => unreachable!("connect op produced foreign output"),
@@ -455,15 +429,7 @@ impl Handle {
         buf: IoBufMut,
         cache: Cache,
     ) -> Result<IoBufMut, (IoBufMut, Error)> {
-        assert!(len <= buf.capacity(), "read_at len exceeds buffer capacity");
-        let request = Request::ReadAt(ReadAtRequest {
-            file,
-            offset,
-            len,
-            read: 0,
-            buf,
-            cache,
-        });
+        let request = Request::read_at(file, offset, len, buf, cache);
         match Op::new(self, request).await {
             Output::ReadAt(result) => result.map_err(|e| *e),
             _ => unreachable!("read_at op produced foreign output"),
@@ -484,19 +450,7 @@ impl Handle {
         options: WriteOptions,
         cache: Cache,
     ) -> Result<(), Error> {
-        let state = if options.contains(WriteOptions::SYNC) {
-            WriteAtState::WritingBeforeSync
-        } else {
-            WriteAtState::Writing
-        };
-        let request = Request::WriteAt(WriteAtRequest {
-            file,
-            offset,
-            written: 0,
-            write: bufs.into(),
-            state,
-            cache,
-        });
+        let request = Request::write_at(file, offset, bufs, options, cache);
         match Op::new(self, request).await {
             Output::WriteAt(result) => result.map_err(|e| *e),
             _ => unreachable!("write_at op produced foreign output"),
@@ -514,7 +468,7 @@ impl Handle {
     /// Admission applies the same backpressure as every other request. The
     /// returned ticket resolves once the fsync completes.
     pub(crate) async fn start_sync(&self, file: Arc<File>) -> SyncTicket {
-        let request = Request::Sync(SyncRequest { file });
+        let request = Request::sync(file);
         SyncTicket(Ticket::admit(self, request).await)
     }
 }

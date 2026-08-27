@@ -25,7 +25,7 @@
 //! | [`Request::Sync`] | `Fsync` | None | Success | None | Yes | Transient | [`Error::Closed`] |
 
 use super::waiter::{CancelReason, WaiterId, WaiterState};
-use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs, iouring::RawSocketAddr};
+use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs, WriteOptions, iouring::RawSocketAddr};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
@@ -40,7 +40,7 @@ use std::{
 
 /// Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum
 /// so storage writes span as few submissions as possible.
-pub(super) const IOVEC_BATCH_SIZE: usize = 1024;
+const IOVEC_BATCH_SIZE: usize = 1024;
 
 /// Return the largest single-buffer length representable by a CQE result.
 ///
@@ -100,13 +100,13 @@ impl Cache {
 /// iovec scratch space. The vectored payload is boxed to keep the single
 /// path (and every [Request]) small: that path already allocates for its
 /// iovec scratch, so the box adds no allocation to an allocation-free path.
-pub(super) enum WriteBuffers {
+enum WriteBuffers {
     Single { buf: IoBuf },
     Vectored(Box<VectoredBuffers>),
 }
 
 /// Buffers and iovec scratch for a vectored write.
-pub(super) struct VectoredBuffers {
+struct VectoredBuffers {
     bufs: IoBufs,
     iovecs: Box<[libc::iovec]>,
     message: libc::msghdr,
@@ -259,6 +259,103 @@ pub(super) enum Output {
 }
 
 impl Request {
+    /// Construct a send request at its initial progress state.
+    pub(super) fn send(fd: Arc<OwnedFd>, bufs: IoBufs, deadline: Option<Instant>) -> Self {
+        Self::Send(SendRequest {
+            fd,
+            write: bufs.into(),
+            deadline,
+        })
+    }
+
+    /// Construct a receive request at its initial progress state.
+    pub(super) fn recv(
+        fd: Arc<OwnedFd>,
+        buf: IoBufMut,
+        offset: usize,
+        len: usize,
+        exact: bool,
+        deadline: Option<Instant>,
+    ) -> Self {
+        assert!(
+            offset <= len && len <= buf.capacity(),
+            "recv invariant violated: need offset <= len <= capacity"
+        );
+        Self::Recv(RecvRequest {
+            fd,
+            buf,
+            offset,
+            len,
+            exact,
+            deadline,
+        })
+    }
+
+    /// Construct an accept request with stable address scratch.
+    pub(super) fn accept(fd: Arc<OwnedFd>, deadline: Option<Instant>) -> Self {
+        Self::Accept(AcceptRequest {
+            fd,
+            addr: RawSocketAddr::zeroed(),
+            deadline,
+        })
+    }
+
+    /// Construct a connect request with a stable encoded target address.
+    pub(super) fn connect(fd: Arc<OwnedFd>, addr: &SocketAddr, deadline: Option<Instant>) -> Self {
+        Self::Connect(ConnectRequest {
+            fd,
+            addr: RawSocketAddr::boxed_from_socket_addr(addr),
+            deadline,
+        })
+    }
+
+    /// Construct a positioned read at its initial progress state.
+    pub(super) fn read_at(
+        file: Arc<File>,
+        offset: u64,
+        len: usize,
+        buf: IoBufMut,
+        cache: Cache,
+    ) -> Self {
+        assert!(len <= buf.capacity(), "read_at len exceeds buffer capacity");
+        Self::ReadAt(ReadAtRequest {
+            file,
+            offset,
+            len,
+            read: 0,
+            buf,
+            cache,
+        })
+    }
+
+    /// Construct a positioned write at its initial progress state.
+    pub(super) fn write_at(
+        file: Arc<File>,
+        offset: u64,
+        bufs: IoBufs,
+        options: WriteOptions,
+        cache: Cache,
+    ) -> Self {
+        let state = if options.contains(WriteOptions::SYNC) {
+            WriteAtState::WritingBeforeSync
+        } else {
+            WriteAtState::Writing
+        };
+        Self::WriteAt(WriteAtRequest {
+            file,
+            offset,
+            written: 0,
+            write: bufs.into(),
+            state,
+            cache,
+        })
+    }
+
+    /// Construct a data-sync request.
+    pub(super) const fn sync(file: Arc<File>) -> Self {
+        Self::Sync(SyncRequest { file })
+    }
+
     /// Return the deadline for this request, if any.
     pub const fn deadline(&self) -> Option<Instant> {
         match self {
@@ -435,11 +532,11 @@ impl CqeResult {
 /// Logical network send request and its in-loop state.
 pub(super) struct SendRequest {
     /// Socket used by the current send SQE.
-    pub(super) fd: Arc<OwnedFd>,
+    fd: Arc<OwnedFd>,
     /// Write cursor and buffers that still need to be sent.
-    pub(super) write: WriteBuffers,
+    write: WriteBuffers,
     /// Absolute deadline for the whole logical request.
-    pub(super) deadline: Option<Instant>,
+    deadline: Option<Instant>,
 }
 
 impl SendRequest {
@@ -493,17 +590,17 @@ impl SendRequest {
 /// Logical network recv request and its in-loop state.
 pub(super) struct RecvRequest {
     /// Socket used by the current recv SQE.
-    pub(super) fd: Arc<OwnedFd>,
+    fd: Arc<OwnedFd>,
     /// Destination buffer owned by the request.
-    pub(super) buf: IoBufMut,
+    buf: IoBufMut,
     /// Byte offset into `buf` where the next recv should write.
-    pub(super) offset: usize,
+    offset: usize,
     /// Total recv target, including any existing filled prefix before `offset`.
-    pub(super) len: usize,
+    len: usize,
     /// Whether the recv must fill the full target before succeeding.
-    pub(super) exact: bool,
+    exact: bool,
     /// Absolute deadline for the whole logical request.
-    pub(super) deadline: Option<Instant>,
+    deadline: Option<Instant>,
 }
 
 impl RecvRequest {
@@ -555,17 +652,17 @@ impl RecvRequest {
 /// Logical positioned file read request and its in-loop state.
 pub(super) struct ReadAtRequest {
     /// File used by the current read SQE.
-    pub(super) file: Arc<File>,
+    file: Arc<File>,
     /// Starting file offset for the logical read.
-    pub(super) offset: u64,
+    offset: u64,
     /// Total number of bytes requested.
-    pub(super) len: usize,
+    len: usize,
     /// Bytes already read into `buf`.
-    pub(super) read: usize,
+    read: usize,
     /// Destination buffer owned by the request.
-    pub(super) buf: IoBufMut,
+    buf: IoBufMut,
     /// Page-cache policy for this request.
-    pub(super) cache: Cache,
+    cache: Cache,
 }
 
 impl ReadAtRequest {
@@ -626,7 +723,7 @@ impl ReadAtRequest {
 
 /// Progress and durability policy for one positioned write request.
 #[derive(Eq, PartialEq)]
-pub(super) enum WriteAtState {
+enum WriteAtState {
     /// Submit writes without per-write durability.
     Writing,
     /// Submit plain writes, then issue one trailing data sync.
@@ -658,17 +755,17 @@ fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
 /// Logical positioned file write request and its in-loop state.
 pub(super) struct WriteAtRequest {
     /// File used by the current write SQE.
-    pub(super) file: Arc<File>,
+    file: Arc<File>,
     /// Starting file offset for the logical write.
-    pub(super) offset: u64,
+    offset: u64,
     /// Bytes already written successfully.
-    pub(super) written: usize,
+    written: usize,
     /// Write cursor and buffers that still need to be written.
-    pub(super) write: WriteBuffers,
+    write: WriteBuffers,
     /// Current write and durability phase.
-    pub(super) state: WriteAtState,
+    state: WriteAtState,
     /// Page-cache policy for this request.
-    pub(super) cache: Cache,
+    cache: Cache,
 }
 
 impl WriteAtRequest {
@@ -746,15 +843,15 @@ impl WriteAtRequest {
 /// Logical accept request and its in-loop state.
 pub(super) struct AcceptRequest {
     /// Listening socket used by the accept SQE.
-    pub(super) fd: Arc<OwnedFd>,
+    fd: Arc<OwnedFd>,
     /// Peer address scratch filled by the kernel on completion.
-    pub(super) addr: Box<RawSocketAddr>,
+    addr: Box<RawSocketAddr>,
     /// Absolute deadline for the whole logical request.
     ///
     /// Accept callers treat expiry as a cue to re-issue the accept, so the
     /// deadline also bounds how long an abandoned accept can occupy a waiter
     /// slot.
-    pub(super) deadline: Option<Instant>,
+    deadline: Option<Instant>,
 }
 
 impl AcceptRequest {
@@ -812,11 +909,11 @@ impl AcceptRequest {
 /// Logical connect request and its in-loop state.
 pub(super) struct ConnectRequest {
     /// Socket being connected by the connect SQE.
-    pub(super) fd: Arc<OwnedFd>,
+    fd: Arc<OwnedFd>,
     /// Target address read by the kernel.
-    pub(super) addr: Box<RawSocketAddr>,
+    addr: Box<RawSocketAddr>,
     /// Absolute deadline for the whole logical request.
-    pub(super) deadline: Option<Instant>,
+    deadline: Option<Instant>,
 }
 
 impl ConnectRequest {
@@ -862,7 +959,7 @@ impl ConnectRequest {
 /// Logical fsync request and its in-loop state.
 pub(super) struct SyncRequest {
     /// File descriptor to sync.
-    pub(super) file: Arc<File>,
+    file: Arc<File>,
 }
 
 impl SyncRequest {
