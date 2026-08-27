@@ -807,7 +807,7 @@ fn test_foreign_drop_wakes_unbounded_drain() {
     });
 
     let start = Instant::now();
-    harness.driver().close();
+    harness.driver().close_admission();
     harness.shutdown();
     assert!(
         start.elapsed() < Duration::from_secs(30),
@@ -853,7 +853,7 @@ fn test_drain_rearms_wake_poll_before_armed_wait() {
         });
 
         let start = Instant::now();
-        harness.driver().close();
+        harness.driver().close_admission();
         harness.shutdown();
         assert!(
             start.elapsed() < Duration::from_secs(30),
@@ -993,7 +993,7 @@ fn test_off_thread_drop_transfers_granted_capacity_slot() {
 ///
 /// fsync on a socket-backed file fails fast, so the terminal error parks
 /// in the completion entry while the returned ticket is held.
-fn park_sync_ticket(harness: &mut TestLoop, handle: &Handle) -> SyncTicket {
+fn park_sync_ticket(harness: &mut TestLoop, handle: &DriverHandle) -> SyncTicket {
     let (left, _right) = UnixStream::pair().unwrap();
     // SAFETY: `left` is a valid owned fd and is transferred into `File`.
     let file = unsafe { File::from_raw_fd(left.into_raw_fd()) };
@@ -1020,7 +1020,7 @@ fn park_sync_ticket(harness: &mut TestLoop, handle: &Handle) -> SyncTicket {
 
 /// Admit and stage an accept that has no peer, leaving its completion
 /// entry Pending and its waiter in flight.
-fn pending_accept_ticket(harness: &mut TestLoop, handle: &Handle) -> AcceptTicket {
+fn pending_accept_ticket(harness: &mut TestLoop, handle: &DriverHandle) -> AcceptTicket {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let fd = Arc::new(OwnedFd::from(listener));
     let ticket =
@@ -2114,7 +2114,7 @@ fn test_ready_ticket_survives_driver_close() {
     let ticket = park_sync_ticket(&mut harness, &handle);
     harness.shutdown();
 
-    // The ring is gone, but the ticket's Handle keeps the userspace-only
+    // The ring is gone, but the ticket's DriverHandle keeps the userspace-only
     // Ready completion alive and directly consumable.
     assert!(harness.block_on(ticket).is_err());
     harness.handle.with(|ops| {
@@ -2186,7 +2186,7 @@ fn test_capacity_cancel_releases_slot() {
         Instant::now() + Duration::from_secs(60),
     ));
     assert!(poll_once(&harness, &mut parked).is_pending());
-    harness.driver().close();
+    harness.driver().close_admission();
     harness
         .handle
         .with(|ops| assert_eq!(ops.capacity.registered(), 0));
@@ -2201,7 +2201,7 @@ fn test_closed_driver_fails_admission() {
     // Verify ops staged after close resolve with their kind-specific
     // failures without touching the ring.
     let mut harness = TestLoop::new(RingConfig::default());
-    harness.driver().close();
+    harness.driver().close_admission();
 
     let (left, _right) = UnixStream::pair().unwrap();
     let handle = harness.handle.clone();
@@ -2875,7 +2875,7 @@ fn test_closed_driver_fails_capacity_parked_admission() {
     assert!(poll_once(&harness, &mut recv_b).is_pending());
 
     // Close the driver: the parked admission must fail on its next poll.
-    harness.driver().close();
+    harness.driver().close_admission();
     match poll_once(&harness, &mut recv_b) {
         Poll::Ready(Err((_, Error::RecvFailed))) => {}
         other => panic!("expected closed-driver recv failure, got {other:?}"),

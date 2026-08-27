@@ -11,11 +11,11 @@ pub(super) enum WakerAction {
     Wake(Waker),
 }
 
-/// Append-only destination for detached capacity waker actions.
+/// Append-only destination for detached waker actions.
 ///
 /// The driver uses its reusable action vector. Future poll and drop paths use
 /// a fixed batch for the one or two actions produced by a single transition.
-pub(super) trait CapacityActionSink {
+pub(super) trait WakerActionSink {
     /// Ensure room before the state transition that will produce actions.
     fn reserve(&mut self, additional: usize);
 
@@ -23,7 +23,7 @@ pub(super) trait CapacityActionSink {
     fn push(&mut self, action: WakerAction);
 }
 
-impl CapacityActionSink for Vec<WakerAction> {
+impl WakerActionSink for Vec<WakerAction> {
     fn reserve(&mut self, additional: usize) {
         Self::reserve(self, additional);
     }
@@ -33,18 +33,18 @@ impl CapacityActionSink for Vec<WakerAction> {
     }
 }
 
-/// Deferred actions produced by one capacity transition.
+/// Deferred actions produced by one state transition.
 ///
 /// A single admission, cancellation, grant, poll, or orphan transition
 /// produces at most two actions. Batched loop paths use a vector directly.
-pub(super) struct CapacityActions {
+pub(super) struct DeferredWakerActions {
     /// Fixed storage for the transition's actions.
     inline: [Option<WakerAction>; 2],
     /// Number of initialized entries at the start of `inline`.
     inline_len: usize,
 }
 
-impl CapacityActions {
+impl DeferredWakerActions {
     /// Construct an empty batch without allocating.
     pub(super) const fn new() -> Self {
         Self {
@@ -54,11 +54,11 @@ impl CapacityActions {
     }
 }
 
-impl CapacityActionSink for CapacityActions {
+impl WakerActionSink for DeferredWakerActions {
     fn reserve(&mut self, additional: usize) {
         assert!(
             additional <= self.inline.len() - self.inline_len,
-            "capacity action batch exceeded fixed storage"
+            "waker action batch exceeded fixed storage"
         );
     }
 
@@ -69,7 +69,7 @@ impl CapacityActionSink for CapacityActions {
     }
 }
 
-impl IntoIterator for CapacityActions {
+impl IntoIterator for DeferredWakerActions {
     type Item = WakerAction;
     type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<WakerAction>, 2>>;
 
@@ -84,7 +84,7 @@ impl IntoIterator for CapacityActions {
 /// ensures a panicking callback cannot strand later waiters whose state has
 /// already advanced. Secondary payloads are leaked because their destructors
 /// may panic while the first payload is retained.
-pub(super) fn wake_batch(actions: impl IntoIterator<Item = WakerAction>) {
+pub(super) fn run_waker_actions(actions: impl IntoIterator<Item = WakerAction>) {
     let already_panicking = std::thread::panicking();
     let mut first_panic = None;
     for action in actions {

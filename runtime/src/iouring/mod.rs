@@ -156,7 +156,7 @@
 //!   on the internal `eventfd`
 //! - Wake CQEs drain `eventfd` readiness and re-install poll when `IORING_CQE_F_MORE`
 //!   is not set
-//! - A dedicated signalled bit coalesces repeated wake attempts while a wait is armed
+//! - A dedicated latched bit coalesces repeated wake attempts while a wait is armed
 //!
 //! ## Shutdown Process
 //!
@@ -216,7 +216,7 @@
 mod driver;
 #[cfg(test)]
 pub(crate) use driver::testing;
-pub(crate) use driver::{AcceptTicket, Cache, Handle};
+pub(crate) use driver::{AcceptTicket, Cache, DriverHandle};
 pub use driver::{MAX_RING_SIZE, SpinnerConfig};
 mod runtime;
 pub use runtime::{Config, Context, Runner};

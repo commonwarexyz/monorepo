@@ -1,7 +1,7 @@
 //! A single-threaded harness for tests that drive the loop
 //! directly (loop, network, and storage unit tests).
 
-use super::{Driver, Handle, waker::Waker};
+use super::{Driver, DriverHandle, waker::RingWaker};
 use crate::{iouring::RingConfig, telemetry::metrics::Registry};
 use futures::task::{ArcWake, waker as arc_waker};
 use std::{
@@ -14,7 +14,7 @@ use std::{
 
 /// Task waker that latches the loop's out-of-band wake, mirroring how the
 /// runtime executor's task wakers unpark the loop.
-pub(crate) struct Unpark(Waker);
+pub(crate) struct Unpark(RingWaker);
 
 impl ArcWake for Unpark {
     fn wake_by_ref(arc_self: &Arc<Self>) {
@@ -25,7 +25,7 @@ impl ArcWake for Unpark {
 /// Single-threaded loop harness driving `turn`/`park` interleaved with
 /// polling a future, mirroring the runtime executor's structure.
 pub(crate) struct TestLoop {
-    pub(super) handle: Handle,
+    pub(super) handle: DriverHandle,
     /// The owned driver, taken by [TestLoop::shutdown].
     driver: Option<Driver>,
 }
@@ -58,7 +58,7 @@ impl TestLoop {
     }
 
     /// Clone the operation handle used by adapter fixtures.
-    pub(crate) fn clone_handle(&self) -> Handle {
+    pub(crate) fn clone_handle(&self) -> DriverHandle {
         self.handle.clone()
     }
 
@@ -74,7 +74,7 @@ impl TestLoop {
 
     /// Reject new operation admission without draining retained work.
     pub(crate) fn close_admission(&mut self) {
-        self.driver().close();
+        self.driver().close_admission();
     }
 
     /// Build a waker that latches the loop's out-of-band wake, or a noop

@@ -3,7 +3,7 @@
 //! This module implements the wake protocol used by [`super::Driver`].
 //! The active protocol is the out-of-band wake latch:
 //! - Producers publish work through their own synchronized containers and
-//!   then call [`Waker::wake`], which latches a dedicated "wake signalled"
+//!   then call [`RingWaker::wake`], which latches a dedicated "wake latched"
 //!   bit and signals only the currently armed wait target. Task wakes,
 //!   sleeper alarms, and stop notifications are cross-thread sources: their
 //!   same-thread deliveries skip the ring waker entirely because the
@@ -11,11 +11,11 @@
 //!   mailbox always wakes directly.
 //! - The latch coalesces repeated wake attempts: while a wake is already
 //!   pending, further wakes write nothing.
-//! - The loop calls [`Waker::park_idle`] when it is fully idle, sleeping in
+//! - The loop calls [`RingWaker::park_idle`] when it is fully idle, sleeping in
 //!   futex wait on the packed state word.
-//! - The loop uses [`Waker::wait_eventfd`] around `submit_and_wait` and is
+//! - The loop uses [`RingWaker::wait_eventfd`] around `submit_and_wait` and is
 //!   woken through `eventfd` readiness while armed.
-//! - Wake CQEs are acknowledged with [`Waker::acknowledge`].
+//! - Wake CQEs are acknowledged with [`RingWaker::acknowledge`].
 //!
 //! Both wait paths follow a lock-free arm-and-recheck handshake: the loop
 //! blocks only when the post-arm snapshot (produced by the same atomic
@@ -25,7 +25,7 @@
 //! The atomic state combines:
 //! - bit 0: waiting on futex
 //! - bit 1: waiting on eventfd
-//! - bit 2: wake already signalled
+//! - bit 2: wake already latched
 //!
 //! Packed states use `wake | eventfd | futex` bit order:
 //!
@@ -48,11 +48,11 @@
 //! Impossible: 011 and 111
 //! ```
 //!
-//! [`Waker::wake`] sets the sticky wake bit. With no armed target it only
+//! [`RingWaker::wake`] sets the sticky wake bit. With no armed target it only
 //! latches the wake. With one armed target it also signals that target, and
-//! repeated wakes coalesce in the corresponding signalled state. Arming via
-//! [`Waker::park_idle`] or [`Waker::arm`] preserves an existing latch and skips
-//! blocking. [`Waker::clear_wait`] ends the wait epoch by clearing every packed
+//! repeated wakes coalesce in the corresponding latched state. Arming via
+//! [`RingWaker::park_idle`] or [`RingWaker::arm`] preserves an existing latch and skips
+//! blocking. [`RingWaker::clear_wait`] ends the wait epoch by clearing every packed
 //! bit. Both targets cannot be armed because the loop is the sole armer, each
 //! arming path asserts that no target is already armed, and `wake` never sets a
 //! target bit.
@@ -86,20 +86,20 @@ pub const WAKE_USER_DATA: UserData = UserData::MAX;
 const WAITING_ON_FUTEX_BIT: u32 = 1;
 /// Bit used when the loop is blocked in `submit_and_wait` and wakeable via eventfd.
 const WAITING_ON_EVENTFD_BIT: u32 = 1 << 1;
-/// Bit used once a wake has already been signalled for the current wait.
-const WAKE_SIGNALLED_BIT: u32 = 1 << 2;
+/// Bit used once a wake has already been latched for the current wait.
+const WAKE_LATCHED_BIT: u32 = 1 << 2;
 /// Mask covering all wake-state flags.
-const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_SIGNALLED_BIT;
+const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_LATCHED_BIT;
 /// Mask covering just the current wait target bits.
 const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 
-/// RAII guard used by [`Waker::wait_eventfd`] around a `submit_and_wait`
+/// RAII guard used by [`RingWaker::wait_eventfd`] around a `submit_and_wait`
 /// blocking section.
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
 /// wake if producers publish new work or the final handle disconnects.
 pub struct ArmGuard<'a> {
-    waker: &'a Waker,
+    waker: &'a RingWaker,
     wake_latched: bool,
 }
 
@@ -122,7 +122,7 @@ impl Drop for ArmGuard<'_> {
 /// executor's `Tasks::queue` and `queue_root`,
 /// `register_alarm`, and the driver's orphan mailbox) publish through their
 /// own synchronized containers and use only the out-of-band
-/// `WAKE_SIGNALLED_BIT` latch via [`Waker::wake`], the task and alarm
+/// `WAKE_LATCHED_BIT` latch via [`RingWaker::wake`], the task and alarm
 /// producers only when called from a foreign thread (same-thread deliveries
 /// are observed by the executor's pre-park rechecks) and the orphan mailbox
 /// unconditionally. After arming a wait
@@ -140,7 +140,7 @@ impl Drop for ArmGuard<'_> {
 /// This makes notifications racing with the sleep transition observable by a
 /// futex or eventfd wakeup.
 #[cfg(not(feature = "loom"))]
-struct WakerInner {
+struct RingWakerInner {
     /// Non-blocking eventfd monitored by the loop's multishot wake poll.
     wake_fd: OwnedFd,
     /// Wait-target and wake-latch state.
@@ -156,7 +156,7 @@ struct WakerInner {
 /// explore memory orderings and wake races. It is not a model of kernel CQE
 /// ordering, `io_uring_enter`, or wake-poll rearm behavior.
 #[cfg(feature = "loom")]
-struct WakerInner {
+struct RingWakerInner {
     /// Wait-target and wake-latch state.
     state: AtomicU32,
     /// Mutex standing in for the kernel futex bucket lock.
@@ -173,11 +173,11 @@ struct WakerInner {
 
 /// Internal hybrid futex/eventfd wake source for the io_uring loop.
 ///
-/// - Wake out of band via [`Waker::wake`] (the production wake path)
-/// - Park in the fully-idle path via [`Waker::park_idle`]
-/// - Arm a `submit_and_wait` blocking section via [`Waker::wait_eventfd`]
-/// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
-/// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
+/// - Wake out of band via [`RingWaker::wake`] (the production wake path)
+/// - Park in the fully-idle path via [`RingWaker::park_idle`]
+/// - Arm a `submit_and_wait` blocking section via [`RingWaker::wait_eventfd`]
+/// - Drain `eventfd` readiness on wake CQEs via [`RingWaker::acknowledge`]
+/// - Re-arm the multishot poll request when needed via [`RingWaker::reinstall`]
 ///
 /// This type intentionally separates wait gating in `state` from kernel
 /// readiness consumption in the `eventfd` read path.
@@ -185,11 +185,11 @@ struct WakerInner {
 /// Keeping these concerns separate makes the wake protocol explicit and avoids
 /// coupling correctness to exact eventfd coalescing behavior.
 #[derive(Clone)]
-pub struct Waker {
-    inner: Arc<WakerInner>,
+pub struct RingWaker {
+    inner: Arc<RingWakerInner>,
 }
 
-impl Waker {
+impl RingWaker {
     /// Create a hybrid futex/eventfd wake source backed by a non-blocking
     /// `eventfd`.
     #[cfg(not(feature = "loom"))]
@@ -203,7 +203,7 @@ impl Waker {
         let wake_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         Ok(Self {
-            inner: Arc::new(WakerInner {
+            inner: Arc::new(RingWakerInner {
                 wake_fd,
                 state: AtomicU32::new(0),
             }),
@@ -218,7 +218,7 @@ impl Waker {
     #[cfg(feature = "loom")]
     pub fn new() -> Result<Self, std::io::Error> {
         Ok(Self {
-            inner: Arc::new(WakerInner {
+            inner: Arc::new(RingWakerInner {
                 state: AtomicU32::new(0),
                 futex_bucket: Mutex::new(()),
                 futex_waiters: Condvar::new(),
@@ -231,7 +231,7 @@ impl Waker {
 
     /// Latch one pending wake and, if a target is currently armed, wake it.
     ///
-    /// The first caller to set `WAKE_SIGNALLED_BIT` in an epoch performs the
+    /// The first caller to set `WAKE_LATCHED_BIT` in an epoch performs the
     /// wake. Subsequent callers do nothing until the loop disarms and clears
     /// the bit.
     ///
@@ -248,9 +248,9 @@ impl Waker {
         let prev = self
             .inner
             .state
-            .fetch_or(WAKE_SIGNALLED_BIT, Ordering::Release);
+            .fetch_or(WAKE_LATCHED_BIT, Ordering::Release);
 
-        if (prev & WAKE_SIGNALLED_BIT) != 0 {
+        if (prev & WAKE_LATCHED_BIT) != 0 {
             return;
         }
 
@@ -276,8 +276,8 @@ impl Waker {
     /// or [Self::arm]) whose post-arm snapshot revalidates the latch and whose
     /// wait-state clear consumes it.
     #[inline]
-    pub fn signalled(&self) -> bool {
-        self.inner.state.load(Ordering::Relaxed) & WAKE_SIGNALLED_BIT != 0
+    pub fn is_wake_latched(&self) -> bool {
+        self.inner.state.load(Ordering::Relaxed) & WAKE_LATCHED_BIT != 0
     }
 
     /// Park on the idle path until the packed wake state changes.
@@ -308,7 +308,7 @@ impl Waker {
 
         // Only block if the post-arm snapshot still looks idle. When that is
         // true, futex-wait on the same packed state word that was just armed.
-        if (snapshot & WAKE_SIGNALLED_BIT) == 0 {
+        if (snapshot & WAKE_LATCHED_BIT) == 0 {
             let before = Instant::now();
             let slept = self.futex_wait(snapshot);
             self.clear_wait();
@@ -340,7 +340,7 @@ impl Waker {
         );
 
         let snapshot = prev | WAITING_ON_EVENTFD_BIT;
-        let wake_latched = (snapshot & WAKE_SIGNALLED_BIT) != 0;
+        let wake_latched = (snapshot & WAKE_LATCHED_BIT) != 0;
         ArmGuard {
             waker: self,
             wake_latched,
@@ -363,7 +363,7 @@ impl Waker {
     ///
     /// This acknowledges kernel-visible `eventfd` readiness. Wait gating is
     /// tracked separately in the packed `state` atomic and is managed by
-    /// [`Waker::park_idle`] and [`Waker::arm`].
+    /// [`RingWaker::park_idle`] and [`RingWaker::arm`].
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
     /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
@@ -520,7 +520,7 @@ impl Waker {
     /// Wake one thread sleeping on the fully-idle futex path.
     ///
     /// This is used only when the loop has no active ring waiters and is
-    /// blocked in [`Waker::futex_wait`] on the wake-state word.
+    /// blocked in [`RingWaker::futex_wait`] on the wake-state word.
     #[cfg(not(feature = "loom"))]
     fn futex_wake(&self) {
         loop {
@@ -547,7 +547,7 @@ impl Waker {
                     // unsupported op. For this private, aligned in-process futex,
                     // all of those indicate a broken invariant or environment.
                     // Unlike `futex_wait()`, there is no safe "just continue in
-                    // userspace" fallback here: because `WAKE_SIGNALLED_BIT` is
+                    // userspace" fallback here: because `WAKE_LATCHED_BIT` is
                     // already latched for this epoch, logging and continuing would
                     // risk a permanent lost wake.
                     //
@@ -645,11 +645,11 @@ pub mod tests {
     #[cfg(not(feature = "loom"))]
     use std::{mem::size_of, os::fd::AsRawFd};
 
-    pub fn state_bits(waker: &Waker) -> u32 {
+    pub fn state_bits(waker: &RingWaker) -> u32 {
         waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
     }
 
-    pub fn eventfd_count(waker: &Waker) -> u64 {
+    pub fn eventfd_count(waker: &RingWaker) -> u64 {
         #[cfg(not(feature = "loom"))]
         {
             let mut value = 0u64;
@@ -682,7 +682,7 @@ pub mod tests {
         // against the parked thread's equality check, futex syscall, and
         // eventual `clear_wait()`.
         for _ in 0..64 {
-            let waker = Waker::new().expect("eventfd creation should succeed");
+            let waker = RingWaker::new().expect("eventfd creation should succeed");
             let notifier_waker = waker.clone();
 
             let handle = std::thread::spawn(move || {
@@ -702,7 +702,7 @@ pub mod tests {
     fn test_wake_before_park_idle_skips_sleep() {
         // Verify an out-of-band wake latched before idle arming makes the next
         // idle park return immediately instead of sleeping.
-        let waker = Waker::new().expect("eventfd creation should succeed");
+        let waker = RingWaker::new().expect("eventfd creation should succeed");
 
         waker.wake();
         let duration = waker.park_idle();
@@ -714,7 +714,7 @@ pub mod tests {
     #[cfg(not(feature = "loom"))]
     #[test]
     fn test_futex_wait_rejects_changed_state_before_syscall() {
-        let waker = Waker::new().expect("eventfd creation should succeed");
+        let waker = RingWaker::new().expect("eventfd creation should succeed");
         waker
             .inner
             .state
@@ -729,7 +729,7 @@ pub mod tests {
 
     #[test]
     fn test_wait_eventfd_callback_panic_clears_wait_state() {
-        let waker = Waker::new().expect("eventfd creation should succeed");
+        let waker = RingWaker::new().expect("eventfd creation should succeed");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             waker.wait_eventfd(|| {
@@ -753,10 +753,10 @@ pub mod tests {
     fn test_unarmed_wakes_rearm_across_epochs() {
         // Verify unarmed wake latches are consumed when the loop next arms,
         // and that later unarmed wakes can be observed in later epochs.
-        let waker = Waker::new().expect("eventfd creation should succeed");
+        let waker = RingWaker::new().expect("eventfd creation should succeed");
 
         waker.wake();
-        assert_eq!(state_bits(&waker), WAKE_SIGNALLED_BIT);
+        assert_eq!(state_bits(&waker), WAKE_LATCHED_BIT);
         let arm = waker.arm();
         assert!(arm.wake_latched());
         drop(arm);
@@ -765,7 +765,7 @@ pub mod tests {
         assert_eq!(eventfd_count(&waker), 0);
 
         waker.wake();
-        assert_eq!(state_bits(&waker), WAKE_SIGNALLED_BIT);
+        assert_eq!(state_bits(&waker), WAKE_LATCHED_BIT);
         let arm = waker.arm();
         assert!(arm.wake_latched());
         drop(arm);
@@ -778,7 +778,7 @@ pub mod tests {
     fn test_wake_deduplicates_eventfd_wakes() {
         // Verify contended out-of-band notifications while the same eventfd
         // wait is armed only queue one wake write.
-        let waker = Waker::new().expect("eventfd creation should succeed");
+        let waker = RingWaker::new().expect("eventfd creation should succeed");
         let barrier = Arc::new(std::sync::Barrier::new(5));
         let mut handles = Vec::new();
 
@@ -804,7 +804,7 @@ pub mod tests {
     #[test]
     fn test_eventfd_wake_and_acknowledge_empty_paths() {
         // Verify eventfd wake and drain, including an already empty counter.
-        let waker = Waker::new().expect("eventfd creation should succeed");
+        let waker = RingWaker::new().expect("eventfd creation should succeed");
 
         // Drive one normal wake cycle, then immediately drain again to hit the
         // non-blocking empty-read path.
@@ -819,7 +819,7 @@ pub mod tests {
         // Verify `reinstall()` queues one multishot wake poll SQE when space
         // is available and reports failure without mutating the SQ when it is
         // full.
-        let waker = Waker::new().expect("eventfd creation should succeed");
+        let waker = RingWaker::new().expect("eventfd creation should succeed");
         let mut ring = IoUring::new(8).expect("io_uring creation should succeed");
 
         // With SQ space available, `reinstall()` should enqueue exactly one
@@ -904,7 +904,7 @@ mod loom_tests {
     // CQE. In the loom model, `eventfd_wake()` increments `eventfd_counter` and
     // notifies this condvar, so this helper represents only that blocking
     // boundary.
-    fn wait_for_eventfd_readiness(waker: &Waker) {
+    fn wait_for_eventfd_readiness(waker: &RingWaker) {
         let mut guard = waker.inner.eventfd_readiness.lock().unwrap();
         while waker.inner.eventfd_counter.load(Ordering::Acquire) == 0 {
             guard = waker.inner.eventfd_waiters.wait(guard).unwrap();
@@ -915,8 +915,8 @@ mod loom_tests {
     //
     // This is deliberately a relaxed spin: the tests using it pair with the
     // producer's Release through the later `clear_wait()` Acquire.
-    fn wait_for_wake_signal(waker: &Waker) {
-        while state_bits(waker) & WAKE_SIGNALLED_BIT == 0 {
+    fn wait_for_wake_signal(waker: &RingWaker) {
+        while state_bits(waker) & WAKE_LATCHED_BIT == 0 {
             thread::yield_now();
         }
     }
@@ -930,7 +930,7 @@ mod loom_tests {
         // the arm guard so `clear_wait()`'s Acquire can pair with `wake()`'s
         // Release.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            let waker = RingWaker::new().unwrap();
             let queued = Arc::new(QueuedRequest::empty());
 
             let notifier = thread::spawn({
@@ -960,7 +960,7 @@ mod loom_tests {
         // Concurrent out-of-band wakes that arrive before the loop arms should
         // coalesce to one sticky wake bit without queuing eventfd readiness.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            let waker = RingWaker::new().unwrap();
 
             let a = thread::spawn({
                 let waker = waker.clone();
@@ -990,7 +990,7 @@ mod loom_tests {
         // resumes and `clear_wait()` must acquire the notifier's earlier state
         // change before the loop checks for disconnect or shutdown state.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            let waker = RingWaker::new().unwrap();
             let queued = Arc::new(QueuedRequest::empty());
             let guard = waker.arm();
             assert!(!guard.wake_latched());
@@ -1023,7 +1023,7 @@ mod loom_tests {
         // loop. If it arrives before arming, `wake_latched` skips the wait.
         // Otherwise the modeled eventfd signal releases the loop.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            let waker = RingWaker::new().unwrap();
             let notifier = thread::spawn({
                 let waker = waker.clone();
                 move || waker.wake()
@@ -1049,7 +1049,7 @@ mod loom_tests {
         // The loop either sees the wake bit before sleeping or is resumed by the
         // modeled futex wake.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            let waker = RingWaker::new().unwrap();
             let notifier = thread::spawn({
                 let waker = waker.clone();
                 move || waker.wake()

@@ -193,7 +193,7 @@ pub struct Network {
     /// Network configuration.
     cfg: Config,
     /// Used to submit operations to the io_uring event loop.
-    handle: iouring::Handle,
+    handle: iouring::DriverHandle,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
@@ -205,7 +205,7 @@ impl Network {
     /// large enough, given the number of connections that will be maintained.
     /// Each in-flight send/recv to/from each connection consumes a ring slot, as
     /// does each in-flight accept and connect.
-    pub(crate) const fn new(cfg: Config, handle: iouring::Handle, pool: BufferPool) -> Self {
+    pub(crate) const fn new(cfg: Config, handle: iouring::DriverHandle, pool: BufferPool) -> Self {
         Self { cfg, handle, pool }
     }
 }
@@ -286,7 +286,7 @@ pub struct Listener {
     /// Address the listener is bound to.
     local_addr: SocketAddr,
     /// Used to submit operations to the io_uring event loop.
-    handle: iouring::Handle,
+    handle: iouring::DriverHandle,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
     /// In-flight accept, retained so a cancelled accept future resumes the
@@ -353,7 +353,7 @@ pub struct Sink {
     /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
-    handle: iouring::Handle,
+    handle: iouring::DriverHandle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
     /// Tracks this sink's lifecycle.
@@ -372,7 +372,7 @@ enum SinkState {
 
 impl Sink {
     /// Construct a sink that submits logical send requests through one io_uring loop.
-    const fn new(fd: Arc<OwnedFd>, handle: iouring::Handle, timeout: Duration) -> Self {
+    const fn new(fd: Arc<OwnedFd>, handle: iouring::DriverHandle, timeout: Duration) -> Self {
         Self {
             fd,
             handle,
@@ -450,7 +450,7 @@ pub struct Stream {
     /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
-    handle: iouring::Handle,
+    handle: iouring::DriverHandle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Tracks whether a previous recv failure has made this stream unusable.
@@ -469,7 +469,7 @@ impl Stream {
     /// Construct a stream with an optional internal read buffer.
     fn new(
         fd: Arc<OwnedFd>,
-        handle: iouring::Handle,
+        handle: iouring::DriverHandle,
         timeout: Duration,
         buffer_capacity: usize,
         pool: BufferPool,

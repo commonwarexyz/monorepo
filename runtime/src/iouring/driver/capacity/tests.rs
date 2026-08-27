@@ -1,5 +1,5 @@
 use super::*;
-use crate::iouring::driver::callbacks::{WakerAction, wake_batch};
+use crate::iouring::driver::callbacks::{WakerAction, run_waker_actions};
 use commonware_utils::sync::Mutex;
 use futures::task::{ArcWake, waker as arc_waker};
 use std::{
@@ -62,20 +62,20 @@ fn poll_capacity_with_deadline(
         &mut actions,
     );
     actions.extend(incoming.map(WakerAction::Drop));
-    wake_batch(actions);
+    run_waker_actions(actions);
     admission
 }
 
 fn reconcile_capacity(capacity: &mut CapacityWaiters, free_len: usize) {
     let mut actions = Vec::new();
     capacity.reconcile(free_len, &mut actions);
-    wake_batch(actions);
+    run_waker_actions(actions);
 }
 
 fn cancel_capacity(capacity: &mut CapacityWaiters, id: CapacityId, free_len: usize) {
     let mut actions = Vec::new();
     capacity.cancel(id, free_len, &mut actions);
-    wake_batch(actions);
+    run_waker_actions(actions);
 }
 
 unsafe fn count_clone(data: *const ()) -> RawWaker {
@@ -203,7 +203,7 @@ fn test_capacity_granted_deadline_transfers_permit_to_fifo_survivor() {
 
     let mut actions = Vec::new();
     capacity.expire(now + Duration::from_millis(15), 1, &mut actions);
-    wake_batch(actions);
+    run_waker_actions(actions);
     assert_eq!(*log.lock(), vec![0, 1]);
     assert!(capacity.live_state(registrations[0].unwrap()).is_none());
     assert!(matches!(
@@ -408,7 +408,7 @@ fn test_capacity_close_recycles_terminal_registrations() {
     }
     let mut grant_actions = Vec::new();
     capacity.reconcile(2, &mut grant_actions);
-    wake_batch(grant_actions);
+    run_waker_actions(grant_actions);
     assert_eq!(capacity.reserved(), 2);
     assert_eq!(capacity.queued(), 1);
 
@@ -478,4 +478,3 @@ fn test_capacity_wake_count_is_linear_in_waiter_count() {
     assert_eq!(capacity.registered(), 0);
     assert_eq!(capacity.arena_len(), WAITERS);
 }
-

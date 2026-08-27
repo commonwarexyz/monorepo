@@ -1,4 +1,4 @@
-use super::callbacks::{CapacityActionSink, WakerAction};
+use super::callbacks::{WakerActionSink, WakerAction};
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,
@@ -126,7 +126,7 @@ impl CapacityWaiters {
         free_len: usize,
         deadline: Option<Instant>,
         incoming_waker: &mut Option<Waker>,
-        actions: &mut impl CapacityActionSink,
+        actions: &mut impl WakerActionSink,
     ) -> CapacityAdmission {
         assert!(
             self.reserved <= free_len,
@@ -213,7 +213,7 @@ impl CapacityWaiters {
         &mut self,
         now: Instant,
         free_len: usize,
-        actions: &mut impl CapacityActionSink,
+        actions: &mut impl WakerActionSink,
     ) {
         let mut changed = false;
         loop {
@@ -321,7 +321,7 @@ impl CapacityWaiters {
         &mut self,
         id: CapacityId,
         free_len: usize,
-        actions: &mut impl CapacityActionSink,
+        actions: &mut impl WakerActionSink,
     ) {
         let Some(state) = self.live_state(id) else {
             return;
@@ -363,7 +363,7 @@ impl CapacityWaiters {
     /// Each transition moves the queued waker into a deferred wake action and
     /// leaves a payload-free grant behind. No RawWaker vtable function runs
     /// while the capacity arena is borrowed.
-    pub(super) fn reconcile(&mut self, free_len: usize, actions: &mut impl CapacityActionSink) {
+    pub(super) fn reconcile(&mut self, free_len: usize, actions: &mut impl WakerActionSink) {
         assert!(
             self.reserved <= free_len,
             "capacity reservations exceed waiter free slots"

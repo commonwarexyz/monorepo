@@ -30,10 +30,10 @@ impl ArcWake for PanicWaker {
 }
 
 #[test]
-fn test_wake_batch_finishes_committed_actions_before_panicking() {
+fn test_run_waker_actions_finishes_committed_actions_before_panicking() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let result = catch_unwind(AssertUnwindSafe(|| {
-        wake_batch([
+        run_waker_actions([
             WakerAction::Wake(arc_waker(Arc::new(PanicWaker))),
             WakerAction::Wake(log_waker(1, &log)),
         ]);
@@ -63,7 +63,7 @@ fn recv_request() -> Request {
 
 #[test]
 fn test_capacity_close_wins_after_unobserved_expiry() {
-    let handle = Handle::new(1, RingWaker::new().unwrap());
+    let handle = DriverHandle::new(1, RingWaker::new().unwrap());
     let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
     let mut blocker = Box::pin(handle.recv(
         Arc::new(blocker_left.into()),
@@ -95,8 +95,8 @@ fn test_capacity_close_wins_after_unobserved_expiry() {
         assert_eq!(ops.capacity.registered(), 0);
         actions
     });
-    wake_batch(actions);
-    assert!(handle.close().is_empty());
+    run_waker_actions(actions);
+    assert!(handle.close_admission().is_empty());
 
     assert!(matches!(
         expired.as_mut().poll(&mut cx),
@@ -125,7 +125,7 @@ fn panic_clone_waker() -> Waker {
 
 /// RawWaker state that orphans one waiter from its drop callback.
 struct ReentrantOrphan {
-    handle: Handle,
+    handle: DriverHandle,
     waiter: Cell<Option<WaiterId>>,
 }
 
@@ -170,7 +170,7 @@ fn reentrant_orphan_waker(state: &ReentrantOrphan) -> Waker {
 
 #[test]
 fn test_op_waker_reentrant_drop_runs_after_ops_borrow() {
-    let handle = Handle::new(2, RingWaker::new().unwrap());
+    let handle = DriverHandle::new(2, RingWaker::new().unwrap());
     let target = handle.with(|ops| {
         ops.waiters
             .insert(recv_request(), futures::task::noop_waker())
@@ -214,7 +214,7 @@ fn test_op_waker_reentrant_drop_runs_after_ops_borrow() {
 
 #[test]
 fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
-    let handle = Handle::new(2, RingWaker::new().unwrap());
+    let handle = DriverHandle::new(2, RingWaker::new().unwrap());
     let target = handle.with(|ops| {
         ops.waiters
             .insert(recv_request(), futures::task::noop_waker())
@@ -262,7 +262,7 @@ fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
 
 #[test]
 fn test_pending_op_clone_panic_preserves_observer() {
-    let handle = Handle::new(1, RingWaker::new().unwrap());
+    let handle = DriverHandle::new(1, RingWaker::new().unwrap());
     let noop = futures::task::noop_waker();
     let mut noop_cx = Context::from_waker(&noop);
     let mut op = Op::new(&handle, recv_request());
@@ -291,7 +291,7 @@ fn test_pending_op_clone_panic_preserves_observer() {
 
 #[test]
 fn test_pending_ticket_clone_panic_preserves_observer() {
-    let handle = Handle::new(1, RingWaker::new().unwrap());
+    let handle = DriverHandle::new(1, RingWaker::new().unwrap());
     let noop = futures::task::noop_waker();
     let (completion_id, waiter_id) = handle.with(|ops| {
         let mut incoming = Some(noop.clone());
@@ -325,7 +325,7 @@ fn test_pending_ticket_clone_panic_preserves_observer() {
 
 #[test]
 fn test_granted_admission_clone_panic_preserves_reservation_for_retry() {
-    let handle = Handle::new(1, RingWaker::new().unwrap());
+    let handle = DriverHandle::new(1, RingWaker::new().unwrap());
     let blocker = handle.with(|ops| {
         ops.waiters
             .insert(recv_request(), futures::task::noop_waker())
@@ -358,7 +358,7 @@ fn test_granted_admission_clone_panic_preserves_reservation_for_retry() {
         ops.capacity.reconcile(ops.waiters.free_len(), &mut actions);
         actions
     });
-    wake_batch(actions);
+    run_waker_actions(actions);
     handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
         assert_eq!(ops.capacity.registered(), 1);
@@ -402,7 +402,7 @@ fn test_granted_admission_clone_panic_preserves_reservation_for_retry() {
 
 #[test]
 fn test_queued_ticket_admission_fails_after_close() {
-    let handle = Handle::new(1, RingWaker::new().unwrap());
+    let handle = DriverHandle::new(1, RingWaker::new().unwrap());
     let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
     let mut blocker = Box::pin(handle.recv(
         Arc::new(blocker_left.into()),
@@ -426,7 +426,7 @@ fn test_queued_ticket_admission_fails_after_close() {
         assert_eq!(ops.capacity.queued(), 1);
     });
 
-    for waker in handle.close() {
+    for waker in handle.close_admission() {
         waker.wake();
     }
     let Poll::Ready(mut ticket) = admission.as_mut().poll(&mut cx) else {

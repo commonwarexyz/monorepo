@@ -1,12 +1,12 @@
 use super::{
-    Handle,
-    callbacks::{WakerAction, wake_batch},
+    DriverHandle,
+    callbacks::{WakerAction, run_waker_actions},
     handle::{self, Ops},
     request,
     spinner::Spinner,
     timeout::{self, Tick, TimeoutWheel},
     waiter::{CompletionId, CompletionOutcome, StageOutcome, WaiterId},
-    waker::{WAKE_USER_DATA, Waker},
+    waker::{WAKE_USER_DATA, RingWaker},
 };
 use crate::{
     iouring::RingConfig,
@@ -103,14 +103,14 @@ impl Drop for PendingOperations {
 /// State owned by one io_uring event loop.
 ///
 /// [`DriverState`] and its ring remain on one runtime worker. Front-end
-/// futures share [`Handle`], whose affinity cell exposes [`Ops`] only on that
+/// futures share [`DriverHandle`], whose affinity cell exposes [`Ops`] only on that
 /// worker.
 ///
 /// ```text
 /// owner runtime thread
 /// +-- DriverState: shutdown, metrics, timeouts, idle/wake, scratch
-/// `-- Handle -> Ops (thread-affine): waiters, completions, queues, capacity
-/// foreign-thread drops -> Handle orphan mailbox -> owner loop
+/// `-- DriverHandle -> Ops (thread-affine): waiters, completions, queues, capacity
+/// foreign-thread drops -> DriverHandle orphan mailbox -> owner loop
 /// ```
 ///
 /// The three `Vec` fields are scratch, not logical state. Each is empty at its
@@ -134,7 +134,7 @@ struct DriverState {
     /// This keeps [`Ops`] and its kernel-referenced resources alive through
     /// ring drain. Owner-thread futures borrow the affinity cell directly,
     /// while foreign-thread drops publish only to the orphan mailbox.
-    handle: Handle,
+    handle: DriverHandle,
     /// Owner-loop index of active admitted-request deadlines.
     ///
     /// It is mutated only while matching waiter state in [`Ops`] is borrowed.
@@ -148,14 +148,14 @@ struct DriverState {
     idle_spinner: Spinner,
     /// Shared futex and eventfd wake source.
     ///
-    /// Producers latch notifications through [`Waker::wake`]. The owner loop
+    /// Producers latch notifications through [`RingWaker::wake`]. The owner loop
     /// consumes the latch, acknowledges wake CQEs, and manages poll rearming.
-    waker: Waker,
+    waker: RingWaker,
     /// Whether a multishot eventfd poll SQE must be staged.
     ///
     /// `true` means no wake poll is known to be live or already staged. It is
     /// set initially and when a wake CQE lacks the kernel `MORE` flag, then
-    /// cleared only after [`Waker::reinstall`] accepts a new SQE. It must be
+    /// cleared only after [`RingWaker::reinstall`] accepts a new SQE. It must be
     /// `false` before eventfd-backed blocking. The fully idle futex path does
     /// not require the poll to be armed.
     wake_rearm_needed: bool,
@@ -184,7 +184,7 @@ impl DriverState {
     /// Must be called outside any borrow of the driver state: wakers reenter
     /// executor scheduling but never the loop state itself.
     fn flush_wakers(&mut self) {
-        wake_batch(self.pending_waker_actions.drain(..));
+        run_waker_actions(self.pending_waker_actions.drain(..));
     }
 
     /// Reconcile FIFO capacity grants against the waiter table.
@@ -196,7 +196,7 @@ impl DriverState {
             .reconcile(ops.waiters.free_len(), &mut self.pending_waker_actions);
     }
 
-    /// Wind down work routed through [handle::Handle] by a foreign-thread
+    /// Wind down work routed through [handle::DriverHandle] by a foreign-thread
     /// drop: admitted waiters orphan exactly as an on-thread drop would, and
     /// parked admission attempts release their capacity slots.
     fn process_orphans(&mut self, ops: &mut Ops) {
@@ -333,7 +333,7 @@ impl DriverState {
             // trip. The spin must not skip `park_idle` on a hit: only the
             // arm-and-clear cycle consumes the latch, and leaving it set
             // would make every subsequent idle park return instantly.
-            self.idle_spinner.spin(|| self.waker.signalled());
+            self.idle_spinner.spin(|| self.waker.is_wake_latched());
             if let Some(park_duration) = self.waker.park_idle() {
                 self.idle_spinner.on_wake(park_duration);
             }
@@ -880,7 +880,7 @@ pub(crate) fn new_ring(size: u32) -> Result<IoUring, std::io::Error> {
 /// Owned half of the io_uring driver: the ring plus the loop state that
 /// services it.
 ///
-/// Op futures reach the driver's shared op state through [Handle]s, while the
+/// Op futures reach the driver's shared op state through [DriverHandle]s, while the
 /// worker that owns the [Driver] is the only place SQEs are built and CQEs
 /// are reaped. The ring and loop state live in separate fields so the
 /// delegating methods below can borrow them disjointly.
@@ -899,18 +899,18 @@ impl Driver {
         cfg: RingConfig,
         max_request_timeout: Duration,
         registry: &mut impl Register,
-    ) -> Result<(Self, Handle), std::io::Error> {
+    ) -> Result<(Self, DriverHandle), std::io::Error> {
         let size = validate_ring_config(&cfg, max_request_timeout);
 
         // Ask the kernel to construct the ring before allocating the waiter
         // table whose capacity is proportional to the effective ring size.
         let ring = new_ring(size)?;
         let pending_operations = PendingOperations::new(registry);
-        let waker = Waker::new().expect("unable to create wake eventfd");
+        let waker = RingWaker::new().expect("unable to create wake eventfd");
         let timeout_wheel =
             TimeoutWheel::new(max_request_timeout, cfg.timeout_wheel_tick, Instant::now());
-        let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.signalled());
-        let handle = Handle::new(size as usize, waker.clone());
+        let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.is_wake_latched());
+        let handle = DriverHandle::new(size as usize, waker.clone());
         let state = DriverState {
             shutdown_timeout: cfg.shutdown_timeout,
             pending_operations,
@@ -928,7 +928,7 @@ impl Driver {
     }
 
     /// Clone the driver's cross-thread wake source.
-    pub(crate) fn waker(&self) -> Waker {
+    pub(crate) fn waker(&self) -> RingWaker {
         self.state.waker.clone()
     }
 
@@ -948,9 +948,9 @@ impl Driver {
     ///
     /// The state is invalidated before callbacks run. All callbacks are
     /// attempted even if one panics, then the earliest panic is resumed.
-    pub(crate) fn close(&self) {
-        let wakers = self.state.handle.close();
-        wake_batch(wakers.into_iter().map(WakerAction::Wake));
+    pub(crate) fn close_admission(&self) {
+        let wakers = self.state.handle.close_admission();
+        run_waker_actions(wakers.into_iter().map(WakerAction::Wake));
     }
 
     /// Close admission and drain in-flight ring work before destroying the
@@ -961,7 +961,8 @@ impl Driver {
     /// driver's op-table reference while the kernel may still access request
     /// buffers.
     pub(crate) fn shutdown(mut self) {
-        let close_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.close()));
+        let close_panic =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.close_admission()));
 
         // The guard must live inside this frame: locals drop before
         // parameters during unwind, so the abort fires while `self` (the

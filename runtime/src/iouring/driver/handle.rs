@@ -1,6 +1,6 @@
 //! Thread-affine op submission for the io_uring runtime.
 //!
-//! The [Handle] is the shared half of the driver: the waiter slab, the
+//! The [DriverHandle] is the shared half of the driver: the waiter slab, the
 //! backlog and cancel queues, and the capacity wait list reached by op futures
 //! and by the event loop that services them (see [super::Driver]). The
 //! runtime traits force [crate::Blob], [crate::Sink], and [crate::Stream] to
@@ -54,14 +54,14 @@
 
 use super::{
     Tick,
-    callbacks::{CapacityActionSink, CapacityActions, WakerAction, wake_batch},
+    callbacks::{WakerActionSink, DeferredWakerActions, WakerAction, run_waker_actions},
     capacity::{CapacityAdmission, CapacityId, CapacityWaiters},
     request::{Cache, Output, Request},
     waiter::{
         CompletionDropOutcome, CompletionId, DeferredPoll, DropOutcome, PollState,
         TicketCompletions, WaiterId, Waiters,
     },
-    waker::Waker as RingWaker,
+    waker::RingWaker,
 };
 use crate::{Error, IoBufMut, IoBufs, WriteOptions};
 use commonware_utils::sync::Mutex;
@@ -186,21 +186,21 @@ impl Ops {
 /// the generation-tagged ID through [OrphanMailbox]. The loop cancels that ID
 /// and transfers any released permit on its next turn. Expiry and close
 /// recycle the slot immediately, so a later stale cancellation is a no-op.
-struct Registration<'a> {
+struct CapacityRegistration<'a> {
     /// Affine driver state and cross-thread orphan mailbox.
-    handle: &'a Handle,
+    handle: &'a DriverHandle,
     /// Live capacity registration, if the admission is queued or granted.
     slot: Option<CapacityId>,
 }
 
-impl<'a> Registration<'a> {
+impl<'a> CapacityRegistration<'a> {
     /// Construct an unregistered guard for one admission future.
-    const fn new(handle: &'a Handle) -> Self {
+    const fn new(handle: &'a DriverHandle) -> Self {
         Self { handle, slot: None }
     }
 }
 
-impl Drop for Registration<'_> {
+impl Drop for CapacityRegistration<'_> {
     fn drop(&mut self) {
         let Some(slot) = self.slot.take() else {
             return;
@@ -211,7 +211,7 @@ impl Drop for Registration<'_> {
         let mut slot = Some(slot);
         let cancelled = self.handle.try_with(|ops| {
             let slot = slot.take().expect("capacity slot consumed twice");
-            let mut actions = CapacityActions::new();
+            let mut actions = DeferredWakerActions::new();
             ops.capacity
                 .cancel(slot, ops.waiters.free_len(), &mut actions);
             actions
@@ -221,22 +221,22 @@ impl Drop for Registration<'_> {
             self.handle.push_orphan(Orphan::Capacity(slot));
             return;
         };
-        wake_batch(actions);
+        run_waker_actions(actions);
     }
 }
 
-/// Handle to driver state shared by the network and storage front-ends and the
-/// event loop itself.
+/// Shared driver handle used by the network and storage front-ends and the
+/// event loop.
 ///
 /// Operation state remains protected by an affinity-checked [Affine] cell,
 /// while foreign-thread drops reach the colocated mailbox without touching
 /// that cell.
 #[derive(Clone)]
-pub(crate) struct Handle {
+pub(crate) struct DriverHandle {
     inner: Arc<HandleInner>,
 }
 
-/// State with the same lifetime as every [Handle] clone.
+/// State with the same lifetime as every [DriverHandle] clone.
 struct HandleInner {
     /// Operation state accessible only from the owning runtime thread.
     ops: Affine<RefCell<Ops>>,
@@ -293,7 +293,7 @@ impl OrphanMailbox {
     }
 }
 
-impl Handle {
+impl DriverHandle {
     /// Create the op state for a driver whose slab tracks at most `capacity`
     /// requests, waking the loop through `waker` for foreign-thread drops.
     ///
@@ -353,7 +353,7 @@ impl Handle {
     /// Close the op state: subsequent admissions fail with their
     /// kind-specific error. Returns the capacity waiters so the caller can wake them
     /// outside the borrow.
-    pub(crate) fn close(&self) -> Vec<Waker> {
+    pub(crate) fn close_admission(&self) -> Vec<Waker> {
         self.with(|ops| {
             ops.closed = true;
             ops.capacity.close()
@@ -483,13 +483,13 @@ impl Handle {
 /// then the waiter id is pushed onto the backlog. The generic closure is
 /// monomorphized for ordinary ops and detached tickets.
 fn poll_admission<T>(
-    handle: &Handle,
+    handle: &DriverHandle,
     request: &mut Option<Request>,
-    registration: &mut Registration<'_>,
+    registration: &mut CapacityRegistration<'_>,
     cx: &mut Context<'_>,
     admit: impl FnOnce(&mut Ops, Request, &mut Option<Waker>) -> (T, WaiterId),
-) -> (Poll<Result<T, Output>>, CapacityActions) {
-    let mut actions = CapacityActions::new();
+) -> (Poll<Result<T, Output>>, DeferredWakerActions) {
+    let mut actions = DeferredWakerActions::new();
     // RawWaker clone callbacks are external code. Run them before borrowing
     // Ops, then move or defer-drop the clone during the state transition.
     let mut incoming_waker = Some(cx.waker().clone());
@@ -560,7 +560,7 @@ fn poll_admission<T>(
 ///
 /// A pending poll refreshes the stored task waker. Taking a result frees its
 /// slot, but the caller reconciles capacity only after publishing local Done.
-fn poll_op_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<Output> {
+fn poll_op_completion(handle: &DriverHandle, id: WaiterId, cx: &mut Context<'_>) -> Poll<Output> {
     match handle.with(|ops| ops.waiters.poll_state(id, cx.waker())) {
         PollState::Ready(output) => return Poll::Ready(output),
         PollState::PendingCurrent => return Poll::Pending,
@@ -568,7 +568,7 @@ fn poll_op_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Po
     }
 
     let mut incoming = Some(cx.waker().clone());
-    let mut actions = CapacityActions::new();
+    let mut actions = DeferredWakerActions::new();
     actions.reserve(1);
     let poll = match handle.with(|ops| ops.waiters.poll_take_deferred(id, &mut incoming)) {
         DeferredPoll::Ready(output) => {
@@ -583,12 +583,12 @@ fn poll_op_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Po
             Poll::Pending
         }
     };
-    wake_batch(actions);
+    run_waker_actions(actions);
     poll
 }
 
 /// Poll a detached ticket's completion entry.
-fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_>) -> Poll<Output> {
+fn poll_ticket_completion(handle: &DriverHandle, id: CompletionId, cx: &mut Context<'_>) -> Poll<Output> {
     match handle.with(|ops| ops.completions.poll_state(id, cx.waker())) {
         PollState::Ready(output) => return Poll::Ready(output),
         PollState::PendingCurrent => return Poll::Pending,
@@ -596,7 +596,7 @@ fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_
     }
 
     let mut incoming = Some(cx.waker().clone());
-    let mut actions = CapacityActions::new();
+    let mut actions = DeferredWakerActions::new();
     actions.reserve(1);
     let poll = match handle.with(|ops| ops.completions.poll_take_deferred(id, &mut incoming)) {
         DeferredPoll::Ready(output) => {
@@ -611,7 +611,7 @@ fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_
             Poll::Pending
         }
     };
-    wake_batch(actions);
+    run_waker_actions(actions);
     poll
 }
 
@@ -620,7 +620,7 @@ fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_
 fn reserve_orphan_wind_down(
     ops: &mut Ops,
     outcome: &DropOutcome,
-    actions: &mut impl CapacityActionSink,
+    actions: &mut impl WakerActionSink,
 ) {
     let capacity_actions = usize::from(matches!(outcome, DropOutcome::Freed));
     actions.reserve(
@@ -648,7 +648,7 @@ fn wind_down_orphan_prepared(
     id: WaiterId,
     outcome: DropOutcome,
     completion_waker: Option<Waker>,
-    actions: &mut impl CapacityActionSink,
+    actions: &mut impl WakerActionSink,
 ) {
     let op_waker = ops.waiters.mark_orphaned(id, &outcome);
     if let Some(waker) = completion_waker {
@@ -677,7 +677,7 @@ fn wind_down_orphan_prepared(
 }
 
 /// Apply the orphan wind-down for `id` on the op table.
-pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl CapacityActionSink) {
+pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl WakerActionSink) {
     let outcome = ops.waiters.classify_orphan(id);
     reserve_orphan_wind_down(ops, &outcome, actions);
     wind_down_orphan_prepared(ops, id, outcome, None, actions);
@@ -690,7 +690,7 @@ pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl C
 pub(super) fn wind_down_ticket(
     ops: &mut Ops,
     id: CompletionId,
-    actions: &mut impl CapacityActionSink,
+    actions: &mut impl WakerActionSink,
 ) {
     let Some(waiter_id) = ops.completions.pending_waiter(id) else {
         assert!(matches!(
@@ -719,29 +719,29 @@ pub(super) fn wind_down_ticket(
 /// thread-affine table directly: it hands the id to the loop through the
 /// orphan mailbox instead, and the loop applies the same wind-down on its
 /// next turn.
-fn orphan_waiter(handle: &Handle, id: WaiterId) {
+fn orphan_waiter(handle: &DriverHandle, id: WaiterId) {
     let Some(actions) = handle.try_with(|ops| {
-        let mut actions = CapacityActions::new();
+        let mut actions = DeferredWakerActions::new();
         wind_down_orphan(ops, id, &mut actions);
         actions
     }) else {
         handle.push_orphan(Orphan::Waiter(id));
         return;
     };
-    wake_batch(actions);
+    run_waker_actions(actions);
 }
 
 /// Wind down a detached ticket using only its completion ID.
-fn orphan_ticket(handle: &Handle, id: CompletionId) {
+fn orphan_ticket(handle: &DriverHandle, id: CompletionId) {
     let Some(actions) = handle.try_with(|ops| {
-        let mut actions = CapacityActions::new();
+        let mut actions = DeferredWakerActions::new();
         wind_down_ticket(ops, id, &mut actions);
         actions
     }) else {
         handle.push_orphan(Orphan::Completion(id));
         return;
     };
-    wake_batch(actions);
+    run_waker_actions(actions);
 }
 
 /// Outcome of one admission attempt.
@@ -777,20 +777,20 @@ enum OpState {
 /// (see the module docs for the wind-down rules).
 #[must_use]
 struct Op<'a> {
-    handle: &'a Handle,
+    handle: &'a DriverHandle,
     state: OpState,
     /// Capacity wait-list registration while queued on a full slab, released
     /// on admission or by drop (via its RAII guard).
-    registration: Registration<'a>,
+    registration: CapacityRegistration<'a>,
 }
 
 impl<'a> Op<'a> {
     /// Construct a queued op whose future owns `request` until admission.
-    const fn new(handle: &'a Handle, request: Request) -> Self {
+    const fn new(handle: &'a DriverHandle, request: Request) -> Self {
         Self {
             handle,
             state: OpState::Queued(Some(request)),
-            registration: Registration::new(handle),
+            registration: CapacityRegistration::new(handle),
         }
     }
 }
@@ -817,17 +817,17 @@ impl Future for Op<'_> {
                     // so an admitted op always returns pending here.
                     Poll::Ready(Ok(id)) => {
                         this.state = OpState::Waiting(id);
-                        wake_batch(actions);
+                        run_waker_actions(actions);
                         Poll::Pending
                     }
                     Poll::Ready(Err(output)) => {
                         this.state = OpState::Done;
-                        wake_batch(actions);
+                        run_waker_actions(actions);
                         Poll::Ready(output)
                     }
                     // A full slab leaves the request in place: no bytes move.
                     Poll::Pending => {
-                        wake_batch(actions);
+                        run_waker_actions(actions);
                         Poll::Pending
                     }
                 }
@@ -836,11 +836,11 @@ impl Future for Op<'_> {
                 let output = std::task::ready!(poll_op_completion(this.handle, *id, cx));
                 this.state = OpState::Done;
                 let actions = this.handle.with(|ops| {
-                    let mut actions = CapacityActions::new();
+                    let mut actions = DeferredWakerActions::new();
                     ops.capacity.reconcile(ops.waiters.free_len(), &mut actions);
                     actions
                 });
-                wake_batch(actions);
+                run_waker_actions(actions);
                 Poll::Ready(output)
             }
             OpState::Done => panic!("io_uring op polled after completion"),
@@ -880,7 +880,7 @@ enum TicketState {
 /// only the completion ID. A Pending drop winds down the linked waiter, while
 /// a Ready drop never addresses the already recycled waiter.
 struct Ticket {
-    handle: Handle,
+    handle: DriverHandle,
     state: TicketState,
 }
 
@@ -890,11 +890,11 @@ impl Ticket {
     ///
     /// After admission the ticket retains only its completion ID, not a
     /// capacity registration or reserved grant.
-    async fn admit(handle: &Handle, request: Request) -> Self {
+    async fn admit(handle: &DriverHandle, request: Request) -> Self {
         let mut request = Some(request);
         // The guard lives outside the poll closure so cancelling this future
         // while parked releases its capacity slot.
-        let mut registration = Registration::new(handle);
+        let mut registration = CapacityRegistration::new(handle);
         let (state, actions) = std::future::poll_fn(|cx| {
             let (admission, actions) = poll_admission(
                 handle,
@@ -914,7 +914,7 @@ impl Ticket {
                 Poll::Ready(Ok(id)) => Poll::Ready((TicketState::Waiting(id), actions)),
                 Poll::Ready(Err(output)) => Poll::Ready((TicketState::Failed(output), actions)),
                 Poll::Pending => {
-                    wake_batch(actions);
+                    run_waker_actions(actions);
                     Poll::Pending
                 }
             }
@@ -924,7 +924,7 @@ impl Ticket {
             handle: handle.clone(),
             state,
         };
-        wake_batch(actions);
+        run_waker_actions(actions);
         ticket
     }
 }

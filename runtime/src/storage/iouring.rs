@@ -108,7 +108,7 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Storage {
     lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
-    io_handle: iouring::Handle,
+    io_handle: iouring::DriverHandle,
     pool: BufferPool,
 }
 
@@ -120,7 +120,7 @@ impl Storage {
     /// so the runtime passes one lock to all of its workers.
     pub(crate) const fn new(
         storage_directory: PathBuf,
-        io_handle: iouring::Handle,
+        io_handle: iouring::DriverHandle,
         pool: BufferPool,
         lock: Arc<Mutex<()>>,
     ) -> Self {
@@ -285,7 +285,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_handle: iouring::Handle,
+    io_handle: iouring::DriverHandle,
     /// Buffer pool for read allocations
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
@@ -301,7 +301,7 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_handle: iouring::Handle,
+        io_handle: iouring::DriverHandle,
         pool: BufferPool,
         data_offset: u64,
     ) -> Self {
