@@ -331,7 +331,7 @@ impl Config {
     pub const fn storage_directory(&self) -> &PathBuf {
         &self.storage_directory
     }
-    /// Returns the blob layouts accepted by storage.
+    /// See [Config]
     pub const fn storage_blob_layout(&self) -> &RangeInclusive<BlobLayout> {
         &self.storage_blob_layout
     }
@@ -506,10 +506,10 @@ impl crate::Runner for Runner {
                     IoUringStorage::start(
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
+                            blob_layout: self.cfg.storage_blob_layout.clone(),
                             iouring_config: Default::default(),
                             thread_stack_size: self.cfg.thread_stack_size,
                         },
-                        self.cfg.storage_blob_layout.clone(),
                         &mut iouring_registry,
                         storage_buffer_pool.clone(),
                     ),
@@ -517,12 +517,12 @@ impl crate::Runner for Runner {
                 );
             } else {
                 let storage = MeteredStorage::new(
-                    TokioStorage::new_with_blob_layout(
+                    TokioStorage::new(
                         TokioStorageConfig::new(
                             self.cfg.storage_directory.clone(),
                             self.cfg.maximum_buffer_size,
+                            self.cfg.storage_blob_layout.clone(),
                         ),
-                        self.cfg.storage_blob_layout.clone(),
                         storage_buffer_pool.clone(),
                     ),
                     &mut runtime_registry,

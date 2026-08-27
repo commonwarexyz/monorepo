@@ -77,6 +77,8 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
+    /// Blob layouts accepted by storage.
+    pub blob_layout: RangeInclusive<Layout>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated io_uring worker thread.
@@ -94,14 +96,10 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub(crate) fn start(
-        cfg: Config,
-        blob_layout: RangeInclusive<Layout>,
-        registry: &mut impl Register,
-        pool: BufferPool,
-    ) -> Self {
+    pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
+            blob_layout,
             mut iouring_config,
             thread_stack_size,
         } = cfg;
@@ -487,10 +485,10 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
+                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
-            Layout::ALL,
             &mut registry.sub_registry("storage"),
             pool,
         );
@@ -980,10 +978,10 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_root.clone(),
+                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            Layout::ALL,
             &mut registry.sub_registry("storage"),
             pool,
         );
@@ -1016,10 +1014,10 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
+                blob_layout: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
-            Layout::ALL,
             &mut registry.sub_registry("storage"),
             pool,
         );
