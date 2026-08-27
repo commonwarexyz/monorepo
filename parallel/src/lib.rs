@@ -1001,7 +1001,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             &self,
             len: usize,
             multiplier: usize,
-            run: impl FnOnce(policy::Execution) -> R,
+            run: impl FnOnce(policy::RunExecution) -> R,
         ) -> R {
             match self.try_execute(len, multiplier, |execution| {
                 Ok::<_, Infallible>(run(execution))
@@ -1016,13 +1016,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             &self,
             len: usize,
             multiplier: usize,
-            run: impl FnOnce(policy::Execution) -> Result<R, E>,
+            run: impl FnOnce(policy::RunExecution) -> Result<R, E>,
         ) -> Result<R, E> {
             let Some(policy) = &self.policy else {
                 let execution = if self.parallelism <= 1 {
-                    policy::Execution::Serial
+                    policy::RunExecution::Serial
                 } else {
-                    policy::Execution::Parallel
+                    policy::RunExecution::Parallel
                 };
                 return run(execution);
             };
@@ -1166,8 +1166,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             PAR: FnOnce() -> R + Send,
         {
             self.execute(len, 1, |execution| match execution {
-                policy::Execution::Serial => serial(),
-                policy::Execution::Parallel => parallel(),
+                policy::RunExecution::Serial => serial(),
+                policy::RunExecution::Parallel => parallel(),
             })
         }
 
@@ -1180,8 +1180,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             PAR: FnOnce() -> Result<R, E> + Send,
         {
             self.try_execute(len, 1, |execution| match execution {
-                policy::Execution::Serial => serial(),
-                policy::Execution::Parallel => parallel(),
+                policy::RunExecution::Serial => serial(),
+                policy::RunExecution::Parallel => parallel(),
             })
         }
 
@@ -1205,10 +1205,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => {
+                policy::RunExecution::Serial => {
                     Sequential.fold_init(items, init, identity, fold_op, reduce_op)
                 }
-                policy::Execution::Parallel => self.thread_pool.install(|| {
+                policy::RunExecution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
                         .fold(
@@ -1233,8 +1233,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.map_collect_vec(items, map_op),
-                policy::Execution::Parallel => self
+                policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
+                policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map(map_op).collect()),
             })
@@ -1250,8 +1250,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.try_execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                policy::Execution::Parallel => self
+                policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
+                policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map(map_op).collect()),
             })
@@ -1268,8 +1268,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::Execution::Parallel => self
+                policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map_init(init, map_op).collect()),
             })
@@ -1292,8 +1292,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), multiplier, |execution| match execution {
-                policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::Execution::Parallel => self
+                policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map_init(init, map_op).collect()),
             })
@@ -1317,10 +1317,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.try_execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => {
+                policy::RunExecution::Serial => {
                     Sequential.try_fold(items, identity, fold_op, reduce_op)
                 }
-                policy::Execution::Parallel => self.thread_pool.install(|| {
+                policy::RunExecution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
                         .try_fold(&identity, &fold_op)
@@ -1346,8 +1346,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.sort_by(items, compare),
-                policy::Execution::Parallel => {
+                policy::RunExecution::Serial => Sequential.sort_by(items, compare),
+                policy::RunExecution::Parallel => {
                     self.thread_pool.install(|| items.par_sort_by(compare))
                 }
             });

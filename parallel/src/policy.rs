@@ -66,12 +66,12 @@ const EWMA_PREVIOUS_WEIGHT: u64 = 4;
 const EWMA_NEXT_WEIGHT: u64 = 1;
 const EWMA_WEIGHT: u64 = EWMA_PREVIOUS_WEIGHT + EWMA_NEXT_WEIGHT;
 
-type Entries = DashMap<Key, Entry>;
+type RunEntries = DashMap<Key, RunEntry>;
 type SpawnEntries = DashMap<Key, SpawnEntry>;
 
 /// The path the policy chose for a call: the strategy runs the matching serial or parallel body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Execution {
+pub(super) enum RunExecution {
     Serial,
     Parallel,
 }
@@ -84,10 +84,11 @@ pub(super) enum SpawnExecution {
     Offload,
 }
 
-/// Adaptive serial-vs-parallel decisions, shared cheaply across [`super::Rayon`] clones.
+/// Adaptive execution decisions (serial vs parallel for collection operations, inline vs
+/// offload for spawned jobs), shared cheaply across [`super::Rayon`] clones.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Policy {
-    entries: Arc<Entries>,
+    run_entries: Arc<RunEntries>,
     spawn_entries: Arc<SpawnEntries>,
 }
 
@@ -105,20 +106,20 @@ impl Policy {
         len: usize,
         work: usize,
         parallelism: usize,
-        run: impl FnOnce(Execution) -> Result<R, E>,
+        run: impl FnOnce(RunExecution) -> Result<R, E>,
     ) -> Result<R, E> {
         // A strategy configured for serial execution cannot benefit from rayon scheduling, so
         // always run serial and never spend a measurement on it.
         if parallelism <= 1 {
-            return run(Execution::Serial);
+            return run(RunExecution::Serial);
         }
 
         let key = Key::new(caller, len, work, parallelism);
-        let (execution, measure) = self.entries.entry(key).or_default().choose(parallelism);
+        let (execution, measure) = self.run_entries.entry(key).or_default().choose(parallelism);
         let start = measure.then(Instant::now);
         let result = run(execution);
         if let (Some(start), Ok(_)) = (start, &result) {
-            let mut entry = self.entries.entry(key).or_default();
+            let mut entry = self.run_entries.entry(key).or_default();
             entry.record(execution, start.elapsed());
         }
         result
@@ -210,7 +211,7 @@ impl Policy {
 
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.entries.len()
+        self.run_entries.len()
     }
 
     /// Whether the spawn entry for this call site has recorded at least one sample
@@ -237,7 +238,7 @@ impl Policy {
         parallelism: usize,
     ) -> Option<(Option<u64>, Option<u64>)> {
         let key = Key::new(caller, len, work, parallelism);
-        self.entries
+        self.run_entries
             .get(&key)
             .map(|e| (e.serial_ns.get(), e.parallel_ns.get()))
     }
@@ -345,13 +346,13 @@ impl Cadence {
 
 /// Timing state for one [`Key`].
 #[derive(Clone, Copy, Debug, Default)]
-struct Entry {
+struct RunEntry {
     serial_ns: Estimate,
     parallel_ns: Estimate,
     cadence: Cadence,
 }
 
-impl Entry {
+impl RunEntry {
     // A serial pass of work that parallel finishes in `parallel_ns` can take up to
     // `parallel_ns * parallelism`.
     fn projected_serial(parallel_ns: u64, parallelism: usize) -> u64 {
@@ -361,26 +362,26 @@ impl Entry {
     // Returns the path to prefer: the faster estimate, provided both the projected and
     // measured serial cost fit under the budget (the tuner only arbitrates small cases).
     // Ties go to serial (equal wall time for fewer busy workers).
-    fn preferred(serial_ns: u64, parallel_ns: u64, parallelism: usize) -> Execution {
+    fn preferred(serial_ns: u64, parallel_ns: u64, parallelism: usize) -> RunExecution {
         if Self::projected_serial(parallel_ns, parallelism) >= SERIAL_SAMPLE_BUDGET_NS
             || serial_ns >= SERIAL_SAMPLE_BUDGET_NS
             || parallel_ns < serial_ns
         {
-            Execution::Parallel
+            RunExecution::Parallel
         } else {
-            Execution::Serial
+            RunExecution::Serial
         }
     }
 
     // Returns the path to run and whether the caller should time it and feed the elapsed duration
     // back to [`record`](Self::record).
-    fn choose(&mut self, parallelism: usize) -> (Execution, bool) {
+    fn choose(&mut self, parallelism: usize) -> (RunExecution, bool) {
         // Seed the parallel estimate with the first call. Saturating the cadence keeps the
         // entry due for an immediate boundary, so the serial seed is offered as soon as the
         // parallel estimate lands (when the projection allows).
         let Some(parallel_ns) = self.parallel_ns.get() else {
             self.cadence.saturate();
-            return (Execution::Parallel, true);
+            return (RunExecution::Parallel, true);
         };
 
         // The projection gates serial in both sampling and preference: a case whose projection
@@ -392,10 +393,10 @@ impl Entry {
         // Until serial is sampled, parallel is preferred by default (winner and loser tie, so
         // the cadence runs at its base interval) and the boundary doubles as the seed slot.
         let (preferred, winner_ns, loser_ns) = self.serial_ns.get().map_or(
-            (Execution::Parallel, parallel_ns, parallel_ns),
+            (RunExecution::Parallel, parallel_ns, parallel_ns),
             |serial_ns| match Self::preferred(serial_ns, parallel_ns, parallelism) {
-                Execution::Serial => (Execution::Serial, serial_ns, parallel_ns),
-                Execution::Parallel => (Execution::Parallel, parallel_ns, serial_ns),
+                RunExecution::Serial => (RunExecution::Serial, serial_ns, parallel_ns),
+                RunExecution::Parallel => (RunExecution::Parallel, parallel_ns, serial_ns),
             },
         );
 
@@ -406,9 +407,9 @@ impl Entry {
         let tick = self.cadence.tick(winner_ns, loser_ns);
         if tick.boundary {
             let probe = match preferred {
-                Execution::Serial => Execution::Parallel,
-                Execution::Parallel if can_sample_serial => Execution::Serial,
-                Execution::Parallel => Execution::Parallel,
+                RunExecution::Serial => RunExecution::Parallel,
+                RunExecution::Parallel if can_sample_serial => RunExecution::Serial,
+                RunExecution::Parallel => RunExecution::Parallel,
             };
             return (probe, true);
         }
@@ -416,11 +417,11 @@ impl Entry {
         (preferred, tick.measure)
     }
 
-    fn record(&mut self, execution: Execution, elapsed: Duration) {
+    fn record(&mut self, execution: RunExecution, elapsed: Duration) {
         let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         match execution {
-            Execution::Serial => self.serial_ns.record(elapsed_ns),
-            Execution::Parallel => self.parallel_ns.record(elapsed_ns),
+            RunExecution::Serial => self.serial_ns.record(elapsed_ns),
+            RunExecution::Parallel => self.parallel_ns.record(elapsed_ns),
         }
     }
 }
@@ -508,54 +509,54 @@ const fn len_bucket(len: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Entry, Execution, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Policy, RESAMPLE_INTERVAL,
-        SPAWN_INLINE_BUDGET_NS, SpawnEntry, SpawnExecution,
+        MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Policy, RESAMPLE_INTERVAL, RunEntry,
+        RunExecution, SPAWN_INLINE_BUDGET_NS, SpawnEntry, SpawnExecution,
     };
     use std::{panic::Location, time::Duration};
 
     const PARALLELISM: usize = 4;
 
-    fn choose(entry: &mut Entry) -> (Execution, bool) {
+    fn choose(entry: &mut RunEntry) -> (RunExecution, bool) {
         entry.choose(PARALLELISM)
     }
 
     #[test]
     fn starts_parallel_then_seeds_serial_immediately() {
-        let mut entry = Entry::default();
+        let mut entry = RunEntry::default();
 
-        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
-        entry.record(Execution::Parallel, Duration::from_micros(100));
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
+        entry.record(RunExecution::Parallel, Duration::from_micros(100));
 
         // The projection fits the budget, so the serial seed is offered on the very next
         // call rather than after a full interval.
-        assert_eq!(choose(&mut entry), (Execution::Serial, true));
-        entry.record(Execution::Serial, Duration::from_micros(95));
+        assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
+        entry.record(RunExecution::Serial, Duration::from_micros(95));
 
         // With both estimates seeded, the boundary resumes its normal cadence.
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Serial, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Serial, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
-        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
     }
 
     #[test]
     fn defers_serial_seed_when_projection_exceeds_budget() {
-        let mut entry = Entry::default();
+        let mut entry = RunEntry::default();
 
-        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
-        entry.record(Execution::Parallel, Duration::from_millis(10));
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
+        entry.record(RunExecution::Parallel, Duration::from_millis(10));
 
         // The projection (10ms x 4) is over budget, so the immediate boundary refreshes
         // parallel instead of seeding serial and the cadence resets to a full interval.
-        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
         assert!(entry.serial_ns.get().is_none());
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
     }
@@ -564,14 +565,14 @@ mod tests {
     fn never_seeds_serial_when_projection_exceeds_budget() {
         // A serial pass could cost up to parallel * parallelism. When that projection exceeds
         // the budget, the tuner biases to parallel without ever paying a serial sample.
-        let mut entry = Entry::default();
+        let mut entry = RunEntry::default();
 
-        entry.record(Execution::Parallel, Duration::from_millis(10));
+        entry.record(RunExecution::Parallel, Duration::from_millis(10));
 
         for i in 1..=(2 * RESAMPLE_INTERVAL) {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
         assert!(entry.serial_ns.get().is_none());
@@ -581,14 +582,14 @@ mod tests {
     fn never_runs_serial_on_big_work() {
         // The production profile of a large signature batch: parallel wall of 25ms on a
         // 12-thread pool. Serial must never run, no matter how many calls arrive.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(25));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_millis(25));
 
         for _ in 0..10_000 {
             let (execution, measure) = entry.choose(12);
-            assert_eq!(execution, Execution::Parallel);
+            assert_eq!(execution, RunExecution::Parallel);
             if measure {
-                entry.record(Execution::Parallel, Duration::from_millis(25));
+                entry.record(RunExecution::Parallel, Duration::from_millis(25));
             }
         }
         assert!(entry.serial_ns.get().is_none());
@@ -599,13 +600,13 @@ mod tests {
         // Both estimates exceed the budget and serial nominally wins the comparison, but the
         // tuner only arbitrates small cases: big work runs parallel outright, and the serial
         // probe stays suppressed because the projection is over budget too.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(30));
-        entry.record(Execution::Serial, Duration::from_millis(12));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_millis(30));
+        entry.record(RunExecution::Serial, Duration::from_millis(12));
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
             let (execution, _) = choose(&mut entry);
-            assert_eq!(execution, Execution::Parallel);
+            assert_eq!(execution, RunExecution::Parallel);
         }
     }
 
@@ -614,44 +615,44 @@ mod tests {
         // A workload grew within its bucket: parallel is now 25ms on a 12-thread pool
         // (projection 300ms, well over budget), but a stale serial estimate from a smaller
         // input claims 8ms. The live projection must keep serial from running.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(25));
-        entry.record(Execution::Serial, Duration::from_millis(8));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_millis(25));
+        entry.record(RunExecution::Serial, Duration::from_millis(8));
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
             let (execution, _) = entry.choose(12);
-            assert_eq!(execution, Execution::Parallel);
+            assert_eq!(execution, RunExecution::Parallel);
         }
     }
 
     #[test]
     fn prefers_serial_when_faster() {
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(100));
-        entry.record(Execution::Serial, Duration::from_micros(95));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(100));
+        entry.record(RunExecution::Serial, Duration::from_micros(95));
 
-        assert_eq!(choose(&mut entry), (Execution::Serial, false));
+        assert_eq!(choose(&mut entry), (RunExecution::Serial, false));
     }
 
     #[test]
     fn prefers_parallel_when_it_wins_wall_time() {
         // Serial is only 2x slower in wall time (cheaper in worker time on a 4-thread pool),
         // but the policy optimizes latency: parallel wins.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(100));
-        entry.record(Execution::Serial, Duration::from_micros(200));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(100));
+        entry.record(RunExecution::Serial, Duration::from_micros(200));
 
-        assert_eq!(choose(&mut entry), (Execution::Parallel, false));
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, false));
     }
 
     #[test]
     fn prefers_serial_on_tie() {
         // Equal wall time: serial occupies one worker instead of the whole pool.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(100));
-        entry.record(Execution::Serial, Duration::from_micros(100));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(100));
+        entry.record(RunExecution::Serial, Duration::from_micros(100));
 
-        assert_eq!(choose(&mut entry), (Execution::Serial, false));
+        assert_eq!(choose(&mut entry), (RunExecution::Serial, false));
     }
 
     #[test]
@@ -659,33 +660,33 @@ mod tests {
         // Before serial is seeded there is no loser: parallel samples smooth into the EWMA,
         // so a single outlier (a contended call) cannot swing the projection that gates
         // serial sampling.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(10));
-        entry.record(Execution::Parallel, Duration::from_millis(20));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_millis(10));
+        entry.record(RunExecution::Parallel, Duration::from_millis(20));
 
         assert_eq!(entry.parallel_ns.get(), Some(12_000_000));
     }
 
     #[test]
     fn blends_preferred_samples_with_integer_math() {
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_nanos(1000));
-        entry.record(Execution::Serial, Duration::from_nanos(100));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_nanos(1000));
+        entry.record(RunExecution::Serial, Duration::from_nanos(100));
 
         // Serial is preferred, so further serial samples blend 4:1.
-        entry.record(Execution::Serial, Duration::from_nanos(200));
+        entry.record(RunExecution::Serial, Duration::from_nanos(200));
 
         assert_eq!(entry.serial_ns.get(), Some(120));
     }
 
     #[test]
     fn blends_preferred_parallel_samples() {
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_nanos(100));
-        entry.record(Execution::Serial, Duration::from_nanos(1000));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_nanos(100));
+        entry.record(RunExecution::Serial, Duration::from_nanos(1000));
 
         // Parallel is preferred, so further parallel samples blend 4:1.
-        entry.record(Execution::Parallel, Duration::from_nanos(200));
+        entry.record(RunExecution::Parallel, Duration::from_nanos(200));
 
         assert_eq!(entry.parallel_ns.get(), Some(120));
     }
@@ -694,20 +695,20 @@ mod tests {
     fn probes_blend_into_stale_estimates() {
         // A probe's sample blends like any other, so one probe moves a stale estimate by a
         // fifth of the gap rather than trusting a single measurement outright.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(25));
-        entry.record(Execution::Serial, Duration::from_millis(100));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_millis(25));
+        entry.record(RunExecution::Serial, Duration::from_millis(100));
 
-        entry.record(Execution::Serial, Duration::from_millis(5));
+        entry.record(RunExecution::Serial, Duration::from_millis(5));
 
         assert_eq!(entry.serial_ns.get(), Some(81_000_000));
         assert_eq!(
-            Entry::preferred(
+            RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
                 entry.parallel_ns.get().unwrap(),
                 PARALLELISM
             ),
-            Execution::Parallel
+            RunExecution::Parallel
         );
     }
 
@@ -715,80 +716,80 @@ mod tests {
     fn seeds_serial_once_projection_shrinks_into_budget() {
         // The projection is live: a key that starts over budget seeds serial at the first
         // boundary after refreshes shrink the parallel estimate into the budget.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(10));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_millis(10));
 
         for _ in 1..RESAMPLE_INTERVAL {
             let (execution, measure) = choose(&mut entry);
-            assert_eq!(execution, Execution::Parallel);
+            assert_eq!(execution, RunExecution::Parallel);
             if measure {
-                entry.record(Execution::Parallel, Duration::from_micros(100));
+                entry.record(RunExecution::Parallel, Duration::from_micros(100));
             }
         }
-        assert_eq!(choose(&mut entry), (Execution::Serial, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
     }
 
     #[test]
     fn resamples_other_execution() {
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(100));
-        entry.record(Execution::Serial, Duration::from_micros(80));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(100));
+        entry.record(RunExecution::Serial, Duration::from_micros(80));
 
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Serial, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Serial, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
-        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
     }
 
     #[test]
     fn resamples_serial_when_parallel_wins() {
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(100));
-        entry.record(Execution::Serial, Duration::from_micros(150));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(100));
+        entry.record(RunExecution::Serial, Duration::from_micros(150));
 
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
-        assert_eq!(choose(&mut entry), (Execution::Serial, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
     }
 
     #[test]
     fn resample_interval_doubles_per_slowdown_multiple() {
         // Parallel lost by 2x-3x, so the probe interval doubles once.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(250));
-        entry.record(Execution::Serial, Duration::from_micros(100));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(250));
+        entry.record(RunExecution::Serial, Duration::from_micros(100));
 
         for i in 1..(2 * RESAMPLE_INTERVAL) {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Serial, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Serial, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
-        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
     }
 
     #[test]
     fn resample_interval_is_capped() {
         // Serial lost by 9x, so the interval shift is capped and the probe still happens.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(100));
-        entry.record(Execution::Serial, Duration::from_micros(900));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(100));
+        entry.record(RunExecution::Serial, Duration::from_micros(900));
 
         let interval = RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT;
         for i in 1..interval {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
-        assert_eq!(choose(&mut entry), (Execution::Serial, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
     }
 
     #[test]
@@ -797,40 +798,40 @@ mod tests {
         // is preferred. The projection is still under budget (2ms x 4 = 8ms). The true
         // parallel cost is 0.5ms: probes blend the estimate down geometrically until the
         // preference flips.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(2));
-        entry.record(Execution::Serial, Duration::from_millis(1));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_millis(2));
+        entry.record(RunExecution::Serial, Duration::from_millis(1));
         assert_eq!(
-            Entry::preferred(
+            RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
                 entry.parallel_ns.get().unwrap(),
                 PARALLELISM
             ),
-            Execution::Serial
+            RunExecution::Serial
         );
 
         let mut probes = 0;
         let mut flipped_at = None;
         for i in 1..=1_000 {
-            if Entry::preferred(
+            if RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
                 entry.parallel_ns.get().unwrap(),
                 PARALLELISM,
-            ) == Execution::Parallel
+            ) == RunExecution::Parallel
             {
                 flipped_at = Some(i - 1);
                 break;
             }
             let (execution, measure) = choose(&mut entry);
             match execution {
-                Execution::Parallel => {
+                RunExecution::Parallel => {
                     assert!(measure);
                     probes += 1;
-                    entry.record(Execution::Parallel, Duration::from_micros(500));
+                    entry.record(RunExecution::Parallel, Duration::from_micros(500));
                 }
-                Execution::Serial => {
+                RunExecution::Serial => {
                     if measure {
-                        entry.record(Execution::Serial, Duration::from_millis(1));
+                        entry.record(RunExecution::Serial, Duration::from_millis(1));
                     }
                 }
             }
@@ -848,22 +849,22 @@ mod tests {
         // Exactly one caller crosses the probe boundary and receives the serial seed, so
         // concurrent callers cannot herd onto serial. A seed whose sample never lands (the
         // call panicked) is offered again one interval later instead of wedging the key.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(250));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(250));
 
         for round in 0..2 {
             for i in 1..RESAMPLE_INTERVAL {
                 assert_eq!(
                     choose(&mut entry),
-                    (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0),
+                    (RunExecution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0),
                     "round {round}"
                 );
             }
-            assert_eq!(choose(&mut entry), (Execution::Serial, true));
+            assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
         }
 
-        entry.record(Execution::Serial, Duration::from_millis(1));
-        assert_eq!(choose(&mut entry).0, Execution::Parallel);
+        entry.record(RunExecution::Serial, Duration::from_millis(1));
+        assert_eq!(choose(&mut entry).0, RunExecution::Parallel);
     }
 
     #[test]
@@ -871,16 +872,16 @@ mod tests {
         // A serial estimate poisoned over the budget (e.g. one contended stall) must not
         // lock serial out forever: the probe gate reads the live projection, not the stale
         // estimate.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(500));
-        entry.record(Execution::Serial, Duration::from_millis(15));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(500));
+        entry.record(RunExecution::Serial, Duration::from_millis(15));
         assert_eq!(
-            Entry::preferred(
+            RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
                 entry.parallel_ns.get().unwrap(),
                 PARALLELISM
             ),
-            Execution::Parallel
+            RunExecution::Parallel
         );
 
         // Slowdown 15ms / 500us = 30 caps the shift, so the probe fires at 100 << 5 calls.
@@ -888,12 +889,12 @@ mod tests {
         for i in 1..interval {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
-        assert_eq!(choose(&mut entry), (Execution::Serial, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
 
-        entry.record(Execution::Serial, Duration::from_micros(300));
+        entry.record(RunExecution::Serial, Duration::from_micros(300));
         assert_eq!(entry.serial_ns.get(), Some(12_060_000));
     }
 
@@ -901,44 +902,44 @@ mod tests {
     fn poisoned_probe_cannot_flip_preference() {
         // A spuriously fast serial sample (e.g. from a contended probe) blends into the EWMA
         // and cannot flip the preference on its own.
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(800));
-        entry.record(Execution::Serial, Duration::from_millis(3));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(800));
+        entry.record(RunExecution::Serial, Duration::from_millis(3));
         assert_eq!(
-            Entry::preferred(
+            RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
                 entry.parallel_ns.get().unwrap(),
                 PARALLELISM
             ),
-            Execution::Parallel
+            RunExecution::Parallel
         );
 
-        entry.record(Execution::Serial, Duration::from_micros(20));
+        entry.record(RunExecution::Serial, Duration::from_micros(20));
 
         assert_eq!(entry.serial_ns.get(), Some(2_404_000));
         assert_eq!(
-            Entry::preferred(
+            RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
                 entry.parallel_ns.get().unwrap(),
                 PARALLELISM
             ),
-            Execution::Parallel
+            RunExecution::Parallel
         );
     }
 
     #[test]
     fn refreshes_preferred_parallel_sample() {
-        let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_micros(100));
-        entry.record(Execution::Serial, Duration::from_micros(410));
+        let mut entry = RunEntry::default();
+        entry.record(RunExecution::Parallel, Duration::from_micros(100));
+        entry.record(RunExecution::Serial, Duration::from_micros(410));
 
         for i in 1..PREFERRED_SAMPLE_INTERVAL {
             assert_eq!(
                 choose(&mut entry),
-                (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+                (RunExecution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
-        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
     }
 
     #[test]
@@ -971,8 +972,8 @@ mod tests {
                     work,
                     PARALLELISM,
                     |execution| match execution {
-                        Execution::Parallel => Err(()),
-                        Execution::Serial => Ok(()),
+                        RunExecution::Parallel => Err(()),
+                        RunExecution::Serial => Ok(()),
                     },
                 );
         }
