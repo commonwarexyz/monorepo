@@ -156,16 +156,7 @@ impl Policy {
         parallelism: usize,
         job: Duration,
     ) {
-        if parallelism <= 1 {
-            return;
-        }
-        let key = Key::new(caller, len, len, parallelism);
-        let job = u64::try_from(job.as_nanos()).unwrap_or(u64::MAX);
-        self.spawn_entries
-            .entry(key)
-            .or_default()
-            .inline_ns
-            .record(job);
+        self.record_spawn(caller, len, parallelism, job, |entry| &mut entry.inline_ns);
     }
 
     /// Records the wall time of a spawned job that ran on a pool worker.
@@ -176,16 +167,7 @@ impl Policy {
         parallelism: usize,
         job: Duration,
     ) {
-        if parallelism <= 1 {
-            return;
-        }
-        let key = Key::new(caller, len, len, parallelism);
-        let job = u64::try_from(job.as_nanos()).unwrap_or(u64::MAX);
-        self.spawn_entries
-            .entry(key)
-            .or_default()
-            .job_ns
-            .record(job);
+        self.record_spawn(caller, len, parallelism, job, |entry| &mut entry.job_ns);
     }
 
     /// Records one offloaded spawn's round-trip overhead: the elapsed time from spawn entry to
@@ -197,16 +179,26 @@ impl Policy {
         parallelism: usize,
         overhead: Duration,
     ) {
+        self.record_spawn(caller, len, parallelism, overhead, |entry| {
+            &mut entry.overhead_ns
+        });
+    }
+
+    /// Folds one spawn timing sample into the selected estimate.
+    fn record_spawn(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        parallelism: usize,
+        sample: Duration,
+        estimate: impl FnOnce(&mut SpawnEntry) -> &mut Estimate,
+    ) {
         if parallelism <= 1 {
             return;
         }
         let key = Key::new(caller, len, len, parallelism);
-        let overhead = u64::try_from(overhead.as_nanos()).unwrap_or(u64::MAX);
-        self.spawn_entries
-            .entry(key)
-            .or_default()
-            .overhead_ns
-            .record(overhead);
+        let mut entry = self.spawn_entries.entry(key).or_default();
+        estimate(&mut entry).record(nanos(sample));
     }
 
     #[cfg(test)]
@@ -293,14 +285,6 @@ impl Estimate {
     }
 }
 
-/// One [`Cadence::tick`] outcome.
-struct Tick {
-    /// This call crosses the probe boundary.
-    boundary: bool,
-    /// This call should be measured to refresh the preferred path's estimate.
-    measure: bool,
-}
-
 /// Paces measurement and probing for one policy entry.
 ///
 /// Between boundaries the preferred path is measured every [`PREFERRED_SAMPLE_INTERVAL`] calls so
@@ -321,9 +305,17 @@ impl Cadence {
         self.since_probe = u32::MAX;
     }
 
-    // Advances one call for an entry whose winning path is estimated at `winner_ns` and losing
-    // path at `loser_ns`.
-    fn tick(&mut self, winner_ns: u64, loser_ns: u64) -> Tick {
+    // Arbitrates one call between a `preferred` and a `loser` path, returning the path to run
+    // and whether the caller should time it. The loser runs at an allowed probe boundary, and a
+    // disallowed boundary still measures the preferred path and resets the counter.
+    fn arbitrate<P: Copy>(
+        &mut self,
+        preferred: P,
+        loser: P,
+        winner_ns: u64,
+        loser_ns: u64,
+        probe_allowed: bool,
+    ) -> (P, bool) {
         let slowdown = loser_ns / winner_ns.max(1);
         let shift = slowdown
             .saturating_sub(1)
@@ -332,15 +324,15 @@ impl Cadence {
         self.since_probe = self.since_probe.saturating_add(1);
         if self.since_probe >= interval {
             self.since_probe = 0;
-            return Tick {
-                boundary: true,
-                measure: true,
-            };
+            if probe_allowed {
+                return (loser, true);
+            }
+            return (preferred, true);
         }
-        Tick {
-            boundary: false,
-            measure: self.since_probe.is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
-        }
+        (
+            preferred,
+            self.since_probe.is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
+        )
     }
 }
 
@@ -392,11 +384,26 @@ impl RunEntry {
 
         // Until serial is sampled, parallel is preferred by default (winner and loser tie, so
         // the cadence runs at its base interval) and the boundary doubles as the seed slot.
-        let (preferred, winner_ns, loser_ns) = self.serial_ns.get().map_or(
-            (RunExecution::Parallel, parallel_ns, parallel_ns),
+        let (preferred, loser, winner_ns, loser_ns) = self.serial_ns.get().map_or(
+            (
+                RunExecution::Parallel,
+                RunExecution::Serial,
+                parallel_ns,
+                parallel_ns,
+            ),
             |serial_ns| match Self::preferred(serial_ns, parallel_ns, parallelism) {
-                RunExecution::Serial => (RunExecution::Serial, serial_ns, parallel_ns),
-                RunExecution::Parallel => (RunExecution::Parallel, parallel_ns, serial_ns),
+                RunExecution::Serial => (
+                    RunExecution::Serial,
+                    RunExecution::Parallel,
+                    serial_ns,
+                    parallel_ns,
+                ),
+                RunExecution::Parallel => (
+                    RunExecution::Parallel,
+                    RunExecution::Serial,
+                    parallel_ns,
+                    serial_ns,
+                ),
             },
         );
 
@@ -404,21 +411,13 @@ impl RunEntry {
         // is simply offered again at the next boundary. A serial seed or probe must fit the
         // live projection. A parallel probe is always allowed: it pays the true parallel wall
         // (including any pool queueing), which the capped interval amortizes.
-        let tick = self.cadence.tick(winner_ns, loser_ns);
-        if tick.boundary {
-            let probe = match preferred {
-                RunExecution::Serial => RunExecution::Parallel,
-                RunExecution::Parallel if can_sample_serial => RunExecution::Serial,
-                RunExecution::Parallel => RunExecution::Parallel,
-            };
-            return (probe, true);
-        }
-
-        (preferred, tick.measure)
+        let probe_allowed = preferred == RunExecution::Serial || can_sample_serial;
+        self.cadence
+            .arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
     }
 
     fn record(&mut self, execution: RunExecution, elapsed: Duration) {
-        let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let elapsed_ns = nanos(elapsed);
         match execution {
             RunExecution::Serial => self.serial_ns.record(elapsed_ns),
             RunExecution::Parallel => self.parallel_ns.record(elapsed_ns),
@@ -461,31 +460,39 @@ impl SpawnEntry {
             return (SpawnExecution::Offload, true);
         };
 
-        // Ties go to inline: equal cost for one fewer pool wake.
+        // Ties go to inline: equal cost for one fewer pool wake. An inline probe is gated on
+        // the live worker wall fitting the budget: the inline wall is only observable by
+        // inlining, so without the probe an entry seeded into offload could never learn it,
+        // and gating on the live worker wall (not the stale inline estimate) lets a poisoned
+        // inline estimate recover. An offload probe is always allowed, since it keeps the
+        // offload estimates tracking the live pool.
         let bound = self.inline_ns.get().unwrap_or(job_ns);
         let threshold = overhead_ns.min(budget);
-        if bound > threshold {
-            // Offload steady state. Measured runs keep the offload estimates live, and the
-            // boundary probes inline when the live worker wall fits the budget: the inline
-            // wall is only observable by inlining, so without the probe an entry seeded into
-            // offload could never learn it. Gating the probe on the live worker wall (not the
-            // stale inline estimate) lets a poisoned inline estimate recover, and a probe
-            // never stalls the calling task beyond the budget.
-            let tick = self.cadence.tick(threshold, bound);
-            if tick.boundary && job_ns < budget {
-                return (SpawnExecution::Inline, true);
-            }
-            return (SpawnExecution::Offload, tick.boundary || tick.measure);
-        }
-
-        // Inline steady state: the boundary hands one call back to the pool so the offload
-        // estimates track the live pool.
-        let tick = self.cadence.tick(bound, threshold);
-        if tick.boundary {
-            return (SpawnExecution::Offload, true);
-        }
-        (SpawnExecution::Inline, tick.measure)
+        let (preferred, loser, winner_ns, loser_ns, probe_allowed) = if bound > threshold {
+            (
+                SpawnExecution::Offload,
+                SpawnExecution::Inline,
+                threshold,
+                bound,
+                job_ns < budget,
+            )
+        } else {
+            (
+                SpawnExecution::Inline,
+                SpawnExecution::Offload,
+                bound,
+                threshold,
+                true,
+            )
+        };
+        self.cadence
+            .arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
     }
+}
+
+// Saturating nanosecond conversion for timing samples.
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn update_ewma(current: u64, next: u64) -> u64 {

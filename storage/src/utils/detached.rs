@@ -12,10 +12,7 @@ use std::{
 
 /// Occupy `workers` Rayon workers until the returned sender is dropped.
 pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<()> {
-    // The jobs block until released, so they must never run inline on the calling task:
-    // `manual()` disables the spawn policy, and the assert rejects the remaining inline path
-    // (spawn always inlines on a single-worker pool; the parallelism plan mirrors the pool
-    // size for strategies built with `Rayon::new`).
+    // The jobs block until released, so they must never run inline on the calling task.
     let manual = strategy.manual();
     assert!(
         manual.parallelism() >= 2,
