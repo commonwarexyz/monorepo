@@ -8,8 +8,9 @@
 //! Data blobs follow the same rollover pipeline as the fixed journal: filling the tail seals it
 //! and starts its fsync after awaiting the previous rollover's fsync, so only the tail and its
 //! predecessor can ever hold non-durable data. Recovery forward-validates those two blobs for
-//! interior fsync holes, and the offsets journal only advances after the data it indexes is
-//! durable. See the [`fixed`] module docs for the full model.
+//! interior fsync holes (skipping any wholly covered by the acknowledged floor), and the
+//! offsets journal only advances after the data it indexes is durable. See the [`fixed`]
+//! module docs for the full model.
 
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
@@ -1076,75 +1077,47 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let floor = offsets.recovery_watermark().max(offsets.pruning_boundary());
         let floor_blob = position_to_blob(floor, items_per_blob);
 
-        // Every fully acknowledged blob must be large enough to back its last item (the fixed
-        // journal checks this by walking blob lengths). Positions below the offsets pruning
-        // boundary have nothing to validate: they were pruned, or `align` rejects the state as
-        // corruption. Torn pages in these blobs are left to page CRCs at read time.
-        for (&blob, writer) in pending.range(..floor_blob) {
-            let last_position = super::blob_end_position(blob, items_per_blob, u64::MAX) - 1;
-            if last_position < offsets.pruning_boundary() {
-                continue;
-            }
-            let offset = offsets.read(last_position).await?;
-            if offset >= writer.size() {
-                return Err(Error::Corruption(format!(
-                    "blob {blob} no longer backs acknowledged items: last item at offset \
-                     {offset} exceeds size {}",
-                    writer.size()
-                )));
-            }
-        }
-
         // Check the two newest blobs for interior holes. Only they can hold non-durable data
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
         // and a crash during an in-flight fsync can lose an interior page while later pages
         // survive. `Writer::new` sizes a blob by its last valid page, so it cannot see such a
-        // hole. The scan starts at the floor's acknowledged prefix: pages below it are covered
-        // by a completed fsync, so in-model holes are impossible there and any later damage
-        // surfaces lazily at read. Above the floor, truncate to the last well-formed page
-        // (replay in `align` repairs a mid-frame cut like torn trailing junk).
+        // hole. Blobs wholly below the floor's blob are covered by a completed fsync, so
+        // in-model holes are impossible there and any later damage surfaces lazily at read.
+        // Above the floor, truncate to the last well-formed page (replay in `align` repairs a
+        // mid-frame cut like torn trailing junk).
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             if blob < floor_blob {
                 continue;
             }
 
-            // The last acknowledged frame's start in the floor's blob. A floor at the blob
-            // boundary or below the offsets pruning boundary acknowledges nothing here.
-            let acknowledged = if blob == floor_blob
-                && floor > blob_first_position(blob, items_per_blob)?
-                && floor > offsets.pruning_boundary()
-            {
-                Some(offsets.read(floor - 1).await?)
-            } else {
-                None
-            };
             // The floor's blob is scanned from the front: offset rebuild replays it from its
             // start regardless, and a torn acknowledged page is clearer as corruption here.
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
             let valid = writer
                 .recoverable_prefix_len(0, cfg.replay_buffer, ReadOptions::default())
                 .await?;
-            if valid == writer.size() {
+            let size = writer.size();
+            if valid == size {
                 continue;
             }
 
             // The floor's blob must retain its acknowledged prefix: a cut at or below the last
             // acknowledged frame's start lost acknowledged data (a cut inside that frame is
-            // truncated, then rejected by replay in `align`).
-            if acknowledged.is_some_and(|start| valid <= start) {
+            // truncated, then rejected by replay in `align`). A floor at the blob boundary or
+            // below the offsets pruning boundary acknowledges nothing here.
+            if blob == floor_blob
+                && floor > blob_first_position(blob, items_per_blob)?
+                && floor > offsets.pruning_boundary()
+                && valid <= offsets.read(floor - 1).await?
+            {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
-                     of size {}",
-                    writer.size()
+                     of size {size}"
                 )));
             }
-            warn!(
-                blob,
-                valid,
-                size = writer.size(),
-                "truncating to last well-formed page"
-            );
+            warn!(blob, valid, size, "truncating to last well-formed page");
+            let writer = pending.get_mut(&blob).expect("suspect blob is present");
             writer.resize(valid).await?;
             writer.sync().await?;
         }
@@ -4761,8 +4734,8 @@ mod tests {
 
     /// A torn page beneath the offsets recovery watermark is external corruption, not a crash
     /// artifact: the watermark only advances after the covering data fsync completes. Recovery
-    /// must fail rather than adopt bounds whose acknowledged items are unreadable, and it must
-    /// preserve the evidence so a retry fails identically.
+    /// never re-reads blobs wholly below the floor's blob, so it adopts the journal unchanged
+    /// and the damage surfaces as read errors on the affected items.
     #[test_traced]
     fn test_variable_recovery_adopts_torn_page_below_watermark() {
         let executor = deterministic::Runner::default();
@@ -4831,11 +4804,12 @@ mod tests {
         });
     }
 
-    /// A blob cleanly shortened beneath the watermark leaves no torn page for the forward scan
-    /// to find, but its acknowledged items no longer fit its physical extent. Recovery must
-    /// reject it rather than adopt bounds pointing past the end of the blob.
+    /// A blob cleanly shortened beneath the watermark is out-of-model damage to acknowledged
+    /// data. Recovery adopts the watermark without re-reading acknowledged blobs, so init
+    /// succeeds and the missing items surface as read errors while the surviving prefix and
+    /// every other blob stay readable.
     #[test_traced]
-    fn test_variable_recovery_rejects_shortened_blob_below_watermark() {
+    fn test_variable_recovery_adopts_shortened_blob_below_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config::<()> {
@@ -4866,15 +4840,25 @@ mod tests {
             blob.resize(2 * physical_page_size).await.unwrap();
             blob.sync().await.unwrap();
 
-            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 33);
+            for i in 0..14u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(journal.read(20).await.is_err());
+            for i in 30..33u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
         });
     }
 
-    /// An externally shortened blob below the watermark is rejected even when it is older than
-    /// the two blobs the interior-hole scan reads.
+    /// An externally shortened blob below the watermark is adopted (not re-read) even when it
+    /// is older than the two blobs the interior-hole scan reads, and its missing items surface
+    /// as read errors.
     #[test_traced]
-    fn test_variable_recovery_rejects_shortened_old_blob_below_watermark() {
+    fn test_variable_recovery_adopts_shortened_old_blob_below_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config::<()> {
@@ -4906,8 +4890,17 @@ mod tests {
             blob.resize(physical_page_size).await.unwrap();
             blob.sync().await.unwrap();
 
-            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 25);
+            for i in 0..7u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(journal.read(8).await.is_err());
+            for i in 10..25u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
         });
     }
 
@@ -5654,13 +5647,14 @@ mod tests {
 
             // The watermark proves positions through 20 were acknowledged. Losing the second
             // blob is corruption, including when the surviving data ends exactly at a boundary.
-            // The acknowledged-floor check in init rejects it before `recovery_anchor` would.
+            // The recovery anchor compares the watermark against the retained data end (both
+            // already in hand) and rejects the rewind.
             for child in ["second", "retry"] {
                 match Journal::<_, u64>::init(context.child(child), cfg.clone()).await {
                     Err(Error::Corruption(message)) => assert_eq!(
                         message,
-                        "blob 1 no longer backs acknowledged items: last item at offset 81 \
-                         exceeds size 0"
+                        "offsets recovery watermark 20 exceeds retained data end 10 (offsets \
+                         bounds 0..20)"
                     ),
                     Err(error) => panic!("unexpected error: {error}"),
                     Ok(_) => panic!("missing acknowledged data was accepted"),

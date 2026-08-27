@@ -486,7 +486,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             if valid == writer.size() {
                 continue;
             }
-            if valid < acknowledged {
+
+            // The repair below may only ever shrink a blob: an accepted prefix past the
+            // physical end means the acknowledged pages do not exist, and `recover_bounds`
+            // would reject the result anyway. Both comparisons use sizes already in hand.
+            if valid > writer.size() || valid < acknowledged {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
                      of size {}",
@@ -4184,8 +4188,8 @@ mod tests {
         });
     }
 
-    /// A clean reopen never re-reads watermark-covered pages: fully acknowledged blobs are
-    /// skipped outright and the floor's blob is scanned only from its acknowledged prefix.
+    /// A clean reopen skips fully acknowledged blobs outright. The floor blob's scan start is
+    /// pinned separately by the mid-blob adoption test.
     #[test_traced]
     fn test_fixed_recovery_skips_watermark_covered_pages() {
         let executor = deterministic::Runner::default();
@@ -4265,6 +4269,64 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_after, size_before);
+        });
+    }
+
+    /// A torn page containing the watermark's acknowledged boundary is the one sub-watermark
+    /// shape recovery still reads: the blob no longer backs its acknowledged items, so init
+    /// fails loudly. Opening may first trim the torn page as an ordinary crash tail, but
+    /// retries fail identically without mutating further.
+    #[test_traced]
+    fn test_fixed_recovery_rejects_torn_boundary_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            // The watermark (15) acknowledges 160 bytes of blob 1, ending inside page 3.
+            journal.sync().await.unwrap();
+
+            // Tear page 3 of blob 1: the boundary page recovery must still validate.
+            let physical_page_size = PAGE_SIZE.get() as u64 + 12;
+            let offset = 3 * physical_page_size + 5;
+            let (blob, _) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .unwrap();
+            let byte = blob
+                .read_at(offset, 1, commonware_runtime::ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            blob.write_at(
+                offset,
+                vec![byte.as_ref()[0] ^ 0xFF],
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+            let (_, size_mid) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            // A retry fails identically and mutates nothing further.
+            let result = Journal::<_, Digest>::init(context.child("retry"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+            let (_, size_after) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(size_after, size_mid);
         });
     }
 

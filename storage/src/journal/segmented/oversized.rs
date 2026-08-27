@@ -368,7 +368,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 let preflight =
                     FixedJournal::preflight_floors(index_context, index_cfg, minimum_items).await?;
                 let values = Glob::init(value_context, value_cfg).await?;
-                Self::validate_value_floors(&values, &preflight).await?;
+                Self::validate_value_floors(&values, &preflight)?;
                 let index = preflight.finish().await?;
                 Ok(Self {
                     index,
@@ -520,8 +520,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.cleanup_orphan_value_sections().await
     }
 
-    /// Verify every floor's terminal value before repair can mutate either journal.
-    async fn validate_value_floors(
+    /// Verify every floor's terminal value extent before repair can mutate either journal.
+    fn validate_value_floors(
         values: &Glob<E, V>,
         preflight: &RecoveryPreflight<E, I>,
     ) -> Result<(), Error> {
@@ -540,11 +540,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 return Err(Error::Corruption(format!(
                     "section {section} retains {retained} value bytes, below the validation \
                      floor of {required}"
-                )));
-            }
-            if !values.verify(section, offset, size).await? {
-                return Err(Error::Corruption(format!(
-                    "section {section} validation floor ends at a corrupt value"
                 )));
             }
         }

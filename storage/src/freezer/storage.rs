@@ -702,8 +702,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Resize table if needed
+                // Resize the table if needed. Growing is never valid: the checkpoint publishes
+                // only after the table sync completes, so a shorter table cannot back the
+                // checkpointed entries, and zero-extending would fabricate empty heads.
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
+                if table_len < expected_table_len {
+                    return Err(Error::CheckpointMismatch);
+                }
                 let mut modified = if table_len != expected_table_len {
                     table.resize(expected_table_len).await?;
                     true

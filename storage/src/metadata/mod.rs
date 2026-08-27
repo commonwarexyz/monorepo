@@ -74,6 +74,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    #[error("corruption: {0}")]
+    Corruption(String),
 }
 
 /// Configuration for [Metadata] storage.
@@ -817,26 +819,16 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Reopen the metadata store
-            let cfg = Config {
-                partition: "test".into(),
-                codec_config: ((0..).into(), ()),
-            };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
-                .await
-                .unwrap();
-
-            // Get the key (falls back to non-corrupt)
-            let value = metadata.get(&key);
-            assert!(value.is_none());
-
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("second_sync_rewrites_total 0"));
-            assert!(buffer.contains("second_sync_overwrites_total 0"));
-            assert!(buffer.contains("second_keys 0"));
-
-            metadata.destroy().await.unwrap();
+            // Both copies failing validation is impossible under a crash (syncs alternate and
+            // drain), so reopening must fail loudly rather than adopt a fresh store.
+            for child in ["second", "third"] {
+                let cfg = Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                };
+                let result = Metadata::<_, U64, Vec<u8>>::init(context.child(child), cfg).await;
+                assert!(matches!(result, Err(Error::Corruption(_))));
+            }
         });
     }
 

@@ -234,11 +234,15 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                         return Err(Error::MissingRecord(index));
                     }
 
-                    // A committed record that is missing or invalid cannot be recovered
-                    replay_blob.seek_to(offset)?;
-                    let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();
-                    if Record::<V>::decode_valid(record_buf.as_ref()).is_none() {
-                        return Err(Error::MissingRecord(index));
+                    // A committed bitmap already proves membership, so its records are not
+                    // re-read and damage surfaces at get. Membership of an unmarked section
+                    // comes from record validity, so its records must be read.
+                    if set_indices.is_none() {
+                        replay_blob.seek_to(offset)?;
+                        let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();
+                        if Record::<V>::decode_valid(record_buf.as_ref()).is_none() {
+                            return Err(Error::MissingRecord(index));
+                        }
                     }
                     items += 1;
                     intervals.insert(index);

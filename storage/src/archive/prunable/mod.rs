@@ -1247,6 +1247,27 @@ mod tests {
                     }
                 };
 
+                // Marked values are never re-read at startup: value damage that preserves the
+                // floor's byte range surfaces lazily at get, like covered interior values.
+                if matches!(damage, Damage::CorruptValues) {
+                    for child in ["first", "second"] {
+                        let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                            case.child(child),
+                            cfg.clone(),
+                        )
+                        .await
+                        .expect("marked value damage must not fail startup");
+                        assert!(archive.get(Identifier::Index(0)).await.is_err());
+                        drop(archive);
+                        let (_, size) = context
+                            .open(&cfg.value_partition, &0u64.to_be_bytes())
+                            .await
+                            .unwrap();
+                        assert_eq!(size, value_size, "adoption must preserve the damaged frame");
+                    }
+                    continue;
+                }
+
                 for child in ["first", "second"] {
                     let result =
                         Archive::<_, _, FixedBytes<64>, i32>::init(case.child(child), cfg.clone())
@@ -1306,14 +1327,24 @@ mod tests {
                 .await
                 .unwrap();
             let expected_size = index_size + 7;
+
+            // Break the floor's terminal index page so preflight rejects the section before
+            // the repairable trailing junk can be truncated.
+            let byte = index
+                .read_at(0, 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            index
+                .write_at(0, vec![byte.as_ref()[0] ^ 0xFF], WriteOptions::SYNC)
+                .await
+                .unwrap();
             let expected = index
                 .read_at(0, expected_size as usize, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
             drop(index);
-
-            corrupt_value_frame(&context, &cfg.value_partition, 0, 0).await;
 
             for child in ["first", "second"] {
                 let result =
@@ -1670,8 +1701,8 @@ mod tests {
 
             // The two data journals enqueue first. Release only the metadata operation to prove
             // that publishing the older boundary cannot satisfy the blocking data contract. The
-            // marker future is polled only when a later request observes it, so its release
-            // cannot be awaited here.
+            // marker future is polled only when a later request observes it, so this test
+            // cannot wait for it to park before releasing it.
             let metadata = pending.lock().remove(2);
             metadata.release.send(Ok(())).unwrap();
             commonware_runtime::reschedule().await;

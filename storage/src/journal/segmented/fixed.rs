@@ -662,6 +662,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// are allocated lazily as the reader advances. Every backing blob read performed by
     /// the returned replay uses `read_options`, including reads after advancing to
     /// another section.
+    ///
+    /// A nonzero start must be a boundary already validated by a prior replay or a durable
+    /// marker: torn-page repair treats everything below it as proven.
     pub async fn replay(
         mut self,
         start_section: u64,

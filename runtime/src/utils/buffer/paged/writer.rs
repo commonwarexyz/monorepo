@@ -1502,6 +1502,82 @@ mod tests {
         });
     }
 
+    /// A proven prefix skips its pages without reading them: a scan started past a torn page
+    /// accepts the caller's proof, and a proof past the blob's end clamps without panicking.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_proven_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_proven")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let total = PAGE_SIZE.get() as usize * 4;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Tear page 1, leaving pages 0 and 2+ valid.
+            let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
+            let offset = physical_page_size + 7;
+            let byte = blob
+                .read_at(offset, 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            blob.write_at(
+                offset,
+                vec![byte.as_ref()[0] ^ 0xFF],
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+
+            // An unproven scan stops at the torn page. A proof past it skips the damage and
+            // scans the remainder, and a mid-page proof rescans the page containing it.
+            let page = u64::from(PAGE_SIZE.get());
+            for (proven, expected) in [
+                (0, page),
+                (page, page),
+                (2 * page, 4 * page),
+                (2 * page + 3, 4 * page),
+                (total as u64, 4 * page),
+            ] {
+                assert_eq!(
+                    writer
+                        .recoverable_prefix_len(
+                            proven,
+                            NZUsize!(BUFFER_SIZE),
+                            ReadOptions::default()
+                        )
+                        .await
+                        .unwrap(),
+                    expected,
+                    "proven {proven}"
+                );
+            }
+
+            // A proof past the blob clamps to the pages that exist. Callers only pass proven
+            // prefixes, and storage-level guards reject a prefix the blob cannot back.
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(
+                        100 * page,
+                        NZUsize!(BUFFER_SIZE),
+                        ReadOptions::default()
+                    )
+                    .await
+                    .unwrap(),
+                4 * page
+            );
+        });
+    }
+
     /// A valid-but-short interior page ends the prefix: a partial page's durable state can
     /// survive a crash while its extension to a full page is lost.
     #[test_traced("DEBUG")]
