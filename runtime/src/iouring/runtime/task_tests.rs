@@ -825,12 +825,6 @@ fn test_cross_worker_spawn() {
     });
 }
 
-/// Property: a cleared arena rejects registration and drops the supplied
-/// future without polling it. Setup: create [Tasks] directly and close
-/// the arena with [Tasks::clear]. Action: register a future holding a
-/// drop probe, then perform a late remove. Expected: register returns
-/// false, the probe reports the future dropped unpolled, and the late
-/// remove is harmless.
 #[test]
 fn test_clear_rejects_registration_and_drops_future() {
     struct Probe {

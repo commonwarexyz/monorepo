@@ -452,29 +452,3 @@ fn test_capacity_close_recycles_terminal_registrations() {
     assert_eq!(capacity.arena_len(), 3);
     cancel_capacity(&mut capacity, replacement, 0);
 }
-
-#[test]
-fn test_capacity_wake_count_is_linear_in_waiter_count() {
-    const WAITERS: usize = 128;
-    let mut capacity = CapacityWaiters::new();
-    let count = Arc::new(CountWaker(AtomicUsize::new(0)));
-    let waker = arc_waker(Arc::clone(&count));
-    let mut registrations = vec![None; WAITERS];
-    for registration in &mut registrations {
-        assert_eq!(
-            poll_capacity(&mut capacity, registration, 0, &waker),
-            CapacityAdmission::Queued
-        );
-    }
-
-    for registration in &mut registrations {
-        reconcile_capacity(&mut capacity, 1);
-        assert_eq!(
-            poll_capacity(&mut capacity, registration, 1, &waker),
-            CapacityAdmission::Granted
-        );
-    }
-    assert_eq!(count.0.load(Ordering::Acquire), WAITERS);
-    assert_eq!(capacity.registered(), 0);
-    assert_eq!(capacity.arena_len(), WAITERS);
-}

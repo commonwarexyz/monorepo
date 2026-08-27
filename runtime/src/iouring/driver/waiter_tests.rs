@@ -359,20 +359,10 @@ fn test_waiters_expire_paths() {
 
 #[test]
 fn test_waiters_stale_cancel_after_slot_reuse() {
-    // Property: a cancel-tagged CQE carrying a stale generation is
-    // tolerated after its slot index was reused by a new waiter, leaving
-    // the new waiter untouched. This is the documented late-cancel race
-    // the generation field exists for (only the empty-slot half was
-    // covered before).
-    // Setup: complete and take a waiter so its slot frees, then insert a
-    // new waiter that reuses the same index with a new generation and
-    // stage it.
-    // Action: feed the old generation's cancel user_data with ECANCELED.
-    // Expected: CqeOutcome::Cancel, and the new waiter keeps its
-    // identity, active state, and in-flight marker.
+    // A late cancel CQE can arrive after its slot index has been reused.
+    // The generation must leave the replacement waiter untouched.
     let mut waiters = Waiters::new(1);
 
-    // Insert, stage, complete, and take the first waiter.
     let old = insert(&mut waiters, make_sync_request(), None);
     assert!(matches!(waiters.stage(old), StageOutcome::Submit(_)));
     assert!(matches!(
@@ -382,7 +372,6 @@ fn test_waiters_stale_cancel_after_slot_reuse() {
     assert!(waiters.poll_take(old, &noop_waker()).is_some());
     assert!(waiters.is_empty());
 
-    // Reuse the slot index under a new generation and stage the waiter.
     let new = insert(&mut waiters, make_sync_request(), None);
     assert_eq!(new.index(), old.index(), "slot index must be reused");
     assert_ne!(new, old, "reused slot must carry a new generation");
@@ -399,25 +388,12 @@ fn test_waiters_stale_cancel_after_slot_reuse() {
         Some(WaiterState::Active { .. })
     ));
     assert!(waiters.is_in_flight(new), "in-flight marker must survive");
-}
-
-#[test]
-fn test_waiters_track_in_flight_state() {
-    // Verify `stage` tracks a staged operation and that the bit is
-    // cleared again when the matching op CQE is processed.
-    let mut waiters = Waiters::new(1);
-    let waiter_id = insert(&mut waiters, make_sync_request(), Some(4));
-
-    assert!(waiters.is_full());
-    assert!(!waiters.is_in_flight(waiter_id));
-    assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-    assert!(waiters.is_in_flight(waiter_id));
 
     assert!(matches!(
-        waiters.on_completion(waiter_id.user_data(), 0),
+        waiters.on_completion(new.user_data(), 0),
         CqeOutcome::Ready { .. }
     ));
-    assert!(!waiters.is_in_flight(waiter_id));
+    assert!(!waiters.is_in_flight(new));
 }
 
 #[test]
@@ -668,10 +644,10 @@ fn test_waiters_poll_take_refreshes_waker() {
 }
 
 #[test]
-fn test_waiters_accept_expected_cancel_cqe_results() {
-    // Verify the expected kernel cancel CQE results leave the waiter alive
-    // for the original operation CQE to finish it later.
-    for result in [0, -libc::EALREADY, -libc::ENOENT] {
+fn test_waiters_accept_nonfatal_cancel_cqe_results() {
+    // Verify nonfatal kernel cancel CQE results leave the waiter alive for
+    // the original operation CQE to finish it later.
+    for result in [0, -libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
         let mut waiters = Waiters::new(1);
         let waiter_id = insert(&mut waiters, make_sync_request(), Some(2));
         assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
@@ -684,23 +660,6 @@ fn test_waiters_accept_expected_cancel_cqe_results() {
         let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
         assert!(matches!(state, WaiterState::CancelRequested { .. }));
     }
-}
-
-#[test]
-fn test_waiters_tolerate_unexpected_negative_cancel_result() {
-    // Verify unexpected negative cancel CQEs are ignored rather than
-    // corrupting waiter state.
-    let mut waiters = Waiters::new(1);
-    let waiter_id = insert(&mut waiters, make_sync_request(), Some(2));
-    assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-    assert!(waiters.expire(waiter_id));
-
-    assert!(matches!(
-        waiters.on_completion(waiter_id.cancel_user_data(), -libc::EPERM),
-        CqeOutcome::Cancel
-    ));
-    let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
-    assert!(matches!(state, WaiterState::CancelRequested { .. }));
 }
 
 #[test]
