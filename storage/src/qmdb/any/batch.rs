@@ -976,7 +976,7 @@ where
     /// first floor-raise candidate read. `superseded_locs` holds the committed locations
     /// superseded by `diff` (every `Some` `base_old_loc`), in any order. The floor raise
     /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
-    /// caller gathered and read ahead of time, consumed by the raise before scanning live.
+    /// caller gathered and read ahead of time, consumed by the raise before scanning `bitmap` live.
     #[allow(clippy::too_many_arguments)]
     async fn finish<E, C, I, const N: usize>(
         self,
@@ -987,7 +987,7 @@ where
         user_steps: u64,
         metadata: Option<U::Value>,
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
-        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        bitmap: &impl bitmap::Readable<N>,
         db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
     where
@@ -1064,6 +1064,7 @@ where
                 };
                 if candidates.len() < limit {
                     scan_from = fill_candidates(
+                        bitmap,
                         scan_from,
                         fixed_tip,
                         limit - candidates.len(),
@@ -1613,18 +1614,10 @@ where
     {
         let db = self.batch.on_chain(db)?;
         let (batch, staged_updates, prefetched) = self
-            .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
-            })
+            .resolve_updates_prefetched(updates, upserts, db, &db.bitmap)
             .await?;
         batch
-            .merkleize_with_floor_scan(
-                db,
-                metadata,
-                staged_updates,
-                Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(db, metadata, staged_updates, Some(prefetched), &db.bitmap)
             .await
     }
 
@@ -1633,24 +1626,18 @@ where
     /// resolved batch, the staged updates, and the prefetched candidates to seed
     /// [`merkleize_with_floor_scan`](UnmerkleizedBatch::merkleize_with_floor_scan) with.
     ///
-    /// `fill_candidates` must be the same candidate source the subsequent floor raise
-    /// scans, so the prefetched prefix continues seamlessly into the live scan (see
-    /// [`PrefetchedCandidates`]). The gather is clamped to the committed boundary: a
-    /// speculative source (e.g. the current variant's parent bitmap) extends past it, but
-    /// its candidate sequence below the boundary is identical and only committed locations
-    /// are servable by the log read.
-    ///
-    /// On early exhaustion of the committed set bits, sources may hand back either one past
-    /// the last emitted candidate or the committed boundary as the continuation point. Both
-    /// are correct: the skipped span holds no set bits, and the source cannot change during
-    /// the call (commits and prunes take `&mut` on the database).
+    /// `bitmap` must be the same bitmap the subsequent floor raise scans, so the prefetched
+    /// prefix continues seamlessly into the live scan (see [`PrefetchedCandidates`]). The
+    /// gather is clamped to the committed boundary: a speculative bitmap (the current
+    /// variant's layered parent) extends past it, but its candidate sequence below the
+    /// boundary is identical and only committed locations are servable by the log read.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn resolve_updates_prefetched<E, C, I, const N: usize>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: OnChain<'_, Db<F, E, C, I, H, update::Unordered<K, V>, N, S>>,
-        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        bitmap: &impl bitmap::Readable<N>,
     ) -> Result<
         (
             UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>,
@@ -1699,7 +1686,7 @@ where
         // the resolution job runs.
         let committed_tip = db.bitmap.len();
         let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
-        let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
+        let next_scan = fill_candidates(bitmap, scan_from, committed_tip, steps_bound, &mut locs);
         let raw: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let read = db.log.read_many_sharded(&raw).await;
 
@@ -1755,9 +1742,7 @@ where
         let db = self.batch.on_chain(db)?;
         let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(db, metadata, staged_updates, &db.bitmap)
             .await
     }
 }
@@ -2015,23 +2000,21 @@ where
             metadata,
             StagedUpdates::<F, update::Unordered<K, V>>::new(),
             None,
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            &db.bitmap,
         )
         .await
     }
 
     /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would
-    /// otherwise require) and accepts the floor-raise candidate source, optionally seeded
+    /// otherwise require) and scans `bitmap` for floor-raise candidates, optionally seeded
     /// with prefetched committed-prefix candidates that must come from the same floor and
-    /// the same candidate source the callback scans (see [`PrefetchedCandidates`]).
+    /// the same bitmap (see [`PrefetchedCandidates`]).
     ///
-    /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls (the floor raise asserts this). It may skip locations only
-    /// when it knows they are inactive. The floor-raise loop revalidates each returned
-    /// candidate against the batch diff, ancestor diffs, and index because the bitmap
-    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
-    /// be set for locations superseded by an overlay in this chain.
+    /// `bitmap` may be speculative (the current variant's layered parent). The floor-raise loop
+    /// revalidates each candidate against the batch diff, ancestor diffs, and index: the
+    /// committed bitmap does not track uncommitted ancestor ops, so bits can be set for
+    /// locations an ancestor superseded.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
@@ -2039,7 +2022,7 @@ where
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        bitmap: &impl bitmap::Readable<N>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2196,7 +2179,7 @@ where
             user_steps,
             metadata,
             prefetched,
-            fill_candidates,
+            bitmap,
             db,
         )
         .await
@@ -2234,7 +2217,7 @@ where
             db,
             metadata,
             StagedUpdates::<F, update::Ordered<K, V>>::new(),
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            &db.bitmap,
         )
         .await
     }
@@ -2242,21 +2225,19 @@ where
     /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the index probe and journal re-read their
     /// resolution would otherwise require: the caller's new value and the cached next key feed
-    /// op generation directly) and accepts the floor-raise candidate source.
+    /// op generation directly) and scans `bitmap` for floor-raise candidates.
     ///
-    /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls (the floor raise asserts this). It may skip locations only
-    /// when it knows they are inactive. The floor-raise loop revalidates each returned
-    /// candidate against the batch diff, ancestor diffs, and index because the bitmap
-    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
-    /// be set for locations superseded by an overlay in this chain.
+    /// `bitmap` may be speculative (the current variant's layered parent). The floor-raise loop
+    /// revalidates each candidate against the batch diff, ancestor diffs, and index: the
+    /// committed bitmap does not track uncommitted ancestor ops, so bits can be set for
+    /// locations an ancestor superseded.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: OnChain<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        bitmap: &impl bitmap::Readable<N>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2622,7 +2603,7 @@ where
             user_steps,
             metadata,
             None,
-            fill_candidates,
+            bitmap,
             db,
         )
         .await

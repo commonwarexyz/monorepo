@@ -21,7 +21,6 @@ use crate::{
             operation::{Operation, update::Update},
         },
         current::{
-            batch::BitmapBatch,
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
@@ -325,7 +324,7 @@ where
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
             self.grafted_snapshot(),
-            BitmapBatch::Base,
+            Vec::new(),
         )
     }
 

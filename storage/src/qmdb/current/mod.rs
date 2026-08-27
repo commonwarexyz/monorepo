@@ -500,7 +500,7 @@ pub mod tests {
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
-            current::batch::BitmapBatch,
+            current::batch::BitmapView,
             store::tests::{TestKey, TestValue},
             verify_proof,
         },
@@ -3605,7 +3605,7 @@ pub mod tests {
     /// Regression: extending a batch after it has been applied (building a child off the
     /// just-applied parent) must produce correct data.
     ///
-    /// Applying `A` mutates the committed bitmap in place; reads through `A`'s chain after
+    /// Applying `A` mutates the committed bitmap in place; reads through `A`'s overlays after
     /// apply resolve `A`'s own overlays over the committed bitmap (which now reflects `A`'s
     /// state), and the two agree. So `A.new_batch()` followed by merkleize + apply is the
     /// right-by-construction case, and this test locks it in.
@@ -3630,18 +3630,15 @@ pub mod tests {
                 .unwrap();
             let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
 
-            // Build B off A after A was applied. Merkleizing B trims A's now-committed layer, so
-            // B's chain is its own layer directly over the committed bitmap (now post-A).
+            // Build B off A after A was applied. Merkleizing B trims A's now-committed overlay,
+            // so B's bitmap is its own overlay directly over the committed bitmap (now post-A).
             let b = a
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            assert!(matches!(
-                &b.bitmap,
-                BitmapBatch::Layer(layer) if matches!(layer.parent, BitmapBatch::Base)
-            ));
+            assert_eq!(b.bitmap.len(), 1);
             let (db, _) = db.apply_batch(b).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -3665,10 +3662,10 @@ pub mod tests {
     }
 
     /// Build a child batch from a still-live parent whose apply was followed by a prune, then
-    /// merkleize and apply the child. The parent's `BitmapBatch` chain terminates in the
-    /// committed bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the
-    /// child is merkleized, the internal `trim_committed` call must observe the advanced
-    /// boundary and produce a correct child chain; merkleize and apply must then produce
+    /// merkleize and apply the child. The parent's overlays are read over the committed
+    /// bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the child is
+    /// merkleized, the internal `trim_committed` call must observe the advanced boundary and
+    /// produce correct child overlays; merkleize and apply must then produce
     /// correct state for keys at and beyond the advanced floor.
     #[test_traced("INFO")]
     fn test_current_live_batch_child_after_prune() {
@@ -3705,7 +3702,7 @@ pub mod tests {
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
 
-            // Extend `a` into `b` AFTER the prune. Merkleizing `b` trims `a`'s chain against
+            // Extend `a` into `b` AFTER the prune. Merkleizing `b` trims `a`'s overlays against
             // the committed bitmap, which must correctly see the advanced pruning boundary.
             let b = a
                 .new_batch::<Sha256>()
@@ -4109,7 +4106,7 @@ pub mod tests {
         });
     }
 
-    /// Regression: the bitmap chunks produced by the speculative `BitmapBatch` chain during
+    /// Regression: the bitmap chunks produced by the speculative bitmap overlays during
     /// merkleize must equal the bytes that `any::Db::apply_batch` writes via diff-driven
     /// updates. `current::Db::apply_batch` relies on this equivalence to install the precomputed
     /// `batch.grafted` against the now-current bitmap.
@@ -4174,9 +4171,9 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Snapshot every chunk in the speculative `BitmapBatch` chain (read through child).
+            // Snapshot every chunk of the speculative bitmap (read through child).
             let speculative_chunks: Vec<[u8; N]> = {
-                let bitmap = child.bitmap.clone().over(&db.any.bitmap);
+                let bitmap = BitmapView::over(child.bitmap.clone(), &db.any.bitmap);
                 let len = Readable::<N>::len(&bitmap);
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
