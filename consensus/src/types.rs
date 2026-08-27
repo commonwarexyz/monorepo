@@ -931,11 +931,15 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
         ///
-        /// Commitment wire layout:
-        /// - block digest, zero-padded to [`COMMITMENT_DIGEST_SIZE`] bytes
-        /// - coding root, zero-padded to [`COMMITMENT_DIGEST_SIZE`] bytes
-        /// - context digest, zero-padded to [`COMMITMENT_DIGEST_SIZE`] bytes
-        /// - coding config
+        /// ```text
+        /// 0                   32                  64                  96            100
+        /// +-------------------+-------------------+-------------------+---------------+
+        /// | block digest      | coding root       | context digest    | coding config |
+        /// +-------------------+-------------------+-------------------+---------------+
+        /// ```
+        ///
+        /// Each digest occupies [`COMMITMENT_DIGEST_SIZE`] bytes. Any unused bytes at the end of
+        /// a digest field are zero.
         ///
         /// Each field is parsed as its declared type on deserialization, so the accessors on a
         /// successfully decoded [`Commitment`] never fail.
