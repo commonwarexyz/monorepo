@@ -1051,9 +1051,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let threads = self.thread_pool.current_num_threads();
             let caller = Location::caller();
 
-            // One worker cannot overlap a hand-off (always inline, untimed); a manual strategy
-            // has no policy (keep spawn's unconditional hand-off). Otherwise the policy decides
-            // from the measured job cost and offload round trip.
+            // A single-worker pool cannot overlap a hand-off, so the job always runs inline,
+            // untimed. A manual strategy has no policy and keeps spawn's unconditional
+            // hand-off. Otherwise the policy weighs the measured job cost against the offload
+            // round trip.
             let ((execution, measure), policy) = if threads <= 1 {
                 ((policy::SpawnExecution::Inline, false), None)
             } else {
