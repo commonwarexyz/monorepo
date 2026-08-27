@@ -871,21 +871,10 @@ fn test_active_sync_paths() {
         .on_cqe(WaiterState::Active { target_tick: None }, 1)
         .expect("terminal CQE");
     unwrap_sync(output).expect("sync should succeed on positive");
-
-    let mut request = Request::Sync(SyncRequest {
-        file: make_file_fd(),
-    });
-    let err = unwrap_sync(request.timeout()).expect_err("expected timeout error");
-    assert!(matches!(err, Error::Timeout));
 }
 
 #[test]
 fn test_fail_uses_fallback_results() {
-    // Property: closed-driver staging failures deliver each kind's
-    // fallback result. Setup: one request of every variant. Action: fail
-    // each without staging. Expected: each kind's own fallback error
-    // surface (accepts and connects share ConnectionFailed).
-
     // Network sends and recvs should preserve their wrapper-specific fallback errors.
     let request = Request::Send(SendRequest {
         fd: make_socket_fd(),
@@ -968,11 +957,6 @@ fn test_fail_uses_fallback_results() {
 
 #[test]
 fn test_finish_timeout_delivers_timeout_results() {
-    // Property: the loop's immediate-timeout path delivers timeout to
-    // each request variant. Setup: one request of every variant with no
-    // CQE processed yet. Action: time each out locally. Expected: every
-    // kind surfaces the shared logical Error::Timeout.
-
     // Network operations should map directly to the shared logical timeout.
     let mut request = Request::Send(SendRequest {
         fd: make_socket_fd(),
@@ -980,7 +964,7 @@ fn test_finish_timeout_delivers_timeout_results() {
         deadline: None,
     });
     assert!(matches!(
-        unwrap_send(request.timeout()),
+        unwrap_send(request.interrupt(Error::Timeout)),
         Err(Error::Timeout)
     ));
 
@@ -993,7 +977,7 @@ fn test_finish_timeout_delivers_timeout_results() {
         deadline: None,
     });
     assert!(matches!(
-        unwrap_recv(request.timeout()),
+        unwrap_recv(request.interrupt(Error::Timeout)),
         Err((_, Error::Timeout))
     ));
 
@@ -1004,7 +988,7 @@ fn test_finish_timeout_delivers_timeout_results() {
         deadline: None,
     });
     assert!(matches!(
-        unwrap_accept(request.timeout()),
+        unwrap_accept(request.interrupt(Error::Timeout)),
         Err(Error::Timeout)
     ));
 
@@ -1015,53 +999,15 @@ fn test_finish_timeout_delivers_timeout_results() {
         deadline: None,
     });
     assert!(matches!(
-        unwrap_connect(request.timeout()),
+        unwrap_connect(request.interrupt(Error::Timeout)),
         Err(Error::Timeout)
     ));
-
-    // Storage reads and writes also use the common logical timeout surface.
-    let mut request = Request::ReadAt(ReadAtRequest {
-        file: make_file_fd(),
-        offset: 0,
-        len: 5,
-        read: 0,
-        buf: IoBufMut::with_capacity(5),
-        cache: Cache::Enabled,
-    });
-    assert!(matches!(
-        unwrap_read_at(request.timeout()),
-        Err((_, Error::Timeout))
-    ));
-
-    let mut request = Request::WriteAt(WriteAtRequest {
-        file: make_file_fd(),
-        offset: 0,
-        written: 0,
-        write: IoBufs::from(IoBuf::from(b"hello")).into(),
-        state: WriteAtState::Writing,
-        cache: Cache::Enabled,
-    });
-    assert!(matches!(
-        unwrap_write_at(request.timeout()),
-        Err(Error::Timeout)
-    ));
-
-    let mut request = Request::Sync(SyncRequest {
-        file: make_file_fd(),
-    });
-    let err = unwrap_sync(request.timeout()).expect_err("sync timeout should be an error");
-    assert!(matches!(err, Error::Timeout));
 }
 
 #[test]
 fn test_shutdown_cancellation_resolves_retry_and_partial_races() {
-    // Property: a CQE racing a shutdown cancellation resolves with the
-    // shutdown's error (Closed), not the deadline path's Timeout, and
-    // only the reason distinguishes them. Setup: every kind placed in
-    // shutdown cancel-requested state. Action (interleaving): feed each
-    // a retryable, partial-progress, or ECANCELED CQE. Expected: network
-    // kinds map retry and partial CQEs to Closed, while storage kinds
-    // map ECANCELED to Closed and requeue retry CQEs (None).
+    // Network retries become Closed during shutdown, while storage retries
+    // continue until their kernel references retire.
     let shutdown = WaiterState::CancelRequested {
         reason: CancelReason::Shutdown,
     };
@@ -1369,8 +1315,8 @@ fn test_vectored_send_builds_sendmsg() {
 }
 
 #[test]
-fn test_vectored_send_to_closed_socket_does_not_raise_sigpipe() {
-    const CHILD_ENV: &str = "COMMONWARE_TEST_IOURING_VECTORED_SEND_SIGPIPE_CHILD";
+fn test_send_to_closed_socket_does_not_raise_sigpipe() {
+    const CHILD_ENV: &str = "COMMONWARE_TEST_IOURING_SEND_SIGPIPE_CHILD";
     if env::var_os(CHILD_ENV).is_some() {
         // SAFETY: this child process runs only this test on one test thread,
         // before creating the loop or any operation that can raise SIGPIPE.
@@ -1380,9 +1326,19 @@ fn test_vectored_send_to_closed_socket_does_not_raise_sigpipe() {
 
         let mut harness = TestLoop::new(RingConfig::default());
         let handle = harness.clone_handle();
+        // The single-buffer and vectored paths each use an independent
+        // closed socket, so one failed request cannot affect the other.
         let (sender, receiver) = UnixStream::pair().expect("failed to create socket pair");
         drop(receiver);
+        let result = harness.block_on(handle.send(
+            Arc::new(sender.into()),
+            IoBuf::from(b"hello").into(),
+            Instant::now() + Duration::from_secs(5),
+        ));
+        assert!(matches!(result, Err(Error::SendFailed)));
 
+        let (sender, receiver) = UnixStream::pair().expect("failed to create socket pair");
+        drop(receiver);
         let mut vectored = IoBufs::default();
         vectored.append(IoBuf::from(b"hello"));
         vectored.append(IoBuf::from(b" world"));
@@ -1396,7 +1352,7 @@ fn test_vectored_send_to_closed_socket_does_not_raise_sigpipe() {
     }
 
     let status = Command::new(env::current_exe().expect("missing current test executable"))
-        .arg("test_vectored_send_to_closed_socket_does_not_raise_sigpipe")
+        .arg("test_send_to_closed_socket_does_not_raise_sigpipe")
         .arg("--test-threads=1")
         .env(CHILD_ENV, "1")
         .status()

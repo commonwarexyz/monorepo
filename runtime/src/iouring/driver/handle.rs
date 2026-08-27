@@ -54,12 +54,12 @@
 
 use super::{
     Tick,
-    callbacks::{WakerActionSink, DeferredWakerActions, WakerAction, run_waker_actions},
+    callbacks::{DeferredWakerActions, WakerAction, WakerActionSink, run_waker_actions},
     capacity::{CapacityAdmission, CapacityId, CapacityWaiters},
-    request::{Cache, RequestOutput, Request},
+    request::{Cache, Request, RequestOutput},
     waiter::{
-        TicketDropOutcome, TicketId, DeferredPoll, DropOutcome, PollState,
-        TicketArena, WaiterId, Waiters,
+        DeferredPoll, DropOutcome, PollState, TicketArena, TicketDropOutcome, TicketId, WaiterId,
+        Waiters,
     },
     waker::RingWaker,
 };
@@ -550,7 +550,7 @@ fn poll_admission<T>(
         }
         Admission::Expired => {
             let mut request = request.take().expect("request lost on capacity timeout");
-            Poll::Ready(Err(request.timeout()))
+            Poll::Ready(Err(request.interrupt(Error::Timeout)))
         }
     };
     (poll, actions)
@@ -560,7 +560,11 @@ fn poll_admission<T>(
 ///
 /// A pending poll refreshes the stored task waker. Taking a result frees its
 /// slot, but the caller reconciles capacity only after publishing local Done.
-fn poll_op_completion(handle: &DriverHandle, id: WaiterId, cx: &mut Context<'_>) -> Poll<RequestOutput> {
+fn poll_op_completion(
+    handle: &DriverHandle,
+    id: WaiterId,
+    cx: &mut Context<'_>,
+) -> Poll<RequestOutput> {
     match handle.with(|ops| ops.waiters.poll_state(id, cx.waker())) {
         PollState::Ready(output) => return Poll::Ready(output),
         PollState::PendingCurrent => return Poll::Pending,
@@ -588,7 +592,11 @@ fn poll_op_completion(handle: &DriverHandle, id: WaiterId, cx: &mut Context<'_>)
 }
 
 /// Poll a detached ticket's completion entry.
-fn poll_ticket_entry(handle: &DriverHandle, id: TicketId, cx: &mut Context<'_>) -> Poll<RequestOutput> {
+fn poll_ticket_entry(
+    handle: &DriverHandle,
+    id: TicketId,
+    cx: &mut Context<'_>,
+) -> Poll<RequestOutput> {
     match handle.with(|ops| ops.tickets.poll_state(id, cx.waker())) {
         PollState::Ready(output) => return Poll::Ready(output),
         PollState::PendingCurrent => return Poll::Pending,
@@ -687,11 +695,7 @@ pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl W
 /// yield their active waiter for request-kind-specific cancellation or detach.
 /// Ready entries drop only their output because the waiter was already
 /// recycled at terminal completion.
-pub(super) fn wind_down_ticket(
-    ops: &mut Ops,
-    id: TicketId,
-    actions: &mut impl WakerActionSink,
-) {
+pub(super) fn wind_down_ticket(ops: &mut Ops, id: TicketId, actions: &mut impl WakerActionSink) {
     let Some(waiter_id) = ops.tickets.pending_waiter(id) else {
         assert!(matches!(
             ops.tickets.mark_orphaned(id),

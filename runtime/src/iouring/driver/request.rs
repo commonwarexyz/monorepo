@@ -462,19 +462,17 @@ impl Request {
     pub fn interrupt(&mut self, error: Error) -> RequestOutput {
         match self {
             Self::Send(_) => RequestOutput::Send(Err(Box::new(error))),
-            Self::Recv(r) => RequestOutput::Recv(Err(Box::new((std::mem::take(&mut r.buf), error)))),
+            Self::Recv(r) => {
+                RequestOutput::Recv(Err(Box::new((std::mem::take(&mut r.buf), error))))
+            }
             Self::Accept(_) => RequestOutput::Accept(Err(Box::new(error))),
             Self::Connect(_) => RequestOutput::Connect(Err(Box::new(error))),
-            Self::ReadAt(r) => RequestOutput::ReadAt(Err(Box::new((std::mem::take(&mut r.buf), error)))),
+            Self::ReadAt(r) => {
+                RequestOutput::ReadAt(Err(Box::new((std::mem::take(&mut r.buf), error))))
+            }
             Self::WriteAt(_) => RequestOutput::WriteAt(Err(Box::new(error))),
             Self::Sync(_) => RequestOutput::Sync(Err(Box::new(error))),
         }
-    }
-
-    /// Return a timeout result, moving any owned buffer out of the request.
-    /// Used when a deadline expires before the current SQE could complete.
-    pub fn timeout(&mut self) -> RequestOutput {
-        self.interrupt(Error::Timeout)
     }
 }
 
@@ -547,7 +545,9 @@ impl SendRequest {
             WriteBuffers::Single { buf } => {
                 let ptr = buf.as_ptr();
                 let remaining = buf.remaining();
-                opcode::Send::new(fd, ptr, single_buffer_sqe_len(remaining)).build()
+                opcode::Send::new(fd, ptr, single_buffer_sqe_len(remaining))
+                    .flags(libc::MSG_NOSIGNAL)
+                    .build()
             }
             WriteBuffers::Vectored(v) => {
                 let message = v.refresh_message();
@@ -861,13 +861,9 @@ impl AcceptRequest {
         // The kernel treats the address length as an in/out parameter, so it
         // must be reset before every submission.
         *self.addr.len_mut() = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-        opcode::Accept::new(
-            fd,
-            self.addr.as_sockaddr_mut_ptr(),
-            self.addr.len_mut(),
-        )
-        .flags(libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK)
-        .build()
+        opcode::Accept::new(fd, self.addr.as_sockaddr_mut_ptr(), self.addr.len_mut())
+            .flags(libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK)
+            .build()
     }
 
     /// Classify one accept CQE and return the terminal result, or `None` when
@@ -920,12 +916,7 @@ impl ConnectRequest {
     /// Build the connect SQE for this request.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.fd.as_raw_fd());
-        opcode::Connect::new(
-            fd,
-            self.addr.as_sockaddr_ptr(),
-            self.addr.len(),
-        )
-        .build()
+        opcode::Connect::new(fd, self.addr.as_sockaddr_ptr(), self.addr.len()).build()
     }
 
     /// Classify one connect CQE and return the terminal result, or `None` when
