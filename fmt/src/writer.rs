@@ -2,6 +2,7 @@
 
 const INDENT: usize = 4;
 pub(crate) const MAX_WIDTH: usize = 89;
+const MAX_OVERFLOW_WIDTH: usize = 100;
 
 pub(crate) struct Writer<'a> {
     output: String,
@@ -61,6 +62,18 @@ impl<'a> Writer<'a> {
         self.current_column() + additional.chars().count() <= MAX_WIDTH
     }
 
+    pub(crate) fn fits_with_overflow(&self, additional: &str) -> bool {
+        self.current_column() + additional.chars().count() <= MAX_OVERFLOW_WIDTH
+    }
+
+    pub(crate) fn fits_on_new_line(&self, text: &str) -> bool {
+        self.indentation + text.chars().count() <= MAX_WIDTH
+    }
+
+    pub(crate) fn fits_on_indented_line(&self, text: &str) -> bool {
+        self.indentation + INDENT + text.chars().count() <= MAX_WIDTH
+    }
+
     pub(crate) fn pad_to_indentation(&mut self) {
         self.ensure_indentation();
     }
@@ -116,6 +129,18 @@ mod tests {
         let writer = Writer::new(88, "\n");
         assert!(writer.fits("x"));
         assert!(!writer.fits("xy"));
+        assert!(writer.fits_with_overflow("123456789012"));
+        assert!(!writer.fits_with_overflow("1234567890123"));
+    }
+
+    #[test]
+    fn checks_fit_from_configured_indentation() {
+        let writer = Writer::new_inline(80, "\n");
+
+        assert!(writer.fits_on_new_line("123456789"));
+        assert!(!writer.fits_on_new_line("1234567890"));
+        assert!(writer.fits_on_indented_line("12345"));
+        assert!(!writer.fits_on_indented_line("123456"));
     }
 
     #[test]

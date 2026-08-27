@@ -1,6 +1,6 @@
 //! Formatter for `cfg_if!` bodies.
 
-use super::{Error, Options};
+use super::{Error, Options, nested};
 use crate::{
     pretty::{self, Disposition, ProtectedFragment},
     source::SourceMap,
@@ -146,7 +146,7 @@ fn parse_body(input: ParseStream<'_>) -> ParseResult<Body> {
 pub(super) fn cfg_if(
     source: &str,
     options: Options,
-    _depth: usize,
+    depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<CfgIfInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
@@ -162,14 +162,15 @@ pub(super) fn cfg_if(
         let Some(predicate) = format_predicate(&source_map, &branch.predicate)? else {
             return Ok(ProtectedFragment::preserved(source));
         };
-        let Some(body) = format_body(&source_map, &branch.brace_token, &branch.body)? else {
+        let Some(body) = format_body(&source_map, &branch.brace_token, &branch.body, depth)? else {
             return Ok(ProtectedFragment::preserved(source));
         };
         branches.push(ConditionalLayout { predicate, body });
     }
     let else_body = match &input.else_branch {
         Some(branch) => {
-            let Some(body) = format_body(&source_map, &branch.brace_token, &branch.body)? else {
+            let Some(body) = format_body(&source_map, &branch.brace_token, &branch.body, depth)?
+            else {
                 return Ok(ProtectedFragment::preserved(source));
             };
             Some(body)
@@ -254,14 +255,18 @@ fn format_body(
     source_map: &SourceMap<'_>,
     brace: &token::Brace,
     body: &Body,
+    depth: usize,
 ) -> Result<Option<String>, Error> {
     let Some(ranges) = body_ranges(source_map, brace)? else {
         return Ok(None);
     };
+    let body_start = ranges.body.start;
     let body_source = source_map.slice(ranges.body)?;
     let body = match body {
-        Body::Items(items) => pretty::items(items, body_source)?,
-        Body::Statements(statements) => pretty::statements(statements, body_source)?,
+        Body::Items(items) => nested::items(items, body_source, body_start, source_map, depth)?,
+        Body::Statements(statements) => {
+            nested::statements(statements, body_source, body_start, source_map, depth)?
+        }
     };
     Ok(movable(body))
 }
@@ -410,6 +415,26 @@ mod tests {
 
         assert_eq!(output.matches("/// Exact docs.").count(), 1);
         assert!(output.contains("pub struct Example {"));
+    }
+
+    #[test]
+    fn preserves_opaque_macro_tokens_and_source_docs() {
+        let source = "if #[cfg(test)] {\n        loom::lazy_static! {\n            /// Exact model-local docs.\n            static ref VALUE: AtomicUsize = AtomicUsize::new(0);\n        }\n        const OTHER:usize=1;\n    }";
+        let output = fixed_point(source);
+
+        assert_eq!(output.matches("/// Exact model-local docs.").count(), 1);
+        assert!(!output.contains("#[doc ="), "{output}");
+        assert!(output.contains("static ref VALUE: AtomicUsize = AtomicUsize::new(0);"));
+        assert!(output.contains("const OTHER: usize = 1;"));
+    }
+
+    #[test]
+    fn preserves_opaque_macro_tokens_in_statement_body() {
+        let source = "if #[cfg(test)] { let span=info_span!(parent: &span, \"name\"); span }";
+        let output = fixed_point(source);
+
+        assert!(output.contains("info_span!(parent: &span, \"name\")"));
+        assert!(!output.contains("parent : & span"), "{output}");
     }
 
     #[test]

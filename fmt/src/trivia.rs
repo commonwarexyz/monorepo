@@ -4,6 +4,8 @@ use crate::source::SourceMap;
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use std::ops::Range;
 
+const MAX_OPTIONAL_ALIGNMENT_CELLS: usize = 16_384;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TokenKey {
     Open(char),
@@ -18,6 +20,7 @@ enum TokenKey {
 struct Token {
     key: TokenKey,
     range: Range<usize>,
+    line_leading: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,7 +70,13 @@ impl LineComments {
         let source_map = SourceMap::new(source);
         let mut tokens = Vec::new();
         let mut literal_ranges = Vec::new();
-        flatten(stream, &source_map, &mut tokens, &mut literal_ranges)?;
+        flatten(
+            stream,
+            source,
+            &source_map,
+            &mut tokens,
+            &mut literal_ranges,
+        )?;
         let doc_ranges = source_doc_ranges(source, &literal_ranges);
         if allow_source_docs {
             tokens.retain(|token| {
@@ -190,13 +199,28 @@ impl LineComments {
         for (range, replacement) in replacements.into_iter().rev() {
             output.replace_range(range, &replacement);
         }
-        let restored = Self::prepare_with_policy(&output, self.allow_source_docs)?;
+        let mut restored = Self::prepare_with_policy(&output, self.allow_source_docs)?;
+        let restored_mapping = token_mapping(&self.tokens, &restored.tokens)?;
+        let required_closes = line_leading_comment_closes(&self.tokens, &self.comments)?;
+        restore_line_leading_closing_delimiters(
+            &mut output,
+            &restored.tokens,
+            &restored_mapping,
+            &required_closes,
+        )?;
+        restored = Self::prepare_with_policy(&output, self.allow_source_docs)?;
+        let restored_mapping = token_mapping(&self.tokens, &restored.tokens)?;
         if restored.comments != expected_comments
             || restored
                 .tokens
                 .iter()
                 .map(|token| &token.key)
                 .ne(formatted_plan.iter().map(|token| &token.key))
+            || !preserves_line_leading_closing_delimiters(
+                &restored.tokens,
+                &restored_mapping,
+                &required_closes,
+            )
         {
             return None;
         }
@@ -209,7 +233,13 @@ fn token_plan(source: &str, allow_source_docs: bool) -> Option<Vec<Token>> {
     let source_map = SourceMap::new(source);
     let mut tokens = Vec::new();
     let mut literal_ranges = Vec::new();
-    flatten(stream, &source_map, &mut tokens, &mut literal_ranges)?;
+    flatten(
+        stream,
+        source,
+        &source_map,
+        &mut tokens,
+        &mut literal_ranges,
+    )?;
     if allow_source_docs {
         let doc_ranges = source_doc_ranges(source, &literal_ranges);
         tokens.retain(|token| {
@@ -224,6 +254,7 @@ fn token_plan(source: &str, allow_source_docs: bool) -> Option<Vec<Token>> {
 
 fn flatten(
     stream: TokenStream,
+    source_text: &str,
     source: &SourceMap<'_>,
     tokens: &mut Vec<Token>,
     literal_ranges: &mut Vec<Range<usize>>,
@@ -232,28 +263,40 @@ fn flatten(
         match token {
             TokenTree::Group(group) => {
                 if group.delimiter() == Delimiter::None {
-                    flatten(group.stream(), source, tokens, literal_ranges)?;
+                    flatten(group.stream(), source_text, source, tokens, literal_ranges)?;
                     continue;
                 }
                 let (open, close) = delimiter_keys(group.delimiter())?;
+                let open_range = source.span_range(group.span_open()).ok()?;
                 tokens.push(Token {
                     key: TokenKey::Open(open),
-                    range: source.span_range(group.span_open()).ok()?,
+                    line_leading: line_leading_whitespace(source_text, open_range.start).is_some(),
+                    range: open_range,
                 });
-                flatten(group.stream(), source, tokens, literal_ranges)?;
+                flatten(group.stream(), source_text, source, tokens, literal_ranges)?;
+                let close_range = source.span_range(group.span_close()).ok()?;
                 tokens.push(Token {
                     key: TokenKey::Close(close),
-                    range: source.span_range(group.span_close()).ok()?,
+                    line_leading: line_leading_whitespace(source_text, close_range.start).is_some(),
+                    range: close_range,
                 });
             }
-            TokenTree::Ident(ident) => tokens.push(Token {
-                key: TokenKey::Ident(ident.to_string()),
-                range: source.span_range(ident.span()).ok()?,
-            }),
-            TokenTree::Punct(punct) => tokens.push(Token {
-                key: TokenKey::Punct(punct.as_char()),
-                range: source.span_range(punct.span()).ok()?,
-            }),
+            TokenTree::Ident(ident) => {
+                let range = source.span_range(ident.span()).ok()?;
+                tokens.push(Token {
+                    key: TokenKey::Ident(ident.to_string()),
+                    line_leading: line_leading_whitespace(source_text, range.start).is_some(),
+                    range,
+                });
+            }
+            TokenTree::Punct(punct) => {
+                let range = source.span_range(punct.span()).ok()?;
+                tokens.push(Token {
+                    key: TokenKey::Punct(punct.as_char()),
+                    line_leading: line_leading_whitespace(source_text, range.start).is_some(),
+                    range,
+                });
+            }
             TokenTree::Literal(literal) => {
                 let range = source.span_range(literal.span()).ok()?;
                 let text = source.slice(range.clone()).ok()?;
@@ -267,6 +310,7 @@ fn flatten(
                     } else {
                         TokenKey::Literal(text.to_owned())
                     },
+                    line_leading: line_leading_whitespace(source_text, range.start).is_some(),
                     range: range.clone(),
                 });
                 literal_ranges.push(range);
@@ -274,6 +318,127 @@ fn flatten(
         }
     }
     Some(())
+}
+
+fn preserves_line_leading_closing_delimiters(
+    restored: &[Token],
+    mapping: &[Option<usize>],
+    required: &[bool],
+) -> bool {
+    required.iter().enumerate().all(|(index, required)| {
+        !required || mapping[index].is_some_and(|mapped| restored[mapped].line_leading)
+    })
+}
+
+fn line_leading_comment_closes(tokens: &[Token], comments: &[Comment]) -> Option<Vec<bool>> {
+    let opening = matching_opening_indices(tokens)?;
+    let mut closing = vec![None; tokens.len()];
+    for (close, open) in opening.iter().enumerate() {
+        if let Some(open) = open {
+            closing[*open] = Some(close);
+        }
+    }
+    let mut comment_positions = comments
+        .iter()
+        .map(|comment| comment.right.unwrap_or(tokens.len()))
+        .collect::<Vec<_>>();
+    comment_positions.sort_unstable();
+
+    let mut required = vec![false; tokens.len()];
+    let mut stack = Vec::new();
+    let mut comment_index = 0;
+    for (boundary, token) in tokens.iter().enumerate() {
+        while comment_positions.get(comment_index) == Some(&boundary) {
+            if let Some((_, Some(close))) = stack.last() {
+                required[*close] = true;
+            }
+            comment_index += 1;
+        }
+        match token.key {
+            TokenKey::Open(_) => {
+                let close = closing[boundary]?;
+                let nearest = if tokens[close].line_leading {
+                    Some(close)
+                } else {
+                    stack.last().and_then(|(_, nearest)| *nearest)
+                };
+                stack.push((close, nearest));
+            }
+            TokenKey::Close(_) => {
+                if stack.pop().is_none_or(|(close, _)| close != boundary) {
+                    return None;
+                }
+            }
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc(_) => {}
+        }
+    }
+    while comment_positions.get(comment_index) == Some(&tokens.len()) {
+        if let Some((_, Some(close))) = stack.last() {
+            required[*close] = true;
+        }
+        comment_index += 1;
+    }
+    if comment_index != comment_positions.len() || !stack.is_empty() {
+        return None;
+    }
+    Some(required)
+}
+
+fn restore_line_leading_closing_delimiters(
+    source: &mut String,
+    restored: &[Token],
+    mapping: &[Option<usize>],
+    required: &[bool],
+) -> Option<()> {
+    let opening = matching_opening_indices(restored)?;
+    let mut replacements = Vec::new();
+    for (index, required) in required.iter().enumerate() {
+        if !required {
+            continue;
+        }
+        let restored_index = mapping[index]?;
+        if restored[restored_index].line_leading {
+            continue;
+        }
+        let open_index = opening[restored_index]?;
+        let indentation = line_indentation(source, restored[open_index].range.start).to_owned();
+        let close_start = restored[restored_index].range.start;
+        let whitespace_start = source[..close_start]
+            .char_indices()
+            .rev()
+            .take_while(|(_, character)| matches!(character, ' ' | '\t'))
+            .last()
+            .map_or(close_start, |(offset, _)| offset);
+        replacements.push((whitespace_start..close_start, format!("\n{indentation}")));
+    }
+    for (range, replacement) in replacements.into_iter().rev() {
+        source.replace_range(range, &replacement);
+    }
+    Some(())
+}
+
+fn matching_opening_indices(tokens: &[Token]) -> Option<Vec<Option<usize>>> {
+    let mut opening = Vec::new();
+    let mut stack = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        match token.key {
+            TokenKey::Open(delimiter) => stack.push((delimiter, index)),
+            TokenKey::Close(delimiter) => {
+                let (open, open_index) = stack.pop()?;
+                if !delimiters_match(open, delimiter) {
+                    return None;
+                }
+                opening.resize(index + 1, None);
+                opening[index] = Some(open_index);
+            }
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc(_) => {}
+        }
+    }
+    if !stack.is_empty() {
+        return None;
+    }
+    opening.resize(tokens.len(), None);
+    Some(opening)
 }
 
 const fn delimiter_keys(delimiter: Delimiter) -> Option<(char, char)> {
@@ -354,31 +519,93 @@ fn parse_gap(
 
 fn token_mapping(original: &[Token], formatted: &[Token]) -> Option<Vec<Option<usize>>> {
     let mut mapping = vec![None; original.len()];
+    let original_required = original
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| !is_removable_original_token(&token.key))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let formatted_required = formatted
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| !is_inserted_formatted_token(&token.key))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if original_required.len() != formatted_required.len() {
+        return None;
+    }
+
+    let mut original_start = 0;
+    let mut formatted_start = 0;
+    for (&original_index, &formatted_index) in original_required.iter().zip(&formatted_required) {
+        if original[original_index].key != formatted[formatted_index].key {
+            return None;
+        }
+        map_optional_tokens(
+            original,
+            original_start..original_index,
+            formatted,
+            formatted_start..formatted_index,
+            &mut mapping,
+        )?;
+        mapping[original_index] = Some(formatted_index);
+        original_start = original_index + 1;
+        formatted_start = formatted_index + 1;
+    }
+    map_optional_tokens(
+        original,
+        original_start..original.len(),
+        formatted,
+        formatted_start..formatted.len(),
+        &mut mapping,
+    )?;
+    Some(mapping)
+}
+
+fn map_optional_tokens(
+    original: &[Token],
+    original_range: Range<usize>,
+    formatted: &[Token],
+    formatted_range: Range<usize>,
+    mapping: &mut [Option<usize>],
+) -> Option<()> {
+    let original = &original[original_range.clone()];
+    let formatted = &formatted[formatted_range.clone()];
+    let columns = formatted.len() + 1;
+    let cells = (original.len() + 1).checked_mul(columns)?;
+    if cells > MAX_OPTIONAL_ALIGNMENT_CELLS {
+        return None;
+    }
+    let mut common = vec![0; cells];
+    for original_index in (0..original.len()).rev() {
+        for formatted_index in (0..formatted.len()).rev() {
+            let index = original_index * columns + formatted_index;
+            common[index] = if original[original_index].key == formatted[formatted_index].key {
+                common[(original_index + 1) * columns + formatted_index + 1] + 1
+            } else {
+                common[(original_index + 1) * columns + formatted_index]
+                    .max(common[original_index * columns + formatted_index + 1])
+            };
+        }
+    }
+
     let mut original_index = 0;
     let mut formatted_index = 0;
     while original_index < original.len() && formatted_index < formatted.len() {
         if original[original_index].key == formatted[formatted_index].key {
-            mapping[original_index] = Some(formatted_index);
+            mapping[original_range.start + original_index] =
+                Some(formatted_range.start + formatted_index);
             original_index += 1;
             formatted_index += 1;
-        } else if is_removable_original_token(&original[original_index].key) {
+        } else if common[(original_index + 1) * columns + formatted_index]
+            >= common[original_index * columns + formatted_index + 1]
+        {
             original_index += 1;
-        } else if is_inserted_formatted_token(&formatted[formatted_index].key) {
-            formatted_index += 1;
         } else {
-            return None;
+            formatted_index += 1;
         }
     }
-    if original[original_index..]
-        .iter()
-        .any(|token| !is_removable_original_token(&token.key))
-        || formatted[formatted_index..]
-            .iter()
-            .any(|token| !is_inserted_formatted_token(&token.key))
-    {
-        return None;
-    }
-    Some(mapping)
+    Some(())
 }
 
 const fn is_removable_original_token(key: &TokenKey) -> bool {
@@ -602,5 +829,17 @@ mod tests {
 
         assert_eq!(restored.matches("// keep item comment").count(), 1);
         assert_eq!(restored.matches("/// Run one selection.").count(), 1);
+    }
+
+    #[test]
+    fn bounds_optional_token_alignment() {
+        let source = format!(
+            "{}value // keep exactly\n{}",
+            "(".repeat(200),
+            ")".repeat(200)
+        );
+        let comments = LineComments::prepare(&source).expect("line comment should be detected");
+
+        assert!(comments.restore(&source).is_none());
     }
 }

@@ -88,7 +88,7 @@ pub(crate) const fn delimiter_text(
     match delimiter {
         MacroDelimiter::Paren(_) => Some(("(", ")")),
         MacroDelimiter::Brace(_) => Some(("{", "}")),
-        MacroDelimiter::Bracket(_) => None,
+        MacroDelimiter::Bracket(_) => Some(("[", "]")),
     }
 }
 

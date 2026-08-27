@@ -14,6 +14,8 @@ use proc_macro2::Span;
 use std::ops::Range;
 use syn::{Expr, spanned::Spanned};
 
+const MAX_UNWRAPPED_MULTILINE_BODY_LINES: usize = 16;
+
 struct BranchLayout {
     pattern: String,
     future: String,
@@ -243,7 +245,10 @@ fn format_branch(
     let pattern = pretty::pattern(pattern, pattern_source)?;
     let future = nested::expression(future, future_source, source, source_map, depth)?;
     let body = nested::expression(body_expression, body_source, source, source_map, depth)?;
-    let wrapped_body = if body_is_block || body.disposition() != Disposition::Formatted {
+    let body_needs_wrapper = !body_is_block
+        && (!body.text().contains('\n')
+            || body.text().lines().count() > MAX_UNWRAPPED_MULTILINE_BODY_LINES);
+    let wrapped_body = if !body_needs_wrapper || body.disposition() != Disposition::Formatted {
         None
     } else {
         let wrapped = nested::value_block(body_expression, body_source, source, source_map, depth)?;
@@ -564,12 +569,19 @@ fn write_branch(writer: &mut Writer<'_>, branch: &BranchLayout) {
     write_branch_head(writer, branch);
     if branch.body_is_block {
         write_block_body(writer, &branch.body);
-    } else if let Some(wrapped_body) = &branch.wrapped_body {
+        return;
+    }
+
+    let inline_body = format!(" => {},", branch.body);
+    if !branch.body.contains('\n') && writer.fits(&inline_body) {
+        writer.push(&inline_body);
+        return;
+    }
+
+    if let Some(wrapped_body) = &branch.wrapped_body {
         write_block_body(writer, wrapped_body);
     } else {
-        writer.push(" => ");
-        writer.push(&branch.body);
-        writer.push(",");
+        write_unwrapped_body(writer, &branch.body);
     }
 }
 
@@ -588,7 +600,7 @@ fn inline_branch(branch: &BranchLayout) -> String {
 fn write_branch_head(writer: &mut Writer<'_>, branch: &BranchLayout) {
     writer.push(&branch.pattern);
     writer.push(" =");
-    write_continuation(writer, &branch.future);
+    write_continuation(writer, &branch.future, &branch_head_reserve(writer, branch));
 
     if let Some(divergence) = &branch.divergence {
         let first_line = divergence.lines().next().unwrap_or(divergence);
@@ -608,9 +620,44 @@ fn write_branch_head(writer: &mut Writer<'_>, branch: &BranchLayout) {
     }
 }
 
-fn write_continuation(writer: &mut Writer<'_>, fragment: &str) {
+fn branch_head_reserve(writer: &Writer<'_>, branch: &BranchLayout) -> String {
+    let mut reserve = String::new();
+    if let Some(divergence) = &branch.divergence {
+        if divergence.contains('\n') {
+            return reserve;
+        }
+        reserve.push_str(" else ");
+        reserve.push_str(divergence);
+    }
+
+    if branch.body_is_block {
+        reserve.push_str(" => {");
+    } else if !branch.body.contains('\n') {
+        let direct_body = format!("=> {},", branch.body);
+        let continuation = format!("{} {direct_body}", branch.future);
+        let direct_body_fits = if branch.future.contains('\n') {
+            writer.fits_on_new_line(&direct_body)
+        } else {
+            writer.fits_on_indented_line(&continuation)
+        };
+        if direct_body_fits {
+            reserve.push(' ');
+            reserve.push_str(&direct_body);
+        } else {
+            reserve.push_str(" => {");
+        }
+    } else if branch.wrapped_body.is_some() {
+        reserve.push_str(" => {");
+    } else {
+        reserve.push_str(" => ");
+        reserve.push_str(branch.body.lines().next().unwrap_or(&branch.body));
+    }
+    reserve
+}
+
+fn write_continuation(writer: &mut Writer<'_>, fragment: &str, reserve: &str) {
     let first_line = fragment.lines().next().unwrap_or(fragment);
-    if writer.fits(&format!(" {first_line}")) {
+    if writer.fits(&format!(" {first_line}{reserve}")) {
         writer.push(" ");
         writer.push(fragment);
     } else {
@@ -622,7 +669,34 @@ fn write_continuation(writer: &mut Writer<'_>, fragment: &str) {
 fn write_block_body(writer: &mut Writer<'_>, body: &str) {
     let first_line = body.lines().next().unwrap_or(body);
     let prefix = format!(" => {first_line}");
-    if writer.fits(&prefix) {
+    if writer.fits(&prefix) || first_line == "{" && writer.fits_with_overflow(" => {") {
+        writer.push(" => ");
+    } else if let Some(inner) = body
+        .strip_prefix("{ ")
+        .and_then(|body| body.strip_suffix(" }"))
+    {
+        if writer.fits_with_overflow(" => {") {
+            writer.push(" => {");
+        } else {
+            writer.newline();
+            writer.push("=> {");
+        }
+        writer.newline();
+        writer.indented(|writer| writer.push(inner));
+        writer.newline();
+        writer.push("},");
+        return;
+    } else {
+        writer.newline();
+        writer.push("=> ");
+    }
+    writer.push(body);
+    writer.push(",");
+}
+
+fn write_unwrapped_body(writer: &mut Writer<'_>, body: &str) {
+    let first_line = body.lines().next().unwrap_or(body);
+    if writer.fits(&format!(" => {first_line}")) {
         writer.push(" => ");
     } else {
         writer.newline();
@@ -688,11 +762,16 @@ mod tests {
     }
 
     #[test]
-    fn wraps_long_non_block_body() {
+    fn keeps_formatted_multiline_body_unwrapped() {
         let source = "value = receive() => value.map(|value| value.with_first_component().with_second_component().with_third_component())";
         let formatted = select(source, OPTIONS).expect("select should format");
 
-        assert!(formatted.text().contains("=> {\n"));
+        assert!(
+            formatted.text().contains("=> value\n"),
+            "{}",
+            formatted.text()
+        );
+        assert!(!formatted.text().contains("=> {\n"), "{}", formatted.text());
         syn::parse_str::<SelectInput>(formatted.text()).expect("formatted select should parse");
     }
 
@@ -714,6 +793,47 @@ mod tests {
             "available_width =\n                another_descriptive_future_name().await"
         ));
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn keeps_short_body_after_multiline_future() {
+        let source = "result = async { let value = receive().await; value } => result";
+        let once = select(source, OPTIONS)
+            .expect("select should format")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("select should format twice")
+            .into_string();
+
+        assert!(once.contains("} => result,"), "{once}");
+        assert!(!once.contains("=> { result }"), "{once}");
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn preserves_unknown_macro_tokens_in_body() {
+        let source = "span=receive()=>info_span!(parent: &span, \"name\")";
+        let once = select(source, OPTIONS)
+            .expect("select should format")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("select should format twice")
+            .into_string();
+
+        assert!(
+            once.contains("info_span!(parent: &span, \"name\")"),
+            "{once}"
+        );
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn preserves_layout_around_multiline_opaque_macro() {
+        let source = "value = receive() => option.unwrap_or_else(|| {\n    panic!(\n        \"missing value: {value:?}\"\n    )\n})";
+        let formatted = select(source, OPTIONS).expect("select should be preserved");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
     }
 
     #[test]
@@ -768,9 +888,85 @@ mod tests {
         let source = "context,on_stopped=>{},msg=receive()=>match msg {Some(value)=>values.push(value),None=>break},";
         let formatted = select_loop(source, OPTIONS).expect("select loop should format");
 
-        assert!(formatted.text().contains("=> {\n        match msg {"));
+        assert!(formatted.text().contains("=> match msg {"));
         syn::parse_str::<SelectLoopInput>(formatted.text())
             .expect("formatted select loop should parse");
+    }
+
+    #[test]
+    fn wraps_large_multiline_match_body() {
+        let arms = (0..20)
+            .map(|value| format!("{value}=>handle_{value}(),"))
+            .collect::<String>();
+        let source = format!("value=receive()=>match value {{{arms}_=>fallback()}}");
+        let formatted = select(&source, OPTIONS).expect("select should format");
+
+        assert!(formatted.text().contains("=> {\n        match value {"));
+        syn::parse_str::<SelectInput>(formatted.text()).expect("formatted select should parse");
+    }
+
+    #[test]
+    fn expands_single_line_block_to_keep_arrow_attached() {
+        let options = Options {
+            indentation: 24,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "receiver=receiver=>{panic!(\"receiver exited with an unexpectedly descriptive failure: {receiver:?}\")}";
+        let formatted = select(source, options).expect("select should format");
+
+        assert!(
+            formatted.text().contains("receiver = receiver => {\n"),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn wraps_long_body_to_keep_arrow_attached() {
+        let options = Options {
+            indentation: 12,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "result=&mut first=>panic!(\"the selected operation returned an unexpectedly descriptive failure\")";
+        let formatted = select(source, options).expect("select should format");
+
+        assert!(
+            formatted.text().contains("result = &mut first => {\n"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            !formatted
+                .text()
+                .lines()
+                .any(|line| line.trim_start().starts_with("=>")),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn keeps_arrow_on_multiline_future_with_bounded_overflow() {
+        let options = Options {
+            indentation: 8,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "artifact=self.syncer.update_targets(Anchor::from(block.as_ref()),A::sync_targets(block.as_ref()))=>artifact";
+        let formatted = select(source, options).expect("select should format");
+
+        assert!(
+            formatted.text().contains(")) => {\n"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            !formatted
+                .text()
+                .lines()
+                .any(|line| line.trim_start().starts_with("=>")),
+            "{}",
+            formatted.text()
+        );
     }
 
     #[test]
@@ -829,7 +1025,10 @@ mod tests {
             .expect("select loop should format twice")
             .into_string();
 
-        assert!(once.contains("    // first line\n    // second line\n"));
+        assert!(
+            once.contains("    // first line\n    // second line\n"),
+            "{once}"
+        );
         assert!(once.contains("        // field comment\n"), "{once}");
         assert_eq!(once, twice);
     }
@@ -948,7 +1147,8 @@ mod tests {
             .into_string();
 
         assert!(
-            once.contains("select! {\n            inner = receive_inner() => inner,\n        }")
+            once.contains("select! {\n        inner = receive_inner() => inner,\n    }"),
+            "{once}"
         );
         assert_eq!(once, twice);
     }
@@ -980,7 +1180,7 @@ mod tests {
             .expect("nested select loop should format twice")
             .into_string();
 
-        assert!(once.contains("select_loop! {\n            context,"));
+        assert!(once.contains("select_loop! {\n        context,"), "{once}");
         assert_eq!(once, twice);
     }
 

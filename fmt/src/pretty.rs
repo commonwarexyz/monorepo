@@ -360,6 +360,25 @@ pub(crate) fn source_requires_preservation(source: &str) -> bool {
     source_requires_preservation_with_policy(source, true)
 }
 
+pub(crate) fn source_has_multiline_literal(source: &str) -> bool {
+    let Ok(stream) = source.parse::<TokenStream>() else {
+        return true;
+    };
+    let source_map = SourceMap::new(source);
+    let mut ranges = Vec::new();
+    let mut literal_ranges = Vec::new();
+    let mut has_multiline_literal = false;
+    collect_token_ranges(
+        stream,
+        &source_map,
+        &mut ranges,
+        &mut literal_ranges,
+        &mut has_multiline_literal,
+    )
+    .is_err()
+        || has_multiline_literal
+}
+
 fn source_requires_preservation_with_policy(source: &str, preserve_source_docs: bool) -> bool {
     let Ok(stream) = source.parse::<TokenStream>() else {
         return true;
@@ -557,7 +576,12 @@ mod tests {
         let input: Expr = syn::parse_str(source).expect("expression should parse");
         let formatted = expression(&input, source).expect("expression should be protected");
 
-        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(
+            formatted.disposition(),
+            Disposition::PreservedForTrivia,
+            "{}",
+            formatted.text()
+        );
         assert_eq!(formatted.text(), source);
     }
 
@@ -569,6 +593,20 @@ mod tests {
 
         assert_eq!(formatted.disposition(), Disposition::Formatted);
         assert_eq!(formatted.text(), "value // keep exactly\n");
+    }
+
+    #[test]
+    fn keeps_trailing_comment_before_closing_delimiter() {
+        let source = "if !interesting(\n    self.activity_timeout,\n    finalized,\n    current.view,\n    view,\n    true // allow future\n) {\n    return;\n}";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert!(
+            formatted.text().contains("true, // allow future\n)"),
+            "{}",
+            formatted.text()
+        );
     }
 
     #[test]
@@ -586,6 +624,71 @@ mod tests {
         assert!(once.contains("// keep before"));
         assert!(once.contains("value // keep trailing"));
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn restores_line_before_collapsed_closing_delimiter() {
+        let source = "cell.with_mut(|ptr| {\n    // SAFETY: keep the boundary clear.\n    unsafe { (*ptr).assume_init_read() }\n})";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert!(
+            formatted.text().contains(
+                "        // SAFETY: keep the boundary clear.\n        unsafe { (*ptr).assume_init_read() }\n    })"
+            ),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn formats_block_with_leading_comment_and_tail_expression() {
+        let source = "{\n// keep field context\nvalue\n}";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should format");
+
+        assert_eq!(
+            formatted.disposition(),
+            Disposition::Formatted,
+            "{}",
+            formatted.text()
+        );
+        assert!(formatted.text().contains("    // keep field context\n"));
+    }
+
+    #[test]
+    fn collapses_unrelated_call_inside_commented_block() {
+        let source = "{\n// keep before call\ncall(\n    value\n)\n}";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert!(
+            formatted.text().contains("call(value)"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            !formatted.text().contains("call(value\n"),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn keeps_only_nearest_comment_enclosing_close_on_own_line() {
+        let source = "call(\n    {\n        // keep inside argument\n        value\n    }\n)";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert!(
+            formatted.text().contains("    value\n})"),
+            "{}",
+            formatted.text()
+        );
+        assert!(!formatted.text().contains("}\n)"), "{}", formatted.text());
     }
 
     #[test]
