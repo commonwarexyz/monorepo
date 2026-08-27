@@ -199,6 +199,29 @@
 //! - Other custom mechanisms can exclude dealers before calling [`observe`] or [`Player::finalize`],
 //!   to enforce other rules for "misbehavior" beyond what the DKG does already.
 //!
+//! ## Aggregate Degree
+//!
+//! For `n` players and at most `f` faults, the configured quorum is `n - f`, so dealer polynomials
+//! have degree `d = n - f - 1`. The aggregate must retain that exact degree; otherwise, fewer than
+//! `n - f` participants could recover the shared secret or produce a threshold signature.
+//!
+//! Every accepted dealer commitment has exact degree `d`, and a usable dealer log records one
+//! result for every player. At most `f` results can be Byzantine acknowledgements issued without
+//! verifying their shares. Every other result is either an honest acknowledgement of a verified
+//! share or a reveal verified against the commitment. The log therefore contains at least
+//! `n - f = d + 1` valid scalar evaluations, enough to determine the dealer's polynomial and the
+//! scalar behind every coefficient commitment.
+//!
+//! Selected commitments are summed during initial key generation and combined with non-zero
+//! Lagrange weights during resharing. In either case, the leading coefficient includes an
+//! independently sampled contribution from at least one honest dealer. Although
+//! [a rushing adversary](https://decentralizedthoughts.github.io/2019-06-07-modeling-the-adversary/#rushing)
+//! may observe the honest commitments before choosing its own, it must know every Byzantine
+//! coefficient scalar before those commitments can be selected. Choosing those scalars so their
+//! combined leading term cancels the honest contribution would require solving the discrete
+//! logarithm of the honest leading commitment (preventing any efficient adversary from forcing the
+//! aggregate below degree `d`).
+//!
 //! ## Non-Uniform Distribution
 //!
 //! The Joint-Feldman DKG protocol does not guarantee a uniformly random secret key is generated. An adversary
@@ -896,8 +919,9 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// performing DKGs from each other. It must remain fixed across all rounds,
     /// epochs, restarts, and participants in the protocol's lifetime.
     /// `round` should be a counter, always incrementing, even for failed DKGs.
-    /// `previous` should be the result of the previous successful DKG. Its public
-    /// sharing must be consistent with its player set and fault-model quorum.
+    /// `previous` should be the result of the previous successful DKG. Its public sharing must
+    /// have a participant count matching its player set and an exact recovery threshold equal to
+    /// the fault-model quorum.
     /// `reveal` selects the revealed-share calculation.
     /// `dealers` should be the list of public keys for the dealers. This MUST
     /// be a subset of the previous round's players.
