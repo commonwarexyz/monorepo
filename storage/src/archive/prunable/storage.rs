@@ -202,6 +202,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             index_page_cache: key_page_cache,
             index_write_buffer: key_write_buffer,
             value_write_buffer,
+            replay_buffer,
             compression,
             codec_config,
         };
@@ -209,7 +210,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             &context,
             oversized_cfg,
             metadata_partition,
-            replay_buffer,
             commonware_runtime::ReadOptions::default(),
         )
         .await
@@ -489,10 +489,11 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Include each section once in the sync metric and retain prior pipelined requests until
         // this blocking call observes their completion.
         self.syncs.inc_by(self.pending.len() as u64);
+        let active = self.pending.clone();
         self.requested.append(&mut self.pending);
         self.oversized = self
             .oversized
-            .sync(&self.requested)
+            .sync_tracked(&self.requested, &active)
             .await
             .map_err(map_journal_error)?;
         self.requested.clear();
@@ -505,12 +506,13 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.syncs.inc_by(self.pending.len() as u64);
 
         // Retain requested sections until a blocking sync observes their outstanding work.
+        let active = self.pending.clone();
         self.requested.append(&mut self.pending);
 
         let handle;
         (self.oversized, handle) = self
             .oversized
-            .start_sync(&self.requested)
+            .start_sync_tracked(&self.requested, &active)
             .await
             .map_err(map_journal_error)?;
         Ok((self, handle))

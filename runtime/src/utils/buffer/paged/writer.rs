@@ -1013,6 +1013,77 @@ impl<B: Blob> Writer<B> {
         Ok(out)
     }
 
+    /// Read the terminal logical range of a raw paged blob and return its logical size.
+    ///
+    /// The blob must contain only complete physical pages. The last page is validated first to
+    /// determine the logical end. If `len` crosses a page boundary, preceding pages are validated
+    /// with [Self::read_validated_from_blob].
+    pub async fn read_validated_tail_from_blob(
+        blob: &B,
+        physical_size: u64,
+        logical_page_size: NonZeroU16,
+        len: usize,
+        read_options: ReadOptions,
+    ) -> Result<(u64, IoBufs), Error> {
+        if physical_size == 0 {
+            return if len == 0 {
+                Ok((0, IoBufs::default()))
+            } else {
+                Err(Error::BlobInsufficientLength)
+            };
+        }
+
+        let page_size = u64::from(logical_page_size.get());
+        let physical_page_size = page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        if !physical_size.is_multiple_of(physical_page_size) {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // The checksum length on the terminal page determines the blob's logical end.
+        let page = physical_size / physical_page_size - 1;
+        let (tail, _) = super::get_page_with_checksum_from_blob(
+            blob,
+            page,
+            page_size,
+            read_options,
+        )
+        .await?;
+        let page_start = page
+            .checked_mul(page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        let logical_size = page_start
+            .checked_add(u64::try_from(tail.len()).map_err(|_| Error::OffsetOverflow)?)
+            .ok_or(Error::OffsetOverflow)?;
+        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let offset = logical_size
+            .checked_sub(len_u64)
+            .ok_or(Error::BlobInsufficientLength)?;
+
+        // Read only the portion preceding the terminal page, then append its already-validated
+        // suffix. This keeps a terminal item wholly within the last page to one blob read.
+        let mut out = if offset < page_start {
+            let prefix_len = usize::try_from(page_start - offset)
+                .map_err(|_| Error::OffsetOverflow)?;
+            Self::read_validated_from_blob(
+                blob,
+                logical_page_size,
+                offset,
+                prefix_len,
+                read_options,
+            )
+            .await?
+        } else {
+            IoBufs::default()
+        };
+        let tail_start = usize::try_from(offset.max(page_start) - page_start)
+            .map_err(|_| Error::OffsetOverflow)?;
+        out.append(tail.slice(tail_start..));
+        debug_assert_eq!(out.len(), len);
+        Ok((logical_size, out))
+    }
+
     /// Return the contiguous recoverable prefix of a raw paged blob without mutating it.
     ///
     /// `physical_size` must be the blob's current size, and the blob must remain unchanged while

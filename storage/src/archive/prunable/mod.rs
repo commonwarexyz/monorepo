@@ -1560,7 +1560,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_lazily_publishes_previous_durable_boundary() {
+    fn test_start_sync_publishes_closed_section_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config(&context, "marker-lag", NZU64!(4));
@@ -1575,11 +1575,11 @@ mod tests {
                 .unwrap();
 
             // The first call has no prior durability proof, so it starts only the index and value
-            // syncs. The second call starts those syncs for the larger prefix and concurrently
-            // publishes the boundary completed by the first call:
+            // syncs. Moving to section 4 closes section 0 and publishes its completed boundary
+            // alongside the new section's data syncs:
             //
-            // call 1: data [0, 1) durable, marker absent
-            // call 2: data [0, 2) pending, marker [0, 1) pending
+            // call 1: section 0 data durable, marker absent
+            // call 2: section 4 data pending, section 0 marker pending
             let (archive, first) = archive
                 .put_start_sync(0, test_key("zero"), 10)
                 .await
@@ -1588,7 +1588,7 @@ mod tests {
             release_pending_syncs(&pending);
             first.await.unwrap();
 
-            let archive = archive.put(1, test_key("one"), 20).await.unwrap();
+            let archive = archive.put(4, test_key("four"), 40).await.unwrap();
             let (archive, second) = archive.start_sync().await.unwrap();
             assert_eq!(pending.lock().len(), 3);
             release_pending_syncs(&pending);
@@ -1601,7 +1601,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 1)]);
+            assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 0), (4, 4)]);
             drop(archive);
 
             Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second_reopen"), cfg)
@@ -1614,7 +1614,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_sync_lazily_publishes_previous_durable_boundary() {
+    fn test_sync_publishes_closed_section_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config(&context, "blocking-marker-lag", NZU64!(4));
@@ -1636,7 +1636,7 @@ mod tests {
             release_pending_syncs(&pending);
             first.await.unwrap();
 
-            let archive = archive.put(1, test_key("one"), 20).await.unwrap();
+            let archive = archive.put(4, test_key("four"), 40).await.unwrap();
             pending.arm();
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
@@ -1651,11 +1651,11 @@ mod tests {
             }
             commonware_runtime::reschedule().await;
 
-            // The marker for the first completed prefix must start alongside the second data sync,
-            // rather than after it:
+            // The marker for closed section 0 must start alongside section 4's data sync, rather
+            // than after it:
             //
-            // data:   [0 -------- 1 -------- 2)  <- current sync, two journals
-            // marker: [0 -------- 1)             <- previous durable boundary
+            // data:   section 4 [0 -------- 1)  <- current sync, two journals
+            // marker: section 0 [0 -------- 1)  <- previous durable boundary
             let parked_syncs = pending.lock().len();
             if parked_syncs != 3 {
                 // Let the spawned operation unwind before reporting the regression. Otherwise the
@@ -1691,7 +1691,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
-            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
+            assert_eq!(archive.get(Identifier::Index(4)).await.unwrap(), Some(40));
             drop(archive);
 
             Archive::<_, _, FixedBytes<64>, i32>::init(delayed.inner.child("second_reopen"), cfg)
@@ -1732,6 +1732,41 @@ mod tests {
 
             let archive = archive.sync().await.unwrap();
             assert_eq!(pending.starts() - initial_starts, 3);
+            archive.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_batches_markers_by_active_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let immediate = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&immediate, "section-marker-batch", NZU64!(4));
+            let archive = Archive::init(immediate.child("archive"), cfg)
+                .await
+                .unwrap();
+            let initial_starts = pending.starts();
+
+            // Repeated writes in one active section start only the index and value durability
+            // operations. Its marker remains debt until writes move to another section.
+            let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.put_sync(1, test_key("one"), 20).await.unwrap();
+            assert_eq!(pending.starts() - initial_starts, 4);
+
+            // Moving to section 4 publishes section 0's completed boundary alongside the two data
+            // operations for section 4. An explicit empty sync then flushes the final partial
+            // section once; another empty sync has no durability work.
+            let archive = archive.put_sync(4, test_key("four"), 40).await.unwrap();
+            assert_eq!(pending.starts() - initial_starts, 7);
+            let archive = archive.sync().await.unwrap();
+            assert_eq!(pending.starts() - initial_starts, 8);
+            let archive = archive.sync().await.unwrap();
+            assert_eq!(pending.starts() - initial_starts, 8);
             archive.destroy().await.unwrap();
         });
     }

@@ -671,6 +671,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             index_page_cache: config.key_page_cache.clone(),
             index_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
+            replay_buffer: config.table_replay_buffer,
             compression: config.value_compression,
             codec_config: config.codec_config,
         };

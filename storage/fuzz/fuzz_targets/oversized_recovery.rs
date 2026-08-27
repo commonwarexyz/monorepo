@@ -209,6 +209,7 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
         index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
+        replay_buffer: NZUsize!(4096),
         compression: None,
         codec_config: (),
     }

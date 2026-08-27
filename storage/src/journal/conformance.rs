@@ -314,6 +314,7 @@ impl StorageWorkload for SegmentedOversizedWorkload {
             index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             index_write_buffer: WRITE_BUFFER,
             value_write_buffer: WRITE_BUFFER,
+            replay_buffer: WRITE_BUFFER,
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };
