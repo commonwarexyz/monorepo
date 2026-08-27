@@ -898,18 +898,13 @@ impl Worker {
         // teardown callback. Registrations racing teardown now fail loudly
         // instead of landing in a heap nobody drains.
         let mut alarm_wakers = Vec::new();
-        match executor.sleeping.lock().take() {
-            Some(sleeping) => {
-                alarm_wakers.reserve(sleeping.alarms.len());
-                for alarm in sleeping.alarms {
-                    if let Some(waker) = alarm.waker.lock().take() {
-                        alarm_wakers.push(waker);
-                    }
+        if let Some(sleeping) = executor.sleeping.lock().take() {
+            alarm_wakers.reserve(sleeping.alarms.len());
+            for alarm in sleeping.alarms {
+                if let Some(waker) = alarm.waker.lock().take() {
+                    alarm_wakers.push(waker);
                 }
             }
-            None => capture_cleanup_panic(&mut first_panic, || {
-                panic!("alarm queue closed twice");
-            }),
         }
 
         // Abort every task spawned under this worker's root so registrations
