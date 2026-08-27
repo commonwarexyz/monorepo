@@ -30,7 +30,7 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::certificate::Scheme;
-use commonware_macros::select;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{Acknowledgement as _, acknowledgement::Exact};
 use futures::{
@@ -233,17 +233,17 @@ where
             processor.schedule(request);
         }
 
-        // One signal for the actor's whole life. Re-creating it per iteration
-        // would record an extra auditor event on the deterministic runtime each
-        // time.
-        let mut shutdown = self.context.stopped();
-
         // One database sync stays active while later finalized state accumulates behind it.
         // Completion starts a successor for that suffix unless a pending prune must establish
         // the next storage-mutation boundary first.
         let mut durability = Durability::new(processor.processed_height());
 
-        loop {
+        // `select_loop!` creates one shutdown signal for the actor's whole life.
+        // Re-creating it per iteration would record an extra auditor event on the
+        // deterministic runtime each time.
+        select_loop! {
+            self.context,
+            on_start => {
             // Observe completed durability before taking more work. A queued prune suppresses
             // the automatic dirty-suffix successor until the prune has run at its own
             // mutation boundary.
@@ -318,215 +318,228 @@ where
                 }
             };
 
-            let step = select! {
-                _ = &mut shutdown => {
-                    debug!("shutdown signal received, stopping processing");
-                    return;
-                },
-                step = next => step,
-            };
-            let Some(step) = step else {
+            },
+            on_stopped => {
+                debug!("shutdown signal received, stopping processing");
                 return;
-            };
+            },
+            step = next => {
+                let Some(step) = step else {
+                    return;
+                };
 
-            match step {
-                Step::Message(Message::Propose {
-                    span,
-                    context,
-                    ancestry,
-                    upstream,
-                    response,
-                }) => {
-                    let process = info_span!(parent: &span, "stateful.actor.propose");
-                    let input = Input {
+                match step {
+                    Step::Message(Message::Propose {
+                        span,
+                        context,
+                        ancestry,
                         upstream,
-                        provider: self.provider.clone(),
-                    };
-                    processor.propose(process, context, ancestry, input, response);
-                    let mut receive_messages = true;
-                    while processor.proposing() {
-                        if receive_messages {
-                            select! {
-                                _ = &mut shutdown => {
-                                    debug!("shutdown signal received, stopping processing");
-                                    return;
-                                },
-                                message = self.mailbox.recv() => match message {
-                                    Some(Message::Verify(request)) => processor.schedule(request),
-                                    Some(message) => {
-                                        // Only verification may overtake an active proposal. The
-                                        // first other message becomes a FIFO barrier for later
-                                        // mailbox work.
-                                        deferred_message = Some(message);
-                                        receive_messages = false;
-                                    }
-                                    None => receive_messages = false,
-                                },
-                                _ = processor.step_next() => {},
+                        response,
+                    }) => {
+                        let process = info_span!(parent: &span, "stateful.actor.propose");
+                        let input = Input {
+                            upstream,
+                            provider: self.provider.clone(),
+                        };
+                        processor.propose(process, context, ancestry, input, response);
+                        let mut receive_messages = true;
+                        while processor.proposing() {
+                            if receive_messages {
+                                select! {
+                                    _ = &mut shutdown => {
+                                        debug!("shutdown signal received, stopping processing");
+                                        return;
+                                    },
+                                    message = self.mailbox.recv() => match message {
+                                        Some(Message::Verify(request)) => processor.schedule(request),
+                                        Some(message) => {
+                                            // Only verification may overtake an active proposal. The
+                                            // first other message becomes a FIFO barrier for later
+                                            // mailbox work.
+                                            deferred_message = Some(message);
+                                            receive_messages = false;
+                                        }
+                                        None => receive_messages = false,
+                                    },
+                                    _ = processor.step_next() => {},
+                                }
+                            } else {
+                                select! {
+                                    _ = &mut shutdown => {
+                                        debug!("shutdown signal received, stopping processing");
+                                        return;
+                                    },
+                                    _ = processor.step_next() => {},
+                                }
                             }
-                        } else {
+                        }
+                    }
+                    Step::Message(Message::Verify(request)) => processor.schedule(request),
+                    Step::Message(Message::Finalized {
+                        span,
+                        block,
+                        acknowledgement,
+                    }) => {
+                        let process = info_span!(parent: &span, "stateful.actor.finalized");
+                        let context = self.context.as_present();
+                        if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                            // `Application::finalized` is at-least-once. Exiting on
+                            // stop leaves the block unacknowledged, and marshal
+                            // redelivers it after restart.
                             select! {
                                 _ = &mut shutdown => {
                                     debug!("shutdown signal received, stopping processing");
                                     return;
+                                },
+                                _ = processor
+                                    .notify_finalized(context, block.as_ref())
+                                    .instrument(process) => {
+                                    acknowledgement.acknowledge();
+                                },
+                            }
+                            continue;
+                        }
+
+                        let Some(finalizing) = processor.begin_finalize(context, Arc::clone(&block))
+                        else {
+                            // A duplicate report. Marshal redelivers a processed height
+                            // only after a restart, where startup aligned the databases
+                            // to durable state.
+                            acknowledgement.acknowledge();
+                            continue;
+                        };
+
+                        // Verification jobs keep running during the apply,
+                        // pausing at their next batch read. Exiting on stop drops
+                        // the un-applied batches, and marshal redelivers the
+                        // unacknowledged block after restart.
+                        let should_start_sync = durability.sync.is_none();
+                        let (prune, started);
+                        select! {
+                            _ = &mut shutdown => {
+                                warn!(
+                                    height = block.height().get(),
+                                    "exiting mid-finalize on shutdown"
+                                );
+                                return;
+                            },
+                            driven = async {
+                                let prune = processor.finalize(context, finalizing).await;
+                                let started = if should_start_sync {
+                                    Some(processor.sync().await)
+                                } else {
+                                    None
+                                };
+                                processor.notify_finalized(context, block.as_ref()).await;
+                                (prune, started)
+                            }
+                            .instrument(process.clone()) => {
+                                (prune, started) = driven;
+                            },
+                        }
+
+                        // Keep the publication bookkeeping under the same span.
+                        let _span = process.entered();
+                        debug!(
+                            height = block.height().get(),
+                            "applied finalized database batch"
+                        );
+
+                        // Retain marshal acknowledgements until a barrier makes their database
+                        // prefix durable. This keeps marshal's processed floor within
+                        // recoverable database state while later work proceeds. The
+                        // acknowledgement window bounds the queue; a barrier that returns false
+                        // leaves the suffix unacknowledged for restart replay.
+                        let height = block.height();
+                        durability.applied(height, acknowledgement);
+
+                        // Snapshots are captured when a sync starts; they serve
+                        // immediately, ahead of that sync completing.
+                        if let Some((snapshots, barrier)) = started {
+                            self.snapshot_publisher.publish(height, snapshots);
+                            durability.started(height, barrier);
+                        }
+
+                        // Defer pruning to the loop so it can settle durability at one
+                        // database mutation boundary.
+                        if let Some(prune) = prune {
+                            pending_prune = Some(prune);
+                        }
+                    }
+                    Step::Prune(prune) => {
+                        // Pruning owns a strict database mutation boundary. Observe an existing sync
+                        // before quiescing readers, then run storage maintenance with no sync active.
+                        while durability.sync.is_some() {
+                            select! {
+                                completion = sync_completion(&mut durability.sync) => {
+                                    if !durability.complete(completion) {
+                                        return;
+                                    }
                                 },
                                 _ = processor.step_next() => {},
                             }
                         }
-                    }
-                }
-                Step::Message(Message::Verify(request)) => processor.schedule(request),
-                Step::Message(Message::Finalized {
-                    span,
-                    block,
-                    acknowledgement,
-                }) => {
-                    let process = info_span!(parent: &span, "stateful.actor.finalized");
-                    let context = self.context.as_present();
-                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                        // `Application::finalized` is at-least-once. Exiting on
-                        // stop leaves the block unacknowledged, and marshal
-                        // redelivers it after restart.
+
+                        // A prune target applied behind an earlier sync may still need durability.
+                        if !durability.covers(prune.barrier_height) {
+                            assert!(
+                                durability.needs_sync(),
+                                "uncovered prune target must have unapplied durability",
+                            );
+                            if !start_sync(
+                                &mut shutdown,
+                                &mut durability,
+                                &mut processor,
+                                &mut self.snapshot_publisher,
+                            )
+                            .await
+                            {
+                                return;
+                            }
+                            loop {
+                                select! {
+                                    _ = &mut shutdown => {
+                                        debug!("shutdown signal received, stopping processing");
+                                        return;
+                                    },
+                                    completion = sync_completion(&mut durability.sync) => {
+                                        if !durability.complete(completion) {
+                                            return;
+                                        }
+                                        break;
+                                    },
+                                    _ = processor.step_next() => {},
+                                }
+                            }
+                            assert!(durability.covers(prune.barrier_height));
+                        }
+                        // Prune mutates storage and can take a while. Race it against
+                        // shutdown so a stop signal is not blocked past its deadline; the
+                        // prune is safe to drop mid-flight and re-runs on restart.
                         select! {
                             _ = &mut shutdown => {
                                 debug!("shutdown signal received, stopping processing");
                                 return;
                             },
-                            _ = processor
-                                .notify_finalized(context, block.as_ref())
-                                .instrument(process) => {
-                                acknowledgement.acknowledge();
-                            },
+                            _ = processor.prune(prune, &self.marshal) => {},
                         }
-                        continue;
-                    }
-
-                    let Some(finalizing) = processor.begin_finalize(context, Arc::clone(&block))
-                    else {
-                        // A duplicate report. Marshal redelivers a processed height
-                        // only after a restart, where startup aligned the databases
-                        // to durable state.
-                        acknowledgement.acknowledge();
-                        continue;
-                    };
-
-                    // Verification jobs keep running during the apply,
-                    // pausing at their next batch read. Exiting on stop drops
-                    // the un-applied batches, and marshal redelivers the
-                    // unacknowledged block after restart.
-                    let should_start_sync = durability.sync.is_none();
-                    let (prune, started);
-                    select! {
-                        _ = &mut shutdown => {
-                            warn!(
-                                height = block.height().get(),
-                                "exiting mid-finalize on shutdown"
-                            );
-                            return;
-                        },
-                        driven = async {
-                            let prune = processor.finalize(context, finalizing).await;
-                            let started = if should_start_sync {
-                                Some(processor.sync().await)
-                            } else {
-                                None
-                            };
-                            processor.notify_finalized(context, block.as_ref()).await;
-                            (prune, started)
-                        }
-                        .instrument(process.clone()) => {
-                            (prune, started) = driven;
-                        },
-                    }
-
-                    // Keep the publication bookkeeping under the same span.
-                    let _span = process.entered();
-                    debug!(
-                        height = block.height().get(),
-                        "applied finalized database batch"
-                    );
-
-                    // Retain marshal acknowledgements until a barrier makes their database
-                    // prefix durable. This keeps marshal's processed floor within
-                    // recoverable database state while later work proceeds. The
-                    // acknowledgement window bounds the queue; a barrier that returns false
-                    // leaves the suffix unacknowledged for restart replay.
-                    let height = block.height();
-                    durability.applied(height, acknowledgement);
-
-                    // Snapshots are captured when a sync starts; they serve
-                    // immediately, ahead of that sync completing.
-                    if let Some((snapshots, barrier)) = started {
-                        self.snapshot_publisher.publish(height, snapshots);
-                        durability.started(height, barrier);
-                    }
-
-                    // Defer pruning to the loop so it can settle durability at one
-                    // database mutation boundary.
-                    if let Some(prune) = prune {
-                        pending_prune = Some(prune);
-                    }
-                }
-                Step::Prune(prune) => {
-                    // Pruning owns a strict database mutation boundary. Observe an existing sync
-                    // before quiescing readers, then run storage maintenance with no sync active.
-                    while durability.sync.is_some() {
+                        // The published snapshots predate this prune and pin the pruned
+                        // storage, so capture and publish afresh right away.
                         select! {
-                            completion = sync_completion(&mut durability.sync) => {
-                                if !durability.complete(completion) {
-                                    return;
-                                }
+                            _ = &mut shutdown => {
+                                debug!("shutdown signal received, stopping processing");
+                                return;
                             },
-                            _ = processor.step_next() => {},
+                            _ = processor.publish_snapshot(&mut self.snapshot_publisher) => {},
                         }
                     }
-
-                    // A prune target applied behind an earlier sync may still need durability.
-                    if !durability.covers(prune.barrier_height) {
-                        assert!(
-                            durability.needs_sync(),
-                            "uncovered prune target must have unapplied durability",
-                        );
-                        if !start_sync(
-                            &mut shutdown,
-                            &mut durability,
-                            &mut processor,
-                            &mut self.snapshot_publisher,
-                        )
-                        .await
-                        {
+                    Step::Sync(completion) => {
+                        if !durability.complete(completion) {
                             return;
                         }
-                        loop {
-                            select! {
-                                _ = &mut shutdown => {
-                                    debug!("shutdown signal received, stopping processing");
-                                    return;
-                                },
-                                completion = sync_completion(&mut durability.sync) => {
-                                    if !durability.complete(completion) {
-                                        return;
-                                    }
-                                    break;
-                                },
-                                _ = processor.step_next() => {},
-                            }
-                        }
-                        assert!(durability.covers(prune.barrier_height));
-                    }
-                    processor.prune(prune, &self.marshal).await;
-                    // The published snapshots predate this prune and pin the pruned
-                    // storage, so capture and publish afresh right away.
-                    processor
-                        .publish_snapshot(&mut self.snapshot_publisher)
-                        .await;
-                }
-                Step::Sync(completion) => {
-                    if !durability.complete(completion) {
-                        return;
                     }
                 }
-            }
+            },
         }
     }
 }

@@ -246,10 +246,13 @@ where
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
     ///
-    /// Storage errors from batch operations are propagated as [`ExecutionError`],
-    /// never interpreted. The wrapper declines the proposal on `Ok(None)` and
-    /// [`Stale`](ExecutionError::Stale), and panics on
-    /// [`Fatal`](ExecutionError::Fatal).
+    /// Storage errors from batch operations are propagated as [`ExecutionError`].
+    /// The wrapper declines the proposal on `Ok(None)` and panics on
+    /// [`Fatal`](ExecutionError::Fatal). Unlike [`verify`](Self::verify) and
+    /// [`apply`](Self::apply), a proposal cannot observe
+    /// [`Stale`](ExecutionError::Stale). The wrapper never interleaves a
+    /// finalization with an active proposal, so its batch reads cannot be
+    /// invalidated mid-execution.
     fn propose(
         &mut self,
         context: (E, Self::Context),
