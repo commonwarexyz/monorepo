@@ -11,22 +11,33 @@
 //! Given points `P_0, ..., P_{n-1}` (already verified to lie on the curve, e.g.
 //! via [`G1::read_unchecked`]), the check runs `r` rounds of `m` parallel
 //! random linear combinations. Each round draws an independent uniform
-//! coefficient `c_{j,i}` in `{0, 1, 2}` for every combination `j < m` and every
-//! point `i`, and applies the exact per-point test [`G1::in_subgroup`] to the
-//! `m` points `Q_j = sum_i c_{j,i} P_i`. The batch is accepted if every
+//! coefficient `c_{j,i}` in `{-1, 0, 1}` for every combination `j < m` and
+//! every point `i`, and applies the exact per-point test [`G1::in_subgroup`] to
+//! the `m` points `Q_j = sum_i c_{j,i} P_i`. The batch is accepted if every
 //! combination in every round lies in G1.
 //!
 //! Rather than computing each `Q_j` separately, a round groups the points by
-//! their coefficient *vector* `(c_{0,i}, ..., c_{m-1,i})` — one of `3^m`
-//! buckets — sums each bucket once, and recovers every combination from the
-//! bucket sums: `Q_j = sum_{v: v_j=1} S_v + 2 * sum_{v: v_j=2} S_v`, where
-//! `v_j` is the `j`-th base-3 digit of bucket index `v`. The combine weights
-//! are the *deterministic* digits of the bucket index — all randomness lives in
-//! the vector assignment — so this evaluates exactly the `m` combinations
-//! above. (It is not the unsound shortcut of re-randomizing over bucket sums,
-//! which would collapse the `m` combinations back into one.)
+//! their coefficient *vector* `(c_{0,i}, ..., c_{m-1,i})`, sums each group
+//! once, and recovers every combination from the group sums:
+//! `Q_j = sum_{v: v_j=1} S_v - sum_{v: v_j=-1} S_v`, where `v_j` is the `j`-th
+//! balanced-ternary digit of the vector `v`. The combine weights are the
+//! *deterministic* digits of the vector — all randomness lives in the vector
+//! assignment — so this evaluates exactly the `m` combinations above. (It is
+//! not the unsound shortcut of re-randomizing over bucket sums, which would
+//! collapse the `m` combinations back into one.)
 //!
-//! Summing `n` points into `3^m` buckets costs the same `n` point additions as
+//! A vector and its negation are stored together: negating an affine point
+//! costs nothing but the sign of its `y`, so a point whose vector is `-v` is
+//! stored negated in `v`'s bucket, leaving `(3^m + 1) / 2` buckets rather than
+//! `3^m`. Reading a bucket's index as a balanced-ternary *value* makes the
+//! canonical vectors exactly the non-negative values, so the bucket is the
+//! value's absolute value and the sign says whether the point enters negated.
+//! Halving the buckets halves both the combine and the cache footprint of a
+//! round, and the sign costs no arithmetic even in the accumulator: negating an
+//! addition's second operand negates the chord's numerator, so taking its
+//! denominator the other way round cancels the sign back out.
+//!
+//! Summing `n` points into many buckets costs the same `n` point additions as
 //! summing them into one, so a single accumulation pass over the points serves
 //! all `m` combinations, and about `81/m` passes are needed at 128-bit security
 //! instead of 81. Four properties keep the constant small:
@@ -40,9 +51,9 @@
 //!   point that arrives meanwhile is carried to the next pass; with random
 //!   bucket ids only a few percent of points ever are.
 //! - **A shared collapse for the combine.** Recovering the `m` combinations one
-//!   at a time would touch `2 * 3^(m-1)` bucket sums each, which caps `m` where
-//!   the combine costs more than the accumulation it saves. Summing away one
-//!   digit at a time instead yields every digit's marginals for about two
+//!   at a time would touch most of the bucket sums each, which caps `m` where
+//!   the combine costs more than the accumulation it saves. Folding away one
+//!   digit at a time instead yields every digit's marginal for about two
 //!   additions per bucket in total, which is what makes wide rounds — and so
 //!   few passes — affordable.
 //! - **Widths chosen per round.** The plan spreads the required combinations
@@ -66,11 +77,13 @@
 //! the group of order `h` (the G1 cofactor). A combination `Q_j` lies in G1
 //! exactly when its coefficient-weighted sum of cofactor parts vanishes. The
 //! G1 cofactor `h = 3 * (11 * 10177 * 859267 * 52437899)^2` is odd, so every
-//! nonzero cofactor part `T` has order at least 3, making `0*T`, `1*T`, and
-//! `2*T` three distinct group elements. Pick any bad point (nonzero `T_i`) and
-//! condition on every other coefficient of combination `j`: the combination
-//! vanishes only if `c_{j,i} * T_i` hits one fixed value, and it takes three
-//! distinct values as `c_{j,i}` ranges over `{0, 1, 2}`, so at most one works —
+//! nonzero cofactor part `T` has order at least 3 — and odd, so never 2 —
+//! making `-1*T`, `0*T` and `1*T` three distinct group elements: two of them
+//! coinciding would need the order to divide their difference, one of `1` or
+//! `2`. Pick any bad point (nonzero `T_i`) and condition on every other
+//! coefficient of combination `j`: the combination vanishes only if
+//! `c_{j,i} * T_i` hits one fixed value, and it takes three distinct values as
+//! `c_{j,i}` ranges over `{-1, 0, 1}`, so at most one works —
 //! probability at most `1/3`, for any number of bad points and any structure of
 //! the cofactor group. The `m` combinations of a round use disjoint independent
 //! coefficients, so a round accepts a bad batch with probability at most
@@ -85,7 +98,10 @@
 //! the point-chooser can predict. Larger coefficients would not strengthen a
 //! combination: in a component of order 3 a coefficient acts through its
 //! residue mod 3, so even full-width random weights leave a cancelling pair a
-//! `1/3` escape.
+//! `1/3` escape. Nor does folding weaken it — folding is a change of storage,
+//! not of the coefficients drawn: a point stored negated in `v`'s bucket
+//! contributes `d_j(v) * (-P)`, which is the `d_j(-v) * P` its own vector
+//! calls for.
 //!
 //! A round cannot do better than `3^-m` either, whatever it does with the
 //! bucket sums: a lone bad point escapes whenever its coefficient vector is the
@@ -107,8 +123,8 @@ use super::group::G1;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_fp, blst_fp_inverse, blst_fp_mul, blst_fp_sqr, blst_p1, blst_p1_add_or_double_affine,
-    blst_p1_affine, blst_p1_double, blst_p1_from_affine, blst_p1_in_g1,
+    blst_fp, blst_fp_inverse, blst_fp_mul, blst_fp_sqr, blst_p1, blst_p1_affine,
+    blst_p1_from_affine, blst_p1_in_g1,
 };
 use commonware_parallel::Strategy;
 use core::mem::{MaybeUninit, size_of};
@@ -177,6 +193,26 @@ const CHUNK: usize = 1024;
 /// operands equal (a doubling rather than a chord).
 const DOUBLE: u32 = 1 << 31;
 
+/// Flag stored in a queued job's output slot, marking its second operand
+/// subtracted rather than added.
+const OP_NEGATE: u32 = 1 << 30;
+
+/// The slot index of a queued job, with [`DOUBLE`] and [`OP_NEGATE`] masked off.
+const SLOT_MASK: u32 = !(DOUBLE | OP_NEGATE);
+
+/// Flag stored in the high bit of a drawn bucket id, marking the point stored
+/// negated because its coefficient vector was folded onto the vector's negation.
+const ID_NEGATE: u32 = 1 << 31;
+
+/// Number of canonical buckets at width `m`.
+///
+/// Coefficient vectors are drawn from `{-1,0,1}^m` and a vector is stored
+/// together with its negation (see [`Trits`]), so the `3^m` vectors occupy
+/// `(3^m + 1) / 2` buckets: one per `{v, -v}` pair, plus the zero vector.
+const fn folded(m: u32) -> usize {
+    (3usize.pow(m) + 1) / 2
+}
+
 /// Bucket slot holding nothing, i.e. standing for the identity.
 const EMPTY: u8 = 0;
 
@@ -207,13 +243,14 @@ fn expected_occupied(n: usize, b: usize) -> usize {
 /// Modeled cost of one round at width `m`, in units of one batch-affine point
 /// addition.
 ///
-/// Summing `n` points into `3^m` buckets takes one addition per point that is
-/// not the last one left in its bucket, and recovering the `m` combinations
-/// takes about two additions per occupied bucket (one for the collapse chain,
-/// one for the marginals it feeds). The `m` exact checks are charged too, since
-/// they are what makes narrow rounds expensive on small batches.
+/// Summing `n` points into the round's buckets takes one addition per point
+/// that is not the last one left in its bucket, and recovering the `m`
+/// combinations takes about two additions per occupied bucket (one for the
+/// collapse chain, one for the marginals it feeds). The `m` exact checks are
+/// charged too, since they are what makes narrow rounds expensive on small
+/// batches.
 fn round_cost(n: usize, m: u32) -> usize {
-    let buckets = 3usize.pow(m);
+    let buckets = folded(m);
     let occupied = expected_occupied(n, buckets);
     (n - occupied) + 2 * occupied + (m as usize) * CHECK_COST
 }
@@ -271,8 +308,8 @@ fn plan(n: usize, combinations: usize) -> Option<Vec<u32>> {
     // too many to keep close to the CPU.
     let mut widest = 0u32;
     while widest < MAX_WIDTH
-        && 3usize.pow(widest + 1) <= 4 * n.max(1)
-        && 3usize.pow(widest + 1) * size_of::<blst_p1_affine>() <= SLOT_BUDGET
+        && folded(widest + 1) <= 4 * n.max(1)
+        && folded(widest + 1) * size_of::<blst_p1_affine>() <= SLOT_BUDGET
     {
         widest += 1;
     }
@@ -415,9 +452,9 @@ struct Round {
     /// digits per bucket id.
     m: u32,
     /// Start of each collapse level within [`Self::sums`]. Level `j` holds
-    /// `3^(m-j)` entries: level 0 is the bucket sums themselves (and doubles as
-    /// the accumulator's per-bucket slots), and level `j+1` is level `j` with
-    /// its lowest remaining digit summed away.
+    /// `folded(m-j)` entries: level 0 is the bucket sums themselves (and
+    /// doubles as the accumulator's per-bucket slots), and level `j+1` is level
+    /// `j` with its top remaining digit folded away.
     levels: Vec<usize>,
     /// The concatenated collapse levels.
     sums: Vec<blst_p1_affine>,
@@ -432,7 +469,7 @@ struct Round {
     ids: [Vec<u32>; 2],
     /// Additions queued for the next shared inversion.
     pending: Pending,
-    /// Entries still to be summed for each of the `2m` marginals.
+    /// Entries still to be summed for each of the `m` marginals.
     marginals: Vec<Vec<u32>>,
 }
 
@@ -440,41 +477,41 @@ impl Round {
     /// Allocate state able to run any round up to width `widest`.
     fn new(widest: u32) -> Self {
         debug_assert!((1..=MAX_WIDTH).contains(&widest));
-        let total = (3usize.pow(widest + 1) - 3) / 2;
+        let total: usize = (1..=widest).map(folded).sum();
         Self {
             m: 0,
             levels: Vec::with_capacity(widest as usize),
             sums: vec![blst_p1_affine::default(); total],
             live: vec![false; total],
-            state: vec![EMPTY; 3usize.pow(widest)],
+            state: vec![EMPTY; folded(widest)],
             lists: [Vec::new(), Vec::new()],
             ids: [Vec::new(), Vec::new()],
             pending: Pending::new(),
-            marginals: (0..2 * widest as usize).map(|_| Vec::new()).collect(),
+            marginals: (0..widest as usize).map(|_| Vec::new()).collect(),
         }
     }
 
     /// Lay out the collapse levels for a round of width `m`.
     fn widen(&mut self, m: u32) {
         debug_assert!((1..=MAX_WIDTH).contains(&m));
-        debug_assert!(3usize.pow(m) <= self.state.len());
+        debug_assert!(folded(m) <= self.state.len());
         if self.m == m {
             return;
         }
         self.m = m;
-        self.pending.bound(3usize.pow(m));
+        self.pending.bound(folded(m));
         self.levels.clear();
         let mut total = 0usize;
         for j in 0..m {
             self.levels.push(total);
-            total += 3usize.pow(m - j);
+            total += folded(m - j);
         }
     }
 
-    /// Sum `points` into the `3^m` buckets named by `ids`, leaving each bucket's
-    /// sum in its slot at level 0 of [`Self::sums`].
+    /// Sum `points` into the canonical buckets named by `ids`, leaving each
+    /// bucket's sum in its slot at level 0 of [`Self::sums`].
     fn accumulate(&mut self, points: &[blst_p1_affine], ids: &[u32]) {
-        self.state[..3usize.pow(self.m)].fill(EMPTY);
+        self.state[..folded(self.m)].fill(EMPTY);
         accumulate_pass(
             points,
             ids,
@@ -500,32 +537,44 @@ impl Round {
         }
         // The collapse works off the shared liveness flags; level 0's come from
         // the accumulator's per-bucket state.
-        let buckets = 3usize.pow(self.m);
+        let buckets = folded(self.m);
         for (live, &state) in self.live[..buckets].iter_mut().zip(&self.state[..buckets]) {
             *live = state != EMPTY;
         }
     }
 
-    /// Run one round: sum the points into `3^m` buckets keyed by coefficient
-    /// vector, recover the `m` combinations from the bucket sums, and check
-    /// each.
+    /// Run one round: sum the points into the canonical buckets keyed by
+    /// coefficient vector, recover the `m` combinations from the bucket sums,
+    /// and check each.
     fn run(&mut self, points: &[blst_p1_affine], ids: &[u32], m: u32) -> bool {
         self.widen(m);
         self.accumulate(points, ids);
 
-        // Collapse chain: level `j+1` sums away level `j`'s lowest digit, so
-        // every digit position's marginals come out of one shared walk over the
+        // Collapse chain: level `j+1` folds away level `j`'s top digit, so
+        // every digit position's marginal comes out of one shared walk over the
         // bucket sums rather than one walk per combination.
+        //
+        // A canonical vector splits as `[d, u]` with `d` its top digit, which
+        // is `0` or `+1` — never `-1`, since a leading `-1` is exactly what
+        // folding negates away. Writing `S` for a level indexed by balanced
+        // ternary value and `H = 3^(level digits - 1)`, the `d = +1` half
+        // covers the full cube in `u`, so pairing `u` with `-u` there gives
+        //
+        //     L[a] = S[a] + S[H + a] - S[H - a]
+        //
+        // whose three terms are the canonical values of `[0, u]`, `[1, u]` and
+        // `[1, -u]`. Index 0 is the all-zero vector: no marginal reads it, so
+        // it is neither folded nor summed.
         for j in 0..(self.m as usize).saturating_sub(1) {
             let (source, target) = (self.levels[j], self.levels[j + 1]);
-            let width = 3usize.pow(self.m - j as u32 - 1);
-            for digit in [1usize, 2] {
-                for k in 0..width {
-                    let out = (target + k) as u32;
-                    let first = if digit == 1 {
-                        (source + 3 * k) as u32
+            let half = 3usize.pow(self.m - j as u32 - 1);
+            for subtract in [false, true] {
+                for a in 1..=(half - 1) / 2 {
+                    let out = (target + a) as u32;
+                    let (first, second) = if subtract {
+                        (out, (source + half - a) as u32)
                     } else {
-                        out
+                        ((source + a) as u32, (source + half + a) as u32)
                     };
                     queue_add(
                         &mut self.sums,
@@ -533,60 +582,43 @@ impl Round {
                         &mut self.pending,
                         out,
                         first,
-                        (source + 3 * k + digit) as u32,
+                        second,
+                        subtract,
                     );
                 }
                 complete(&mut self.sums, &mut self.pending);
             }
         }
 
-        // Combination `j` is the sum of the buckets whose `j`-th digit is 1 plus
-        // twice the sum of those whose digit is 2, and level `j` has every other
-        // digit already summed away.
+        // Combination `j` is the sum of the canonical buckets whose digit `j`
+        // is `+1`, taken at the level where `j` is the top digit — the folding
+        // already carried the `-1` side across, so there is nothing to subtract
+        // and no weight-2 class to double. Those buckets are the values of
+        // `[1, u]`, a contiguous range.
         for j in 0..self.m as usize {
-            let level = self.levels[j];
-            let width = 3usize.pow(self.m - j as u32 - 1);
-            for digit in [1usize, 2] {
-                let list = &mut self.marginals[2 * j + digit - 1];
-                list.clear();
-                list.extend(
-                    (0..width)
-                        .map(|k| (level + digit + 3 * k) as u32)
-                        .filter(|&index| self.live[index as usize]),
-                );
-            }
+            let level = self.levels[self.m as usize - 1 - j];
+            let half = 3usize.pow(j as u32);
+            let list = &mut self.marginals[j];
+            list.clear();
+            list.extend(
+                ((half + 1) / 2..=(3 * half - 1) / 2)
+                    .map(|b| (level + b) as u32)
+                    .filter(|&index| self.live[index as usize]),
+            );
         }
         reduce(
             &mut self.sums,
             &mut self.live,
-            &mut self.marginals,
+            &mut self.marginals[..self.m as usize],
             &mut self.pending,
         );
 
         for j in 0..self.m as usize {
             let mut combination = blst_p1::default();
-            if let Some(&twos) = self.marginals[2 * j + 1].first() {
-                let mut point = blst_p1::default();
+            if let Some(&marginal) = self.marginals[j].first() {
                 // SAFETY: the index names a live affine point, and blst_p1
                 // defaults to the identity.
-                unsafe {
-                    blst_p1_from_affine(&mut point, &self.sums[twos as usize]);
-                    blst_p1_double(&mut combination, &point);
-                }
-            }
-            if let Some(&ones) = self.marginals[2 * j].first() {
-                // Copied rather than passed twice: handing the same local out
-                // as both `&mut` and `&` would alias.
-                let twos = combination;
-                // SAFETY: all operands are valid blst values, the identity
-                // included, and the routine handles equal operands.
-                unsafe {
-                    blst_p1_add_or_double_affine(
-                        &mut combination,
-                        &twos,
-                        &self.sums[ones as usize],
-                    );
-                }
+                unsafe { blst_p1_from_affine(&mut combination, &self.sums[marginal as usize]) };
             }
             // SAFETY: combination is a valid blst_p1 (identity included).
             if !unsafe { blst_p1_in_g1(&combination) } {
@@ -622,13 +654,18 @@ fn accumulate_pass(
         // Bucket ids are uniform, so the slot a point lands in is a cache miss
         // the loop can see coming a long way off.
         if let Some(&ahead) = src_ids.get(index + PREFETCH_DISTANCE) {
-            prefetch(slots, ahead as usize);
+            prefetch(slots, (ahead & !ID_NEGATE) as usize);
         }
-        let bucket = id as usize;
+        // A point whose vector folded onto its negation enters negated. The
+        // negation is free everywhere but here: an affine point negates in its
+        // y alone, and the addition formulas below absorb the sign by choosing
+        // which way round to subtract.
+        let negate = id & ID_NEGATE != 0;
+        let bucket = (id & !ID_NEGATE) as usize;
         match state[bucket] {
             EMPTY => {
                 state[bucket] = FILLED;
-                slots[bucket] = *point;
+                slots[bucket] = if negate { neg_affine(point) } else { *point };
                 continue;
             }
             BUSY => {
@@ -648,21 +685,34 @@ fn accumulate_pass(
         // Only the x coordinates decide which formula applies, so the running
         // sum is read a field element at a time rather than copied whole.
         let held = &slots[bucket];
+        let flag = if negate { OP_NEGATE } else { 0 };
         if fp_eq(&held.x, &point.x) {
             // Same x: on the curve y is determined up to sign, so this is
             // either P + (-P) = identity or a doubling.
-            let two_y = fp_add(&held.y, &point.y);
+            let two_y = if negate {
+                fp_sub(&held.y, &point.y)
+            } else {
+                fp_add(&held.y, &point.y)
+            };
             if fp_is_zero(&two_y) {
                 // The sum cancels, and an empty slot is the identity.
                 state[bucket] = EMPTY;
                 continue;
             }
-            // y_held == y_point != 0, so two_y = 2*y_held is the doubling
+            // The operands are equal, so two_y = 2*y_held is the doubling
             // denominator. (y == 0 cannot occur: the group order h * r is odd,
             // so the curve has no 2-torsion.)
-            pending.push(bucket as u32 | DOUBLE, index as u32, two_y);
+            pending.push(bucket as u32 | DOUBLE | flag, index as u32, two_y);
         } else {
-            pending.push(bucket as u32, index as u32, fp_sub(&point.x, &held.x));
+            // Negating the operand negates the chord's numerator, so taking the
+            // denominator the other way round cancels it back out and the sign
+            // costs no arithmetic at all.
+            let denominator = if negate {
+                fp_sub(&held.x, &point.x)
+            } else {
+                fp_sub(&point.x, &held.x)
+            };
+            pending.push(bucket as u32 | flag, index as u32, denominator);
         }
         state[bucket] = BUSY;
         if pending.is_full() {
@@ -690,16 +740,17 @@ fn absorb(
         // The walk runs backwards, so the slot a job below will reopen is as
         // far off as the one the accumulation loop looks ahead for.
         if let Some(&(ahead, _)) = pending.jobs.get(index.wrapping_sub(PREFETCH_DISTANCE)) {
-            prefetch(slots, (ahead & !DOUBLE) as usize);
+            prefetch(slots, (ahead & SLOT_MASK) as usize);
         }
         let (slot, point) = pending.jobs[index];
         let inverse = pending.unwind(index, &mut running);
-        let bucket = (slot & !DOUBLE) as usize;
+        let bucket = (slot & SLOT_MASK) as usize;
         let sum = chord(
             &slots[bucket],
             &src[point as usize],
             &inverse,
             slot & DOUBLE != 0,
+            slot & OP_NEGATE != 0,
         );
         slots[bucket] = sum;
         state[bucket] = FILLED;
@@ -707,7 +758,8 @@ fn absorb(
     pending.clear();
 }
 
-/// Queue `slots[out] = slots[first] + slots[second]`.
+/// Queue `slots[out] = slots[first] +/- slots[second]`, subtracting when
+/// `subtract` is set.
 ///
 /// The first operand is moved into the output slot immediately, so a completed
 /// job needs only the output and the second operand. Queued jobs must never
@@ -720,6 +772,7 @@ fn queue_add(
     out: u32,
     first: u32,
     second: u32,
+    subtract: bool,
 ) {
     let (out_index, first_index, second_index) = (out as usize, first as usize, second as usize);
     if !live[second_index] {
@@ -730,7 +783,11 @@ fn queue_add(
         return;
     }
     if !live[first_index] {
-        slots[out_index] = slots[second_index];
+        slots[out_index] = if subtract {
+            neg_affine(&slots[second_index])
+        } else {
+            slots[second_index]
+        };
         live[out_index] = true;
         return;
     }
@@ -738,16 +795,26 @@ fn queue_add(
         slots[out_index] = slots[first_index];
     }
     live[out_index] = true;
+    let flag = if subtract { OP_NEGATE } else { 0 };
     let (held, point) = (&slots[out_index], &slots[second_index]);
     if fp_eq(&held.x, &point.x) {
-        let two_y = fp_add(&held.y, &point.y);
+        let two_y = if subtract {
+            fp_sub(&held.y, &point.y)
+        } else {
+            fp_add(&held.y, &point.y)
+        };
         if fp_is_zero(&two_y) {
             live[out_index] = false;
             return;
         }
-        pending.push(out | DOUBLE, second, two_y);
+        pending.push(out | DOUBLE | flag, second, two_y);
     } else {
-        pending.push(out, second, fp_sub(&point.x, &held.x));
+        let denominator = if subtract {
+            fp_sub(&held.x, &point.x)
+        } else {
+            fp_sub(&point.x, &held.x)
+        };
+        pending.push(out | flag, second, denominator);
     }
     if pending.is_full() {
         complete(slots, pending);
@@ -761,16 +828,17 @@ fn complete(slots: &mut [blst_p1_affine], pending: &mut Pending) {
     };
     for index in (0..pending.jobs.len()).rev() {
         if let Some(&(ahead, _)) = pending.jobs.get(index.wrapping_sub(PREFETCH_DISTANCE)) {
-            prefetch(slots, (ahead & !DOUBLE) as usize);
+            prefetch(slots, (ahead & SLOT_MASK) as usize);
         }
         let (slot, second) = pending.jobs[index];
         let inverse = pending.unwind(index, &mut running);
-        let out = (slot & !DOUBLE) as usize;
+        let out = (slot & SLOT_MASK) as usize;
         let sum = chord(
             &slots[out],
             &slots[second as usize],
             &inverse,
             slot & DOUBLE != 0,
+            slot & OP_NEGATE != 0,
         );
         slots[out] = sum;
     }
@@ -790,7 +858,7 @@ fn reduce(
     while lists.iter().any(|list| list.len() > 1) {
         for list in lists.iter() {
             for pair in list.chunks_exact(2) {
-                queue_add(slots, live, pending, pair[0], pair[0], pair[1]);
+                queue_add(slots, live, pending, pair[0], pair[0], pair[1], false);
             }
         }
         complete(slots, pending);
@@ -917,16 +985,53 @@ fn chord(
     second: &blst_p1_affine,
     inverse: &blst_fp,
     double: bool,
+    negate: bool,
 ) -> blst_p1_affine {
     let lambda = if double {
         let square = fp_sqr(&first.x);
         fp_mul(&fp_add(&fp_add(&square, &square), &square), inverse)
+    } else if negate {
+        // The second operand enters negated, which negates the numerator; the
+        // caller took its denominator the other way round, so the two signs
+        // cancel and the negation costs no arithmetic. Only x is read below,
+        // and negation leaves x alone.
+        fp_mul(&fp_add(&second.y, &first.y), inverse)
     } else {
         fp_mul(&fp_sub(&second.y, &first.y), inverse)
     };
     let x = fp_sub(&fp_sub(&fp_sqr(&lambda), &first.x), &second.x);
     let y = fp_sub(&fp_mul(&lambda, &fp_sub(&first.x, &x)), &first.y);
     blst_p1_affine { x, y }
+}
+
+/// Negate an affine point, which negates its `y` alone.
+#[inline(always)]
+fn neg_affine(point: &blst_p1_affine) -> blst_p1_affine {
+    blst_p1_affine {
+        x: point.x,
+        y: fp_neg(&point.y),
+    }
+}
+
+/// Negate a field element.
+///
+/// Zero is its own negation; every other value is `MODULUS - value`, which is
+/// already reduced.
+#[inline(always)]
+fn fp_neg(a: &blst_fp) -> blst_fp {
+    if fp_is_zero(a) {
+        return *a;
+    }
+    let mut difference = [0u64; 6];
+    let mut borrow = false;
+    for (out, (modulus, limb)) in difference.iter_mut().zip(MODULUS.iter().zip(&a.l)) {
+        let (value, first) = modulus.overflowing_sub(*limb);
+        let (value, second) = value.overflowing_sub(borrow as u64);
+        *out = value;
+        borrow = first | second;
+    }
+    debug_assert!(!borrow, "a reduced element is at most MODULUS");
+    blst_fp { l: difference }
 }
 
 /// Fill `prefix` with the running products of `values` and return the inverse
@@ -1187,7 +1292,15 @@ impl<'a, R: CryptoRng> Trits<'a, R> {
         }
     }
 
-    /// Draw `count` uniform bucket ids in `[0, 3^m)`.
+    /// Draw `count` uniform canonical bucket ids in `[0, (3^m+1)/2)`, each with
+    /// [`ID_NEGATE`] set when its coefficient vector was folded onto its
+    /// negation.
+    ///
+    /// A uniform residue in `[0, 3^m)` is a uniform balanced-ternary *value*
+    /// once centred, and centring is the whole of the fold: a vector's value is
+    /// positive exactly when its top nonzero digit is `+1`, so the canonical
+    /// bucket is the absolute value and the sign says whether the point enters
+    /// negated. The draw itself is unchanged, and so is its exact uniformity.
     ///
     /// The width is dispatched once for the whole run rather than per id, so
     /// the inner loop divides by a literal and the compiler turns each division
@@ -1198,14 +1311,20 @@ impl<'a, R: CryptoRng> Trits<'a, R> {
         let mut ids = Vec::with_capacity(count);
         macro_rules! draw {
             ($modulus:literal, $per_word:literal) => {{
+                const HALF: u32 = ($modulus - 1) / 2;
                 while ids.len() < count {
                     let mut word = self.next_word();
                     for _ in 0..$per_word {
                         if ids.len() == count {
                             break;
                         }
-                        ids.push(word % $modulus);
+                        let residue = word % $modulus;
                         word /= $modulus;
+                        ids.push(if residue >= HALF {
+                            residue - HALF
+                        } else {
+                            (HALF - residue) | ID_NEGATE
+                        });
                     }
                 }
             }};
@@ -1306,6 +1425,41 @@ mod tests {
         (to_affine(points), kept)
     }
 
+    /// The `m` balanced-ternary digits of the coefficient vector a drawn id
+    /// stands for, lowest digit first.
+    ///
+    /// An id is the absolute value of the vector's balanced-ternary value, with
+    /// [`ID_NEGATE`] recording that the vector was folded onto its negation.
+    fn signed_digits(id: u32, m: u32) -> Vec<i64> {
+        let mut value = signed_value(id);
+        (0..m)
+            .map(|_| {
+                let digit = match value.rem_euclid(3) {
+                    2 => -1,
+                    other => other,
+                };
+                value = (value - digit) / 3;
+                digit
+            })
+            .collect()
+    }
+
+    /// The balanced-ternary value a drawn id stands for, sign included.
+    fn signed_value(id: u32) -> i64 {
+        let magnitude = i64::from(id & !ID_NEGATE);
+        if id & ID_NEGATE != 0 {
+            -magnitude
+        } else {
+            magnitude
+        }
+    }
+
+    /// The point an id contributes to its bucket, negated when the id's vector
+    /// was folded.
+    fn folded_point(point: &G1, id: u32) -> G1 {
+        if id & ID_NEGATE != 0 { -*point } else { *point }
+    }
+
     /// Run the accumulator and return each bucket's sum, with `None` for the
     /// buckets that sum to the identity.
     fn bucket_sums(points: &[G1], ids: &[u32], m: u32) -> Vec<Option<blst_p1_affine>> {
@@ -1313,7 +1467,7 @@ mod tests {
         let mut round = Round::new(m);
         round.widen(m);
         round.accumulate(&affine, &affine_ids);
-        (0..3usize.pow(m))
+        (0..folded(m))
             .map(|bucket| round.live[bucket].then_some(round.sums[bucket]))
             .collect()
     }
@@ -1321,12 +1475,12 @@ mod tests {
     /// Assert that the accumulator agrees with naive per-bucket G1 addition.
     fn assert_sums_match(points: &[G1], ids: &[u32], m: u32) {
         let sums = bucket_sums(points, ids, m);
-        assert_eq!(sums.len(), 3usize.pow(m));
+        assert_eq!(sums.len(), folded(m));
         for (bucket, got) in sums.iter().enumerate() {
             let mut expected = G1::zero();
             for (point, &id) in points.iter().zip(ids) {
-                if id as usize == bucket {
-                    expected += point;
+                if (id & !ID_NEGATE) as usize == bucket {
+                    expected += &folded_point(point, id);
                 }
             }
             let expected = G1::batch_to_affine(&[expected]);
@@ -1357,8 +1511,8 @@ mod tests {
                 };
                 for &m in &widths {
                     assert!((1..=MAX_WIDTH).contains(&m));
-                    assert!(3usize.pow(m) <= 4 * n.max(1));
-                    assert!(3usize.pow(m) * size_of::<blst_p1_affine>() <= SLOT_BUDGET);
+                    assert!(folded(m) <= 4 * n.max(1));
+                    assert!(folded(m) * size_of::<blst_p1_affine>() <= SLOT_BUDGET);
                 }
                 // Every plan must cover the required number of combinations,
                 // and must not waste more than one on rounding.
@@ -1398,8 +1552,8 @@ mod tests {
             for n in [0usize, 1, 7, 130, 200, 999, 1000, 6000, 20_000, 100_000, 400_000] {
                 let mut widest = 0u32;
                 while widest < MAX_WIDTH
-                    && 3usize.pow(widest + 1) <= 4 * n.max(1)
-                    && 3usize.pow(widest + 1) * size_of::<blst_p1_affine>() <= SLOT_BUDGET
+                    && folded(widest + 1) <= 4 * n.max(1)
+                    && folded(widest + 1) * size_of::<blst_p1_affine>() <= SLOT_BUDGET
                 {
                     widest += 1;
                 }
@@ -1484,7 +1638,12 @@ mod tests {
         let mut rng = test_rng();
         let mut trits = Trits::new(&mut rng);
         for m in 1..=MAX_WIDTH {
-            assert!(trits.fill(m, 1000).into_iter().all(|id| id < 3u32.pow(m)));
+            assert!(
+                trits
+                    .fill(m, 1000)
+                    .into_iter()
+                    .all(|id| ((id & !ID_NEGATE) as usize) < folded(m))
+            );
         }
     }
 
@@ -1492,9 +1651,11 @@ mod tests {
     fn bucket_ids_are_roughly_uniform() {
         let mut rng = test_rng();
         let mut trits = Trits::new(&mut rng);
+        // Folding is a bijection onto the signed values, so uniformity of the
+        // ids is uniformity over the nine vectors of width two.
         let mut counts = [0usize; 9];
         for id in trits.fill(2, 9000) {
-            counts[id as usize] += 1;
+            counts[(signed_value(id) + 4) as usize] += 1;
         }
         // Expected 1000 per id; the window is ~6.7 standard deviations wide.
         for &count in &counts {
@@ -1522,12 +1683,17 @@ mod tests {
                 let mut digits = vec![[0usize; 3]; m as usize];
                 let mut pairs = vec![[0usize; 9]; m as usize - 1];
                 for id in ids {
-                    assert!(id < 3u32.pow(m));
-                    let mut value = id;
+                    assert!(((id & !ID_NEGATE) as usize) < folded(m));
+                    let mut value = signed_value(id);
                     let mut previous = None;
                     for (position, counts) in digits.iter_mut().enumerate() {
-                        let digit = (value % 3) as usize;
-                        value /= 3;
+                        // Balanced-ternary digits, shifted to index {0,1,2}.
+                        let signed = match value.rem_euclid(3) {
+                            2 => -1,
+                            other => other,
+                        };
+                        value = (value - signed) / 3;
+                        let digit = (signed + 1) as usize;
                         counts[digit] += 1;
                         if let Some(previous) = previous {
                             pairs[position - 1][previous * 3 + digit] += 1;
@@ -1575,7 +1741,9 @@ mod tests {
         points.push(off_subgroup_point(&mut rng));
         // Good points are spread arbitrarily; their in-subgroup parts cannot
         // mask a cofactor part in any combination.
-        let mut ids: Vec<u32> = (0..points.len()).map(|i| (i % 243) as u32).collect();
+        let mut ids: Vec<u32> = (0..points.len())
+            .map(|i| (i % folded(M)) as u32)
+            .collect();
         let mut round = Round::new(M);
         // Vector 0 assigns the bad point coefficient 0 in every combination,
         // so the round must accept.
@@ -1583,9 +1751,20 @@ mod tests {
         let (affine, affine_ids) = affine_with_ids(&points, &ids);
         assert!(round.run(&affine, &affine_ids, M));
         // Any nonzero vector leaves a nonzero digit in some combination, which
-        // must reject: 3^j isolates digit j with value 1; 2 and 162 = 2 * 3^4
-        // cover value 2 at the lowest and highest positions.
-        for v in [1u32, 2, 3, 9, 27, 81, 162] {
+        // must reject. A value of 3^j isolates digit j at +1, and the same
+        // value folded isolates it at -1, so these cover both signs at the
+        // lowest and highest positions as well as a two-digit vector.
+        for v in [
+            1u32,
+            3,
+            9,
+            27,
+            81,
+            1 | ID_NEGATE,
+            81 | ID_NEGATE,
+            4,
+            82 | ID_NEGATE,
+        ] {
             ids[bad_index] = v;
             let (affine, affine_ids) = affine_with_ids(&points, &ids);
             assert!(
@@ -1880,9 +2059,10 @@ mod tests {
             for j in 0..m {
                 let mut acc = G1::zero();
                 for (point, &id) in points.iter().zip(&ids) {
-                    let digit = (id / 3u32.pow(j)) % 3;
-                    for _ in 0..digit {
-                        acc += point;
+                    match signed_digits(id, m)[j as usize] {
+                        1 => acc += point,
+                        -1 => acc += &-*point,
+                        _ => {}
                     }
                 }
                 if !acc.in_subgroup() {
@@ -1928,10 +2108,19 @@ mod tests {
                 })
                 .collect();
             // Id distributions: uniform, all-equal, and a tiny support.
+            let buckets = folded(m) as u32;
             let ids: Vec<u32> = match seed % 4 {
                 0 => Trits::new(&mut rng).fill(m, n),
-                1 => vec![(seed as u32) % 3u32.pow(m); n],
-                2 => (0..n).map(|i| (i as u32) % 3u32.min(3u32.pow(m))).collect(),
+                // All points on one folded vector, half of them negated.
+                1 => (0..n)
+                    .map(|i| {
+                        (seed as u32) % buckets | if i % 2 == 0 { ID_NEGATE } else { 0 }
+                    })
+                    .collect(),
+                // A tiny support, so collisions and cancellations dominate.
+                2 => (0..n)
+                    .map(|i| (i as u32) % buckets.min(3) | ((i as u32 & 1) << 31))
+                    .collect(),
                 _ => Trits::new(&mut rng).fill(m, n),
             };
             let (affine, affine_ids) = affine_with_ids(&points, &ids);
@@ -1942,34 +2131,19 @@ mod tests {
             for j in 0..m {
                 let mut expected = G1::zero();
                 for (point, &id) in kept.iter().zip(&affine_ids) {
-                    let digit = (id / 3u32.pow(j)) % 3;
-                    for _ in 0..digit {
-                        expected += point;
+                    match signed_digits(id, m)[j as usize] {
+                        1 => expected += point,
+                        -1 => expected += &-*point,
+                        _ => {}
                     }
                 }
                 // Rebuild the combination from the round's marginals exactly
                 // as `run` does, so a wiring bug shows up as a value mismatch.
                 let mut got = blst_p1::default();
-                if let Some(&twos) = round.marginals[2 * j as usize + 1].first() {
-                    let mut point = blst_p1::default();
+                if let Some(&marginal) = round.marginals[j as usize].first() {
                     // SAFETY: the index names a live affine point, and blst_p1
                     // defaults to the identity.
-                    unsafe {
-                        blst_p1_from_affine(&mut point, &round.sums[twos as usize]);
-                        blst_p1_double(&mut got, &point);
-                    }
-                }
-                if let Some(&ones) = round.marginals[2 * j as usize].first() {
-                    let doubled = got;
-                    // SAFETY: all operands are valid blst values, the identity
-                    // included, and the routine handles equal operands.
-                    unsafe {
-                        blst_p1_add_or_double_affine(
-                            &mut got,
-                            &doubled,
-                            &round.sums[ones as usize],
-                        );
-                    }
+                    unsafe { blst_p1_from_affine(&mut got, &round.sums[marginal as usize]) };
                 }
                 let mut got_affine = blst_p1_affine::default();
                 // SAFETY: both pointers reference valid blst values.
@@ -2004,9 +2178,14 @@ mod tests {
             let ids = Trits::new(&mut rng).fill(m, count);
             let mut counts = vec![0usize; buckets];
             let mut per_pos = vec![vec![0usize; buckets]; per_word];
+            // Uniformity is a property of the vector drawn, not of the bucket
+            // it folds onto: two vectors share a bucket, so counting buckets
+            // would pass even if the sign were biased.
+            let centre = (buckets as i64 - 1) / 2;
             for (i, &id) in ids.iter().enumerate() {
-                counts[id as usize] += 1;
-                per_pos[i % per_word][id as usize] += 1;
+                let vector = (signed_value(id) + centre) as usize;
+                counts[vector] += 1;
+                per_pos[i % per_word][vector] += 1;
             }
             let chi: f64 = counts
                 .iter()
@@ -2053,10 +2232,11 @@ mod tests {
                     })
                     .collect();
                 let ids = Trits::new(&mut rng).fill(m, n);
-                // Naive: one running G1 sum per bucket.
-                let mut expected = vec![G1::zero(); 3usize.pow(m)];
+                // Naive: one running G1 sum per bucket, each point entering
+                // negated when its vector folded onto its negation.
+                let mut expected = vec![G1::zero(); folded(m)];
                 for (point, &id) in points.iter().zip(&ids) {
-                    expected[id as usize] += point;
+                    expected[(id & !ID_NEGATE) as usize] += &folded_point(point, id);
                 }
                 let expected = G1::batch_to_affine(&expected);
                 let (affine, affine_ids) = affine_with_ids(&points, &ids);
@@ -2291,7 +2471,7 @@ mod tests {
         let start = Instant::now();
         for _ in 0..reps {
             for i in 0..n {
-                out[i] = chord(&affine[2 * i], &affine[2 * i + 1], &values[i], false);
+                out[i] = chord(&affine[2 * i], &affine[2 * i + 1], &values[i], false, false);
             }
             std::hint::black_box(&out);
         }
