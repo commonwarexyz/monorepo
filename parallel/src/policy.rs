@@ -1113,6 +1113,58 @@ mod tests {
     }
 
     #[test]
+    fn spawn_inline_ewma_crossing_the_overhead_revokes_inline() {
+        // A converged-inline entry whose inline wall grows: the flip must come from the inline
+        // EWMA while the worker wall stays low, pinning that the decision prefers the inline
+        // wall once one exists.
+        let mut entry = SpawnEntry::default();
+        entry.job_ns.record(2_000);
+        entry.overhead_ns.record(50_000);
+        entry.inline_ns.record(2_000);
+        assert!(matches!(
+            entry.choose(SPAWN_INLINE_BUDGET_NS),
+            (SpawnExecution::Inline, _)
+        ));
+
+        // One grown sample blends the inline EWMA over the 50us overhead.
+        entry.inline_ns.record(500_000);
+        assert_eq!(entry.inline_ns.get(), Some(101_600));
+        assert!(matches!(
+            entry.choose(SPAWN_INLINE_BUDGET_NS),
+            (SpawnExecution::Offload, _)
+        ));
+    }
+
+    #[test]
+    fn spawn_records_feed_choose() {
+        // Policy-level wiring for the three spawn record paths: the worker and future samples
+        // seed the entry, and the probe's inline sample drives the flip.
+        let policy = Policy::default();
+        let location = Location::caller();
+
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM),
+            (SpawnExecution::Offload, true)
+        );
+        policy.record_spawn_job(location, 64, PARALLELISM, Duration::from_micros(25));
+        policy.record_spawn_overhead(location, 64, PARALLELISM, Duration::from_micros(10));
+
+        // The boundary probes inline (the worker wall fits the budget).
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM),
+            (SpawnExecution::Inline, true)
+        );
+
+        // The probe's inline wall beats the overhead, so the entry flips inline: recording it
+        // anywhere but the inline estimate would leave the entry offloaded.
+        policy.record_spawn_inline(location, 64, PARALLELISM, Duration::from_micros(8));
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM),
+            (SpawnExecution::Inline, false)
+        );
+    }
+
+    #[test]
     fn spawn_uses_job_ewma() {
         // A converged-inline entry: cheap job, expensive round trip.
         let mut entry = SpawnEntry::default();

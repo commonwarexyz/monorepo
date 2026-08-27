@@ -98,7 +98,8 @@ commonware_macros::stability_scope!(BETA {
     /// A strategy wrapper for manually partitioned work.
     ///
     /// Built via [`Strategy::manual`], this disables adaptive policy decisions (including spawn
-    /// placement) for operations that callers have already split into partitions.
+    /// placement) for operations that callers have already split into partitions, and carries
+    /// the parallelism used to plan those partitions.
     #[derive(Clone, Debug)]
     pub struct Manual<S> {
         strategy: S,
@@ -106,14 +107,6 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl<S> Manual<S> {
-        /// Creates a strategy wrapper for manually partitioned work.
-        pub const fn new(strategy: S, parallelism: NonZeroUsize) -> Self {
-            Self {
-                strategy,
-                parallelism: parallelism.get(),
-            }
-        }
-
         /// Returns the parallelism to use for manually partitioned work.
         pub const fn parallelism(&self) -> usize {
             self.parallelism
@@ -132,14 +125,12 @@ commonware_macros::stability_scope!(BETA {
             Self: Sized;
 
         /// Submit one CPU-bound job to this strategy, running it inline on the calling task when
-        /// it is measured cheaper than the pool hand-off itself and offloading it to the pool
-        /// otherwise.
+        /// it is measured cheaper than the round trip of offloading it to the pool.
         ///
         /// `len` groups calls at a call site into size classes for those measurements, so similar
         /// `len` must mean comparable cost. An inline job runs to completion before `spawn`
-        /// returns and is capped by a small time budget, so big jobs always offload. To force a
-        /// hand-off, submit through [`manual`](Self::manual) (a single-worker pool always runs
-        /// jobs inline).
+        /// returns, and jobs whose measured cost exceeds a small time budget offload. To force a
+        /// hand-off on a multi-worker pool, submit through [`manual`](Self::manual).
         ///
         /// The returned future resolves when the job completes. Blocking on external
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
@@ -812,7 +803,10 @@ commonware_macros::stability_scope!(BETA {
 
     impl Strategy for Sequential {
         fn manual(&self) -> Manual<Self> {
-            Manual::new(Self, NonZeroUsize::new(1).unwrap())
+            Manual {
+                strategy: Self,
+                parallelism: 1,
+            }
         }
 
         fn spawn<F, T>(
@@ -1349,6 +1343,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             });
         }
     }
+});
+commonware_macros::stability_scope!(ALPHA, cfg(feature = "test-utils") {
+    pub mod mocks;
 });
 
 #[cfg(test)]
