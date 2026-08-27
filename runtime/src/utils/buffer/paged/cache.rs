@@ -21,15 +21,18 @@ use std::{
 };
 use tracing::{debug, error, trace};
 
-/// Maximum consecutive pages fetched per blob read by [`CacheRef::fetch_pages_after_faults`].
-/// Bounds the per-run scratch buffer (pages are copied into pooled cache buffers on admission)
-/// while still coalescing the sequential misses common to bulk cold reads.
+/// Maximum consecutive pages fetched per blob read by [`CacheRef::fetch_pages_after_faults`]. At
+/// the common 4KiB page size a full run is a ~256KiB read, which already sits on the flat region of
+/// NVMe sequential-read efficiency: larger reads grow the per-run scratch buffer (pages are copied
+/// into pooled cache buffers on admission) without materially improving throughput, and smaller
+/// ones pay more dispatches per byte. Throughput is insensitive to this value near that plateau, so
+/// it is a constant rather than configuration.
 const MAX_FAULT_RUN_PAGES: usize = 64;
 
 /// Maximum runs fetched concurrently (and admitted per lock acquisition) by
-/// [`CacheRef::fetch_pages_after_faults`]. Bounds the scratch memory held in flight, the
-/// concurrent blob reads dispatched, and how long one admission holds the cache write lock
-/// against concurrent readers.
+/// [`CacheRef::fetch_pages_after_faults`]. Bounds the scratch memory held in flight (about 2MiB at
+/// 4KiB pages), the concurrent blob reads dispatched, and how long one admission holds the cache
+/// write lock against concurrent readers.
 const MAX_FAULT_WAVE_RUNS: usize = 8;
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
@@ -443,9 +446,9 @@ impl CacheRef {
     }
 
     /// Fetch the pages of `page_nums` absent from the cache and admit them, coalescing runs of
-    /// consecutive pages into single blob reads. `page_nums` must be strictly increasing, and
-    /// every page must lie below the owning view's in-memory tail (so it is a full logical page
-    /// on disk). One read-lock acquisition probes the whole batch for pages already cached.
+    /// consecutive pages into single blob reads. `page_nums` must be strictly increasing, and every
+    /// page must lie below the owning view's in-memory tail (so it is a full logical page on disk).
+    /// One read-lock acquisition probes the whole batch for pages already cached.
     ///
     /// Unlike [`Self::read_after_page_fault`], concurrent fetches of the same page are not
     /// deduplicated: racing fetches admit identical bytes, so bulk callers trade an occasional
@@ -470,9 +473,9 @@ impl CacheRef {
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
 
-        // Split the sorted pages into runs of consecutive pages, each served by one blob read.
-        // Runs are capped so one run's scratch buffer stays modest even when a large batch of
-        // adjacent pages misses at once.
+        // Split the sorted pages into runs of consecutive pages, each served by one blob read. Runs
+        // are capped so one run's scratch buffer stays modest even when a large batch of adjacent
+        // pages misses at once.
         let mut runs: Vec<(u64, usize)> = Vec::new();
         for &page_num in &page_nums {
             match runs.last_mut() {
@@ -485,10 +488,10 @@ impl CacheRef {
             }
         }
 
-        // Fetch runs in bounded waves: each wave reads its runs concurrently, validates
-        // every page's checksum, and admits the wave under one lock acquisition. The bound
-        // caps the scratch buffers held in flight, the concurrent blob reads dispatched,
-        // and how long one admission blocks concurrent readers on the cache lock.
+        // Fetch runs in bounded waves: each wave reads its runs concurrently, validates every
+        // page's checksum, and admits the wave under one lock acquisition. The bound caps the
+        // scratch buffers held in flight, the concurrent blob reads dispatched, and how long one
+        // admission blocks concurrent readers on the cache lock.
         let page_size = self.page_size as usize;
         for wave in runs.chunks(MAX_FAULT_WAVE_RUNS) {
             let fetched = try_join_all(wave.iter().map(|&(start, len)| async move {
@@ -509,6 +512,7 @@ impl CacheRef {
                         error!(page_num = start + i as u64, "page fetch failed checksum");
                         return Err(Error::InvalidChecksum);
                     };
+
                     // Only full logical pages are cacheable. A non-last page falling back to a
                     // partial CRC indicates corruption, mirroring the single-page fetch path.
                     if checksum.len as u64 != self.page_size {

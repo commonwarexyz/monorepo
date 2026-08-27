@@ -616,8 +616,7 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Warm the page cache for sorted, non-overlapping `(offset, len)` byte ranges, admitting
-    /// missing pages with coalesced blob reads.
+    /// Warm the page cache for sorted, non-overlapping `(offset, len)` byte ranges.
     pub(super) async fn warm_ranges(&self, ranges: &[(u64, usize)]) -> Result<(), Error> {
         match self {
             Self::Writer(writer) => Ok(writer.warm_ranges(ranges).await?),

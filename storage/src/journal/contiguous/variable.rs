@@ -71,10 +71,10 @@ const OFFSETS_SUFFIX: &str = "_offsets";
 /// Byte ranges to warm on one blob's pages before decoding: `(blob, handle, ranges)`.
 type WarmRanges<'a, 'b, B> = (u64, &'a Blob<'b, B>, Vec<(u64, usize)>);
 
-/// Compute the byte range to warm for one run of consecutive frames at `offsets`, from the
-/// first frame's start through the first byte of the last frame. `offsets` are persisted
-/// data: runs whose endpoints are not increasing return [Error::Corruption], and ranges
-/// that do not fit in a `usize` return [Error::OffsetOverflow].
+/// Compute the byte range to warm for one run of consecutive frames at `offsets`, from the first
+/// frame's start through the first byte of the last frame. `offsets` are persisted data: runs whose
+/// endpoints are not increasing return [Error::Corruption], and ranges that do not fit in a `usize`
+/// return [Error::OffsetOverflow].
 fn warm_range(blob: u64, offsets: &[u64]) -> Result<(u64, usize), Error> {
     let start = offsets[0];
     let last = offsets[offsets.len() - 1];
