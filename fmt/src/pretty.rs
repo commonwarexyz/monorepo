@@ -1,0 +1,511 @@
+//! Formatting adapters for ordinary Rust syntax fragments.
+
+use crate::source::SourceMap;
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
+use quote::quote;
+use std::{ops::Range, panic::AssertUnwindSafe};
+use syn::{Attribute, Expr, File, Item, ItemFn, Meta, Pat, Stmt, parse::Parse, spanned::Spanned};
+use thiserror::Error;
+
+/// An error produced while formatting a Rust syntax fragment.
+#[derive(Debug, Error)]
+pub enum Error {
+    /// The synthetic wrapper could not be constructed.
+    #[error("failed to construct formatter wrapper: {0}")]
+    Construct(#[source] syn::Error),
+    /// `prettyplease` panicked while unparsing the wrapper.
+    #[error("prettyplease panicked while formatting a fragment")]
+    Panic,
+    /// Formatted wrapper output was not valid Rust.
+    #[error("failed to parse formatted wrapper: {0}")]
+    Reparse(#[source] syn::Error),
+    /// The formatted wrapper did not have its required synthetic shape.
+    #[error("formatted wrapper had an unexpected shape")]
+    WrapperShape,
+    /// A source span could not be mapped into the formatted wrapper.
+    #[error("failed to locate formatted fragment: {0}")]
+    Source(#[from] crate::source::Error),
+    /// Pretty output did not contain the expected synthetic indentation.
+    #[error("formatted wrapper had unexpected indentation")]
+    Indentation,
+}
+
+/// How a protected fragment was produced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Disposition {
+    /// The fragment was formatted with `prettyplease`.
+    Formatted,
+    /// Exact source was retained because formatting could lose trivia.
+    PreservedForTrivia,
+}
+
+/// A formatted fragment or an exact source-preserving fallback.
+pub struct ProtectedFragment {
+    text: String,
+    disposition: Disposition,
+}
+
+impl ProtectedFragment {
+    /// Returns the protected fragment text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns how the fragment was produced.
+    pub const fn disposition(&self) -> Disposition {
+        self.disposition
+    }
+
+    /// Consumes the fragment and returns its text.
+    pub fn into_string(self) -> String {
+        self.text
+    }
+}
+
+/// Formats an expression through a synthetic function body.
+///
+/// `source` must be the exact source text from which `expression` was parsed.
+pub fn expression(expression: &Expr, source: &str) -> Result<ProtectedFragment, Error> {
+    format_or_preserve(source, || {
+        let wrapper = parse_wrapper(quote! {
+            fn __commonware_fmt() {
+                let __commonware_fmt_value = #expression;
+            }
+        })?;
+        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
+        let function = sole_function(&reparsed)?;
+        let [Stmt::Local(local)] = function.block.stmts.as_slice() else {
+            return Err(Error::WrapperShape);
+        };
+        let Some(initializer) = &local.init else {
+            return Err(Error::WrapperShape);
+        };
+        if initializer.diverge.is_some() {
+            return Err(Error::WrapperShape);
+        }
+        extract_dedented(&formatted, initializer.expr.span())
+    })
+}
+
+/// Formats a pattern through a synthetic `for` loop.
+///
+/// `source` must be the exact source text from which `pattern` was parsed.
+pub fn pattern(pattern: &Pat, source: &str) -> Result<ProtectedFragment, Error> {
+    format_or_preserve(source, || {
+        let wrapper = parse_wrapper(quote! {
+            fn __commonware_fmt() {
+                for #pattern in () {}
+            }
+        })?;
+        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
+        let function = sole_function(&reparsed)?;
+        let [Stmt::Expr(Expr::ForLoop(for_loop), None)] = function.block.stmts.as_slice() else {
+            return Err(Error::WrapperShape);
+        };
+        extract_dedented(&formatted, for_loop.pat.span())
+    })
+}
+
+/// Formats a complete list of items.
+///
+/// `source` must be the exact source text from which `items` were parsed.
+pub fn items(items: &[Item], source: &str) -> Result<ProtectedFragment, Error> {
+    format_or_preserve(source, || {
+        let wrapper = File {
+            shebang: None,
+            attrs: Vec::new(),
+            items: items.to_vec(),
+        };
+        let formatted = unparse(&wrapper)?;
+        let reparsed = syn::parse_file(&formatted).map_err(Error::Reparse)?;
+        if reparsed.items.len() != items.len() {
+            return Err(Error::WrapperShape);
+        }
+        Ok(formatted
+            .strip_suffix('\n')
+            .unwrap_or(&formatted)
+            .to_owned())
+    })
+}
+
+/// Formats a complete list of statements.
+///
+/// `source` must be the exact source text from which `statements` were parsed.
+pub fn statements(statements: &[Stmt], source: &str) -> Result<ProtectedFragment, Error> {
+    format_or_preserve(source, || {
+        if statements.is_empty() {
+            return Ok(String::new());
+        }
+
+        let wrapper = parse_wrapper(quote! {
+            fn __commonware_fmt() {
+                #(#statements)*
+            }
+        })?;
+        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
+        let function = sole_function(&reparsed)?;
+        if function.block.stmts.len() != statements.len() {
+            return Err(Error::WrapperShape);
+        }
+        let first = function
+            .block
+            .stmts
+            .first()
+            .ok_or(Error::WrapperShape)?
+            .span();
+        let last = function
+            .block
+            .stmts
+            .last()
+            .ok_or(Error::WrapperShape)?
+            .span();
+        extract_dedented(&formatted, join_spans(first, last)?)
+    })
+}
+
+/// Formats a cfg predicate or other meta item.
+///
+/// `source` must be the exact source text from which `meta` was parsed.
+pub fn meta(meta: &Meta, source: &str) -> Result<ProtectedFragment, Error> {
+    format_or_preserve(source, || {
+        let wrapper = parse_wrapper(quote! {
+            #[cfg(#meta)]
+            struct __CommonwareFmt;
+        })?;
+        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
+        let [Item::Struct(item)] = reparsed.items.as_slice() else {
+            return Err(Error::WrapperShape);
+        };
+        let [attribute] = item.attrs.as_slice() else {
+            return Err(Error::WrapperShape);
+        };
+        let parsed = parse_cfg_argument(attribute)?;
+        extract_dedented(&formatted, parsed.span())
+    })
+}
+
+fn format_or_preserve(
+    source: &str,
+    format: impl FnOnce() -> Result<String, Error>,
+) -> Result<ProtectedFragment, Error> {
+    if requires_preservation(source) {
+        return Ok(ProtectedFragment {
+            text: source.to_owned(),
+            disposition: Disposition::PreservedForTrivia,
+        });
+    }
+
+    Ok(ProtectedFragment {
+        text: format()?,
+        disposition: Disposition::Formatted,
+    })
+}
+
+fn parse_wrapper(tokens: TokenStream) -> Result<File, Error> {
+    syn::parse2(tokens).map_err(Error::Construct)
+}
+
+fn unparse_and_reparse(wrapper: &File) -> Result<(String, File), Error> {
+    let formatted = unparse(wrapper)?;
+    let reparsed = syn::parse_file(&formatted).map_err(Error::Reparse)?;
+    Ok((formatted, reparsed))
+}
+
+fn unparse(wrapper: &File) -> Result<String, Error> {
+    std::panic::catch_unwind(AssertUnwindSafe(|| prettyplease::unparse(wrapper)))
+        .map_err(|_| Error::Panic)
+}
+
+fn sole_function(file: &File) -> Result<&ItemFn, Error> {
+    let [Item::Fn(function)] = file.items.as_slice() else {
+        return Err(Error::WrapperShape);
+    };
+    if function.sig.ident != "__commonware_fmt" {
+        return Err(Error::WrapperShape);
+    }
+    Ok(function)
+}
+
+fn parse_cfg_argument(attribute: &Attribute) -> Result<Meta, Error> {
+    if !attribute.path().is_ident("cfg") {
+        return Err(Error::WrapperShape);
+    }
+    attribute
+        .parse_args_with(Meta::parse)
+        .map_err(Error::Reparse)
+}
+
+fn join_spans(first: Span, last: Span) -> Result<Span, Error> {
+    first.join(last).ok_or(Error::WrapperShape)
+}
+
+fn extract_dedented(formatted: &str, span: Span) -> Result<String, Error> {
+    let source = SourceMap::new(formatted);
+    let range = source.span_range(span)?;
+    dedent_wrapper(source.slice(range)?)
+}
+
+fn dedent_wrapper(source: &str) -> Result<String, Error> {
+    let mut output = String::with_capacity(source.len());
+    let mut lines = source.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return Ok(output);
+    };
+    output.push_str(first);
+
+    for line in lines {
+        if line == "\n" {
+            output.push('\n');
+            continue;
+        }
+        let line = line.strip_prefix("    ").ok_or(Error::Indentation)?;
+        output.push_str(line);
+    }
+
+    Ok(output)
+}
+
+fn requires_preservation(source: &str) -> bool {
+    let Ok(stream) = source.parse::<TokenStream>() else {
+        return true;
+    };
+    let source_map = SourceMap::new(source);
+    let mut ranges = Vec::new();
+    let mut literal_ranges = Vec::new();
+    let mut has_multiline_literal = false;
+    if collect_token_ranges(
+        stream,
+        &source_map,
+        &mut ranges,
+        &mut literal_ranges,
+        &mut has_multiline_literal,
+    )
+    .is_err()
+    {
+        return true;
+    }
+    if has_multiline_literal || has_source_spelled_doc_comment(source, &literal_ranges) {
+        return true;
+    }
+
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    let mut cursor = 0;
+    for range in ranges {
+        if range.start > cursor && !source[cursor..range.start].chars().all(char::is_whitespace) {
+            return true;
+        }
+        cursor = cursor.max(range.end);
+    }
+    source[cursor..]
+        .chars()
+        .any(|character| !character.is_whitespace())
+}
+
+fn collect_token_ranges(
+    stream: TokenStream,
+    source: &SourceMap<'_>,
+    ranges: &mut Vec<Range<usize>>,
+    literal_ranges: &mut Vec<Range<usize>>,
+    has_multiline_literal: &mut bool,
+) -> Result<(), crate::source::Error> {
+    for token in stream {
+        match token {
+            TokenTree::Group(group) => {
+                if group.delimiter() != Delimiter::None {
+                    ranges.push(source.span_range(group.span_open())?);
+                    ranges.push(source.span_range(group.span_close())?);
+                }
+                collect_token_ranges(
+                    group.stream(),
+                    source,
+                    ranges,
+                    literal_ranges,
+                    has_multiline_literal,
+                )?;
+            }
+            TokenTree::Literal(literal) => {
+                let range = source.span_range(literal.span())?;
+                let literal = source.slice(range.clone())?;
+                *has_multiline_literal |= literal.contains('\n') || literal.contains('\r');
+                literal_ranges.push(range.clone());
+                ranges.push(range);
+            }
+            TokenTree::Ident(ident) => ranges.push(source.span_range(ident.span())?),
+            TokenTree::Punct(punct) => ranges.push(source.span_range(punct.span())?),
+        }
+    }
+    Ok(())
+}
+
+fn has_source_spelled_doc_comment(source: &str, literal_ranges: &[Range<usize>]) -> bool {
+    let mut literal_ranges = literal_ranges.to_vec();
+    literal_ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    let mut literals = literal_ranges.iter().peekable();
+    let mut offset = 0;
+    while offset < source.len() {
+        while literals.peek().is_some_and(|literal| literal.end <= offset) {
+            literals.next();
+        }
+
+        let remaining = &source[offset..];
+        if remaining.starts_with("///")
+            || remaining.starts_with("//!")
+            || remaining.starts_with("/**")
+            || remaining.starts_with("/*!")
+        {
+            return true;
+        }
+        if let Some(literal) = literals.peek()
+            && literal.start <= offset
+        {
+            offset = literal.end;
+            literals.next();
+            continue;
+        }
+
+        offset += source[offset..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse::Parser;
+
+    #[test]
+    fn formats_expression() {
+        let source = "value.map(|item| { let doubled = item * 2; doubled + 1 })";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(
+            formatted.text(),
+            "value\n    .map(|item| {\n        let doubled = item * 2;\n        doubled + 1\n    })"
+        );
+        syn::parse_str::<Expr>(formatted.text()).expect("formatted expression should parse");
+    }
+
+    #[test]
+    fn formats_pattern() {
+        let source = "Example { first, second: Some(value) }";
+        let input: Pat = Pat::parse_single
+            .parse_str(source)
+            .expect("pattern should parse");
+        let formatted = pattern(&input, source).expect("pattern should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(formatted.text(), source);
+        Pat::parse_single
+            .parse_str(formatted.text())
+            .expect("formatted pattern should parse");
+    }
+
+    #[test]
+    fn formats_items_and_explicit_doc_attributes() {
+        let source = "#[doc = \"An example.\"]\npub struct Example { pub value: usize }\nimpl Example { pub fn value(&self) -> usize { self.value } }";
+        let file = syn::parse_file(source).expect("items should parse");
+        let formatted = items(&file.items, source).expect("items should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_ne!(formatted.text(), source);
+        assert_eq!(
+            syn::parse_file(formatted.text())
+                .expect("formatted items should parse")
+                .items
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn formats_statements() {
+        let source = "let value = source.map(|item| item + 1); value.unwrap_or_default()";
+        let block: syn::Block =
+            syn::parse_str(&format!("{{{source}}}")).expect("block should parse");
+        let formatted = statements(&block.stmts, source).expect("statements should format");
+
+        let reparsed: syn::Block =
+            syn::parse_str(&format!("{{{}}}", formatted.text())).expect("statements should parse");
+        assert_eq!(reparsed.stmts.len(), 2);
+    }
+
+    #[test]
+    fn formats_meta() {
+        let source = "all(test, any(feature = \"std\", unix))";
+        let input: Meta = syn::parse_str(source).expect("meta should parse");
+        let formatted = meta(&input, source).expect("meta should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(formatted.text(), source);
+        syn::parse_str::<Meta>(formatted.text()).expect("formatted meta should parse");
+    }
+
+    #[test]
+    fn preserves_multiline_literal() {
+        let source = "r#\"first\n    second\"#";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should be protected");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn preserves_ordinary_comments() {
+        for source in ["value // keep", "call(/* keep */ value)"] {
+            let input: Expr = syn::parse_str(source).expect("expression should parse");
+            let formatted = expression(&input, source).expect("expression should be protected");
+
+            assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+            assert_eq!(formatted.text(), source);
+        }
+    }
+
+    #[test]
+    fn preserves_source_spelled_doc_comments() {
+        for source in [
+            "/// Exact doc text.  \npub struct Example;",
+            "/** Exact block doc text.  */\npub struct Example;",
+        ] {
+            let file = syn::parse_file(source).expect("item should parse");
+            let formatted = items(&file.items, source).expect("item should be protected");
+
+            assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+            assert_eq!(formatted.text(), source);
+        }
+    }
+
+    #[test]
+    fn ignores_comment_markers_in_literals() {
+        let source = "format!(\"http://example.test/*path*/\")";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert!(formatted.text().contains("http://example.test/*path*/"));
+    }
+
+    #[test]
+    fn reaches_fixed_point() {
+        let source = "match value {Some(value)=>value,None=>0}";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let once = expression(&input, source)
+            .expect("expression should format")
+            .into_string();
+        let reparsed = syn::parse_str(&once).expect("formatted expression should parse");
+        let twice = expression(&reparsed, &once)
+            .expect("expression should format twice")
+            .into_string();
+
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn empty_statements_are_empty() {
+        let formatted = statements(&[], "").expect("empty statements should format");
+        assert_eq!(formatted.text(), "");
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+    }
+}

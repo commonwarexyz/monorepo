@@ -1,0 +1,22 @@
+[package]
+name = "commonware-fmt"
+edition.workspace = true
+publish = false
+version.workspace = true
+license.workspace = true
+description = "Format Commonware macro invocations."
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/fmt"
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+prettyplease.workspace = true
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+quote.workspace = true
+syn = { workspace = true, features = ["full", "visit"] }
+thiserror.workspace = true

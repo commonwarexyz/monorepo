@@ -13,6 +13,7 @@ members = [
     "cryptography",
     "cryptography/curve25519",
     "deployer",
+    "fmt",
     "formatting",
     "glue",
     "macros",
@@ -185,6 +186,7 @@ pin-project = "1.1.13"
 proc-macro-crate = "3.5.0"
 proc-macro2 = "1.0"
 prometheus-client = "0.25.0"
+prettyplease = { version = "=0.2.37", features = ["verbatim"] }
 proptest = "1.11.0"
 prost = "0.14.4"
 prost-build = "0.14.4"
