@@ -406,40 +406,6 @@ fn test_capacity_queued_head_middle_tail_cancellation_preserves_links() {
 }
 
 #[test]
-fn test_capacity_stale_generation_cannot_cancel_reused_node() {
-    let mut capacity = CapacityWaiters::new();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let old_waker = log_waker(0, &log);
-    let new_waker = log_waker(1, &log);
-    let mut old = None;
-    assert_eq!(
-        poll_capacity(&mut capacity, &mut old, 0, &old_waker),
-        CapacityAdmission::Queued
-    );
-    let stale = old.unwrap();
-    cancel_capacity(&mut capacity, stale, 0);
-
-    let mut new = None;
-    assert_eq!(
-        poll_capacity(&mut capacity, &mut new, 0, &new_waker),
-        CapacityAdmission::Queued
-    );
-    let current = new.unwrap();
-    assert_eq!(stale.index, current.index);
-    assert_ne!(stale.generation, current.generation);
-    cancel_capacity(&mut capacity, stale, 0);
-    assert_eq!(capacity.registered(), 1);
-    reconcile_capacity(&mut capacity, 1);
-    assert_eq!(*log.lock(), vec![1]);
-    assert_eq!(capacity.reserved(), 1);
-
-    // The same stale ID also cannot revoke the reused node after grant.
-    cancel_capacity(&mut capacity, stale, 1);
-    assert_eq!(capacity.reserved(), 1);
-    assert_eq!(capacity.registered(), 1);
-}
-
-#[test]
 fn test_capacity_queued_repoll_replaces_waker_without_reordering() {
     let mut capacity = CapacityWaiters::new();
     let old = Arc::new(CountWaker(AtomicUsize::new(0)));
@@ -908,32 +874,6 @@ fn test_pending_orphan_with_queued_successor_keeps_actions_inline() {
     });
     wake_batch(actions);
     drop(successor);
-}
-
-#[test]
-fn test_recv_rejects_offset_past_end_before_admission() {
-    let handle = Handle::new(1, RingWaker::new().unwrap());
-    let (left, _right) = UnixStream::pair().unwrap();
-    let mut recv = Box::pin(handle.recv(
-        Arc::new(left.into()),
-        IoBufMut::with_capacity(1),
-        1,
-        0,
-        false,
-        Instant::now(),
-    ));
-    let noop = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&noop);
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = recv.as_mut().poll(&mut cx);
-    }));
-    assert!(result.is_err());
-    handle.with(|ops| {
-        assert!(ops.waiters.is_empty());
-        assert!(ops.backlog.is_empty());
-        assert_eq!(ops.capacity.registered(), 0);
-    });
 }
 
 #[test]

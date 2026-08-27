@@ -384,9 +384,9 @@ enum CapacityState {
 
 /// Result of one atomic capacity-admission transition.
 ///
-/// Successful variants carry the observer waker cloned before the transition
-/// consumed either a direct free slot or a reserved grant. The caller can then
-/// publish the waiter and retain the observer without a second external clone.
+/// Successful variants leave the cloned observer waker in the caller-owned
+/// slot. The caller can then publish the waiter and retain the observer without
+/// a second external clone.
 #[cfg_attr(test, derive(Debug, Eq, PartialEq))]
 enum CapacityAdmission {
     /// Admit directly from an unreserved authoritative free slot.

@@ -311,16 +311,10 @@ impl Request {
         }
     }
 
-    /// Return whether this request carries a deadline.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub const fn has_deadline(&self) -> bool {
-        self.deadline().is_some()
-    }
-
     /// Return whether an orphaned ticket stops this request from driving
     /// follow-up SQEs.
     ///
-    /// Storage write/sync behavior stays aligned with `storage/tokio/unix.rs`,
+    /// Storage write/sync behavior stays aligned with `storage/tokio/blob.rs`,
     /// where spawned blocking work continues running after caller drop, so
     /// those kinds keep making progress even without an observer.
     pub const fn orphan_stops_progress(&self) -> bool {

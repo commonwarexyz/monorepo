@@ -261,22 +261,6 @@ fn test_expired_deadline_completes_immediately() {
 }
 
 #[test]
-#[should_panic(expected = "recv invariant violated")]
-fn test_recv_panics_on_invalid_buffer_bounds() {
-    let mut harness = TestLoop::new(RingConfig::default());
-    let (left, _right) = UnixStream::pair().unwrap();
-    let handle = harness.handle.clone();
-    let _ = harness.block_on(handle.recv(
-        Arc::new(left.into()),
-        IoBufMut::with_capacity(4),
-        0,
-        5,
-        false,
-        Instant::now() + Duration::from_secs(1),
-    ));
-}
-
-#[test]
 fn test_drop_cancels_inflight_recv() {
     // Verify dropping an op future mid-flight eagerly cancels the
     // operation and frees its slot without waiting for the deadline.

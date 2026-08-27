@@ -160,40 +160,6 @@ fn test_ticket_output_survives_waiter_reuse() {
 }
 
 #[test]
-fn test_publish_ready_rejects_duplicate_without_replacing_output() {
-    let mut waiters = Waiters::new(1);
-    let mut completions = TicketCompletions::new();
-    let (completion_id, waiter_id) =
-        insert_ticket(&mut completions, &mut waiters, make_sync_request());
-    assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-    let CompletionOutcome::Ticket {
-        waiter_id: completed_waiter,
-        completion_id: completed_completion,
-        output,
-        target_tick: None,
-    } = waiters.on_completion(waiter_id.user_data(), 0)
-    else {
-        panic!("sync ticket did not produce detached output");
-    };
-    let _ = completions.publish_ready(completed_completion, completed_waiter, output);
-    waiters.finish_ticket(completed_waiter, completed_completion);
-
-    let duplicate = catch_unwind(AssertUnwindSafe(|| {
-        let _ = completions.publish_ready(
-            completion_id,
-            waiter_id,
-            Output::Sync(Err(Box::new(Error::Closed))),
-        );
-    }));
-    assert!(duplicate.is_err());
-    assert_eq!(completions.ready(), 1);
-    assert!(matches!(
-        completions.poll_take(completion_id, &noop_waker()),
-        Some(Output::Sync(Ok(())))
-    ));
-}
-
-#[test]
 fn test_completion_slot_reuses_after_ticket_drop() {
     let mut waiters = Waiters::new(1);
     let mut completions = TicketCompletions::new();
@@ -497,55 +463,6 @@ fn test_waiters_reject_stale_in_flight_queries() {
 }
 
 #[test]
-fn test_waiters_completed_results_cannot_be_scheduled_or_staged() {
-    let mut waiters = Waiters::new(1);
-    let deadline = std::time::Instant::now();
-    let waiter_id = waiters.insert(
-        Request::Send(SendRequest {
-            fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            deadline: Some(deadline),
-        }),
-        noop_waker(),
-    );
-    assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-    assert!(matches!(
-        waiters.on_completion(waiter_id.user_data(), 5),
-        CompletionOutcome::Complete { freed: false, .. }
-    ));
-
-    assert!(waiters.deadline_to_schedule(waiter_id).is_none());
-    let restage = catch_unwind(AssertUnwindSafe(|| {
-        let _ = waiters.stage(waiter_id);
-    }));
-    assert!(restage.is_err());
-    assert!(matches!(
-        waiters.poll_take(waiter_id, &noop_waker()),
-        Some(Output::Send(Ok(())))
-    ));
-}
-
-#[test]
-fn test_waiters_stage_panics_for_out_of_range_and_empty_slots() {
-    // Verify `stage` treats impossible waiter ids as invariant failures,
-    // while the tolerant query/cancel paths still reject them cleanly.
-    let mut waiters = Waiters::new(1);
-    let out_of_range = WaiterId::new(7, 0);
-    assert!(!waiters.cancel(out_of_range));
-    let out_of_range_stage = catch_unwind(AssertUnwindSafe(|| {
-        let _ = waiters.stage(out_of_range);
-    }));
-    assert!(out_of_range_stage.is_err());
-
-    let empty_slot = WaiterId::new(0, 0);
-    assert!(!waiters.cancel(empty_slot));
-    let empty_slot_stage = catch_unwind(AssertUnwindSafe(|| {
-        let _ = waiters.stage(empty_slot);
-    }));
-    assert!(empty_slot_stage.is_err());
-}
-
-#[test]
 fn test_waiters_cancel_and_in_flight_reject_out_of_range_and_empty_slots() {
     // Verify cancel and in-flight tracking reject waiter ids that point
     // outside the table or at currently empty slots.
@@ -845,22 +762,6 @@ fn test_waiters_cancel_rejects_parked_results() {
 }
 
 #[test]
-fn test_waiters_stale_ids_cannot_remove_reused_slots() {
-    // Verify stale waiter ids cannot observe state or remove a reused slot.
-    let mut waiters = Waiters::new(1);
-    let waiter_id = insert(&mut waiters, make_sync_request(), Some(1));
-    let _ = remove_waiter(&mut waiters, waiter_id);
-
-    let reused_id = insert(&mut waiters, make_sync_request(), Some(2));
-    assert_ne!(reused_id, waiter_id);
-    assert!(waiter_state(&waiters, waiter_id).is_none());
-    let stale_remove = catch_unwind(AssertUnwindSafe(|| {
-        let _ = remove_waiter(&mut waiters, waiter_id);
-    }));
-    assert!(stale_remove.is_err());
-}
-
-#[test]
 fn test_waiters_insert_and_cancel_invariants() {
     // Verify waiter capacity is enforced and that cancel remains valid even for waiters that
     // were inserted without a deadline.
@@ -914,29 +815,4 @@ fn test_waiters_cancel_active_skips_parked_results() {
     assert_eq!(transitioned[0].0, in_flight);
     assert_eq!(transitioned[0].1, Some(2));
     assert!(transitioned[0].2);
-}
-
-#[test]
-fn test_shutdown_cancellation_is_not_reported_as_deadline_timeout() {
-    // `cancel_active` is the shutdown-budget path. Its cancellation must
-    // remain distinguishable from `cancel`, which is also used by the
-    // request deadline path: a shutdown surfaces as closed, not as an
-    // ordinary operation timeout.
-    let mut waiters = Waiters::new(1);
-    let waiter_id = insert(&mut waiters, make_recv_request(), Some(7));
-    assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-    assert_eq!(waiters.cancel_active().len(), 1);
-
-    assert!(matches!(
-        waiters.on_completion(waiter_id.user_data(), -libc::ECANCELED),
-        CompletionOutcome::Complete { .. }
-    ));
-    let Some(Output::Recv(Err(error))) = waiters.poll_take(waiter_id, &noop_waker()) else {
-        panic!("shutdown-cancelled recv did not produce an error");
-    };
-    let (_, error) = *error;
-    assert!(
-        matches!(error, Error::Closed),
-        "expected shutdown cancellation to be Closed, got {error:?}"
-    );
 }

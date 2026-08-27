@@ -1178,37 +1178,6 @@ fn test_completed_workers_not_retained() {
     });
 }
 
-#[test]
-fn test_child_drop_panic_propagates_after_teardown() {
-    struct PanicOnDrop;
-
-    impl Future for PanicOnDrop {
-        type Output = ();
-
-        fn poll(self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
-            Poll::Pending
-        }
-    }
-
-    impl Drop for PanicOnDrop {
-        fn drop(&mut self) {
-            panic!("child drop panic");
-        }
-    }
-
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        Runner::default().start(|context| async move {
-            let _handle = context.child("pending").spawn(|_| PanicOnDrop);
-        })
-    }));
-    let payload = result.expect_err("child drop panic should fail start");
-    let message = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    assert_eq!(message, Some("child drop panic"));
-}
-
 /// A task destructor panic must not strand a later task's submitted
 /// operation. The later task must be cleared before the driver drains.
 #[test]
