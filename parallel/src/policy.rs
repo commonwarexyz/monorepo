@@ -76,13 +76,12 @@ pub(super) enum Execution {
     Parallel,
 }
 
-/// The placement the spawn policy chose for one call.
+/// The placement the spawn policy chose: run the job inline on the calling task, or hand it off
+/// to the pool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SpawnDecision {
-    /// Run the job inline on the calling task, timing it when `measure` is set.
-    Inline { measure: bool },
-    /// Hand the job to the pool, timing the hand-off and the job wall when `measure` is set.
-    Offload { measure: bool },
+pub(super) enum SpawnExecution {
+    Inline,
+    Offload,
 }
 
 /// Adaptive serial-vs-parallel decisions, shared cheaply across [`super::Rayon`] clones.
@@ -125,17 +124,20 @@ impl Policy {
         result
     }
 
-    /// Chooses where to run a spawned job: inline on the calling task when the job is measured
-    /// cheaper than the pool hand-off itself, offloaded to the pool otherwise.
+    /// Chooses where to run a spawned job (inline on the calling task when the job is measured
+    /// cheaper than the pool hand-off itself, offloaded to the pool otherwise) and whether the
+    /// caller should time the run and feed the sample back via
+    /// [`record_spawn_inline`](Self::record_spawn_inline) or
+    /// [`record_spawn_offload`](Self::record_spawn_offload).
     pub(super) fn choose_spawn(
         &self,
         caller: &'static Location<'static>,
         len: usize,
         parallelism: usize,
-    ) -> SpawnDecision {
+    ) -> (SpawnExecution, bool) {
         // A single worker cannot overlap a hand-off, so always inline (nothing to measure).
         if parallelism <= 1 {
-            return SpawnDecision::Inline { measure: false };
+            return (SpawnExecution::Inline, false);
         }
         let key = Key::new(caller, len, len, parallelism);
         self.spawn_entries
@@ -414,12 +416,13 @@ struct SpawnEntry {
 }
 
 impl SpawnEntry {
-    // Decides where this call runs. `budget` caps the job EWMA eligible for inlining.
-    fn choose(&mut self, budget: u64) -> SpawnDecision {
+    // Decides where this call runs and whether the caller should time it. `budget` caps the job
+    // EWMA eligible for inlining.
+    fn choose(&mut self, budget: u64) -> (SpawnExecution, bool) {
         // Seed both estimates from an offloaded run before ever inlining.
         let (Some(handoff_ns), Some(job_ns)) = (self.handoff_ns.get(), self.job_ns.get()) else {
             self.cadence.saturate();
-            return SpawnDecision::Offload { measure: true };
+            return (SpawnExecution::Offload, true);
         };
 
         // Ties go to inline: equal cost for one fewer pool wake.
@@ -429,20 +432,16 @@ impl SpawnEntry {
             // to inline on its own once the evidence clears the threshold: no inline probe is
             // needed because an inline run measures nothing an offloaded run does not.
             let tick = self.cadence.tick(threshold, job_ns);
-            return SpawnDecision::Offload {
-                measure: tick.boundary || tick.measure,
-            };
+            return (SpawnExecution::Offload, tick.boundary || tick.measure);
         }
 
         // Inline steady state: the boundary hands one call back to the pool so the hand-off
         // estimate tracks the live pool.
         let tick = self.cadence.tick(job_ns, threshold);
         if tick.boundary {
-            return SpawnDecision::Offload { measure: true };
+            return (SpawnExecution::Offload, true);
         }
-        SpawnDecision::Inline {
-            measure: tick.measure,
-        }
+        (SpawnExecution::Inline, tick.measure)
     }
 
     // Folds one job-wall sample into this entry (measured on the caller for inline runs and on
@@ -481,7 +480,7 @@ const fn len_bucket(len: usize) -> u8 {
 mod tests {
     use super::{
         Entry, Execution, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Policy, RESAMPLE_INTERVAL,
-        SPAWN_INLINE_BUDGET_NS, SpawnDecision, SpawnEntry,
+        SPAWN_INLINE_BUDGET_NS, SpawnEntry, SpawnExecution,
     };
     use std::{panic::Location, time::Duration};
 
@@ -959,7 +958,7 @@ mod tests {
         // The first call seeds both estimates from an offloaded run.
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
-            SpawnDecision::Offload { measure: true }
+            (SpawnExecution::Offload, true)
         );
         // A 2us job behind a 50us hand-off.
         entry.record_offload(50_000, 2_000);
@@ -967,14 +966,14 @@ mod tests {
         // The seed leaves the entry due for an immediate boundary, which re-measures offload.
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
-            SpawnDecision::Offload { measure: true }
+            (SpawnExecution::Offload, true)
         );
         entry.record_offload(50_000, 2_000);
 
         // The job costs less than the hand-off and fits the budget, so it runs inline.
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
-            SpawnDecision::Inline { measure: false }
+            (SpawnExecution::Inline, false)
         );
     }
 
@@ -985,18 +984,18 @@ mod tests {
         let mut entry = SpawnEntry::default();
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
-            SpawnDecision::Offload { measure: true }
+            (SpawnExecution::Offload, true)
         );
         entry.record_offload(5_000, 50_000);
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
             match entry.choose(SPAWN_INLINE_BUDGET_NS) {
-                SpawnDecision::Offload { measure } => {
+                (SpawnExecution::Offload, measure) => {
                     if measure {
                         entry.record_offload(5_000, 50_000);
                     }
                 }
-                inline => panic!("expected offload, got {inline:?}"),
+                (execution, _) => panic!("expected offload, got {execution:?}"),
             }
         }
     }
@@ -1008,18 +1007,18 @@ mod tests {
         let mut entry = SpawnEntry::default();
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
-            SpawnDecision::Offload { measure: true }
+            (SpawnExecution::Offload, true)
         );
         entry.record_offload(50_000_000, 2_000_000);
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
             match entry.choose(SPAWN_INLINE_BUDGET_NS) {
-                SpawnDecision::Offload { measure } => {
+                (SpawnExecution::Offload, measure) => {
                     if measure {
                         entry.record_offload(50_000_000, 2_000_000);
                     }
                 }
-                inline => panic!("expected offload, got {inline:?}"),
+                (execution, _) => panic!("expected offload, got {execution:?}"),
             }
         }
     }
@@ -1031,7 +1030,7 @@ mod tests {
         let location = Location::caller();
         assert_eq!(
             policy.choose_spawn(location, 64, 1),
-            SpawnDecision::Inline { measure: false }
+            (SpawnExecution::Inline, false)
         );
     }
 
@@ -1046,7 +1045,7 @@ mod tests {
         assert_eq!(entry.job_ns.get(), Some(21_600));
         assert!(matches!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
-            SpawnDecision::Inline { .. }
+            (SpawnExecution::Inline, _)
         ));
     }
 
@@ -1061,8 +1060,8 @@ mod tests {
         let mut calls = 0;
         loop {
             match entry.choose(SPAWN_INLINE_BUDGET_NS) {
-                SpawnDecision::Inline { .. } => break,
-                SpawnDecision::Offload { measure } => {
+                (SpawnExecution::Inline, _) => break,
+                (SpawnExecution::Offload, measure) => {
                     if measure {
                         entry.record_offload(50_000, 2_000);
                     }
@@ -1086,16 +1085,17 @@ mod tests {
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
                 entry.choose(SPAWN_INLINE_BUDGET_NS),
-                SpawnDecision::Inline {
-                    measure: i.is_multiple_of(PREFERRED_SAMPLE_INTERVAL)
-                },
+                (
+                    SpawnExecution::Inline,
+                    i.is_multiple_of(PREFERRED_SAMPLE_INTERVAL)
+                ),
                 "call {i}"
             );
         }
         // The boundary hands one call back to the pool so the hand-off estimate stays live.
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
-            SpawnDecision::Offload { measure: true }
+            (SpawnExecution::Offload, true)
         );
     }
 
@@ -1110,15 +1110,16 @@ mod tests {
         for i in 1..interval {
             assert_eq!(
                 entry.choose(SPAWN_INLINE_BUDGET_NS),
-                SpawnDecision::Inline {
-                    measure: i.is_multiple_of(PREFERRED_SAMPLE_INTERVAL)
-                },
+                (
+                    SpawnExecution::Inline,
+                    i.is_multiple_of(PREFERRED_SAMPLE_INTERVAL)
+                ),
                 "call {i}"
             );
         }
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
-            SpawnDecision::Offload { measure: true }
+            (SpawnExecution::Offload, true)
         );
     }
 }

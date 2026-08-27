@@ -1060,22 +1060,17 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // One worker cannot overlap a hand-off (always inline, untimed); a manual strategy
             // has no policy (keep spawn's unconditional hand-off). Otherwise the policy decides
             // from the measured hand-off and job costs.
-            let (decision, policy) = if threads <= 1 {
-                (
-                    policy::SpawnDecision::Inline {
-                        measure: false,
-                    },
-                    None,
-                )
+            let ((execution, measure), policy) = if threads <= 1 {
+                ((policy::SpawnExecution::Inline, false), None)
             } else {
                 self.policy.as_ref().map_or(
-                    (policy::SpawnDecision::Offload { measure: false }, None),
+                    ((policy::SpawnExecution::Offload, false), None),
                     |policy| (policy.choose_spawn(caller, len, threads), Some(policy)),
                 )
             };
 
-            match decision {
-                policy::SpawnDecision::Inline { measure } => {
+            match execution {
+                policy::SpawnExecution::Inline => {
                     // Inline: run on the calling task and hand back a ready future.
                     let start = measure.then(Instant::now);
                     let result = f(self.clone());
@@ -1084,7 +1079,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     }
                     Either::Left(future::ready(result))
                 }
-                policy::SpawnDecision::Offload { measure } => {
+                policy::SpawnExecution::Offload => {
                     // Offload: hand the job to the pool. The worker records the sample before
                     // sending the result, so measurement is independent of how (or whether) the
                     // caller polls the returned future.
