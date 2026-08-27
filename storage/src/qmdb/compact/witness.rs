@@ -125,6 +125,18 @@ enum Durability {
     Sync,
 }
 
+/// The tip witness's relationship to the journal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TipState {
+    /// Journaled and covered by a durability operation that has at least started.
+    Committed,
+    /// Journaled after the latest durability operation started.
+    Uncommitted,
+    /// From compact sync and not in the journal, which still holds the partition's previous
+    /// contents until the first application replaces them with the tip.
+    Imported,
+}
+
 /// The compact Merkle, the contiguous journal of its witnesses, and an in-memory cache of the
 /// tip witness.
 pub(crate) struct Store<E: Context, F: Family, H: Hasher, S: Strategy> {
@@ -137,14 +149,8 @@ pub(crate) struct Store<E: Context, F: Family, H: Hasher, S: Strategy> {
     /// The verified witness at the journal tip.
     tip_witness: VerifiedWitness<F, H::Digest>,
 
-    /// Whether the cached witness came from compact sync and has not been written to the
-    /// journal yet. While set, the journal still holds the partition's previous contents; the
-    /// first application to the journal replaces them with the cached witness and clears this
-    /// flag.
-    import_pending: bool,
-
-    /// Whether witnesses were appended after the latest durability operation started.
-    uncommitted: bool,
+    /// The tip witness's relationship to the journal.
+    tip_state: TipState,
 
     /// The sync pipelined by the last [`Self::start_sync`], cleared by the next full
     /// journal sync.
@@ -183,8 +189,7 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
                 merkle,
                 journal,
                 tip_witness,
-                import_pending: false,
-                uncommitted: false,
+                tip_state: TipState::Committed,
                 pending_sync: None,
             },
             op,
@@ -212,8 +217,7 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
             merkle,
             journal,
             tip_witness,
-            import_pending: true,
-            uncommitted: false,
+            tip_state: TipState::Imported,
             pending_sync: None,
         })
     }
@@ -304,7 +308,7 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
     /// Journal a pending compact-sync import, if any.
     async fn flush_import(self) -> Result<Self, Error<F>> {
         debug_assert_eq!(self.tip_witness.size(), self.merkle.leaves());
-        if !self.import_pending {
+        if self.tip_state != TipState::Imported {
             return Ok(self);
         }
         let verified = self.tip_witness.clone();
@@ -317,7 +321,7 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
         mut self,
         verified: VerifiedWitness<F, H::Digest>,
     ) -> Result<Self, Error<F>> {
-        if self.import_pending {
+        if self.tip_state == TipState::Imported {
             self = self.clear_for_import().await?;
         }
 
@@ -326,8 +330,7 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
         (self.journal, _) = self.journal.append(&verified.witness).await?;
 
         // Publish the applied tip while retaining that it lies outside the durable prefix.
-        self.import_pending = false;
-        self.uncommitted = true;
+        self.tip_state = TipState::Uncommitted;
         self.merkle.prune_to_frontier();
         self.tip_witness = verified;
         Ok(self)
@@ -359,14 +362,16 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
 
         // A commit leaves `pending_sync` set so the next full sync still persists all metadata.
         match durability {
-            Durability::Commit if self.uncommitted => {
+            Durability::Commit if self.tip_state == TipState::Uncommitted => {
                 self.journal = self.journal.commit().await?;
-                self.uncommitted = false;
+                self.tip_state = TipState::Committed;
             }
-            Durability::Sync if self.uncommitted || self.pending_sync.is_some() => {
+            Durability::Sync
+                if self.tip_state == TipState::Uncommitted || self.pending_sync.is_some() =>
+            {
                 let journal = self.journal.sync().await?;
                 self.pending_sync = None;
-                self.uncommitted = false;
+                self.tip_state = TipState::Committed;
                 self.journal = journal;
             }
             Durability::Commit | Durability::Sync => {}
@@ -398,7 +403,7 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
         let completion: SyncCompletion = handle.boxed().shared();
-        self.uncommitted = false;
+        self.tip_state = TipState::Committed;
         self.pending_sync = Some(completion.clone());
         Ok((self, Handle::from_future(completion)))
     }
@@ -440,7 +445,7 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
             rebuild::<F, H::Digest, H, S, Op>(entry, &mut self.merkle, commit_codec_config)?;
         self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
         self.pending_sync = None;
-        self.uncommitted = false;
+        self.tip_state = TipState::Committed;
         self.tip_witness = witness;
         Ok((self, op))
     }
@@ -462,19 +467,19 @@ impl<E: Context, F: Family, H: Hasher, S: Strategy> Store<E, F, H, S> {
         (self.journal, _) = self.journal.prune(pos).await?;
         self.journal = self.journal.sync().await?;
         self.pending_sync = None;
-        self.uncommitted = false;
+        self.tip_state = TipState::Committed;
         Ok(self)
     }
 
     /// Whether the current cached state is not covered by a durability operation.
     pub(crate) const fn has_uncommitted_state(&self) -> bool {
-        self.import_pending || self.uncommitted
+        !matches!(self.tip_state, TipState::Committed)
     }
 
     /// Reject operations on a journal whose contents an unapplied compact-sync import is
     /// about to replace.
     const fn check_import_applied(&self) -> Result<(), Error<F>> {
-        if self.import_pending {
+        if matches!(self.tip_state, TipState::Imported) {
             return Err(Error::DataCorrupted("compact-sync import not applied"));
         }
         Ok(())
