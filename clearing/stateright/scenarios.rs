@@ -304,6 +304,9 @@ fn finalize_b0(model: SettlementModel, state: &mut SettlementState) {
 fn drain_terminal(model: SettlementModel, state: &mut SettlementState) {
     if state.terminal == Terminal::Dormant {
         step(model, state, SettlementAction::BeginTerminal);
+        let initialized = state.clone();
+        step(model, state, SettlementAction::BeginTerminal);
+        assert_eq!(state, &initialized);
     }
     for account in [Account::Alice, Account::Bob, Account::Carol] {
         if let Some(next) = model.apply(state, SettlementAction::ClaimDeposit(account)) {

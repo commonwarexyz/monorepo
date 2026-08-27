@@ -7628,4 +7628,11 @@ mod tests {
             Err(SettlementError::EpochOverflow)
         ));
     }
+
+    mod refinement {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/stateright/refinement.rs"
+        ));
+    }
 }

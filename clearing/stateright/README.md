@@ -3,7 +3,9 @@
 This directory contains Bajillion's executable Rust model. Stateright explores every reachable
 state in each declared finite instance to a fixed point; there is no depth cutoff, randomized
 sampling, or hand-seeded terminal state in the exhaustive checks. Deterministic traces separately
-exercise the longer user journeys and rejected calls against the same transition functions.
+exercise the longer user journeys and rejected calls against the same transition functions. A
+bounded implementation-refinement suite then executes the same settlement actions through real
+signed Bajillion objects and compares production state to the abstract state after every step.
 
 The complete protocol diagrams live in the
 [Bajillion module documentation](../src/bajillion/mod.rs). The checked composition is:
@@ -78,6 +80,7 @@ registration.
 | `claims.rs` | Eight exact replay identities: two typed namespaces, two batches, and two positions. It explores every claim ordering while checking typed root identity, output value and position, destination routing, atomic mutation, reserve conservation, and independence across kind, batch, and position. |
 | `settlement.rs` | A three-account, five-candidate, three-pending-slot, bounded-time instance. It explores intake, immutable registration, deadline ties, certified admission, strict ancestry and FIFO finalization, challenge suffix cuts, clean-prefix drain, finalized reserve creation, claim routing, replay expiry, custody conservation, and terminal recovery. |
 | `scenarios.rs` | Twenty-one deterministic end-to-end traces using the same settlement transition function. They cover accepted and rejected boundaries, every challenge relation, front/middle/tail operator faults, registration and intake expiry, every sender-value bucket, Amount and Close, exact claim routing, replay, and finalized reserves that survive a later fault. |
+| `refinement.rs` | Test-only production adapter for the settlement model. It constructs real deposits, signed withdrawals, payments, closes, proof slices, sealed dealings, certificates, challenges, openings, and claims, then checks action acceptance, returned value, and a behavior-relevant private state projection after every step. |
 
 The models compose through two opaque capabilities. A `CertifiedClose` is emitted for one exact
 candidate and registration only after the certification transition function reaches exact valid
@@ -111,18 +114,50 @@ fails its ordinary Rust test.
 
 | Obligation | Exhaustive finite graph | Deterministic trace | Production refinement |
 | --- | --- | --- | --- |
-| Exact dealing, quorum intersection, retention, and retry | `certification.rs` | Certification unit traces | `seal`, typed proof-slice verification, and admission tests |
-| Both signatures, exact linkage, typed lookups, and challenge relation | `challenge.rs` | Every challenge edge in `scenarios.rs` | Production challenge tests and fuzz targets |
-| Consecutive admission and FIFO finalization | `settlement.rs` | Skip and out-of-order rejection | `SettlementChain` tests |
-| Front, middle, tail, registration, deposit, and withdrawal faults | `settlement.rs` | Exact recovery traces in `scenarios.rs` | Malicious-operator settlement tests |
-| Typed `(kind, batch, position)` replay and reserve accounting | `claims.rs` | Clean claims and later-fault reserve survival | Withdrawal and external-payout claim tests |
+| Exact dealing, quorum intersection, retention, and retry | `certification.rs` | Certification unit traces | Every refined admission runs `assemble_slices`, `seal`, certificate formation, and `admit`; malformed-dealing tests remain separate |
+| Both signatures, exact linkage, typed lookups, and challenge relation | `challenge.rs` | Every challenge edge in `scenarios.rs` | Refinement constructs real evidence for the three semantic families plus `SameSend` and `SameIndex`; production verifier tests cover `Full`, malformed evidence, and codecs |
+| Consecutive admission and FIFO finalization | `settlement.rs` | Skip and out-of-order rejection | Four real epochs refine step by step; rejected skip/finalize calls must stutter |
+| Front, middle, tail, registration, deposit, and withdrawal faults | `settlement.rs` | Exact recovery traces in `scenarios.rs` | Real challenged-suffix and all three deadline classes refine through terminal fund recovery; broader malicious-operator tests remain separate |
+| Typed `(kind, batch, position)` replay and reserve accounting | `claims.rs` | Clean claims and later-fault reserve survival | Real payout, Amount, and Close claims compare outputs, reserves, replay sets, and repeated-call rejection |
 | Codec, hash framing, Merkle verification, and signature batching | Not abstracted as byte arrays | Rejected production inputs | Rust unit/integration tests and fuzzing |
 | Durable crash cuts and asset transfers | Assumed atomic and idempotent | Not owned by this in-memory crate | Embedding recovery tests |
 | Arbitrary cardinalities | Not proved inductively | Larger production fixtures | Quorum algebra plus implementation tests |
 
 “Exhaustive” in this document always means the complete reachable graph of the declared finite
 instance. The deterministic traces demonstrate specific causal user journeys; they are not a
-substitute for the graph, an implementation-refinement proof, or crash-consistency evidence.
+substitute for the graph, the bounded implementation-refinement profiles, or crash-consistency
+evidence.
+
+## Implementation refinement
+
+The settlement adapter has an exhaustive top-level match over `SettlementAction`; adding an action
+without a production mapping fails compilation. A coverage test also requires a real refinement
+path for every action variant. For each mapped call, the test compares acceptance or rejection,
+returned custody output, and a private projection containing the finalized root and liability,
+custody buckets, staged deposits and withdrawals, deadlines, registration, ordered pipeline and
+statuses, replay keys, claim reserves, fault and fence identity, frozen terminal boundary,
+and consumed state positions. Per-account deposit refunds and terminal recovery outputs are also
+compared exactly. Rejected calls at the already-observed time must stutter. A separate timed-call
+profile checks the production rule that observing a deadline may persist a permanent fault even
+when the requested operation returns an error.
+
+The profiles cover a four-epoch clean pipeline, strict FIFO finalization, independent external,
+Amount, and amountless Close claims, replay rejection, malformed and mispositioned withdrawal
+openings, a challenged middle suffix with clean-prefix drain, registration/deposit/withdrawal
+expiry, direct deposit refund, and terminal state recovery. It also checks that beginning terminal
+settlement is idempotently retryable while claims remain.
+Every admission uses the production proof-slice assembler and `seal`, so a modeled
+`CertifiedClose` reaches settlement only alongside a real authenticated dealing and certificate.
+Five constructible challenge classes use real payer and operator signatures and production
+openings. The abstract `Full` receipt-fork relation remains a conservative generic-signature
+over-approximation; canonical `Full` decoding and verification behavior are covered by the
+production challenge tests.
+
+This is bounded trace refinement, not the Cartesian product of the 3,929,740-state lifecycle graph
+with cryptographic fixtures. The independent fixed-point model proves the declared finite
+interleavings; the refinement profiles catch drift at every production action and state component
+they traverse. Neither result is an inductive proof for arbitrary cardinalities or evidence of
+durable crash safety.
 
 ## Fund-recovery contract
 
@@ -144,12 +179,13 @@ mutation.
 
 The model uses small enums, ideal cryptography, mathematical amounts, explicit proof-fault profiles,
 and representative challenge endpoint classes. It does not independently derive the production
-Merkle/row verifier or quantify over every numeric payment tuple. Codecs, hash framing, Merkle
-implementations, BLS verification and randomized batching, arithmetic limits, allocation bounds,
-storage crash cuts, and external asset adapters remain covered by Bajillion's Rust unit/integration
-tests, fuzz targets, and the embedding's crash-consistency tests. The finite results establish every
-reachable state of these instances; they are not an inductive proof for arbitrary account,
-validator, slice, or payment counts.
+Merkle/row verifier or quantify over every numeric payment tuple. The refinement exercises real
+hash framing, Merkle verification, BLS certification, randomized payment-signature batching, and
+claim openings for its declared fixtures. Broader codecs, arithmetic limits, allocation bounds,
+adversarial byte domains, storage crash cuts, and external asset adapters remain covered by
+Bajillion's Rust unit tests, fuzz targets, and the embedding's crash-consistency tests. The finite
+results establish every reachable state of these instances; they are not an inductive proof for
+arbitrary account, validator, slice, or payment counts.
 
 ## Why Stateright
 
@@ -168,11 +204,12 @@ specific production-only invariant later warrants it.
 ## Run
 
 ```bash
-cargo test -p commonware-clearing --test bajillion_model
+cargo test -p commonware-clearing --lib bajillion::model
+cargo test -p commonware-clearing --lib refinement::
 ```
 
-The model is an ordinary clearing integration test and therefore runs in the workspace's normal
-Rust test jobs. No Node.js, JVM, Docker image, or external model-checker process is required.
+The model and refinement are ordinary clearing unit tests and therefore run in the workspace's
+normal Rust test jobs. No Node.js, JVM, Docker image, or external model-checker process is required.
 
 ## Explore
 

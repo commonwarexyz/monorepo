@@ -1412,13 +1412,15 @@ impl SettlementModel {
     }
 
     fn begin_terminal(&self, state: &mut SettlementState) -> Option<()> {
+        if state.fault.healthy() || state.terminal == Terminal::Settled {
+            return None;
+        }
+        if matches!(state.terminal, Terminal::Claiming { .. }) {
+            return Some(());
+        }
         let deposits = array_total(&state.unfinalized_deposits);
         let liability = state.current_liability;
-        if state.fault.healthy()
-            || state.terminal != Terminal::Dormant
-            || !Self::terminal_can_begin(state)
-            || state.custody != liability.checked_add(deposits)?
-        {
+        if !Self::terminal_can_begin(state) || state.custody != liability.checked_add(deposits)? {
             return None;
         }
         let immediately_settled = liability == 0 && deposits == 0;

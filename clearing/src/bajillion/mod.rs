@@ -485,9 +485,11 @@
 //! The crate's executable Stateright model checks finite proof-profile/certification, challenge,
 //! claim-ledger, and settlement machines to completion. Deterministic traces cover the accepted and
 //! rejected user flows shown above, including malicious-operator recovery, exact deadline
-//! boundaries, strict epoch order, and independent finalized reserves. The model uses ideal
-//! cryptography and representative proof/challenge classes; implementation and crash-consistency
-//! obligations remain with the Rust tests, fuzz targets, and embedding.
+//! boundaries, strict epoch order, and independent finalized reserves. Bounded refinement tests
+//! run every settlement action class through real signed production objects and compare private
+//! state after each step. The exhaustive model still uses ideal cryptography and representative
+//! proof classes; arbitrary-cardinality and crash-consistency obligations remain with the Rust
+//! tests, fuzz targets, and embedding.
 
 pub mod admission;
 pub mod boundary;
@@ -498,3 +500,6 @@ pub mod payment;
 pub mod settlement;
 pub mod state;
 pub mod transition;
+
+#[cfg(test)]
+mod model;
