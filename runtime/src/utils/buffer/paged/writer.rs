@@ -884,8 +884,13 @@ impl<B: Blob> Writer<B> {
     /// still buffered in this writer is unreadable from the blob and fails the scan. `buffer_size`
     /// bounds each blob read, except that a value smaller than one physical page still reads one
     /// page. Applies `read_options` to every blob read.
+    ///
+    /// `proven` is a logical byte offset already known valid (a durability watermark or a
+    /// replay-validated prefix). Pages wholly below it are accepted without reading, and the
+    /// scan starts at the page containing it.
     pub async fn recoverable_prefix_len(
         &self,
+        proven: u64,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<u64, Error> {
@@ -895,6 +900,7 @@ impl<B: Blob> Writer<B> {
             &self.blob,
             logical_page_size,
             total_pages,
+            proven / logical_page_size,
             buffer_size,
             read_options,
         )
@@ -1067,6 +1073,7 @@ impl<B: Blob> Writer<B> {
             blob,
             logical_page_size,
             total_pages,
+            0,
             buffer_size,
             read_options,
         )
@@ -1085,6 +1092,7 @@ impl<B: Blob> Writer<B> {
         blob: &B,
         logical_page_size: u64,
         total_pages: u64,
+        start_page: u64,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<(u64, bool), Error> {
@@ -1095,8 +1103,13 @@ impl<B: Blob> Writer<B> {
             usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
         let max_batch_pages = u64::try_from((buffer_size.get() / physical_page_size_usize).max(1))
             .map_err(|_| Error::OffsetOverflow)?;
-        let mut valid_len = 0u64;
-        let mut page = 0u64;
+
+        // Pages below the caller's proven prefix are accepted without reading.
+        let start_page = start_page.min(total_pages);
+        let mut valid_len = start_page
+            .checked_mul(logical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        let mut page = start_page;
         while page < total_pages {
             // Bound each read while deriving its physical range with checked arithmetic.
             let batch_pages = max_batch_pages.min(total_pages - page);
@@ -1394,7 +1407,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 writer
-                    .recoverable_prefix_len(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .await
                     .unwrap(),
                 0
@@ -1409,7 +1422,7 @@ mod tests {
             recordings.clear();
             assert_eq!(
                 writer
-                    .recoverable_prefix_len(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .await
                     .unwrap(),
                 total as u64
@@ -1481,7 +1494,7 @@ mod tests {
 
             assert_eq!(
                 writer
-                    .recoverable_prefix_len(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .await
                     .unwrap(),
                 PAGE_SIZE.get() as u64
@@ -1528,7 +1541,7 @@ mod tests {
 
             assert_eq!(
                 writer
-                    .recoverable_prefix_len(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .await
                     .unwrap(),
                 20

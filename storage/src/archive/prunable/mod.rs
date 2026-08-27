@@ -1669,9 +1669,10 @@ mod tests {
             }
 
             // The two data journals enqueue first. Release only the metadata operation to prove
-            // that publishing the older boundary cannot satisfy the blocking data contract.
+            // that publishing the older boundary cannot satisfy the blocking data contract. The
+            // marker future is polled only when a later request observes it, so its release
+            // cannot be awaited here.
             let metadata = pending.lock().remove(2);
-            metadata.blocked.await.unwrap();
             metadata.release.send(Ok(())).unwrap();
             commonware_runtime::reschedule().await;
             assert_eq!(

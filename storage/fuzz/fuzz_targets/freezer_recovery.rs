@@ -41,7 +41,9 @@ fn config(pooler: &impl BufferPooler) -> Config<()> {
     Config {
         key_partition: "freezer-recovery-index".into(),
         key_write_buffer: NZUsize!(1),
-        key_page_cache: CacheRef::from_pooler(pooler, NZU16!(128), NZUsize!(4)),
+        // A page size that no key-record size divides, so terminal boundary entries straddle
+        // pages and restore exercises the multi-page tail read.
+        key_page_cache: CacheRef::from_pooler(pooler, NZU16!(72), NZUsize!(4)),
         value_partition: "freezer-recovery-values".into(),
         value_compression: None,
         value_write_buffer: NZUsize!(1),

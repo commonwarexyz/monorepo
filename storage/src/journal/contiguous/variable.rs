@@ -1099,35 +1099,40 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
         // and a crash during an in-flight fsync can lose an interior page while later pages
         // survive. `Writer::new` sizes a blob by its last valid page, so it cannot see such a
-        // hole. Above the floor, truncate to the last well-formed page (replay in `align`
-        // repairs a mid-frame cut like torn trailing junk). Below the floor, the covering
-        // fsync completed, so a hole is external corruption: fail and preserve the evidence.
+        // hole. The scan starts at the floor's acknowledged prefix: pages below it are covered
+        // by a completed fsync, so in-model holes are impossible there and any later damage
+        // surfaces lazily at read. Above the floor, truncate to the last well-formed page
+        // (replay in `align` repairs a mid-frame cut like torn trailing junk).
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
+            if blob < floor_blob {
+                continue;
+            }
+
+            // The last acknowledged frame's start in the floor's blob. A floor at the blob
+            // boundary or below the offsets pruning boundary acknowledges nothing here.
+            let acknowledged = if blob == floor_blob
+                && floor > blob_first_position(blob, items_per_blob)?
+                && floor > offsets.pruning_boundary()
+            {
+                Some(offsets.read(floor - 1).await?)
+            } else {
+                None
+            };
+            // The floor's blob is scanned from the front: offset rebuild replays it from its
+            // start regardless, and a torn acknowledged page is clearer as corruption here.
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
             let valid = writer
-                .recoverable_prefix_len(cfg.replay_buffer, ReadOptions::default())
+                .recoverable_prefix_len(0, cfg.replay_buffer, ReadOptions::default())
                 .await?;
             if valid == writer.size() {
                 continue;
             }
-            if blob < floor_blob {
-                return Err(Error::Corruption(format!(
-                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
-                     of size {}",
-                    writer.size()
-                )));
-            }
 
             // The floor's blob must retain its acknowledged prefix: a cut at or below the last
             // acknowledged frame's start lost acknowledged data (a cut inside that frame is
-            // truncated, then rejected by replay in `align`). A floor at the blob boundary or
-            // below the offsets pruning boundary acknowledges nothing here.
-            if blob == floor_blob
-                && floor > blob_first_position(blob, items_per_blob)?
-                && floor > offsets.pruning_boundary()
-                && valid <= offsets.read(floor - 1).await?
-            {
+            // truncated, then rejected by replay in `align`).
+            if acknowledged.is_some_and(|start| valid <= start) {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
                      of size {}",
@@ -4759,7 +4764,7 @@ mod tests {
     /// must fail rather than adopt bounds whose acknowledged items are unreadable, and it must
     /// preserve the evidence so a retry fails identically.
     #[test_traced]
-    fn test_variable_recovery_rejects_torn_page_below_watermark() {
+    fn test_variable_recovery_adopts_torn_page_below_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config::<()> {
@@ -4787,23 +4792,42 @@ mod tests {
                 .await
                 .unwrap();
 
-            // The watermark (33) anchors recovery in blob 1, so replay alone never revisits
-            // blob 0. Recovery must still reject the journal: positions 14..30 are acknowledged
-            // but no longer data-backed.
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-
-            // The rejection must not truncate the torn blob, and a retry must fail identically.
+            // The watermark (33) anchors recovery in blob 1 and every blob-0 page had its
+            // covering fsync complete, so recovery never revisits blob 0: the journal is
+            // adopted unchanged and the damage surfaces as read errors on affected items.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("acknowledged damage must not fail recovery");
             let (_, size_after) = context
                 .open(&cfg.data_partition(), &0u64.to_be_bytes())
                 .await
                 .unwrap();
             assert_eq!(
                 size_after, size_before,
-                "rejection must preserve the evidence"
+                "adoption must preserve the evidence"
             );
-            let result = Journal::<_, u64>::init(context.child("third"), cfg).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            let mut damaged = 0;
+            for i in 0..30u64 {
+                match journal.read(i).await {
+                    Ok(item) => assert_eq!(item, i * 100),
+                    Err(_) => damaged += 1,
+                }
+            }
+            assert!(damaged > 0, "the torn page must surface as read errors");
+            for i in 30..33u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            drop(journal);
+
+            // A retry adopts the same state without mutating it.
+            let _ = Journal::<_, u64>::init(context.child("third"), cfg.clone())
+                .await
+                .unwrap();
+            let (_, size_retry) = context
+                .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(size_retry, size_before);
         });
     }
 

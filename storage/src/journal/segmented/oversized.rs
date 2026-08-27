@@ -848,6 +848,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     }
 
     /// Start a joint data sync and publish only previously completed tracked boundaries.
+    ///
+    /// The returned handle covers only the requested data syncs. Marker generations trail
+    /// data durability by design, and a marker failure surfaces as [Error::Metadata] when a
+    /// later request observes it.
     pub(crate) async fn start_sync_tracked(
         mut self,
         sections: &BTreeSet<u64>,
@@ -882,8 +886,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 
         // Do not mutate Metadata while its prior generation is in flight. Completed barriers stay
         // as debt and are published when their section is no longer active, or on an empty flush.
-        let mut marker = pending_marker;
-        if marker.is_none() {
+        if pending_marker.is_none() {
             let publish = tracking
                 .barriers
                 .iter_mut()
@@ -897,25 +900,16 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             if metadata_dirty {
                 let handle;
                 (tracking.metadata, handle) = tracking.metadata.start_sync().await?;
-                let completion = handle.boxed().shared();
-                tracking.marker_sync_pending = Some(completion.clone());
-                marker = Some(completion);
+                tracking.marker_sync_pending = Some(handle.boxed().shared());
             }
         }
 
-        if marker.is_none() {
-            self.tracking = Some(tracking);
-            return Ok((self, Handle::from_future(completion)));
-        }
-
         self.tracking = Some(tracking);
-        let marker = marker.expect("checked above");
-        let handle =
-            Handle::from_future(async move { try_join(completion, marker).await.map(|_| ()) });
-        Ok((self, handle))
+        Ok((self, Handle::from_future(completion)))
     }
 
-    /// Block until selected data and any marker generation started for it are durable.
+    /// Block until the selected data syncs are durable, surfacing any marker failure the
+    /// completed generation already exposed.
     pub(crate) async fn sync_tracked(
         self,
         sections: &BTreeSet<u64>,

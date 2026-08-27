@@ -59,7 +59,9 @@ fn config(pooler: &impl BufferPooler) -> Config<()> {
         freezer_table_resize_frequency: 1,
         freezer_table_resize_chunk_size: 1,
         freezer_key_partition: "immutable-recovery-keys".into(),
-        freezer_key_page_cache: CacheRef::from_pooler(pooler, NZU16!(128), NZUsize!(4)),
+        // A page size that no key-record size divides, so terminal boundary entries straddle
+        // pages and restore exercises the multi-page tail read.
+        freezer_key_page_cache: CacheRef::from_pooler(pooler, NZU16!(72), NZUsize!(4)),
         freezer_value_partition: "immutable-recovery-values".into(),
         freezer_value_target_size: 64,
         freezer_value_compression: None,
