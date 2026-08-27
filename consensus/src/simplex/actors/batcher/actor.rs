@@ -346,7 +346,7 @@ where
             }
         }
 
-        // Construct and forward every certificate with a verified quorum
+        // Construct and forward every certificate with a verified quorum.
         while let Some(certificate) = self
             .recover_latency
             .time_some(

@@ -52,7 +52,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
-        dkg::feldman_desmedt::deal,
+        dkg::feldman_desmedt::{Reveal, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
     },
     certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
@@ -1087,6 +1087,7 @@ impl EngineDefinition for ReshareEngine {
                 fence,
                 namespace: NAMESPACE,
                 sharing_mode: self.sharing_mode,
+                reveal: Reveal::V1,
                 mailbox_size: NZUsize!(100),
                 partition_prefix: format!("{partition_prefix}-reshare"),
                 max_participants: MAX_PARTICIPANTS,

@@ -28,6 +28,7 @@ use commonware_storage::{
 use commonware_utils::{
     NZU16, NZU64, NZUsize,
     acknowledgement::{Acknowledgement as _, Exact},
+    non_empty,
     sync::Mutex,
     vec::NonEmptyVec,
 };
@@ -135,8 +136,12 @@ pub(crate) fn finalization(
         .iter()
         .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
         .collect::<Vec<_>>();
-    Finalization::from_finalizes(&fixture.verifier, &finalizes, &Sequential)
-        .expect("recover finalization")
+    Finalization::from_finalizes(
+        &fixture.verifier,
+        non_empty![@finalizes.iter()],
+        &Sequential,
+    )
+    .expect("recover finalization")
 }
 
 fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
