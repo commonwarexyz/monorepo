@@ -118,7 +118,7 @@ where
             self.context,
             on_start => {
                 self.deferred_verifications
-                    .retain(|request| !request.verification.is_cancelled());
+                    .retain(|request| !request.response.is_closed());
             },
             on_stopped => {
                 debug!("syncing loop received shutdown signal");
@@ -151,7 +151,7 @@ where
                 Message::Verify(request) => {
                     let process = info_span!(parent: &request.span, "stateful.actor.verify.defer");
                     self.deferred_verifications
-                        .retain(|request| !request.verification.is_cancelled());
+                        .retain(|request| !request.response.is_closed());
                     self.deferred_verifications.push(request);
                     process.in_scope(|| {
                         debug!(
@@ -371,8 +371,7 @@ where
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     // Exiting on stop leaves the block unacknowledged, and
                     // marshal redelivers it after a restart.
-                    let prune;
-                    select! {
+                    let prune = select! {
                         _ = &mut shutdown => {
                             warn!(
                                 height = block.height().get(),
@@ -384,10 +383,8 @@ where
                             let prune = processor.finalize(context.as_present(), block.as_ref()).await;
                             processor.notify_finalized(context.as_present(), block.as_ref()).await;
                             prune
-                        } => {
-                            prune = driven;
-                        },
-                    }
+                        } => driven,
+                    };
                     pending_acknowledgements.push(acknowledgement);
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
@@ -398,8 +395,7 @@ where
         // Applied handoffs extend beyond the state-sync artifact. Release their acknowledgements
         // only after one barrier makes the entire suffix durable.
         if !pending_acknowledgements.is_empty() {
-            let barrier;
-            select! {
+            let (_, barrier) = select! {
                 _ = &mut shutdown => {
                     warn!(
                         height = completed_height.get(),
@@ -407,10 +403,8 @@ where
                     );
                     return;
                 },
-                driven = processor.sync() => {
-                    (_, barrier) = driven;
-                },
-            }
+                driven = processor.sync() => driven,
+            };
             if !barrier.durable().await {
                 return;
             }

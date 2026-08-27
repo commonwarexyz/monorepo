@@ -11,10 +11,9 @@
 //! Each finalized block is applied immediately. Snapshots are captured and
 //! published when a durability sync starts, and one active sync covers every
 //! block applied behind it (see [`Publisher`](crate::stateful::db::Publisher)).
-//! The block is acknowledged to
-//! marshal only once a sync proves it durable. A queued prune owns the next
-//! storage-mutation boundary. It waits until the pruned range is durable,
-//! prunes, and publishes fresh snapshots right away.
+//! The block is acknowledged to marshal only once a sync proves it durable. A
+//! queued prune owns the next storage-mutation boundary. It waits until the
+//! pruned range is durable, prunes, and publishes fresh snapshots right away.
 
 use crate::stateful::{
     Application, Input,
@@ -146,10 +145,9 @@ impl Durability {
     }
 }
 
-/// Start a durability barrier for pending applied state.
+/// Start a durability barrier for pending applied state, stepping jobs until it starts.
 ///
-/// Verification work remains driven while the database writer is acquired. Returns false if the
-/// actor stops before the barrier starts, dropping the in-flight capture.
+/// Returns false if the actor stops first, dropping the in-flight capture.
 async fn start_sync<E, A, P>(
     shutdown: &mut (impl Future + Unpin),
     durability: &mut Durability,
@@ -176,6 +174,8 @@ where
     }
 }
 
+/// The post-sync loop: mailbox intake, acknowledgement durability, prune
+/// scheduling and the proposal FIFO barrier.
 pub(super) struct Processing<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -227,73 +227,73 @@ where
         select_loop! {
             self.context,
             on_start => {
-            // Observe completed durability before taking more work. A queued prune suppresses
-            // the automatic dirty-suffix successor until the prune has run at its own
-            // mutation boundary.
-            if let Some(completion) = durability.completion().now_or_never()
-                && !durability.complete(completion)
-            {
-                return;
-            }
-            if pending_prune.is_none()
-                && !start_sync(&mut shutdown, &mut durability, &mut processor).await
-            {
-                return;
-            }
-
-            // Step the jobs that finished before admitting another message, so
-            // mailbox traffic cannot starve them.
-            processor.step_ready();
-
-            // A message held back by an active proposal is the FIFO barrier
-            // for subsequent mailbox work, so handle it before later arrivals.
-            let prune_needs_sync = pending_prune.is_some() && durability.needs_sync();
-            let message = if prune_needs_sync {
-                // The suppressed successor sync would defer durability, and the acks
-                // behind it, until the mailbox went idle. Run the prune's boundary now.
-                Err(TryRecvError::Empty)
-            } else {
-                match held_message.take() {
-                    Some(message) => Ok(message),
-                    None => self.mailbox.try_recv(),
-                }
-            };
-
-            // A prune remains idle work unless it owns the next dirty-suffix mutation boundary.
-            let next = match message {
-                // A message is ready. Handle it now, regardless of any queued prune.
-                Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
-                Err(TryRecvError::Empty) => match pending_prune.take() {
-                    Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
-                    // No message and nothing to prune. Wait on the mailbox, driving
-                    // the active sync and verification jobs while idle.
-                    None => {
-                        let mailbox = &mut self.mailbox;
-                        let durability = &mut durability;
-                        let processor = &mut processor;
-                        Either::Right(async move {
-                            loop {
-                                select! {
-                                    message = mailbox.recv() => {
-                                        if message.is_none() {
-                                            debug!("mailbox closed, stopping processing");
-                                        }
-                                        break message.map(Step::Message);
-                                    },
-                                    completion = durability.completion() => {
-                                        break Some(Step::Sync(completion));
-                                    },
-                                    _ = processor.step_next() => continue,
-                                }
-                            }
-                        })
-                    }
-                },
-                Err(TryRecvError::Disconnected) => {
-                    debug!("mailbox closed, stopping processing");
+                // Observe completed durability before taking more work. A queued prune suppresses
+                // the automatic dirty-suffix successor until the prune has run at its own
+                // mutation boundary.
+                if let Some(completion) = durability.completion().now_or_never()
+                    && !durability.complete(completion)
+                {
                     return;
                 }
-            };
+                if pending_prune.is_none()
+                    && !start_sync(&mut shutdown, &mut durability, &mut processor).await
+                {
+                    return;
+                }
+
+                // Step the jobs that finished before admitting another message, so
+                // mailbox traffic cannot starve them.
+                processor.step_ready();
+
+                // A message held back by an active proposal is the FIFO barrier
+                // for subsequent mailbox work, so handle it before later arrivals.
+                let prune_needs_sync = pending_prune.is_some() && durability.needs_sync();
+                let message = if prune_needs_sync {
+                    // The suppressed successor sync would defer durability, and the acks
+                    // behind it, until the mailbox went idle. Run the prune's boundary now.
+                    Err(TryRecvError::Empty)
+                } else {
+                    match held_message.take() {
+                        Some(message) => Ok(message),
+                        None => self.mailbox.try_recv(),
+                    }
+                };
+
+                // A prune remains idle work unless it owns the next dirty-suffix mutation boundary.
+                let next = match message {
+                    // A message is ready. Handle it now, regardless of any queued prune.
+                    Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
+                    Err(TryRecvError::Empty) => match pending_prune.take() {
+                        Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
+                        // No message and nothing to prune. Wait on the mailbox, driving
+                        // the active sync and verification jobs while idle.
+                        None => {
+                            let mailbox = &mut self.mailbox;
+                            let durability = &mut durability;
+                            let processor = &mut processor;
+                            Either::Right(async move {
+                                loop {
+                                    select! {
+                                        message = mailbox.recv() => {
+                                            if message.is_none() {
+                                                debug!("mailbox closed, stopping processing");
+                                            }
+                                            break message.map(Step::Message);
+                                        },
+                                        completion = durability.completion() => {
+                                            break Some(Step::Sync(completion));
+                                        },
+                                        _ = processor.step_next() => continue,
+                                    }
+                                }
+                            })
+                        }
+                    },
+                    Err(TryRecvError::Disconnected) => {
+                        debug!("mailbox closed, stopping processing");
+                        return;
+                    }
+                };
 
             },
             on_stopped => {
@@ -390,8 +390,7 @@ where
                         // the un-applied batches, and marshal redelivers the
                         // unacknowledged block after restart.
                         let should_start_sync = !durability.syncing();
-                        let (prune, started);
-                        select! {
+                        let (prune, started) = select! {
                             _ = &mut shutdown => {
                                 warn!(
                                     height = block.height().get(),
@@ -409,12 +408,10 @@ where
                                 processor.notify_finalized(context, block.as_ref()).await;
                                 (prune, started)
                             }
-                            .instrument(process.clone()) => {
-                                (prune, started) = driven;
-                            },
-                        }
+                            .instrument(process.clone()) => driven,
+                        };
 
-                        // Keep the publication bookkeeping under the same span.
+                        // Keep the durability bookkeeping under the same span.
                         let _span = process.entered();
                         debug!(
                             height = block.height().get(),

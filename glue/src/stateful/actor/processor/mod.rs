@@ -28,9 +28,10 @@
 //!
 //! A job is a chain of stages ([`stages`]): futures over owned inputs that the
 //! processor polls in a pool. Between stages the processor steps the job
-//! synchronously. That step is the only code that reads or writes the pending
-//! map, the anchor, or the replay table, and every fork a job executes on is
-//! taken in a step.
+//! synchronously. Jobs read or write the pending map, the anchor and the replay
+//! table only in a step, and every fork a job executes on is taken in a step.
+//! A cancelled replay owner hands its replay to the jobs waiting on it, and
+//! proposals are jobs with the same stages.
 //!
 //! Every database mutation takes the databases out of the processor and puts
 //! them back only after the anchor reflects it. Steps run while the mutation is
@@ -279,9 +280,11 @@ pub(super) struct Prune<T> {
 
 /// Where a job's next batches come from.
 enum Fork<U> {
+    /// The parent has cached state or is the anchor.
     Batches(U),
     /// The parent is the anchor and the databases are inside a mutation.
     Deferred,
+    /// The parent has no cached state and is not the anchor.
     Unknown,
 }
 
@@ -561,6 +564,7 @@ where
         self.update_pending_metric();
     }
 
+    /// Whether `digest` is the anchor or has cached state.
     fn known(&self, digest: &PendingDigest<A, E>) -> bool {
         self.last_processed.digest == *digest || self.pending.contains_key(digest)
     }
@@ -654,7 +658,7 @@ where
             span,
             context: request.context,
             ancestry,
-            caller: Caller::Verify(request.verification),
+            caller: Caller::Verify(request.response),
             candidate: None,
             parent: None,
             anchor: self.last_processed,
@@ -724,6 +728,7 @@ where
 
     /// Advance one job past a completed stage.
     fn step(&mut self, mut job: Job<E, A>, outcome: Outcome<E, A>) {
+        let _span = job.span.clone().entered();
         match outcome {
             Outcome::Cancelled => self.retire(job),
             Outcome::Candidate(Some(block)) => {
@@ -737,7 +742,7 @@ where
             Outcome::Parent(None) if job.is_proposal() => self.deliver(job, None),
             // Incomplete ancestry is not a verdict.
             Outcome::Candidate(None) | Outcome::Parent(None) => {
-                debug!("verification request waiting on incomplete ancestry");
+                debug!("verification request parked on incomplete ancestry");
                 self.park(job);
             }
             Outcome::Canonical(None) => {
@@ -767,68 +772,69 @@ where
                 );
                 job.answer(false);
             }
-            Outcome::Verified(Ok(Some(merkleized))) => {
-                let _job_span = job.span.clone().entered();
-                let (digest, parent) = (job.candidate().digest(), job.parent().digest());
-                let _span = info_span!(
-                    "stateful.processor.match_commitments",
-                    block = %digest,
-                    parent = %parent,
-                )
-                .entered();
-
-                // Application output is adversarial until it matches the
-                // commitments carried by the candidate block. Never retain it
-                // before this check.
-                if !A::Databases::matches_sync_targets(
-                    &merkleized,
-                    &A::sync_targets(job.candidate()),
-                ) {
-                    warn!(
-                        parent_digest = ?parent,
-                        block_digest = ?digest,
-                        "verification rejected: verified state must match block commitments"
-                    );
-                    return job.answer(false);
-                }
-
-                // Caching is retention, not part of the verdict. The execution
-                // matched the block's commitments on its own branch.
-                if !self.insert(
-                    digest,
-                    parent,
-                    job.context.1.round(),
-                    merkleized,
-                    Provenance::Verified,
-                ) {
-                    debug!(
-                        parent_digest = ?parent,
-                        block_digest = ?digest,
-                        "verified state not cached, overtaken by finalization"
-                    );
-                }
-                job.answer(true);
-            }
+            Outcome::Verified(Ok(Some(merkleized))) => self.verified(job, merkleized),
             Outcome::Verified(Err(Stale)) | Outcome::Proposed(Err(Stale)) => self.stale(job),
             Outcome::Proposed(Ok(None)) => self.deliver(job, None),
-            Outcome::Proposed(Ok(Some(Proposed { block, merkleized }))) => {
-                assert!(
-                    A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
-                    "proposed state must match block commitments",
-                );
-                assert!(
-                    self.insert(
-                        block.digest(),
-                        job.parent().digest(),
-                        job.context.1.round(),
-                        merkleized,
-                        Provenance::Verified,
-                    ),
-                    "proposal parent must remain compatible until the proposal completes",
-                );
-                self.deliver(job, Some(block));
-            }
+            Outcome::Proposed(Ok(Some(proposed))) => self.proposed(job, proposed),
         }
+    }
+
+    /// Retain a verified candidate's state and answer true.
+    fn verified(&mut self, job: Job<E, A>, merkleized: PendingBatches<A, E>) {
+        let (digest, parent) = (job.candidate().digest(), job.parent().digest());
+        let _span = info_span!(
+            "stateful.processor.match_commitments",
+            block = %digest,
+            parent = %parent,
+        )
+        .entered();
+
+        // Application output is adversarial until it matches the block's
+        // commitments.
+        if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(job.candidate())) {
+            warn!(
+                parent_digest = ?parent,
+                block_digest = ?digest,
+                "verification rejected: verified state must match block commitments"
+            );
+            return job.answer(false);
+        }
+
+        // Caching is retention, not part of the verdict. The execution matched
+        // the block's commitments on its own branch.
+        if !self.insert(
+            digest,
+            parent,
+            job.context.1.round(),
+            merkleized,
+            Provenance::Verified,
+        ) {
+            debug!(
+                parent_digest = ?parent,
+                block_digest = ?digest,
+                "verified state not cached, overtaken by finalization"
+            );
+        }
+        job.answer(true);
+    }
+
+    /// Retain a built block's state and deliver the block.
+    fn proposed(&mut self, job: Job<E, A>, Proposed { block, merkleized }: Proposed<A, E>) {
+        assert!(
+            A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
+            "proposed state must match block commitments",
+        );
+        assert!(
+            self.insert(
+                block.digest(),
+                job.parent().digest(),
+                job.context.1.round(),
+                merkleized,
+                Provenance::Verified,
+            ),
+            "proposal parent must remain compatible until the proposal completes",
+        );
+        self.deliver(job, Some(block));
     }
 
     /// Retire a job whose caller dropped its request. A replay owner hands its
@@ -869,11 +875,11 @@ where
         // A finalized candidate cannot be re-executed against newer database
         // state. Prove it belongs to the canonical chain before accepting it.
         if height < job.anchor.height {
-            let provider = self.marshal.clone();
+            let marshal = self.marshal.clone();
             return dispatch!(
                 self,
                 job,
-                stages::canonical(provider, height).map(Outcome::Canonical)
+                stages::canonical(marshal, height).map(Outcome::Canonical)
             );
         }
         if height == job.anchor.height {
@@ -896,18 +902,17 @@ where
     /// Fork the parent's state, or start rebuilding it.
     fn lookup(&mut self, mut job: Job<E, A>) {
         debug_assert!(job.path.is_empty(), "only a replay owner carries a path");
-        job.anchor = self.last_processed;
         if self.known(&job.parent().digest()) {
             return self.advance(job);
         }
         job.rebuild = Some(self.metrics.rebuild_pending_duration.timer(&job.context.0));
         let known = self.pending.keys().copied().collect();
-        let provider = self.marshal.clone();
-        let (parent, anchor) = (Arc::clone(job.parent()), job.anchor);
+        let marshal = self.marshal.clone();
+        let (parent, anchor) = (Arc::clone(job.parent()), self.last_processed);
         dispatch!(
             self,
             job,
-            stages::walk(provider, parent, anchor, known).map(Outcome::Walked)
+            stages::walk(marshal, parent, anchor, known).map(Outcome::Walked)
         );
     }
 
@@ -1000,7 +1005,7 @@ where
         let digest = block.digest();
         let retained = result.map(|merkleized| {
             // Application output is adversarial until it matches the block's
-            // commitments. Never retain it before this check.
+            // commitments.
             if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(block)) {
                 warn!(block = ?digest, "replayed state root must match block commitments");
                 return false;
@@ -1035,10 +1040,8 @@ where
     fn invalid(&mut self, job: Job<E, A>) {
         match job.caller {
             Caller::Propose { .. } => self.deliver(job, None),
-            // An anchor that moved during the attempt can make valid ancestry
-            // look invalid (the finalization dropped the parent from the
-            // pending map), so re-classify. A stable anchor means the ancestry
-            // is genuinely invalid.
+            // An anchor that moved since classification can make valid ancestry
+            // look invalid, so re-classify. A stable anchor means it is genuinely invalid.
             Caller::Verify(_) if job.anchor != self.last_processed => self.classify(job),
             Caller::Verify(_) => {
                 warn!(
@@ -1058,15 +1061,15 @@ where
     fn stale(&mut self, job: Job<E, A>) {
         assert!(
             !job.is_proposal(),
-            "no mutation runs while a proposal is live"
+            "a proposal's batches are never refused: no apply overlaps it, and a replay it waits on includes every block applied before it joined"
         );
         debug!(
             parent_digest = ?job.parent().digest(),
             block_digest = ?job.candidate().digest(),
             "verification went stale during execution"
         );
-        // The apply that refused the job has not returned the databases yet,
-        // so the anchor has not moved. Defer until it has.
+        // While the databases are out, the refusing apply may not have moved
+        // the anchor yet. Defer until they return.
         if self.databases.is_none() {
             return self.deferred.push(job);
         }
@@ -1141,14 +1144,6 @@ mod tests {
                 Fork::Batches(batches) => Some(batches),
                 Fork::Deferred | Fork::Unknown => None,
             }
-        }
-
-        fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
-            self.last_processed
-        }
-
-        fn pending_contains(&self, digest: &PendingDigest<A, E>) -> bool {
-            self.pending.contains_key(digest)
         }
 
         fn clear_pending(&mut self) {
@@ -1314,6 +1309,55 @@ mod tests {
         }
     }
 
+    /// An ancestry that yields its first block at once and the rest only after
+    /// `release` fires.
+    #[derive(Clone)]
+    struct GatedAncestry {
+        blocks: VecDeque<Arc<Block>>,
+        yielded: usize,
+        hold: Arc<Mutex<Hold>>,
+    }
+
+    enum Hold {
+        Held(oneshot::Receiver<()>),
+        Released,
+    }
+
+    impl GatedAncestry {
+        fn new(blocks: impl IntoIterator<Item = Block>, release: oneshot::Receiver<()>) -> Self {
+            Self {
+                blocks: blocks.into_iter().map(Arc::new).collect(),
+                yielded: 0,
+                hold: Arc::new(Mutex::new(Hold::Held(release))),
+            }
+        }
+    }
+
+    impl Stream for GatedAncestry {
+        type Item = Arc<Block>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            if this.yielded > 0 {
+                let mut hold = this.hold.lock();
+                if let Hold::Held(release) = &mut *hold {
+                    match Pin::new(release).poll(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(_) => *hold = Hold::Released,
+                    }
+                }
+            }
+            this.yielded += 1;
+            Poll::Ready(this.blocks.pop_front())
+        }
+    }
+
+    impl Ancestry<Block> for GatedAncestry {
+        fn peek(&self) -> Option<&Block> {
+            self.blocks.front().map(Arc::as_ref)
+        }
+    }
+
     fn u64_to_digest(value: u64) -> Digest {
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&value.to_be_bytes());
@@ -1337,7 +1381,7 @@ mod tests {
         Sha256::hash(&[b"processor_harness_counter"])
     }
 
-    struct ApplyGate {
+    struct ProbeGate {
         started: oneshot::Sender<()>,
         release: oneshot::Receiver<()>,
     }
@@ -1346,11 +1390,11 @@ mod tests {
     struct ApplicationProbe {
         target: Digest,
         calls: Arc<AtomicUsize>,
-        gates: Arc<Mutex<VecDeque<ApplyGate>>>,
+        gates: Arc<Mutex<VecDeque<ProbeGate>>>,
     }
 
     impl ApplicationProbe {
-        fn new(target: Digest, gates: impl IntoIterator<Item = ApplyGate>) -> Self {
+        fn new(target: Digest, gates: impl IntoIterator<Item = ProbeGate>) -> Self {
             Self {
                 target,
                 calls: Arc::new(AtomicUsize::new(0)),
@@ -1366,16 +1410,16 @@ mod tests {
             let Some(mut gate) = self.gates.lock().pop_front() else {
                 return;
             };
-            gate.started.send(()).expect("test must await replay");
+            gate.started.send(()).expect("test must await the probe");
             let _ = (&mut gate.release).await;
         }
     }
 
-    fn apply_gate() -> (ApplyGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    fn probe_gate() -> (ProbeGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (started, started_rx) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();
         (
-            ApplyGate {
+            ProbeGate {
                 started,
                 release: release_rx,
             },
@@ -2088,16 +2132,16 @@ mod tests {
             let winner = harness.stage_pending_child(&block1, View::new(3)).await;
             let loser = harness.stage_pending_child(&block1, View::new(2)).await;
 
-            assert!(harness.processor.pending_contains(&winner.digest()));
-            assert!(harness.processor.pending_contains(&loser.digest()));
+            assert!(harness.processor.pending.contains_key(&winner.digest()));
+            assert!(harness.processor.pending.contains_key(&loser.digest()));
 
             let applied = harness.finalize(winner.clone()).await;
             assert!(applied, "finalization should persist winner state");
             assert!(
-                !harness.processor.pending_contains(&loser.digest()),
+                !harness.processor.pending.contains_key(&loser.digest()),
                 "losing fork at finalized round should be pruned",
             );
-            assert_eq!(harness.processor.last_processed().digest, winner.digest());
+            assert_eq!(harness.processor.last_processed.digest, winner.digest());
             assert_eq!(harness.height_value(Height::new(2)).await, Some(3));
         });
     }
@@ -2112,18 +2156,26 @@ mod tests {
             let winner = harness.stage_pending_child(&block1, View::new(3)).await;
             let loser_child = harness.stage_pending_child(&loser, View::new(4)).await;
 
-            assert!(harness.processor.pending_contains(&winner.digest()));
-            assert!(harness.processor.pending_contains(&loser.digest()));
-            assert!(harness.processor.pending_contains(&loser_child.digest()));
+            assert!(harness.processor.pending.contains_key(&winner.digest()));
+            assert!(harness.processor.pending.contains_key(&loser.digest()));
+            assert!(
+                harness
+                    .processor
+                    .pending
+                    .contains_key(&loser_child.digest())
+            );
 
             let applied = harness.finalize(winner.clone()).await;
             assert!(applied, "finalization should persist winner state");
             assert!(
-                !harness.processor.pending_contains(&loser.digest()),
+                !harness.processor.pending.contains_key(&loser.digest()),
                 "losing fork at finalized round should be pruned",
             );
             assert!(
-                !harness.processor.pending_contains(&loser_child.digest()),
+                !harness
+                    .processor
+                    .pending
+                    .contains_key(&loser_child.digest()),
                 "descendants of the losing fork should also be pruned",
             );
         });
@@ -2136,7 +2188,7 @@ mod tests {
             let genesis = Block::genesis();
             let block = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let (gate, mut started, release) = apply_gate();
+            let (gate, mut started, release) = probe_gate();
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(block.digest(), [gate]));
             let context = harness.context_cell.as_present();
@@ -2181,7 +2233,7 @@ mod tests {
                 ),
                 "completed work on a losing fork must not publish after finalization",
             );
-            assert!(!harness.processor.pending_contains(&late_child.digest()));
+            assert!(!harness.processor.pending.contains_key(&late_child.digest()));
         });
     }
 
@@ -2204,11 +2256,11 @@ mod tests {
                 .expect("proposal should rebuild its parent state");
             assert_eq!(proposed.parent(), block3.digest());
             assert!(
-                harness.processor.pending_contains(&block2.digest()),
+                harness.processor.pending.contains_key(&block2.digest()),
                 "first missing descendant should be reconstructed",
             );
             assert!(
-                harness.processor.pending_contains(&block3.digest()),
+                harness.processor.pending.contains_key(&block3.digest()),
                 "target block should be reconstructed",
             );
 
@@ -2249,7 +2301,7 @@ mod tests {
                 replayed_merkleized,
                 Provenance::Applied,
             ));
-            assert!(harness.processor.pending_contains(&replayed.digest()));
+            assert!(harness.processor.pending.contains_key(&replayed.digest()));
             assert!(
                 !harness.processor.pending_verified(&replayed.digest()),
                 "apply-provenance state must not read as verified",
@@ -2350,15 +2402,15 @@ mod tests {
                 "rebuild should reject a replayed batch whose sync target does not match the block",
             );
             assert!(
-                !harness.processor.pending_contains(&block2.digest()),
+                !harness.processor.pending.contains_key(&block2.digest()),
                 "rejected replay must not be inserted into the pending cache",
             );
         });
     }
 
     #[test]
-    fn walk_rejects_height_gap_to_processed_anchor() {
-        deterministic::Runner::default().start(|_| async move {
+    fn walk_rejects_height_gap_to_parent() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|_| async move {
             let block1 = linked_block(&Block::genesis(), View::new(1));
             let mut gap_block = linked_block(&block1, View::new(3));
             gap_block.height = Height::new(3);
@@ -2366,7 +2418,7 @@ mod tests {
             provider.push(&gap_block, [Some(block1.clone())]);
 
             let path = stages::walk(
-                provider,
+                provider.clone(),
                 Arc::new(gap_block),
                 anchor_at(&block1),
                 BTreeSet::new(),
@@ -2374,14 +2426,15 @@ mod tests {
             .await;
             assert!(
                 path.is_none(),
-                "the walk must reject non-contiguous ancestry above the processed anchor",
+                "the walk must reject a height gap to the parent"
             );
+            assert_eq!(provider.fetches(), 1);
         });
     }
 
     #[test]
     fn walk_rejects_wrong_parent_digest() {
-        deterministic::Runner::default().start(|_| async move {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|_| async move {
             let block1 = linked_block(&Block::genesis(), View::new(1));
             let block2 = linked_block(&block1, View::new(2));
             let block3 = linked_block(&block2, View::new(3));
@@ -2516,7 +2569,7 @@ mod tests {
 
     #[test]
     fn proposal_cancelled_before_its_ancestry_arrives_is_retired() {
-        deterministic::Runner::default().start(|context| async move {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let mut harness = Harness::new(context).await;
             let (response, receiver) = oneshot::channel();
             let context = harness.context_cell.as_present();
@@ -2538,6 +2591,33 @@ mod tests {
             harness.processor.step_next().await;
             assert!(!harness.processor.proposing());
             assert!(harness.processor.jobs.is_empty());
+        });
+    }
+
+    /// A candidate finalized while its parent is being fetched is judged
+    /// against the new anchor, not the one it was classified under.
+    #[test]
+    fn candidate_finalized_during_its_parent_fetch_answers_true() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let (candidate, _) = harness.build_child(&genesis, View::new(1)).await;
+            let (release, held) = oneshot::channel();
+            let (response, verdict) = oneshot::channel();
+            let context = harness.context_cell.as_present();
+            let (_owner, request) = super::Request::new(
+                tracing::Span::none(),
+                (context.child("verify"), candidate.context()),
+                GatedAncestry::new([candidate.clone(), genesis], held),
+                response,
+            );
+            harness.processor.schedule(request);
+            // Classify the candidate against genesis; its parent fetch then holds.
+            harness.processor.step_ready();
+            assert!(harness.finalize(candidate).await);
+
+            release.send(()).expect("the parent fetch should be held");
+            assert!(harness.run_until(verdict).await);
         });
     }
 
@@ -2630,7 +2710,7 @@ mod tests {
             let (candidate, _) = harness.build_child(&winner, View::new(2)).await;
             // Uncached, so the finalization replays the winner and holds there.
             harness.processor.clear_pending();
-            let (gate, started, release) = apply_gate();
+            let (gate, started, release) = probe_gate();
             let probe = ApplicationProbe::new(winner.digest(), [gate]);
             harness.processor.app.apply_probe = Some(probe.clone());
 
@@ -2638,7 +2718,10 @@ mod tests {
             {
                 let context = harness.context_cell.as_present();
                 let mut finalize = pin!(harness.processor.finalize(context, &winner));
-                assert!(poll!(&mut finalize).is_pending());
+                select! {
+                    _ = &mut finalize => panic!("the finalization must hold at the replay gate"),
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                }
                 started.await.expect("the replay should start");
 
                 // The job walked to the anchor while the databases were out and
@@ -2670,7 +2753,7 @@ mod tests {
             let (second, _) = harness.build_child(&block1, View::new(3)).await;
             let (third, _) = harness.build_child(&block1, View::new(4)).await;
             harness.processor.clear_pending();
-            let (gate, started, release) = apply_gate();
+            let (gate, started, release) = probe_gate();
             harness.processor.app.apply_probe =
                 Some(ApplicationProbe::new(block1.digest(), [gate]));
             let verify_probe = ApplicationProbe::new(second.digest(), []);
@@ -2717,7 +2800,7 @@ mod tests {
             let (candidate, _) = harness.build_child(&loser, View::new(3)).await;
 
             // Park the verification inside the application, forked from the loser.
-            let (gate, started, release) = apply_gate();
+            let (gate, started, release) = probe_gate();
             harness.processor.app.verify_probe =
                 Some(ApplicationProbe::new(candidate.digest(), [gate]));
             let mut verdict = harness.verify(&candidate, &loser);

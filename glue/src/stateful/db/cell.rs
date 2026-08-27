@@ -97,8 +97,8 @@ impl<T> Writer<T> {
     /// Run `f` over the database without waiting.
     ///
     /// A mutation exists only inside [`Self::mutate`], which consumes the writer, so
-    /// holding `&self` proves no write is held or queued and a read guard is free.
-    /// The header's one-guard rule does not apply here for the same reason.
+    /// `&self` proves no write is held or queued: the guard is immediate and safe to
+    /// hold alongside another read guard.
     pub(super) fn view<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         match self.0.state.try_read().as_deref() {
             Some(State::Live(db)) => f(db),

@@ -1,8 +1,8 @@
 //! The stages a job runs through.
 //!
-//! Each stage is a future over owned inputs that resolves to what it learned.
-//! Stages never touch the processor's state, which only the
-//! [`Processor`](super::Processor) touches between stages.
+//! Each stage is a future over owned inputs, or over the job's own ancestry
+//! cursor, that resolves to what it learned. Stages never touch the processor's
+//! state, which only the [`Processor`](super::Processor) touches between stages.
 
 use super::jobs::Stale;
 use crate::stateful::{
@@ -78,10 +78,10 @@ pub(super) async fn fetch<B: Block>(ancestry: &mut BoxedAncestry<B>) -> Option<A
     fields(height = height.traced())
 )]
 pub(super) async fn canonical<P: Marshal>(
-    provider: P,
+    marshal: P,
     height: Height,
 ) -> Option<<P::Block as Digestible>::Digest> {
-    provider.canonical(height).await
+    marshal.canonical(height).await
 }
 
 /// Walk marshal backward from `parent` to the nearest block in `known` or the

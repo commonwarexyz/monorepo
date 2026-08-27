@@ -88,7 +88,7 @@ impl Metrics {
 
         let rebuild_hist = context.register(
             "rebuild_pending_duration",
-            "Wall-clock duration of lazy-recovery replays",
+            "Wall-clock duration of rebuilding a missing parent state by replay",
             Histogram::new(BUCKETS),
         );
 

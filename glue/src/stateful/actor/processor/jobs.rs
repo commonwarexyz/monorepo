@@ -7,7 +7,7 @@
 //! never watch for cancellation, which the processor's dispatch does.
 
 use super::{PendingBatches, PendingDigest};
-use crate::stateful::{Application, Input, Proposed, actor::core::Verification, db::Anchor};
+use crate::stateful::{Application, Input, Proposed, db::Anchor};
 use commonware_consensus::marshal::ancestry::BoxedAncestry;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::metrics::histogram::Timer};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
@@ -18,7 +18,7 @@ use tracing::Span;
 /// Who asked for a job and how it is answered.
 pub(super) enum Caller<B, I, P> {
     /// A verification, answered with a verdict.
-    Verify(Verification),
+    Verify(oneshot::Sender<bool>),
     /// A proposal, answered with the built block.
     Propose {
         response: oneshot::Sender<Option<B>>,
@@ -31,17 +31,11 @@ impl<B, I, P> Caller<B, I, P> {
     /// Resolves once the caller drops its request.
     pub(super) async fn cancelled(&mut self) {
         match self {
-            Self::Verify(verification) => verification.wait_for_cancellation().await,
+            Self::Verify(response) => response.closed().await,
             Self::Propose { response, .. } => response.closed().await,
         }
     }
 }
-
-pub(super) type CallerOf<A, E> = Caller<
-    <A as Application<E>>::Block,
-    <A as Application<E>>::Input,
-    <A as Application<E>>::Provider,
->;
 
 /// One request's state between stages.
 pub(super) struct Job<E, A>
@@ -50,15 +44,17 @@ where
     A: Application<E>,
 {
     pub(super) span: Span,
+    /// The request's contexts. A proposal hands the runtime context to the
+    /// application and keeps a child as its clock.
     pub(super) context: (E, A::Context),
     /// Ancestry cursor, positioned after the parent once it is fetched.
     pub(super) ancestry: BoxedAncestry<A::Block>,
-    pub(super) caller: CallerOf<A, E>,
+    pub(super) caller: Caller<A::Block, A::Input, A::Provider>,
     /// The block under verification. Proposals have none.
     pub(super) candidate: Option<Arc<A::Block>>,
     /// The block whose state execution forks from.
     pub(super) parent: Option<Arc<A::Block>>,
-    /// The anchor the current attempt is judged against.
+    /// The anchor the job was last classified under.
     pub(super) anchor: Anchor<PendingDigest<A, E>>,
     /// Blocks still to replay before the parent's state exists, oldest first.
     /// Non-empty in the pool only while the job replays its front.
@@ -77,7 +73,7 @@ where
     pub(super) const fn candidate(&self) -> &Arc<A::Block> {
         self.candidate
             .as_ref()
-            .expect("the candidate was fetched before this step")
+            .expect("only verifications have a candidate")
     }
 
     pub(super) const fn parent(&self) -> &Arc<A::Block> {
@@ -92,13 +88,13 @@ where
 
     /// Answer a verification. Observes the timer on a true verdict.
     pub(super) fn answer(self, valid: bool) {
-        let Caller::Verify(verification) = self.caller else {
+        let Caller::Verify(response) = self.caller else {
             unreachable!("proposals are answered with a block")
         };
         if valid {
             self.timer.observe(&self.context.0);
         }
-        verification.respond(valid);
+        response.send_lossy(valid);
     }
 
     /// Answer a proposal. Observes the timer when a block was built.
@@ -132,8 +128,8 @@ where
     /// The digest of the canonical block at the candidate's height, or `None`
     /// when marshal does not have it.
     Canonical(Option<PendingDigest<A, E>>),
-    /// The blocks between known state and the parent, oldest first. `None` is
-    /// invalid ancestry.
+    /// The blocks from the first unknown ancestor through the parent, oldest
+    /// first. `None` is invalid ancestry.
     Walked(Option<Vec<Arc<A::Block>>>),
     /// `replay` executed the first block of the path.
     Replayed(Result<PendingBatches<A, E>, Stale>),

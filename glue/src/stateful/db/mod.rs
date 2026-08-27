@@ -216,9 +216,8 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Create a new unmerkleized batch rooted at `db`'s applied state.
     ///
-    /// The batch keeps `reader` and takes read access through it on every
-    /// read, so it stays valid across applies of compatible batches. The set
-    /// takes the read access for `db` once; implementers never see the writer.
+    /// `db` is borrowed under the set's read guard. The batch keeps `reader`
+    /// for its own reads, which stay valid across applies of compatible batches.
     fn new_batch(db: &Self, reader: Reader<Self>) -> Self::Unmerkleized;
 
     /// Return true if a merkleized batch matches a sync target.
@@ -389,7 +388,8 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// Create unmerkleized batches from each database's applied state.
     ///
     /// Synchronous because the set holds every database's sole [`Writer`]: no
-    /// mutation can be pending while the caller holds `&self`.
+    /// mutation can be pending while the caller holds `&self`. Custom sets
+    /// compose [`Single`]s, as the tuple sets do.
     fn new_batches(&self) -> Self::Unmerkleized;
 
     /// Create child unmerkleized batches from a pending merkleized parent.
@@ -892,7 +892,7 @@ macro_rules! impl_database_set {
             }
 
             fn new_batches(&self) -> Self::Unmerkleized {
-                ($(self.$idx.writer.view(|db| $T::new_batch(db, self.$idx.writer.reader())),)+)
+                ($(<Single<$T> as DatabaseSet<E>>::new_batches(&self.$idx),)+)
             }
 
             fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {

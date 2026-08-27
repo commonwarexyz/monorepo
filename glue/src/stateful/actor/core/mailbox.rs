@@ -14,11 +14,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
-use commonware_utils::{
-    acknowledgement::Exact,
-    channel::{fallible::OneshotExt, oneshot},
-    sync::Mutex,
-};
+use commonware_utils::{acknowledgement::Exact, channel::oneshot, sync::Mutex};
 use rand_core::Rng;
 use std::{
     collections::VecDeque,
@@ -35,9 +31,7 @@ pub(in crate::stateful::actor) struct WeakAncestry<B: Block>(Weak<Mutex<BoxedAnc
 
 impl<B: Block> WeakAncestry<B> {
     /// Returns the caller-owned ancestry and a non-owning request handle.
-    pub(in crate::stateful::actor) fn new(
-        ancestry: impl Ancestry<B>,
-    ) -> (Arc<Mutex<BoxedAncestry<B>>>, Self) {
+    fn new(ancestry: impl Ancestry<B>) -> (Arc<Mutex<BoxedAncestry<B>>>, Self) {
         let owner = Arc::new(Mutex::new(BoxedAncestry::new(ancestry)));
         let reference = Self(Arc::downgrade(&owner));
         (owner, reference)
@@ -48,25 +42,6 @@ impl<B: Block> WeakAncestry<B> {
     /// Returns `None` once caller cancellation releases the strong owner.
     pub(in crate::stateful::actor) fn upgrade(&self) -> Option<BoxedAncestry<B>> {
         self.0.upgrade().map(|ancestry| ancestry.lock().clone())
-    }
-}
-
-/// A verification is scoped to its caller.
-pub(in crate::stateful::actor) struct Verification {
-    response: oneshot::Sender<bool>,
-}
-
-impl Verification {
-    pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
-        self.response.closed().await;
-    }
-
-    pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
-        self.response.is_closed()
-    }
-
-    pub(in crate::stateful::actor) fn respond(self, valid: bool) {
-        self.response.send_lossy(valid);
     }
 }
 
@@ -83,7 +58,7 @@ where
     pub(in crate::stateful::actor) span: Span,
     pub(in crate::stateful::actor) context: (E, A::Context),
     pub(in crate::stateful::actor) ancestry: WeakAncestry<A::Block>,
-    pub(in crate::stateful::actor) verification: Verification,
+    pub(in crate::stateful::actor) response: oneshot::Sender<bool>,
 }
 
 impl<E, A> Request<E, A>
@@ -105,7 +80,7 @@ where
             span,
             context,
             ancestry,
-            verification: Verification { response },
+            response,
         };
         (owner, request)
     }
@@ -145,7 +120,7 @@ where
     fn is_obsolete(&self) -> bool {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
-            Self::Verify(request) => request.verification.is_cancelled(),
+            Self::Verify(request) => request.response.is_closed(),
             Self::Finalized { .. } => false,
         }
     }
