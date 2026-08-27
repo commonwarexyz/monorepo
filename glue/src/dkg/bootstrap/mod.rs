@@ -35,9 +35,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Digest as _, Digestible, Hasher, PublicKey, Sha256, Signer as _,
-    bls12381::primitives::{
-        sharing::{Mode as SharingMode, ModeVersion},
-        variant::Variant,
+    bls12381::{
+        dkg::feldman_desmedt::Reveal,
+        primitives::{
+            sharing::{Mode as SharingMode, ModeVersion},
+            variant::Variant,
+        },
     },
     certificate::{ConstantProvider, Verifier as _},
     ed25519,
@@ -93,6 +96,9 @@ pub struct Config<M, X, SS, T, D = Unit> {
 
     /// Sharing mode used for the generated threshold output.
     pub sharing_mode: SharingMode,
+
+    /// Revealed-share calculation used for the DKG ceremony.
+    pub reveal: Reveal,
 
     /// Maximum sharing mode version accepted when decoding blocks.
     pub max_supported_mode: ModeVersion,
@@ -474,6 +480,7 @@ where
                 fence,
                 namespace: self.config.namespace,
                 sharing_mode: self.config.sharing_mode,
+                reveal: self.config.reveal,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}-reshare", self.config.partition_prefix),
                 max_participants,
@@ -664,6 +671,7 @@ mod tests {
             strategy: (),
             namespace: b"test",
             sharing_mode: SharingMode::RootsOfUnity,
+            reveal: Reveal::V1,
             max_supported_mode: ModeVersion::v0(),
             partition_prefix: "test".into(),
             participants: Set::default(),

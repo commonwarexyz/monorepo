@@ -104,6 +104,7 @@ mod tests {
         Acknowledgement as _, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
+        non_empty,
         ordered::{Quorum as _, Set},
         probability,
         sequence::U64,
@@ -2255,7 +2256,7 @@ mod tests {
                 .map(|index| Nullify::sign::<D>(&schemes[index], skipped_round).unwrap())
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&schemes[0], &nullifies, &Sequential).unwrap();
+                Nullification::from_nullifies(&schemes[0], non_empty![@&nullifies], &Sequential).unwrap();
             byzantine_certificate_sender.send(
                 Recipients::One(victim.clone()),
                 Certificate::<S, D>::Nullification(nullification).encode(),
@@ -2302,7 +2303,7 @@ mod tests {
                 .map(|index| Notarize::sign(&schemes[index], good_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&schemes[0], &good_votes, &Sequential).unwrap();
+                Notarization::from_notarizes(&schemes[0], non_empty![@&good_votes], &Sequential).unwrap();
             byzantine_certificate_sender.send(
                 Recipients::One(victim),
                 Certificate::<S, D>::Notarization(notarization).encode(),

@@ -170,7 +170,7 @@ mod test {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng,
-        channel::oneshot, probability, sync::Mutex, test_rng,
+        channel::oneshot, iter::NonEmpty, non_empty, probability, sync::Mutex, test_rng,
     };
     use std::{
         collections::BTreeMap,
@@ -362,7 +362,7 @@ mod test {
         fn verify_certificates<'a, R, D, I>(
             &self,
             rng: &mut R,
-            certificates: I,
+            certificates: NonEmpty<I>,
             strategy: &impl ParallelStrategy,
         ) -> bool
         where
@@ -459,15 +459,14 @@ mod test {
 
         fn assemble<I>(
             &self,
-            attestations: I,
+            attestations: NonEmpty<I>,
             strategy: &impl ParallelStrategy,
-        ) -> Option<Self::Certificate>
+        ) -> Result<Self::Certificate, certificate::AssemblyError>
         where
-            I: IntoIterator<Item = Attestation<Self>>,
-            I::IntoIter: Send,
+            I: Iterator<Item = Attestation<Self>> + Send,
         {
             self.inner.assemble(
-                attestations.into_iter().map(Self::unwrap_attestation),
+                non_empty![@attestations.into_iter().map(Self::unwrap_attestation)],
                 strategy,
             )
         }
@@ -777,7 +776,8 @@ mod test {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
             .collect();
         let finalization =
-            Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).expect("recover");
+            Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
+                .expect("recover");
         (block, finalization)
     }
 

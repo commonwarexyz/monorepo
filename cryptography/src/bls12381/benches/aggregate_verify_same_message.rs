@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
-use commonware_utils::test_rng;
+use commonware_utils::{non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 
@@ -22,11 +22,15 @@ fn bench_aggregate_verify_same_message(c: &mut Criterion) {
                     }
                     (
                         public_keys,
-                        ops::aggregate::combine_signatures::<MinSig, _>(&signatures),
+                        ops::aggregate::combine_signatures::<MinSig, _>(
+                            non_empty![@signatures.iter()],
+                        ),
                     )
                 },
                 |(public_keys, signature)| {
-                    let public = ops::aggregate::combine_public_keys::<MinSig, _>(&public_keys);
+                    let public = ops::aggregate::combine_public_keys::<MinSig, _>(
+                        non_empty![@public_keys.iter()],
+                    );
                     ops::aggregate::verify_same_message::<MinSig>(
                         &public, namespace, &msg, &signature,
                     )

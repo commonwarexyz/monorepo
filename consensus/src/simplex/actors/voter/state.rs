@@ -1647,7 +1647,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZU32, futures::AbortablePool};
+    use commonware_utils::{NZU32, futures::AbortablePool, non_empty};
     use std::time::Duration;
 
     fn round_robin<S: certificate::Scheme>(scheme: &S) -> RoundRobinElector<S> {
@@ -1702,7 +1702,8 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
             .collect();
-        Notarization::from_notarizes(verifier, votes.iter(), &Sequential).expect("notarization")
+        Notarization::from_notarizes(verifier, non_empty![@votes.iter()], &Sequential)
+            .expect("notarization")
     }
 
     fn build_nullification(
@@ -1714,7 +1715,8 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("nullify"))
             .collect();
-        Nullification::from_nullifies(verifier, &votes, &Sequential).expect("nullification")
+        Nullification::from_nullifies(verifier, non_empty![@&votes], &Sequential)
+            .expect("nullification")
     }
 
     fn build_finalization(
@@ -1726,7 +1728,8 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
             .collect();
-        Finalization::from_finalizes(verifier, votes.iter(), &Sequential).expect("finalization")
+        Finalization::from_finalizes(verifier, non_empty![@votes.iter()], &Sequential)
+            .expect("finalization")
     }
 
     #[test_traced]
@@ -6507,9 +6510,12 @@ mod tests {
                     Notarize::sign(&schemes[index], good_proposal.clone()).expect("notarize")
                 })
                 .collect();
-            let good_notarization =
-                Notarization::from_notarizes(&verifier, good_votes.iter(), &Sequential)
-                    .expect("notarization");
+            let good_notarization = Notarization::from_notarizes(
+                &verifier,
+                non_empty![@good_votes.iter()],
+                &Sequential,
+            )
+            .expect("notarization");
             let (added, equivocator) = state.add_notarization(good_notarization);
             assert!(added);
             assert!(equivocator.is_some());
