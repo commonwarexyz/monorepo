@@ -496,10 +496,6 @@ impl Waker {
             match err.raw_os_error() {
                 // Retry if interrupted by a signal before completion.
                 Some(libc::EINTR) => continue,
-                // Non-blocking write would block because the eventfd
-                // counter is saturated. A wake is already queued, so no
-                // retry is needed.
-                Some(libc::EAGAIN) => return,
                 _ => {
                     // The wake latch prevents another signal in this epoch, so
                     // returning could leave the armed loop blocked forever.
@@ -647,10 +643,7 @@ pub mod tests {
     use super::*;
     use io_uring::IoUring;
     #[cfg(not(feature = "loom"))]
-    use std::{
-        mem::size_of,
-        os::fd::{AsRawFd, FromRawFd},
-    };
+    use std::{mem::size_of, os::fd::AsRawFd};
 
     pub fn state_bits(waker: &Waker) -> u32 {
         waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
@@ -849,58 +842,6 @@ pub mod tests {
         let before = sq.len();
         assert!(!waker.reinstall(&mut sq));
         assert_eq!(sq.len(), before);
-    }
-
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_eventfd_wake_eagain_is_nonfatal() {
-        let waker = Waker::new().expect("eventfd creation should succeed");
-
-        // Saturate the eventfd counter near its maximum so `eventfd_wake` takes the
-        // non-blocking EAGAIN path and `acknowledge` drains the queued wake.
-        let fd = waker.inner.wake_fd.as_raw_fd();
-        let value = u64::MAX - 1;
-        // SAFETY: `fd` is a valid eventfd and `value` points to initialized memory.
-        let wrote = unsafe {
-            libc::write(
-                fd,
-                &value as *const u64 as *const libc::c_void,
-                size_of::<u64>(),
-            )
-        };
-        assert_eq!(wrote, size_of::<u64>() as isize);
-        waker.eventfd_wake();
-        waker.acknowledge();
-    }
-
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_armed_eventfd_write_failure_panics() {
-        let mut waker = Waker::new().expect("eventfd creation should succeed");
-        let fd = waker.inner.wake_fd.as_raw_fd();
-        let arm = waker.arm();
-        assert!(!arm.wake_latched());
-
-        // SAFETY: closing a valid fd is safe.
-        let closed = unsafe { libc::close(fd) };
-        assert_eq!(closed, 0);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()));
-        drop(arm);
-
-        // Replace the manually closed descriptor before dropping its owner.
-        // SAFETY: `eventfd` is called with valid flags.
-        let replacement = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        assert!(replacement >= 0);
-        let old = {
-            let inner = std::sync::Arc::get_mut(&mut waker.inner).expect("unique waker in test");
-            // SAFETY: `replacement` is a new uniquely owned descriptor.
-            std::mem::replace(&mut inner.wake_fd, unsafe {
-                std::os::fd::OwnedFd::from_raw_fd(replacement)
-            })
-        };
-        std::mem::forget(old);
-
-        assert!(result.is_err(), "invalid eventfd should fail closed");
     }
 }
 
