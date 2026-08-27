@@ -1059,7 +1059,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
             // One worker cannot overlap a hand-off (always inline, untimed); a manual strategy
             // has no policy (keep spawn's unconditional hand-off). Otherwise the policy decides
-            // from the measured hand-off and job costs.
+            // from the measured job cost and offload round trip.
             let ((execution, measure), policy) = if threads <= 1 {
                 ((policy::SpawnExecution::Inline, false), None)
             } else {
@@ -1075,15 +1075,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     let start = measure.then(Instant::now);
                     let result = f(self.clone());
                     if let (Some(start), Some(policy)) = (start, policy) {
-                        policy.record_spawn_inline(caller, len, threads, start.elapsed());
+                        policy.record_spawn_job(caller, len, threads, start.elapsed());
                     }
                     Either::Left(future::ready(result))
                 }
                 policy::SpawnExecution::Offload => {
-                    // Offload: hand the job to the pool. The worker records the sample before
-                    // sending the result, so measurement is independent of how (or whether) the
-                    // caller polls the returned future.
-                    let handoff_start = measure.then(Instant::now);
+                    // Offload: hand the job to the pool. The worker records the job wall before
+                    // sending the result (so job estimates survive a dropped future), and the
+                    // awaiting future records the round-trip overhead when it observes the
+                    // result.
+                    let spawn_start = measure.then(Instant::now);
                     let (tx, mut rx) = oneshot::channel();
                     let s = self.clone();
                     let pool = self.thread_pool.clone();
@@ -1092,33 +1093,25 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     } else {
                         None
                     };
+                    let worker_recorder = recorder.clone();
                     self.thread_pool.spawn(move || {
-                        // The hand-off ends when the job starts here: channel setup, clones,
-                        // enqueue, queue wait, and worker wake. `Instant` is monotonic across
-                        // threads, so the caller-captured start is valid on this one.
-                        let handoff = handoff_start.map(|start| start.elapsed());
-                        let job_start = handoff.is_some().then(Instant::now);
+                        let job_start = worker_recorder.is_some().then(Instant::now);
 
                         // Catch the panic so a panicking job propagates to the awaiting task
                         // rather than aborting the process (rayon aborts on an uncaught panic in
                         // a spawned job).
                         let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
+                        let job = job_start.map(|start| start.elapsed());
 
                         // Record successful runs only, matching the inline arm: a panicked job's
                         // wall time says nothing about the job size.
                         if result.is_ok()
-                            && let (Some((policy, caller, len, threads)), Some(handoff), Some(start)) =
-                                (recorder, handoff, job_start)
+                            && let (Some((policy, caller, len, threads)), Some(job)) =
+                                (worker_recorder, job)
                         {
-                            policy.record_spawn_offload(
-                                caller,
-                                len,
-                                threads,
-                                handoff,
-                                start.elapsed(),
-                            );
+                            policy.record_spawn_job(caller, len, threads, job);
                         }
-                        let _ = tx.send(result);
+                        let _ = tx.send((result, job));
                     });
                     Either::Right(async move {
                         // When the polling thread is itself a member of the pool, waiting on the
@@ -1126,21 +1119,39 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         // pool work inline until the job completes or another worker takes over.
                         // `yield_now` returns `None` when this thread is not a pool member, so
                         // external callers fall through to the channel immediately.
-                        loop {
-                            if let Ok(Some(result)) = rx.try_recv() {
-                                return match result {
-                                    Ok(value) => value,
-                                    Err(payload) => panic::resume_unwind(payload),
-                                };
+                        let (result, job) = loop {
+                            if let Ok(Some(payload)) = rx.try_recv() {
+                                break payload;
                             }
                             if !matches!(pool.yield_now(), Some(Yield::Executed)) {
-                                break;
+                                break rx.await.unwrap_or_else(|_| {
+                                    panic!("strategy job dropped before completion")
+                                });
                             }
-                        }
-                        match rx.await {
-                            Ok(Ok(value)) => value,
-                            Ok(Err(payload)) => panic::resume_unwind(payload),
-                            Err(_) => panic!("strategy job dropped before completion"),
+                        };
+                        match result {
+                            Ok(value) => {
+                                // The round trip is everything around the job itself: hand-off
+                                // setup, queueing, worker wake, result send, task wake, and this
+                                // poll. A late poll inflates the sample with overlap slack, which
+                                // only ever biases toward inline, and the policy's budget caps
+                                // what that bias can buy.
+                                if let (
+                                    Some((policy, caller, len, threads)),
+                                    Some(job),
+                                    Some(start),
+                                ) = (recorder, job, spawn_start)
+                                {
+                                    policy.record_spawn_overhead(
+                                        caller,
+                                        len,
+                                        threads,
+                                        start.elapsed().saturating_sub(job),
+                                    );
+                                }
+                                value
+                            }
+                            Err(payload) => panic::resume_unwind(payload),
                         }
                     })
                 }

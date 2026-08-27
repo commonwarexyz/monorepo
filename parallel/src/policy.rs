@@ -125,10 +125,10 @@ impl Policy {
     }
 
     /// Chooses where to run a spawned job (inline on the calling task when the job is measured
-    /// cheaper than the pool hand-off itself, offloaded to the pool otherwise) and whether the
-    /// caller should time the run and feed the sample back via
-    /// [`record_spawn_inline`](Self::record_spawn_inline) or
-    /// [`record_spawn_offload`](Self::record_spawn_offload).
+    /// cheaper than the round trip of offloading it, offloaded to the pool otherwise) and whether
+    /// the caller should time the run and feed the samples back via
+    /// [`record_spawn_job`](Self::record_spawn_job) and
+    /// [`record_spawn_overhead`](Self::record_spawn_overhead).
     pub(super) fn choose_spawn(
         &self,
         caller: &'static Location<'static>,
@@ -146,8 +146,9 @@ impl Policy {
             .choose(SPAWN_INLINE_BUDGET_NS)
     }
 
-    /// Records the wall time of a spawned job that ran inline on the calling task.
-    pub(super) fn record_spawn_inline(
+    /// Records a spawned job's own wall time, measured on the caller for inline runs and on the
+    /// worker for offloaded runs.
+    pub(super) fn record_spawn_job(
         &self,
         caller: &'static Location<'static>,
         len: usize,
@@ -158,30 +159,33 @@ impl Policy {
             return;
         }
         let key = Key::new(caller, len, len, parallelism);
-        let job = u64::try_from(job.as_nanos()).unwrap_or(u64::MAX);
-        self.spawn_entries.entry(key).or_default().record_job(job);
-    }
-
-    /// Records one offloaded spawn: `handoff` spans spawn entry to job start on the worker
-    /// (setup, enqueue, queue wait, and worker wake) and `job` is the job's own wall time there.
-    pub(super) fn record_spawn_offload(
-        &self,
-        caller: &'static Location<'static>,
-        len: usize,
-        parallelism: usize,
-        handoff: Duration,
-        job: Duration,
-    ) {
-        if parallelism <= 1 {
-            return;
-        }
-        let key = Key::new(caller, len, len, parallelism);
-        let handoff = u64::try_from(handoff.as_nanos()).unwrap_or(u64::MAX);
         let job = u64::try_from(job.as_nanos()).unwrap_or(u64::MAX);
         self.spawn_entries
             .entry(key)
             .or_default()
-            .record_offload(handoff, job);
+            .job_ns
+            .record(job);
+    }
+
+    /// Records one offloaded spawn's round-trip overhead: the elapsed time from spawn entry to
+    /// the result being observed by the awaiting future, minus the job's own wall time.
+    pub(super) fn record_spawn_overhead(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        parallelism: usize,
+        overhead: Duration,
+    ) {
+        if parallelism <= 1 {
+            return;
+        }
+        let key = Key::new(caller, len, len, parallelism);
+        let overhead = u64::try_from(overhead.as_nanos()).unwrap_or(u64::MAX);
+        self.spawn_entries
+            .entry(key)
+            .or_default()
+            .overhead_ns
+            .record(overhead);
     }
 
     #[cfg(test)]
@@ -201,7 +205,7 @@ impl Policy {
         let key = Key::new(caller, len, len, parallelism);
         self.spawn_entries
             .get(&key)
-            .is_some_and(|entry| entry.handoff_ns.get().is_some() || entry.job_ns.get().is_some())
+            .is_some_and(|entry| entry.overhead_ns.get().is_some() || entry.job_ns.get().is_some())
     }
 
     #[cfg(test)]
@@ -403,13 +407,17 @@ impl Entry {
 
 /// Timing state for one spawn [`Key`].
 ///
-/// Since caller overlap cannot be observed, the policy inlines only when the job EWMA is no greater
-/// than both the hand-off EWMA and [`SPAWN_INLINE_BUDGET_NS`]. Hand-off samples include setup,
-/// queueing, and worker wake.
+/// Since caller overlap cannot be observed, the policy inlines only when the job EWMA is no
+/// greater than both the offload round-trip overhead EWMA and [`SPAWN_INLINE_BUDGET_NS`]. The
+/// overhead is everything an offloaded run costs around the job itself (hand-off setup, queueing,
+/// worker wake, result send, task wake, and the observing poll), so a caller that waits on the
+/// result inlines whenever that is measured cheaper. A caller that polls late inflates its
+/// overhead samples with overlap slack, which biases toward inline, and the budget bounds what
+/// that bias can place on the calling task.
 #[derive(Clone, Copy, Debug, Default)]
 struct SpawnEntry {
-    // Spawn entry to job start on a worker: setup, enqueue, queue wait, and worker wake.
-    handoff_ns: Estimate,
+    // Spawn entry to result observed, minus the job's own wall time, from offloaded runs.
+    overhead_ns: Estimate,
     // The job's own wall time, fed by offload and inline runs alike.
     job_ns: Estimate,
     cadence: Cadence,
@@ -420,13 +428,13 @@ impl SpawnEntry {
     // EWMA eligible for inlining.
     fn choose(&mut self, budget: u64) -> (SpawnExecution, bool) {
         // Seed both estimates from an offloaded run before ever inlining.
-        let (Some(handoff_ns), Some(job_ns)) = (self.handoff_ns.get(), self.job_ns.get()) else {
+        let (Some(overhead_ns), Some(job_ns)) = (self.overhead_ns.get(), self.job_ns.get()) else {
             self.cadence.saturate();
             return (SpawnExecution::Offload, true);
         };
 
         // Ties go to inline: equal cost for one fewer pool wake.
-        let threshold = handoff_ns.min(budget);
+        let threshold = overhead_ns.min(budget);
         if job_ns > threshold {
             // Offload steady state. Measured runs keep both estimates live, so the entry flips
             // to inline on its own once the evidence clears the threshold: no inline probe is
@@ -435,26 +443,13 @@ impl SpawnEntry {
             return (SpawnExecution::Offload, tick.boundary || tick.measure);
         }
 
-        // Inline steady state: the boundary hands one call back to the pool so the hand-off
+        // Inline steady state: the boundary hands one call back to the pool so the overhead
         // estimate tracks the live pool.
         let tick = self.cadence.tick(job_ns, threshold);
         if tick.boundary {
             return (SpawnExecution::Offload, true);
         }
         (SpawnExecution::Inline, tick.measure)
-    }
-
-    // Folds one job-wall sample into this entry (measured on the caller for inline runs and on
-    // the worker for offloaded runs).
-    fn record_job(&mut self, job_ns: u64) {
-        self.job_ns.record(job_ns);
-    }
-
-    // Folds one offloaded run into this entry: the hand-off (spawn entry to job start on the
-    // worker) and the job's own wall time there.
-    fn record_offload(&mut self, handoff_ns: u64, job_ns: u64) {
-        self.handoff_ns.record(handoff_ns);
-        self.job_ns.record(job_ns);
     }
 }
 
@@ -952,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_seeds_offload_then_inlines_a_sub_handoff_job() {
+    fn spawn_seeds_offload_then_inlines_a_sub_overhead_job() {
         let mut entry = SpawnEntry::default();
 
         // The first call seeds both estimates from an offloaded run.
@@ -960,17 +955,19 @@ mod tests {
             entry.choose(SPAWN_INLINE_BUDGET_NS),
             (SpawnExecution::Offload, true)
         );
-        // A 2us job behind a 50us hand-off.
-        entry.record_offload(50_000, 2_000);
+        // A 2us job behind a 50us round-trip overhead.
+        entry.job_ns.record(2_000);
+        entry.overhead_ns.record(50_000);
 
         // The seed leaves the entry due for an immediate boundary, which re-measures offload.
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
             (SpawnExecution::Offload, true)
         );
-        entry.record_offload(50_000, 2_000);
+        entry.job_ns.record(2_000);
+        entry.overhead_ns.record(50_000);
 
-        // The job costs less than the hand-off and fits the budget, so it runs inline.
+        // The job costs less than the overhead and fits the budget, so it runs inline.
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
             (SpawnExecution::Inline, false)
@@ -978,21 +975,23 @@ mod tests {
     }
 
     #[test]
-    fn spawn_keeps_offloading_a_job_bigger_than_the_handoff() {
-        // A 50us job behind a 5us hand-off: inline must never fire even though the job is far
-        // under the budget, because offloading is cheaper for the caller under any polling.
+    fn spawn_keeps_offloading_a_job_bigger_than_the_overhead() {
+        // A 50us job behind a 5us round-trip overhead: inline must never fire even though the job
+        // is far under the budget, because offloading is cheaper under any polling.
         let mut entry = SpawnEntry::default();
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
             (SpawnExecution::Offload, true)
         );
-        entry.record_offload(5_000, 50_000);
+        entry.job_ns.record(50_000);
+        entry.overhead_ns.record(5_000);
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
             match entry.choose(SPAWN_INLINE_BUDGET_NS) {
                 (SpawnExecution::Offload, measure) => {
                     if measure {
-                        entry.record_offload(5_000, 50_000);
+                        entry.job_ns.record(50_000);
+                        entry.overhead_ns.record(5_000);
                     }
                 }
                 (execution, _) => panic!("expected offload, got {execution:?}"),
@@ -1001,21 +1000,23 @@ mod tests {
     }
 
     #[test]
-    fn spawn_budget_caps_inline_when_the_handoff_is_inflated() {
-        // A contended pool measured the hand-off at 50ms. The 2ms job is cheaper than that, but its
+    fn spawn_budget_caps_inline_when_the_overhead_is_inflated() {
+        // A contended pool measured the round-trip overhead at 50ms. The 2ms job is cheaper, but its
         // EWMA exceeds the inline budget, so it remains offloaded.
         let mut entry = SpawnEntry::default();
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
             (SpawnExecution::Offload, true)
         );
-        entry.record_offload(50_000_000, 2_000_000);
+        entry.job_ns.record(2_000_000);
+        entry.overhead_ns.record(50_000_000);
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
             match entry.choose(SPAWN_INLINE_BUDGET_NS) {
                 (SpawnExecution::Offload, measure) => {
                     if measure {
-                        entry.record_offload(50_000_000, 2_000_000);
+                        entry.job_ns.record(2_000_000);
+                        entry.overhead_ns.record(50_000_000);
                     }
                 }
                 (execution, _) => panic!("expected offload, got {execution:?}"),
@@ -1036,12 +1037,13 @@ mod tests {
 
     #[test]
     fn spawn_uses_job_ewma() {
-        // A converged-inline entry: cheap job, expensive hand-off.
+        // A converged-inline entry: cheap job, expensive round trip.
         let mut entry = SpawnEntry::default();
-        entry.record_offload(50_000, 2_000);
+        entry.job_ns.record(2_000);
+        entry.overhead_ns.record(50_000);
 
-        // The latest sample exceeds the hand-off, but the EWMA remains below it.
-        entry.record_job(100_000);
+        // The latest sample exceeds the overhead, but the EWMA remains below it.
+        entry.job_ns.record(100_000);
         assert_eq!(entry.job_ns.get(), Some(21_600));
         assert!(matches!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
@@ -1054,8 +1056,9 @@ mod tests {
         // A spike revoked inline placement. Offloaded runs keep measuring the job small, so the
         // estimates decay and inline returns without any dedicated probe.
         let mut entry = SpawnEntry::default();
-        entry.record_offload(50_000, 2_000);
-        entry.record_job(15_000_000);
+        entry.job_ns.record(2_000);
+        entry.overhead_ns.record(50_000);
+        entry.job_ns.record(15_000_000);
 
         let mut calls = 0;
         loop {
@@ -1063,7 +1066,8 @@ mod tests {
                 (SpawnExecution::Inline, _) => break,
                 (SpawnExecution::Offload, measure) => {
                     if measure {
-                        entry.record_offload(50_000, 2_000);
+                        entry.job_ns.record(2_000);
+                        entry.overhead_ns.record(50_000);
                     }
                 }
             }
@@ -1077,10 +1081,11 @@ mod tests {
 
     #[test]
     fn spawn_inline_records_on_cadence_and_probes_offload() {
-        // The hand-off is within 2x of the job, so the shared cadence probes at its base
+        // The overhead is within 2x of the job, so the shared cadence probes at its base
         // interval.
         let mut entry = SpawnEntry::default();
-        entry.record_offload(50_000, 30_000);
+        entry.job_ns.record(30_000);
+        entry.overhead_ns.record(50_000);
 
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
@@ -1092,7 +1097,7 @@ mod tests {
                 "call {i}"
             );
         }
-        // The boundary hands one call back to the pool so the hand-off estimate stays live.
+        // The boundary hands one call back to the pool so the overhead estimate stays live.
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
             (SpawnExecution::Offload, true)
@@ -1104,7 +1109,8 @@ mod tests {
         // Inline wins by 25x, so the offload probe backs off to the capped interval while the
         // measure cadence continues, matching the serial-vs-parallel entries.
         let mut entry = SpawnEntry::default();
-        entry.record_offload(50_000, 2_000);
+        entry.job_ns.record(2_000);
+        entry.overhead_ns.record(50_000);
 
         let interval = RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT;
         for i in 1..interval {
