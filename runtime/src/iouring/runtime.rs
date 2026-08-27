@@ -125,7 +125,7 @@ use std::{
 };
 
 mod task;
-use self::task::{Erased, Tasks};
+use self::task::{ErasedTask, Tasks};
 
 cfg_if::cfg_if! {
     if #[cfg(test)] {
@@ -475,7 +475,7 @@ struct Shared {
     storage_buffer_pool: BufferPool,
     /// Serializes filesystem-shape storage operations (open, remove, scan)
     /// across all workers sharing the runtime's storage directory.
-    storage_lock: Arc<Mutex<()>>,
+    metadata_lock: Arc<Mutex<()>>,
     /// Threads running dedicated workers, joined when the root worker exits.
     ///
     /// `None` once the root has joined every worker: a dedicated spawn racing
@@ -744,7 +744,7 @@ impl Worker {
                 shared.cfg.storage_directory.clone(),
                 handle.clone(),
                 shared.storage_buffer_pool.clone(),
-                Arc::clone(&shared.storage_lock),
+                Arc::clone(&shared.metadata_lock),
             ),
             &mut runtime_registry,
         );
@@ -812,7 +812,7 @@ impl Worker {
         // Reusable ready-task buffer, local to this frame. Its capacity stays
         // at the batch high-water mark so a busy executor does not allocate
         // per iteration, and by teardown no task is parked in it.
-        let mut scratch: Vec<Arc<dyn Erased>> = Vec::with_capacity(READY_TASKS_PER_TURN);
+        let mut scratch: Vec<Arc<dyn ErasedTask>> = Vec::with_capacity(READY_TASKS_PER_TURN);
 
         // Process tasks until the root task completes.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
@@ -1030,7 +1030,7 @@ impl crate::Runner for Runner {
             panicker,
             network_buffer_pool,
             storage_buffer_pool,
-            storage_lock: Arc::new(Mutex::new(())),
+            metadata_lock: Arc::new(Mutex::new(())),
             workers: Mutex::new(Some(Vec::new())),
             worker_panic: Mutex::new(None),
         });

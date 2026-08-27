@@ -5,7 +5,7 @@
 //! and a compact state machine that coalesces repeated wakes into one ready-lane
 //! entry. A notification received while polling is queued only if that poll
 //! returns `Pending`, so wake-then-complete futures leave no stale token.
-//! Polling crosses a single type-erased boundary ([Erased]) so the
+//! Polling crosses a single type-erased boundary ([ErasedTask]) so the
 //! compiler sees the concrete future type inside the monomorphized cell.
 //! [Tasks] owns normal and event-ready FIFO lanes plus the arena of running
 //! tasks. Initial polls, task self-wakes, and foreign-thread wakes use the
@@ -51,7 +51,7 @@ use std::{
 /// so the only dynamic dispatch on the poll path is this trait: inside the
 /// monomorphized [TaskCell] methods the compiler sees the concrete future
 /// type end to end.
-pub(super) trait Erased: Send + Sync {
+pub(super) trait ErasedTask: Send + Sync {
     /// Poll the stored future, returning its arena slot only when this call
     /// completed it (the caller then frees that slot). `tasks` is the owner
     /// that supplied this ready token and receives any deferred self-wake.
@@ -222,7 +222,7 @@ where
             return;
         }
         if let Some(tasks) = self.tasks.upgrade() {
-            tasks.queue_wake(Arc::clone(self) as Arc<dyn Erased>);
+            tasks.queue_wake(Arc::clone(self) as Arc<dyn ErasedTask>);
         }
     }
 
@@ -234,7 +234,7 @@ where
         let Some(tasks) = self.tasks.upgrade() else {
             return;
         };
-        tasks.queue_wake(self as Arc<dyn Erased>);
+        tasks.queue_wake(self as Arc<dyn ErasedTask>);
     }
 
     /// Publish the notification retained during a poll that returned
@@ -243,7 +243,7 @@ where
         // A notification received while the task was running always belongs
         // to the normal lane. Event delivery cannot poll tasks, and a direct
         // unit-test event guard must not change this handoff's classification.
-        tasks.queue_normal(self as Arc<dyn Erased>);
+        tasks.queue_normal(self as Arc<dyn ErasedTask>);
     }
 }
 
@@ -260,7 +260,7 @@ where
     }
 }
 
-impl<F> Erased for TaskCell<F>
+impl<F> ErasedTask for TaskCell<F>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -285,7 +285,7 @@ where
                 let future = slot.as_mut().expect("queued task must retain its future");
                 // SAFETY: the future lives inside this task's Arc allocation
                 // and is never moved out of it: completion (below) and
-                // teardown ([Erased::clear]) both drop it in place by
+                // teardown ([ErasedTask::clear]) both drop it in place by
                 // overwriting the option with None.
                 let future = unsafe { Pin::new_unchecked(future) };
                 match future.poll(&mut cx) {
@@ -347,7 +347,7 @@ impl ArcWake for RootWaker {
 /// The arena of running tasks.
 struct Running {
     /// Task slots. Freed slots are recycled through `free`.
-    slots: Vec<Option<Arc<dyn Erased>>>,
+    slots: Vec<Option<Arc<dyn ErasedTask>>>,
     /// Recycled slot indices.
     free: Vec<usize>,
 }
@@ -368,9 +368,9 @@ enum ReadyLane {
 /// order within each lane.
 struct Ready {
     /// Ordinary readiness in arrival order.
-    normal: VecDeque<Arc<dyn Erased>>,
+    normal: VecDeque<Arc<dyn ErasedTask>>,
     /// Event-delivered readiness in arrival order.
-    event: VecDeque<Arc<dyn Erased>>,
+    event: VecDeque<Arc<dyn ErasedTask>>,
 }
 
 /// Move exactly `count` tokens from the front of `lane` into `scratch`.
@@ -378,8 +378,8 @@ struct Ready {
 /// Callers cap `count` to the lane length before entering this hot loop.
 #[inline]
 fn drain_front(
-    lane: &mut VecDeque<Arc<dyn Erased>>,
-    scratch: &mut Vec<Arc<dyn Erased>>,
+    lane: &mut VecDeque<Arc<dyn ErasedTask>>,
+    scratch: &mut Vec<Arc<dyn ErasedTask>>,
     count: usize,
 ) {
     for _ in 0..count {
@@ -505,18 +505,18 @@ impl Tasks {
                 // through a moved context.
                 future: Affine::pinned(arc_self.owner, RefCell::new(Some(future))),
             });
-            running.slots[slot] = Some(Arc::clone(&cell) as Arc<dyn Erased>);
+            running.slots[slot] = Some(Arc::clone(&cell) as Arc<dyn ErasedTask>);
             cell
         };
 
         // Queue the first poll.
-        arc_self.queue_normal(cell as Arc<dyn Erased>);
+        arc_self.queue_normal(cell as Arc<dyn ErasedTask>);
         true
     }
 
     /// Enqueue an initial poll or deferred running notification at the back
     /// of the normal lane.
-    fn queue_normal(&self, task: Arc<dyn Erased>) {
+    fn queue_normal(&self, task: Arc<dyn ErasedTask>) {
         let mut ready = self.ready.lock();
         ready.normal.push_back(task);
         drop(ready);
@@ -530,7 +530,7 @@ impl Tasks {
     /// an event-delivery phase enters the event lane. Foreign wakes remain
     /// normal even if they race such a phase, and task self-wakes remain
     /// normal because task polling is outside it.
-    fn queue_wake(&self, task: Arc<dyn Erased>) {
+    fn queue_wake(&self, task: Arc<dyn ErasedTask>) {
         let foreign = current_thread_id() != self.owner;
         let lane = if !foreign && self.delivering_events.load(Ordering::Relaxed) {
             ReadyLane::Event
@@ -587,7 +587,7 @@ impl Tasks {
     /// parking, while retained scratch capacity avoids later allocations.
     pub(super) fn drain_into(
         &self,
-        scratch: &mut Vec<Arc<dyn Erased>>,
+        scratch: &mut Vec<Arc<dyn ErasedTask>>,
         limit: usize,
         event_quota: usize,
     ) {

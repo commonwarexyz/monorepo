@@ -41,7 +41,7 @@ fn ready_cell(tasks: &Arc<Tasks>, slot: usize) -> Arc<TaskCell<std::future::Read
 }
 
 /// Poll a drained batch of ready tokens and return their completion slots.
-fn completed_slots(owner: &Tasks, tasks: &mut Vec<Arc<dyn Erased>>) -> Vec<usize> {
+fn completed_slots(owner: &Tasks, tasks: &mut Vec<Arc<dyn ErasedTask>>) -> Vec<usize> {
     tasks
         .drain(..)
         .map(|task| task.poll(owner).expect("ready token must complete"))
@@ -49,7 +49,7 @@ fn completed_slots(owner: &Tasks, tasks: &mut Vec<Arc<dyn Erased>>) -> Vec<usize
 }
 
 /// Append an unregistered token to one ready lane without unparking.
-fn queue_token(tasks: &Tasks, task: Arc<dyn Erased>, lane: ReadyLane) {
+fn queue_token(tasks: &Tasks, task: Arc<dyn ErasedTask>, lane: ReadyLane) {
     let mut ready = tasks.ready.lock();
     match lane {
         ReadyLane::Normal => ready.normal.push_back(task),
@@ -179,7 +179,7 @@ fn test_event_wake_does_not_promote_queued_normal_token() {
     assert!(tasks.take_root_ready());
     let cell = pending_cell(&tasks, 7, true);
     let task_waker = waker(Arc::clone(&cell));
-    queue_token(&tasks, cell as Arc<dyn Erased>, ReadyLane::Normal);
+    queue_token(&tasks, cell as Arc<dyn ErasedTask>, ReadyLane::Normal);
 
     {
         let _event_delivery = tasks.event_delivery();
@@ -216,7 +216,7 @@ fn test_task_poll_self_wake_uses_normal_lane() {
         state: TaskState::queued(),
         future: Affine::pinned(std::thread::current().id(), RefCell::new(Some(WakePending))),
     });
-    queue_token(&tasks, cell as Arc<dyn Erased>, ReadyLane::Normal);
+    queue_token(&tasks, cell as Arc<dyn ErasedTask>, ReadyLane::Normal);
 
     let mut scratch = Vec::new();
     tasks.drain_into(&mut scratch, 1, 1);
@@ -272,7 +272,7 @@ fn test_foreign_wake_during_poll_follows_poll_result() {
                 })),
             ),
         });
-        queue_token(&tasks, cell as Arc<dyn Erased>, ReadyLane::Normal);
+        queue_token(&tasks, cell as Arc<dyn ErasedTask>, ReadyLane::Normal);
 
         let foreign = std::thread::spawn(move || {
             waker_recv.recv().unwrap().wake();

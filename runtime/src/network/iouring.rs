@@ -3,11 +3,11 @@
 //!
 //! ## Architecture
 //!
-//! Network operations (including accept and connect) are submitted through an io_uring `Handle`
+//! Network operations (including accept and connect) are submitted through a `DriverHandle`
 //! to the event loop that services the ring, which the `iouring` runtime drives on the runtime
 //! thread. Socket creation and bind are cheap non-blocking syscalls performed inline.
 //!
-//! Each worker owns the handle used by its network backend and by the resources
+//! Each worker owns the driver handle used by its network backend and by the resources
 //! that backend creates:
 //!
 //! ```text
@@ -193,20 +193,20 @@ pub struct Network {
     /// Network configuration.
     cfg: Config,
     /// Used to submit operations to the io_uring event loop.
-    handle: iouring::DriverHandle,
+    driver_handle: iouring::DriverHandle,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
 
 impl Network {
-    /// Returns a new [Network] instance that submits operations through `handle`.
+    /// Returns a new [Network] instance that submits operations through `driver_handle`.
     ///
-    /// The caller should take special care to ensure the ring backing `handle` is
+    /// The caller should take special care to ensure the ring backing `driver_handle` is
     /// large enough, given the number of connections that will be maintained.
     /// Each in-flight send/recv to/from each connection consumes a ring slot, as
     /// does each in-flight accept and connect.
-    pub(crate) const fn new(cfg: Config, handle: iouring::DriverHandle, pool: BufferPool) -> Self {
-        Self { cfg, handle, pool }
+    pub(crate) const fn new(cfg: Config, driver_handle: iouring::DriverHandle, pool: BufferPool) -> Self {
+        Self { cfg, driver_handle, pool }
     }
 }
 
@@ -214,7 +214,7 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        self.handle.assert_owner();
+        self.driver_handle.assert_owner();
         // Create the listening socket inline: socket setup, bind, and listen
         // are cheap non-blocking syscalls.
         let fd = new_socket(&socket).map_err(|_| Error::BindFailed)?;
@@ -243,9 +243,9 @@ impl crate::Network for Network {
             cfg: self.cfg.clone(),
             fd: Arc::new(fd),
             local_addr,
-            handle: self.handle.clone(),
+            driver_handle: self.driver_handle.clone(),
             pool: self.pool.clone(),
-            pending: None,
+            pending_accept: None,
         })
     }
 
@@ -253,7 +253,7 @@ impl crate::Network for Network {
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
-        self.handle.assert_owner();
+        self.driver_handle.assert_owner();
         let fd = Arc::new(new_socket(&socket).map_err(|_| Error::ConnectionFailed)?);
 
         // Apply socket options before connecting.
@@ -262,13 +262,13 @@ impl crate::Network for Network {
         // Connect through the ring. Deadline expiry cancels the in-flight
         // connect and resolves the dial with [Error::Timeout].
         let deadline = Instant::now() + self.cfg.connect_timeout;
-        self.handle.connect(fd.clone(), socket, deadline).await?;
+        self.driver_handle.connect(fd.clone(), socket, deadline).await?;
 
         Ok((
-            Sink::new(fd.clone(), self.handle.clone(), self.cfg.read_write_timeout),
+            Sink::new(fd.clone(), self.driver_handle.clone(), self.cfg.read_write_timeout),
             Stream::new(
                 fd,
-                self.handle.clone(),
+                self.driver_handle.clone(),
                 self.cfg.read_write_timeout,
                 self.cfg.read_buffer_size,
                 self.pool.clone(),
@@ -286,16 +286,16 @@ pub struct Listener {
     /// Address the listener is bound to.
     local_addr: SocketAddr,
     /// Used to submit operations to the io_uring event loop.
-    handle: iouring::DriverHandle,
+    driver_handle: iouring::DriverHandle,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
     /// In-flight accept, retained so a cancelled accept future resumes the
     /// same request instead of losing an accepted connection.
     ///
     /// A connection accepted between `accept` calls moves into the ticket's
-    /// Ready completion entry until the next call takes it or the listener
+    /// Ready ticket entry until the next call takes it or the listener
     /// drops. The request's waiter slot is already free at that point.
-    pending: Option<iouring::AcceptTicket>,
+    pending_accept: Option<iouring::AcceptTicket>,
 }
 
 impl crate::Listener for Listener {
@@ -305,26 +305,30 @@ impl crate::Listener for Listener {
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         loop {
             // Issue a fresh accept if none is in flight.
-            if self.pending.is_none() {
+            if self.pending_accept.is_none() {
                 let deadline = Instant::now() + self.cfg.read_write_timeout;
-                self.pending = Some(self.handle.start_accept(self.fd.clone(), deadline).await);
+                self.pending_accept =
+                    Some(self.driver_handle.start_accept(self.fd.clone(), deadline).await);
             }
 
             // Wait on the in-flight accept. If this future is dropped, the
-            // ticket stays in `self.pending` and the next call resumes it.
-            let ticket = self.pending.as_mut().expect("pending accept was just set");
+            // ticket stays in `self.pending_accept` and the next call resumes it.
+            let ticket = self
+                .pending_accept
+                .as_mut()
+                .expect("pending accept was just set");
             let result = ticket.await;
-            self.pending = None;
+            self.pending_accept = None;
             match result {
                 Ok((fd, remote_addr)) => {
                     let fd = Arc::new(fd);
                     configure_socket(&fd, &self.cfg);
                     return Ok((
                         remote_addr,
-                        Sink::new(fd.clone(), self.handle.clone(), self.cfg.read_write_timeout),
+                        Sink::new(fd.clone(), self.driver_handle.clone(), self.cfg.read_write_timeout),
                         Stream::new(
                             fd,
-                            self.handle.clone(),
+                            self.driver_handle.clone(),
                             self.cfg.read_write_timeout,
                             self.cfg.read_buffer_size,
                             self.pool.clone(),
@@ -343,7 +347,7 @@ impl crate::Listener for Listener {
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
-        self.handle.assert_owner();
+        self.driver_handle.assert_owner();
         Ok(self.local_addr)
     }
 }
@@ -353,7 +357,7 @@ pub struct Sink {
     /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
-    handle: iouring::DriverHandle,
+    driver_handle: iouring::DriverHandle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
     /// Tracks this sink's lifecycle.
@@ -372,10 +376,10 @@ enum SinkState {
 
 impl Sink {
     /// Construct a sink that submits logical send requests through one io_uring loop.
-    const fn new(fd: Arc<OwnedFd>, handle: iouring::DriverHandle, timeout: Duration) -> Self {
+    const fn new(fd: Arc<OwnedFd>, driver_handle: iouring::DriverHandle, timeout: Duration) -> Self {
         Self {
             fd,
-            handle,
+            driver_handle,
             timeout,
             state: SinkState::Open,
         }
@@ -406,7 +410,7 @@ impl Drop for Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.handle.assert_owner();
+        self.driver_handle.assert_owner();
         match self.state {
             SinkState::Open => {}
             SinkState::Sending => {
@@ -426,7 +430,7 @@ impl crate::Sink for Sink {
         self.state = SinkState::Sending;
 
         let result = self
-            .handle
+            .driver_handle
             .send(self.fd.clone(), bufs, Instant::now() + self.timeout)
             .await;
 
@@ -450,7 +454,7 @@ pub struct Stream {
     /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
-    handle: iouring::DriverHandle,
+    driver_handle: iouring::DriverHandle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Tracks whether a previous recv failure has made this stream unusable.
@@ -469,14 +473,14 @@ impl Stream {
     /// Construct a stream with an optional internal read buffer.
     fn new(
         fd: Arc<OwnedFd>,
-        handle: iouring::DriverHandle,
+        driver_handle: iouring::DriverHandle,
         timeout: Duration,
         buffer_capacity: usize,
         pool: BufferPool,
     ) -> Self {
         Self {
             fd,
-            handle,
+            driver_handle,
             timeout,
             poisoned: false,
             buffer: IoBufMut::with_capacity(buffer_capacity),
@@ -495,7 +499,7 @@ impl Stream {
         let len = buffer.capacity();
 
         self.buffer_len = match self
-            .handle
+            .driver_handle
             .recv(self.fd.clone(), buffer, 0, len, false, deadline)
             .await
         {
@@ -516,7 +520,7 @@ impl Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
-        self.handle.assert_owner();
+        self.driver_handle.assert_owner();
         if self.poisoned {
             return Err(Error::Closed);
         }
@@ -551,7 +555,7 @@ impl crate::Stream for Stream {
                 let buffer_capacity = self.buffer.capacity();
                 if buffer_capacity == 0 || remaining >= buffer_capacity {
                     match self
-                        .handle
+                        .driver_handle
                         .recv(
                             self.fd.clone(),
                             owned_buf,
@@ -587,7 +591,7 @@ impl crate::Stream for Stream {
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
-        self.handle.assert_owner();
+        self.driver_handle.assert_owner();
         let buffered = self.buffer_len - self.buffer_pos;
         let len = std::cmp::min(buffered, max_len);
         &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len]

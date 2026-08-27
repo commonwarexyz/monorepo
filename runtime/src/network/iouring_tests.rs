@@ -515,7 +515,7 @@ fn test_closed_driver_public_dial_and_accept() {
         Err(Error::Closed)
     ));
     assert!(
-        listener.pending.is_none(),
+        listener.pending_accept.is_none(),
         "a failed accept must not retain a pending ticket"
     );
 

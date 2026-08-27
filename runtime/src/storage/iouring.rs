@@ -106,28 +106,28 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 /// for the blocking rules and lifecycle).
 #[derive(Clone)]
 pub struct Storage {
-    lock: Arc<Mutex<()>>,
+    metadata_lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
-    io_handle: iouring::DriverHandle,
+    driver_handle: iouring::DriverHandle,
     pool: BufferPool,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance that submits I/O through the driver.
     ///
-    /// `lock` serializes filesystem-shape operations (open, remove, scan).
+    /// `metadata_lock` serializes filesystem-shape operations (open, remove, scan).
     /// Every instance sharing a storage directory must share the same lock,
     /// so the runtime passes one lock to all of its workers.
     pub(crate) const fn new(
         storage_directory: PathBuf,
-        io_handle: iouring::DriverHandle,
+        driver_handle: iouring::DriverHandle,
         pool: BufferPool,
-        lock: Arc<Mutex<()>>,
+        metadata_lock: Arc<Mutex<()>>,
     ) -> Self {
         Self {
-            lock,
+            metadata_lock,
             storage_directory,
-            io_handle,
+            driver_handle,
             pool,
         }
     }
@@ -142,11 +142,11 @@ impl crate::Storage for Storage {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Blob, u64, u16), Error> {
-        self.io_handle.assert_owner();
+        self.driver_handle.assert_owner();
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        let _guard = self.metadata_lock.lock();
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
@@ -201,7 +201,7 @@ impl crate::Storage for Storage {
             partition.into(),
             name,
             file,
-            self.io_handle.clone(),
+            self.driver_handle.clone(),
             self.pool.clone(),
             data_offset,
         );
@@ -212,7 +212,7 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        let _guard = self.metadata_lock.lock();
 
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
@@ -235,7 +235,7 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        let _guard = self.metadata_lock.lock();
 
         let path = self.storage_directory.join(partition);
 
@@ -285,7 +285,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_handle: iouring::DriverHandle,
+    driver_handle: iouring::DriverHandle,
     /// Buffer pool for read allocations
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
@@ -301,7 +301,7 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_handle: iouring::DriverHandle,
+        driver_handle: iouring::DriverHandle,
         pool: BufferPool,
         data_offset: u64,
     ) -> Self {
@@ -309,7 +309,7 @@ impl Blob {
             partition,
             name: name.to_vec(),
             file: Arc::new(file),
-            io_handle,
+            driver_handle,
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
@@ -335,7 +335,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.io_handle.assert_owner();
+        self.driver_handle.assert_owner();
         let mut input_bufs = bufs.into();
         // SAFETY: `len` bytes are filled via io_uring read loop below.
         unsafe { input_bufs.set_len(len) };
@@ -365,7 +365,7 @@ impl crate::Blob for Blob {
             iouring::Cache::Enabled
         };
         let io_buf = self
-            .io_handle
+            .driver_handle
             .read_at(self.file.clone(), offset, len, io_buf, cache)
             .await
             .map_err(|(_, err)| err)?;
@@ -385,7 +385,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        self.io_handle.assert_owner();
+        self.driver_handle.assert_owner();
         let bufs = bufs.into();
         let offset = offset
             .checked_add(self.data_offset)
@@ -400,14 +400,14 @@ impl crate::Blob for Blob {
         } else {
             iouring::Cache::Enabled
         };
-        self.io_handle
+        self.driver_handle
             .write_at(self.file.clone(), offset, bufs, options, cache)
             .await
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        self.io_handle.assert_owner();
+        self.driver_handle.assert_owner();
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
@@ -421,7 +421,7 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.io_handle
+        self.driver_handle
             .sync(self.file.clone())
             .await
             .map_err(|err| match err {
@@ -433,7 +433,7 @@ impl crate::Blob for Blob {
     async fn start_sync(&self) -> Handle<()> {
         let partition = self.partition.clone();
         let name = self.name.clone();
-        let ticket = self.io_handle.start_sync(self.file.clone()).await;
+        let ticket = self.driver_handle.start_sync(self.file.clone()).await;
         Handle::from_future(async move {
             match ticket.await {
                 Ok(()) => Ok(()),
