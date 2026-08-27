@@ -417,6 +417,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::init].
     pub(crate) async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        if let Some(clear_target) = checkpoint.clear_target() {
+            warn!(clear_target, "crash repair: completing interrupted clear");
+        }
         Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
@@ -633,15 +636,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         ))
     }
 
-    /// Complete an interrupted clear: discard all blob partitions and start fresh at
-    /// `clear_target`, then finalize the checkpoint the crashed clear left staged.
+    /// Complete a clear: discard all blob partitions and start fresh at `clear_target`, then
+    /// finalize the checkpoint.
+    ///
+    /// Runs for a reset the caller requested in this initialization and for a clear a crashed
+    /// process left staged; callers surface the latter as crash repair.
     async fn complete_staged_clear(
         context: E,
         cfg: Config,
         checkpoint: Checkpoint<E>,
         clear_target: u64,
     ) -> Result<Self, Error> {
-        warn!(clear_target, "crash repair: completing interrupted clear");
         let new_partition = format!("{}-blobs", cfg.partition);
         Partition::<E>::remove_all(&context, &cfg.partition).await?;
         Partition::<E>::remove_all(&context, &new_partition).await?;
@@ -847,8 +852,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::init_at_size].
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
-        // Fail before writing intent if existing blob partitions are already inconsistent.
-        Partition::select(&context, &cfg.partition).await?;
         Self::init_at_size_cleared(context, cfg, size, || async { Ok(()) }).await
     }
 
@@ -857,7 +860,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ///
     /// Callers that key dependent state off this journal use this to discard that state atomically
     /// with the reset. A crash at any point leaves a durable intent that the next `init` (or
-    /// [Self::init_cleared]) finishes.
+    /// [Self::init_cleared]) finishes. A journal that never durably recorded anything skips the
+    /// intent: a crash then leaves the journal fresh, and the next initialization repeats the
+    /// reset from the start.
     #[commonware_macros::stability(ALPHA)]
     pub(in crate::journal::contiguous) async fn init_at_size_cleared<F, Fut>(
         context: E,
@@ -875,9 +880,21 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return Err(Error::SizeOverflow);
         }
 
+        // Fail before writing intent if existing blob partitions are already inconsistent.
+        let (_, blobs) = Partition::select(&context, &cfg.partition).await?;
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+
+        // A journal that never durably recorded anything has nothing to reset: skip the staged
+        // intent (one durable round trip per reset) and record the cleared state directly. A
+        // crash before that single write leaves the journal fresh, and dependent state cleared
+        // below is reconciled on recovery exactly as after an append-path crash.
+        if blobs.is_empty() && checkpoint.is_fresh() {
+            clear_dependents().await?;
+            return Self::complete_staged_clear(context, cfg, checkpoint, size).await;
+        }
+
         // Stage the reset intent durably. `init_with_checkpoint` will detect the intent and
         // complete the clear before recovering bounds.
-        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         let checkpoint = checkpoint.stage_clear(size).await?;
         clear_dependents().await?;
         Self::init_with_checkpoint(context, cfg, checkpoint).await
@@ -899,7 +916,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Fut: Future<Output = Result<(), Error>>,
     {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
-        if checkpoint.clear_target().is_some() {
+        if let Some(clear_target) = checkpoint.clear_target() {
+            warn!(clear_target, "crash repair: completing interrupted clear");
             clear_dependents().await?;
         }
         Self::init_with_checkpoint(context, cfg, checkpoint).await
