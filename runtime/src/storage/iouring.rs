@@ -1,31 +1,5 @@
-//! This module provides an io_uring-based implementation of the [crate::Storage] trait,
-//! offering fast, high-throughput file operations on Linux systems.
-//!
-//! ## Architecture
-//!
-//! I/O operations are staged directly into the io_uring driver's shared state
-//! while op futures are polled on the runtime thread, and the `iouring` runtime's
-//! event loop submits them to the ring and parks their results.
-//!
-//! Each worker owns the handle used by its storage backend and by the blobs it
-//! opens:
-//!
-//! ```text
-//! worker -> Storage::open_versioned -> Blob -> worker's io_uring ring
-//! ```
-//!
-//! Use a blob and its in-flight operations on the worker that opened it. See
-//! [Blocking Metadata Operations](#blocking-metadata-operations) for synchronous
-//! paths and [`Blob`] for its I/O behavior.
-//!
-//! ## Memory Safety
-//!
-//! Buffers and file descriptors are owned by the active request state machine inside the io_uring
-//! loop, ensuring that the memory location is valid for the duration of the operation.
-//!
-//! ## Feature Flag
-//!
-//! This implementation is enabled by using the `iouring` feature.
+//! io_uring implementation of [crate::Storage]. See [crate::iouring] for
+//! runtime requirements and worker-affinity rules.
 //!
 //! ## Blocking Metadata Operations
 //!
@@ -38,15 +12,6 @@
 //! file and takes no lock. Keep these off hot paths. Data-path reads, writes, and
 //! syncs go through the ring and do not block.
 //!
-//! This blocking behavior is accepted debt, not a resolved design: offloading
-//! metadata operations belongs with the planned shared blocking pool (and
-//! `resize` with #831), so it is documented here rather than worked around
-//! piecemeal.
-//!
-//! ## Linux Only
-//!
-//! This implementation is only available on Linux systems that support io_uring.
-//! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::Header;
 use crate::{
@@ -145,19 +110,15 @@ impl crate::Storage for Storage {
         self.driver_handle.assert_owner();
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
         let _guard = self.metadata_lock.lock();
 
-        // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
         let parent = path
             .parent()
             .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
-        // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
-        // Open the file, creating it if it doesn't exist
         let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -211,7 +172,6 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
         let _guard = self.metadata_lock.lock();
 
         let path = self.storage_directory.join(partition);
@@ -234,7 +194,6 @@ impl crate::Storage for Storage {
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
         let _guard = self.metadata_lock.lock();
 
         let path = self.storage_directory.join(partition);
@@ -278,15 +237,10 @@ impl crate::Storage for Storage {
 /// rules and lifecycle).
 #[derive(Clone)]
 pub struct Blob {
-    /// The partition this blob lives in
     partition: String,
-    /// The name of the blob
     name: Vec<u8>,
-    /// The underlying file
     file: Arc<File>,
-    /// Where to send IO operations to be executed
     driver_handle: iouring::DriverHandle,
-    /// Buffer pool for read allocations
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
@@ -296,7 +250,6 @@ pub struct Blob {
 }
 
 impl Blob {
-    /// Construct a blob handle around an already-open file and shared io_uring loop.
     fn new(
         partition: String,
         name: &[u8],
@@ -344,7 +297,6 @@ impl crate::Blob for Blob {
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
 
-        // Zero-length reads succeed trivially without submitting to the ring.
         if len == 0 {
             return Ok(input_bufs);
         }

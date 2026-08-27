@@ -228,12 +228,11 @@ impl DriverState {
     pub(crate) fn turn(&mut self, ring: &mut IoUring) {
         let handle = self.handle.clone();
         loop {
-            let (needs_flush, mut kernel_idle) = handle.with(|ops| {
+            let (submit_immediately, mut kernel_idle) = handle.with(|ops| {
                 // Wind down foreign-thread drops first: freed slots and
                 // cancel SQEs from the mailbox take effect this turn.
                 self.process_orphans(ops);
 
-                // Process available completions.
                 for cqe in ring.completion() {
                     self.handle_cqe(ops, cqe);
                 }
@@ -242,13 +241,11 @@ impl DriverState {
                 // requests move to cancellation promptly and free capacity sooner.
                 self.advance_timeouts(ops);
 
-                // Stage as much admitted work as capacity allows.
-                let needs_flush = self.fill_submission_queue(ops, ring);
+                let submit_immediately = self.fill_submission_queue(ops, ring);
 
-                // Update pending operations metric.
                 self.pending_operations.report(ops.operation_count());
 
-                (needs_flush, ops.waiters.pending() == 0)
+                (submit_immediately, ops.waiters.pending() == 0)
             });
 
             // Wake tasks whose results were parked, outside the state borrow.
@@ -257,8 +254,7 @@ impl DriverState {
             let invoked_callbacks = !self.pending_waker_actions.is_empty();
             self.flush_wakers();
 
-            if needs_flush {
-                // Flush the staged batch into the kernel and stage more work.
+            if submit_immediately {
                 self.submit(ring).expect("unable to submit to ring");
                 continue;
             }
@@ -294,7 +290,6 @@ impl DriverState {
             self.submit_and_wait(ring, 1, Some(Duration::ZERO))
                 .expect("unable to submit to ring");
 
-            // Process any completions the flush surfaced before returning.
             if ring.completion().is_empty() {
                 return;
             }
@@ -374,7 +369,7 @@ impl DriverState {
             } => self.complete_ticket(ops, waiter_id, ticket_id, output, None),
             StageOutcome::Submit(sqe) => {
                 // SAFETY:
-                // - All resources are stored in the waiter slab until CQE processing, so
+                // - All resources are stored in the waiter table until CQE processing, so
                 //   SQE pointers remain valid and FD numbers cannot be reused early.
                 // - SQ capacity was checked by caller.
                 unsafe {
@@ -469,7 +464,6 @@ impl DriverState {
             return true;
         }
 
-        // Stage admitted requests in FIFO order.
         let backlog_remains = self.stage_backlog(ops, &mut submission_queue);
 
         // With no free waiter and no work left to stage, the zero-timeout

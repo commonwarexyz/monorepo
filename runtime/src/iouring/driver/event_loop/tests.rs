@@ -590,7 +590,7 @@ fn test_pending_operations_aggregates_across_drivers() {
     let noop = futures::task::noop_waker();
     let mut cx = std::task::Context::from_waker(&noop);
     let Poll::Ready(ticket) = admit.as_mut().poll(&mut cx) else {
-        panic!("admission should not park on an empty slab");
+        panic!("admission should not park on an empty waiter table");
     };
 
     // Driver A reports its pending op, and an idle driver B turn must not
@@ -795,7 +795,7 @@ fn test_foreign_drop_wakes_unbounded_drain() {
     let noop = futures::task::noop_waker();
     let mut cx = std::task::Context::from_waker(&noop);
     let Poll::Ready(ticket) = admit.as_mut().poll(&mut cx) else {
-        panic!("accept admission should not park on an empty slab");
+        panic!("accept admission should not park on an empty waiter table");
     };
     harness.driver().turn();
     assert_eq!(harness.pending(), 1);
@@ -866,7 +866,7 @@ fn test_drain_rearms_wake_poll_before_armed_wait() {
 
 #[test]
 fn test_off_thread_drop_releases_capacity_slot() {
-    // An admission attempt parked on a full slab and dropped on a
+    // An admission attempt parked on a full waiter table and dropped on a
     // foreign thread must release its capacity registration through the
     // orphan mailbox: a saturated ring never drains the wait list, so a
     // retained registration would otherwise persist indefinitely.
@@ -2446,9 +2446,9 @@ fn test_cross_thread_wake_lands_with_saturated_submission_queue() {
 }
 
 #[test]
-fn test_fill_requires_flush_only_for_sq_pressure() {
+fn test_fill_requires_immediate_submit_only_for_sq_pressure() {
     // A full SQ with backlog work remaining must request a flush even when
-    // the slab is also full.
+    // the waiter table is also full.
     let mut harness = TestLoop::new(RingConfig {
         size: 2,
         ..Default::default()
@@ -2481,16 +2481,16 @@ fn test_fill_requires_flush_only_for_sq_pressure() {
     // (also true) waiter-capacity pressure.
     let driver_state = harness.handle.clone();
     let driver = harness.driver();
-    let needs_flush =
+    let submit_immediately =
         driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
-    assert!(needs_flush);
+    assert!(submit_immediately);
 
     // After flushing, the second op stages without filling the SQ, so no
-    // further flush is needed even though the slab remains full.
+    // further flush is needed even though the waiter table remains full.
     driver.state.submit(&mut driver.ring).unwrap();
-    let needs_flush =
+    let submit_immediately =
         driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
-    assert!(!needs_flush);
+    assert!(!submit_immediately);
 
     drop(recv_a);
     drop(recv_b);
@@ -2525,21 +2525,21 @@ fn test_fill_retries_wake_rearm_when_sq_is_full() {
         assert!(submission_queue.is_full());
     });
 
-    let needs_flush =
+    let submit_immediately =
         driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
-    assert!(needs_flush);
+    assert!(submit_immediately);
     assert!(driver.state.wake_rearm_needed);
 
     driver.state.submit(&mut driver.ring).unwrap();
-    let needs_flush = driver_state.with(|ops| {
-        let needs_flush = driver.state.fill_submission_queue(ops, &mut driver.ring);
+    let submit_immediately = driver_state.with(|ops| {
+        let submit_immediately = driver.state.fill_submission_queue(ops, &mut driver.ring);
         assert!(ops.waiters.is_full());
         assert!(ops.backlog.is_empty());
-        needs_flush
+        submit_immediately
     });
     // The wake poll exactly fills the SQ while the only waiter is in
     // flight. The turn can flush and reap it in one submit-and-wait call.
-    assert!(!needs_flush);
+    assert!(!submit_immediately);
     assert!(!driver.state.wake_rearm_needed);
 
     drop(recv);
@@ -2568,13 +2568,13 @@ fn test_fill_reports_exact_sq_saturation() {
     // waiter table or leaving more work queued.
     let driver_state = harness.handle.clone();
     let driver = harness.driver();
-    let needs_flush = driver_state.with(|ops| {
-        let needs_flush = driver.state.fill_submission_queue(ops, &mut driver.ring);
+    let submit_immediately = driver_state.with(|ops| {
+        let submit_immediately = driver.state.fill_submission_queue(ops, &mut driver.ring);
         assert!(ops.backlog.is_empty());
         assert!(!ops.waiters.is_full());
-        needs_flush
+        submit_immediately
     });
-    assert!(needs_flush);
+    assert!(submit_immediately);
 
     drop(recv);
 }
@@ -2623,15 +2623,15 @@ fn test_cancel_staging_batches_across_sq_submissions() {
     driver.state.submit(&mut driver.ring).unwrap();
     driver_state.with(|ops| driver.state.cancel_all(ops));
 
-    let needs_flush =
+    let submit_immediately =
         driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
-    assert!(needs_flush);
+    assert!(submit_immediately);
     driver_state.with(|ops| assert_eq!(ops.pending_cancels.len(), 1));
 
     driver.state.submit(&mut driver.ring).unwrap();
-    let needs_flush =
+    let submit_immediately =
         driver_state.with(|ops| driver.state.fill_submission_queue(ops, &mut driver.ring));
-    assert!(!needs_flush);
+    assert!(!submit_immediately);
     driver_state.with(|ops| assert!(ops.pending_cancels.is_empty()));
     driver.state.submit(&mut driver.ring).unwrap();
 

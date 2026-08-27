@@ -8,32 +8,6 @@
 //!
 //! This module is enabled by the `iouring` feature and is only available on Linux.
 //!
-//! # Event Loop
-//!
-//! The event loop provides a high-level interface for submitting logical requests to Linux's
-//! io_uring subsystem and receiving their results. The design centers around a single event loop
-//! that manages the submission queue (SQ) and completion queue (CQ) of an io_uring instance.
-//!
-//! Work is submitted thread-locally: op futures stage requests directly into the loop's
-//! shared state (a waiter slab plus a backlog FIFO) while they are polled on the runtime
-//! thread. Ordinary op completions park in their waiter until consumed. Detached accept
-//! and sync tickets use a second, independently generational arena, so terminal output
-//! moves out of the waiter and the waiter is recycled immediately. There are no channels
-//! and no per-op queue or completion allocations on this path. The arenas reuse vector
-//! storage up to their high-water marks (address-carrying ops and vectored writes allocate
-//! their scratch once per logical request when built). The event loop
-//! blocks either in userspace futex wait (when the ring is truly idle) or in
-//! `io_uring_enter` (when the ring has active waiters), and is woken by:
-//! - normal CQE progress in the ring
-//! - futex wake when a task is woken from another thread while fully idle
-//! - `eventfd` readiness when a task is woken from another thread while blocked in
-//!   `submit_and_wait`
-//!
-//! The runtime executor drives the loop by interleaving a non-blocking `turn` (drain
-//! completions, advance deadlines, stage and flush submissions) and a blocking `park`
-//! with task polling on the runtime thread. Because staging happens only during task
-//! polls, every submission is followed by a `turn` before the executor can park.
-//!
 //! # Kernel Requirements
 //!
 //! This runtime requires Linux kernel 6.1 or newer: the ring is configured with
@@ -63,63 +37,7 @@
 //! resources remain alive until completion. An idle resource's descriptor may
 //! instead close on the thread that drops its final owner.
 //!
-//! # Architecture
-//!
-//! ## Event Loop
-//!
-//! Each pass of the event loop (driven by the executor's `turn`/`park` cycle):
-//! 1. Processes io_uring completion queue entries (CQEs), including internal wake CQEs
-//! 2. Advances userspace deadlines
-//! 3. Builds and submits SQEs for requests admitted into the backlog by op futures
-//! 4. Handles partial progress and retryable errors by requeuing requests
-//! 5. Commits terminal output to its waiter or detached ticket entry
-//! 6. Recycles terminal ticket waiters, then wakes ticket and capacity tasks
-//!
-//! ## Request Flow
-//!
-//! ```text
-//! Data path:
-//!   Op future poll -> Driver (slab insert + backlog FIFO) -> SQE -> io_uring
-//!   Op future poll <- parked RequestOutput in slot <- Driver <- CQE <- io_uring
-//!
-//! Detached ticket path:
-//!   Ticket admission -> TicketEntryState::Pending { waiter_id, waker }
-//!                    -> Waiter { owner: TicketId, request }
-//!                    -> SQE -> io_uring -> CQE
-//!   CQE -> TicketEntryState::Ready(RequestOutput) -> timeout removal -> recycle WaiterId
-//!       -> ticket wake -> Ticket poll(TicketId) -> RequestOutput
-//!
-//! Detached ticket drop:
-//!   TicketId -> Pending(waiter_id) -> Accept cancel or Sync detach
-//!                -> Ready(RequestOutput)      -> drop RequestOutput, no waiter access
-//!
-//! Wake paths (cross-thread task wakes only):
-//!   Foreign thread --futex wake--> packed wake state --> Driver
-//!   Foreign thread --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> Driver
-//!
-//! Loop behavior:
-//!   1) Drain CQEs.
-//!   2) Advance timeouts.
-//!   3) Rarely rearm wake polling, then stage cancels and backlog requests
-//!      into SQ (scheduling deadlines at first staging).
-//!   4) If work is pending or active waiters remain, submit and possibly block in
-//!      io_uring_enter until a CQE (data or wake) arrives.
-//!   5) If the ring is fully idle, arm the shared wake word and sleep in futex
-//!      wait until another thread latches an out-of-band wake.
-//! ```
-//!
-//! ## Work Tracking
-//!
-//! Each admitted request is assigned a waiter ID that serves as the `user_data` field in
-//! its SQEs. The flat `Waiters` store owns all kernel-referenced request resources
-//! (buffers, FDs, and progress state) until terminal completion. Ordinary op outputs
-//! remain in that slot until their future takes them. Detached accept and sync tickets
-//! hold only a ticket ID after admission. Their separate `TicketArena`
-//! stores `Pending { waiter_id, waker }` while the kernel request is active and
-//! `Ready(RequestOutput)` after it is terminal. Publishing Ready, removing timeout accounting,
-//! and recycling the waiter all happen before ticket or capacity wakers run.
-//!
-//! ## Timeout Handling
+//! # Timeout Handling
 //!
 //! Requests can optionally carry an absolute deadline. When present:
 //! - The loop tracks deadline ticks in a userspace timing wheel, scheduling each
@@ -133,32 +51,7 @@
 //! - If the original op CQE only makes partial/retryable progress after timeout, the caller
 //!   sees timeout and no follow-up SQE is issued
 //!
-//! ## Submission Policy
-//!
-//! A logical request may need multiple SQEs before it completes. Fresh admissions and
-//! requeued requests share one backlog (the FIFO of admitted requests whose next SQE the
-//! loop must build), and the loop stages work in this order:
-//! 1. Rarely, a wake poll rearm SQE when a prior multishot wake CQE ended the
-//!    existing poll registration.
-//! 2. Cancellation SQEs for timed-out or drop-cancelled requests.
-//! 3. Staged-queue requests, until SQ capacity is hit.
-//!
-//! When the waiter slab is full, op futures park on a FIFO capacity wait list. Each freed
-//! slot is reserved for the oldest queued admission until that task consumes or cancels
-//! its grant. Fresh submissions cannot barge ahead of queued or granted admissions.
-//!
-//! ## Wake Handling
-//!
-//! Cross-thread task wakes (e.g. a timer or channel resolved by a helper thread) use one
-//! shared atomic state word plus an internal `eventfd`.
-//! - When the loop has no waiters, it sleeps in futex wait on that shared word
-//! - When the loop blocks in `submit_and_wait`, it keeps a multishot `PollAdd`
-//!   on the internal `eventfd`
-//! - Wake CQEs drain `eventfd` readiness and re-install poll when `IORING_CQE_F_MORE`
-//!   is not set
-//! - A dedicated latched bit coalesces repeated wake attempts while a wait is armed
-//!
-//! ## Shutdown Process
+//! # Shutdown Process
 //!
 //! At teardown (after every task has been dropped, which eagerly cancels their
 //! abandoned operations), the runtime closes the driver and drains the loop:
@@ -170,18 +63,17 @@
 //! 4. Ready results owned by escaped tickets survive the drain in the ticket arena:
 //!    they hold no kernel resources or waiter slots and are reclaimed when polled or dropped
 //!
-//! ## Liveness Model
+//! # Liveness Model
 //!
-//! This loop enforces a configured upper bound on in-flight requests. New submissions
-//! park on a FIFO capacity wait list when the slab is full. Freeing slots grants them
+//! The ring size bounds waiter-backed operations, not dependency closure. New submissions
+//! park on a FIFO capacity wait list when the waiter table is full. Freeing slots grants them
 //! to queued admissions in order, and each grant stays reserved until its owner polls
 //! or cancels. Fresh submissions cannot consume capacity reserved for older attempts.
 //! Already-admitted requests may still be restaged ahead of fresh admissions according
-//! to the submission policy above.
+//! to the driver's submission policy.
 //!
-//! This implies a bounded-liveness caveat: if all in-flight requests are waiting on operations
-//! that are still queued behind the capacity limit, the loop cannot make progress until some
-//! in-flight request completes or is canceled.
+//! If every waiter-backed request depends on work that cannot be admitted because the table
+//! is full, the loop cannot make progress until an admitted request completes or is cancelled.
 //!
 //! Concrete example with `cfg.size = 2`:
 //!
@@ -192,25 +84,25 @@
 //! 4. The writes stay queued behind the capacity limit, so no completion is produced and the loop
 //!    cannot free capacity on its own.
 //!
-//! The runtime cannot infer dependency relationships between arbitrary queued and in-flight
+//! The runtime cannot infer dependency relationships between arbitrary queued and admitted
 //! requests, so it cannot implement dependency-aware admission (and doing so generically would
 //! add substantial overhead).
 //!
 //! The practical way to recover from this condition is cancellation via per-request timeouts.
-//! When timed-out in-flight requests are canceled, waiter capacity is eventually released and
+//! When timed-out requests are cancelled, waiter capacity is eventually released and
 //! queued requests can be staged. Without cancellation, liveness depends on workload structure:
-//! callers must avoid submission patterns where in-flight requests require later queued requests
+//! callers must avoid submission patterns where admitted requests require later queued requests
 //! to run.
 //!
 //! Operational guidance:
-//! - Workloads that may create causal dependencies across queued and in-flight requests must use
+//! - Workloads that may create causal dependencies across queued and admitted requests must use
 //!   per-request timeouts.
-//! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
+//! - If cancellation is disabled, callers must guarantee that admitted requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
 //! - Ready detached tickets do not count toward waiter capacity. Their waiter is recycled before
 //!   the ticket waker runs, so retaining a completed accept or sync ticket cannot block admission.
 //! - A timed request's deadline includes time spent waiting for capacity. The event loop parks no
-//!   longer than the earliest admission or in-flight deadline, so a saturated waiter slab cannot
+//!   longer than the earliest admission or active-request deadline, so a full waiter table cannot
 //!   hide timeout progress.
 
 mod driver;

@@ -738,7 +738,6 @@ impl Worker {
             )
         });
 
-        // Initialize storage and network against this worker's driver.
         let storage = MeteredStorage::new(
             IoUringStorage::new(
                 shared.cfg.storage_directory.clone(),
@@ -1057,7 +1056,6 @@ impl crate::Runner for Runner {
         });
         let _ = Tasks::register(&worker.executor.tasks, collector);
 
-        // Get metrics
         let label = Label::root();
         shared.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = shared.metrics.tasks_running.get_or_create(&label).clone();
@@ -1319,7 +1317,6 @@ impl crate::Spawner for Context {
             return Handle::ready(Err(Error::Closed));
         };
 
-        // Get metrics
         let label = Label::task(self.name.clone(), self.execution);
         let (_, metric) = spawn_metrics!(label, @record &executor.shared.metrics);
 
@@ -1354,12 +1351,10 @@ impl crate::Spawner for Context {
             },
         );
 
-        // Register the task, unless the executor is already tearing down.
         if !Tasks::register(&executor.tasks, task) {
             return Handle::closed(metric);
         }
 
-        // Register the task on the parent
         if let Some(aborter) = handle.aborter() {
             parent.register(aborter);
         }

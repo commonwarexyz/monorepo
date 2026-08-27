@@ -1,6 +1,6 @@
 //! Thread-affine op submission for the io_uring runtime.
 //!
-//! The [DriverHandle] is the shared half of the driver: the waiter slab, the
+//! The [DriverHandle] is the shared half of the driver: the waiter table, the
 //! backlog and cancel queues, and the capacity wait list reached by op futures
 //! and by the event loop that services them (see [super::Driver]). The
 //! runtime traits force [crate::Blob], [crate::Sink], and [crate::Stream] to
@@ -10,7 +10,7 @@
 //! construction, and the compiler-visible `Sync` is backed by a runtime
 //! thread assert.
 //!
-//! Op futures ([Op]) stage requests by inserting into the slab and pushing
+//! Op futures ([Op]) stage requests by inserting into the waiter table and pushing
 //! onto the backlog during `poll`. The loop builds and submits SQEs in
 //! its own turn, parks ordinary op results in the slot, and wakes the stored
 //! task waker. Detached ticket results move to an independent ticket arena
@@ -28,7 +28,7 @@
 //! Capacity and terminal ownership move through these states:
 //!
 //! ```text
-//! full waiter slab
+//! full waiter table
 //!       |
 //!       v
 //! Queued CapacityId --slot freed--> Granted CapacityId --owner repolls--> waiter owns request
@@ -145,7 +145,7 @@ impl<T> Affine<T> {
 
 /// Shared operation state for futures, detached tickets, and the event loop.
 pub(super) struct Ops {
-    /// Slot table tracking every admitted logical request. Slots own all
+    /// Waiter table tracking every admitted logical request. Entries own all
     /// operation resources (buffers, FDs) for the request lifetime.
     pub(super) waiters: Waiters,
     /// Detached ticket state. Pending entries point to an active waiter,
@@ -259,7 +259,7 @@ pub(super) enum Orphan {
     /// the waiter link while Pending and identifies foreign drops.
     Ticket(TicketId),
     /// A capacity registration whose admission attempt was dropped while
-    /// parked on a full slab (before any waiter existed).
+    /// parked on a full waiter table (before any waiter existed).
     Capacity(CapacityId),
 }
 
@@ -294,7 +294,7 @@ impl OrphanMailbox {
 }
 
 impl DriverHandle {
-    /// Create the op state for a driver whose slab tracks at most `capacity`
+    /// Create the op state for a driver whose waiter table tracks at most `capacity`
     /// requests, waking the loop through `waker` for foreign-thread drops.
     ///
     /// The calling thread becomes the owning (runtime) thread.
@@ -476,7 +476,7 @@ impl DriverHandle {
 /// Poll one admission attempt for `request`, using `admit` to bind its observer.
 ///
 /// On a closed driver the request resolves immediately to its kind-specific
-/// failure (returned as `Err`). On a full slab the task parks on the capacity
+/// failure (returned as `Err`). On a full waiter table the task parks on the capacity
 /// wait list through `registration` (one slot per attempt, refreshed on
 /// re-polls and released here once the attempt resolves). Otherwise the
 /// observer-specific state and waiter are published under one op-state borrow,
@@ -642,7 +642,7 @@ fn reserve_orphan_wind_down(
     }
 }
 
-/// Apply a pre-reserved orphan wind-down for `id` on the op table.
+/// Apply a pre-reserved orphan wind-down for `id` on the waiter table.
 fn wind_down_orphan_prepared(
     ops: &mut Ops,
     id: WaiterId,
@@ -676,7 +676,7 @@ fn wind_down_orphan_prepared(
     }
 }
 
-/// Apply the orphan wind-down for `id` on the op table.
+/// Apply the orphan wind-down for `id` on the waiter table.
 pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId, actions: &mut impl WakerActionSink) {
     let outcome = ops.waiters.classify_orphan(id);
     reserve_orphan_wind_down(ops, &outcome, actions);
@@ -779,7 +779,7 @@ enum OpState {
 struct Op<'a> {
     handle: &'a DriverHandle,
     state: OpState,
-    /// Capacity wait-list registration while queued on a full slab, released
+    /// Capacity wait-list registration while queued on a full waiter table, released
     /// on admission or by drop (via its RAII guard).
     registration: CapacityRegistration<'a>,
 }
@@ -825,7 +825,7 @@ impl Future for Op<'_> {
                         run_waker_actions(actions);
                         Poll::Ready(output)
                     }
-                    // A full slab leaves the request in place: no bytes move.
+                    // A full waiter table leaves the request in place: no bytes move.
                     Poll::Pending => {
                         run_waker_actions(actions);
                         Poll::Pending

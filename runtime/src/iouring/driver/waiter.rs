@@ -709,7 +709,7 @@ pub struct Waiters {
 }
 
 impl Waiters {
-    /// Create an empty waiter set that can track at most `capacity` logical
+    /// Create an empty waiter table that can track at most `capacity` logical
     /// requests at once.
     pub fn new(capacity: usize) -> Self {
         let mut entries = Vec::with_capacity(capacity);
@@ -758,7 +758,7 @@ impl Waiters {
     /// Return the authoritative number of free waiter slots.
     ///
     /// Capacity reservations reconcile against this value after every waiter
-    /// removal so userspace grants cannot drift from the slab.
+    /// removal so userspace grants cannot drift from the waiter table.
     pub const fn free_len(&self) -> usize {
         self.free.len()
     }

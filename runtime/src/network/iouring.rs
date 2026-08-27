@@ -1,39 +1,9 @@
-//! This module provides an io_uring-based implementation of the [crate::Network] trait,
-//! offering fast, high-throughput network operations on Linux systems.
+//! io_uring implementation of [crate::Network].
 //!
-//! ## Architecture
-//!
-//! Network operations (including accept and connect) are submitted through a `DriverHandle`
-//! to the event loop that services the ring, which the `iouring` runtime drives on the runtime
-//! thread. Socket creation and bind are cheap non-blocking syscalls performed inline.
-//!
-//! Each worker owns the driver handle used by its network backend and by the resources
-//! that backend creates:
-//!
-//! ```text
-//! worker -> Network -> Listener/Sink/Stream -> worker's io_uring ring
-//! ```
-//!
-//! Use the network, its resources, and their in-flight operations on that worker.
-//! Socket creation, bind, and socket-option setup run synchronously on the
-//! calling worker. Connect, accept, and non-empty sends use the ring. A recv
-//! reaches the ring only when cached bytes cannot satisfy it. `local_addr` and
-//! `peek` only inspect cached state. Foreign drops of admitted operation and
-//! ticket state are routed to the owning worker.
-//!
-//! ## Memory Safety
-//!
-//! Buffers and file descriptors are owned by the active request state machine inside the io_uring
-//! loop, ensuring that the memory location is valid for the duration of the operation.
-//!
-//! ## Feature Flag
-//!
-//! This implementation is enabled by using the `iouring` feature.
-//!
-//! ## Linux Only
-//!
-//! This implementation is only available on Linux systems that support io_uring.
-//! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
+//! Socket creation, bind, and socket-option setup run synchronously. Connect,
+//! accept, and non-empty sends use the ring. A recv reaches the ring only when
+//! cached bytes cannot satisfy it. See [crate::iouring] for runtime requirements
+//! and worker-affinity rules.
 
 use crate::{
     Buf, BufferPool, Error, IoBufMut, IoBufs,
@@ -163,7 +133,6 @@ fn local_addr(fd: &OwnedFd) -> Result<SocketAddr, std::io::Error> {
 
 /// Apply configured per-connection socket options, logging failures.
 fn configure_socket(fd: &OwnedFd, cfg: &Config) {
-    // Set TCP_NODELAY if configured
     if let Some(tcp_nodelay) = cfg.tcp_nodelay
         && let Err(err) = set_socket_option(
             fd,
@@ -175,7 +144,6 @@ fn configure_socket(fd: &OwnedFd, cfg: &Config) {
         warn!(?err, "failed to set TCP_NODELAY");
     }
 
-    // Set SO_LINGER to zero if configured
     if cfg.zero_linger {
         let linger = libc::linger {
             l_onoff: 1,
@@ -190,11 +158,8 @@ fn configure_socket(fd: &OwnedFd, cfg: &Config) {
 /// [crate::Network] implementation that uses io_uring to do async I/O.
 #[derive(Clone)]
 pub struct Network {
-    /// Network configuration.
     cfg: Config,
-    /// Used to submit operations to the io_uring event loop.
     driver_handle: iouring::DriverHandle,
-    /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
 
@@ -215,8 +180,6 @@ impl crate::Network for Network {
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         self.driver_handle.assert_owner();
-        // Create the listening socket inline: socket setup, bind, and listen
-        // are cheap non-blocking syscalls.
         let fd = new_socket(&socket).map_err(|_| Error::BindFailed)?;
         set_socket_option(
             &fd,
@@ -256,11 +219,8 @@ impl crate::Network for Network {
         self.driver_handle.assert_owner();
         let fd = Arc::new(new_socket(&socket).map_err(|_| Error::ConnectionFailed)?);
 
-        // Apply socket options before connecting.
         configure_socket(&fd, &self.cfg);
 
-        // Connect through the ring. Deadline expiry cancels the in-flight
-        // connect and resolves the dial with [Error::Timeout].
         let deadline = Instant::now() + self.cfg.connect_timeout;
         self.driver_handle.connect(fd.clone(), socket, deadline).await?;
 
@@ -279,15 +239,11 @@ impl crate::Network for Network {
 
 /// Implementation of [crate::Listener] for an io-uring [Network].
 pub struct Listener {
-    /// Network configuration.
     cfg: Config,
     /// Listening socket descriptor, shared with in-flight accept requests.
     fd: Arc<OwnedFd>,
-    /// Address the listener is bound to.
     local_addr: SocketAddr,
-    /// Used to submit operations to the io_uring event loop.
     driver_handle: iouring::DriverHandle,
-    /// Buffer pool for recv allocations.
     pool: BufferPool,
     /// In-flight accept, retained so a cancelled accept future resumes the
     /// same request instead of losing an accepted connection.
@@ -304,7 +260,6 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         loop {
-            // Issue a fresh accept if none is in flight.
             if self.pending_accept.is_none() {
                 let deadline = Instant::now() + self.cfg.read_write_timeout;
                 self.pending_accept =
@@ -356,26 +311,20 @@ impl crate::Listener for Listener {
 pub struct Sink {
     /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
-    /// Used to submit send operations to the io_uring event loop.
     driver_handle: iouring::DriverHandle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
-    /// Tracks this sink's lifecycle.
     state: SinkState,
 }
 
 /// Lifecycle state for the write-half of a connection.
 enum SinkState {
-    /// Sends may be attempted.
     Open,
-    /// A send is currently in progress.
     Sending,
-    /// The write-half has been shut down.
     Closed,
 }
 
 impl Sink {
-    /// Construct a sink that submits logical send requests through one io_uring loop.
     const fn new(fd: Arc<OwnedFd>, driver_handle: iouring::DriverHandle, timeout: Duration) -> Self {
         Self {
             fd,
@@ -434,13 +383,11 @@ impl crate::Sink for Sink {
             .send(self.fd.clone(), bufs, Instant::now() + self.timeout)
             .await;
 
-        // A failed send leaves the write-half unusable.
         if result.is_err() {
             self.close();
             return result;
         }
 
-        // Mark the sink reusable on success.
         self.state = SinkState::Open;
         Ok(())
     }
@@ -453,24 +400,18 @@ impl crate::Sink for Sink {
 pub struct Stream {
     /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
-    /// Used to submit recv operations to the io_uring event loop.
     driver_handle: iouring::DriverHandle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Tracks whether a previous recv failure has made this stream unusable.
     poisoned: bool,
-    /// Internal read buffer.
     buffer: IoBufMut,
-    /// Current read position in the buffer.
     buffer_pos: usize,
-    /// Number of valid bytes in the buffer.
     buffer_len: usize,
-    /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
 
 impl Stream {
-    /// Construct a stream with an optional internal read buffer.
     fn new(
         fd: Arc<OwnedFd>,
         driver_handle: iouring::DriverHandle,
@@ -536,7 +477,6 @@ impl crate::Stream for Stream {
             let deadline = Instant::now() + self.timeout;
 
             while bytes_received < len {
-                // First drain any buffered data
                 let buffered = self.buffer_len - self.buffer_pos;
                 if buffered > 0 {
                     let to_copy = std::cmp::min(buffered, len - bytes_received);
@@ -573,7 +513,6 @@ impl crate::Stream for Stream {
                         Err((_, err)) => return Err(err),
                     }
                 } else {
-                    // Fill internal buffer, then loop will copy
                     self.fill_buffer(deadline).await?;
                 }
             }
