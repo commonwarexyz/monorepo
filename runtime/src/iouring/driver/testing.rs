@@ -1,14 +1,15 @@
 //! A single-threaded harness for tests that drive the loop
 //! directly (loop, network, and storage unit tests).
 
-use super::*;
-use crate::telemetry::metrics::Registry;
+use super::{Driver, Handle, waker::Waker};
+use crate::{iouring::RingConfig, telemetry::metrics::Registry};
 use futures::task::{ArcWake, waker as arc_waker};
 use std::{
     future::Future,
     pin::{Pin, pin},
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
 /// Task waker that latches the loop's out-of-band wake, mirroring how the
