@@ -4,6 +4,7 @@
 pub(crate) mod batch;
 pub mod db;
 mod sync;
+mod variant;
 pub(crate) mod witness;
 
 use crate::journal::contiguous::variable;

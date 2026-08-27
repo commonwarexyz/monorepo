@@ -29,6 +29,8 @@
 //! snapshot rebuilding here; all historical in-memory state is discarded whenever a batch is
 //! applied.
 
+pub use super::variant::Variant;
+pub(in crate::qmdb) use super::variant::sealed;
 use super::{Config, batch as compact_batch, witness};
 use crate::{
     Context,
@@ -37,7 +39,6 @@ use crate::{
     qmdb::{
         self, Error,
         batch_chain::{self, Bounds, Commitment},
-        operation::Floored,
         sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
 };
@@ -47,36 +48,6 @@ use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use std::sync::{Arc, Weak};
-
-pub(in crate::qmdb) mod sealed {
-    pub trait Sealed {}
-}
-
-/// An operation type a compact db is built over: how its commit operations are built and read,
-/// and how a batch accumulates the operations before its commit.
-///
-/// [`Db`] only builds and reads commit operations and turns a batch's mutations into operations;
-/// everything else about the operation type is opaque to it.
-pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + Clone + Send + Sync + 'static {
-    /// The commit metadata type.
-    type Metadata: Clone + Send + Sync + 'static;
-
-    /// The mutations a batch accumulates before merkleization.
-    type Mutations: Default + Send;
-
-    /// The variant's name, recorded on tracing spans.
-    const NAME: &'static str;
-
-    /// Build a commit operation.
-    fn commit_op(metadata: Option<Self::Metadata>, inactivity_floor_loc: Location<F>) -> Self;
-
-    /// Split a commit operation into its metadata and inactivity floor, or `None` for any
-    /// other operation.
-    fn into_commit(self) -> Option<(Option<Self::Metadata>, Location<F>)>;
-
-    /// Turn a batch's mutations into operations, in application order.
-    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self> + Send;
-}
 
 /// A compact authenticated db that discards historical operations, retaining only a witness
 /// for each applied batch.
@@ -90,10 +61,8 @@ where
     O: Variant<F>,
     H: Hasher,
 {
-    last_commit_metadata: Option<O::Metadata>,
-    inactivity_floor_loc: Location<F>,
     commit_codec_config: C,
-    witness: witness::Store<E, F, H, S>,
+    store: witness::Store<E, F, O, H, S>,
 }
 
 impl<F, E, O, H, C, S: Strategy> std::fmt::Debug for Db<F, E, O, H, C, S>
@@ -182,7 +151,7 @@ where
         E: Context,
     {
         Self {
-            merkle_batch: db.witness.merkle().new_batch(),
+            merkle_batch: db.store.merkle().new_batch(),
             mutations: O::Mutations::default(),
             parent: None,
             base,
@@ -237,7 +206,7 @@ where
         let total_size = self.base.size + ops.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
         let (merkle, root) = compact_batch::merkleize_ops::<F, H, S, _>(
-            db.witness.merkle(),
+            db.store.merkle(),
             self.merkle_batch,
             ops,
             inactive_peaks,
@@ -276,15 +245,6 @@ where
     O: EncodeShared + Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
-    fn encode_commit_op(
-        metadata: Option<O::Metadata>,
-        inactivity_floor_loc: Location<F>,
-    ) -> Vec<u8> {
-        O::commit_op(metadata, inactivity_floor_loc)
-            .encode()
-            .to_vec()
-    }
-
     /// Returns a compact db initialized from `cfg`.
     pub async fn init(context: E, cfg: Config<C, S>) -> Result<Self, Error<F>> {
         let journal = variable::Journal::init(context.child("witness"), cfg.witness).await?;
@@ -294,9 +254,9 @@ where
     /// Build a compact db from state fetched by the sync engine.
     ///
     /// The imported witness lives only in memory until the first [`Self::apply_batch`],
-    /// [`Self::commit`], [`Self::sync`], or [`Self::start_sync`]. Applying a batch replaces it with
-    /// the newly applied journal checkpoint; a durability method journals it directly. Until one
-    /// of those operations succeeds, rewind and prune are rejected.
+    /// [`Self::commit`], [`Self::sync`], or [`Self::start_sync`], which journals it in place of
+    /// the partition's previous contents. Until one of those succeeds, rewind and prune are
+    /// rejected.
     pub(crate) fn init_from_sync(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
@@ -305,26 +265,16 @@ where
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: O,
     ) -> Result<Self, Error<F>> {
-        let Some((last_commit_metadata, inactivity_floor_loc)) = O::into_commit(last_commit_op)
-        else {
-            return Err(Error::UnexpectedData(last_commit_loc));
-        };
-        witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-
-        let op_bytes = Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc);
-        let witness = witness::Store::from_import(
+        let store = witness::Store::from_import(
             journal,
             strategy,
             last_commit_loc,
             pinned_nodes,
-            inactivity_floor_loc,
-            op_bytes,
+            last_commit_op,
         )?;
         Ok(Self {
-            last_commit_metadata,
-            inactivity_floor_loc,
             commit_codec_config,
-            witness,
+            store,
         })
     }
 
@@ -338,44 +288,31 @@ where
         journal: witness::Journal<E, F, H::Digest>,
         commit_codec_config: C,
     ) -> Result<Self, Error<F>> {
-        // Bootstrap: append an initial Commit(None, 0) on first open.
-        let (witness, last_commit_op) = witness::Store::init::<O>(
-            journal,
-            strategy,
-            &commit_codec_config,
-            Self::encode_commit_op(None, Location::new(0)),
-        )
-        .await?;
-        let Some((last_commit_metadata, inactivity_floor_loc)) = O::into_commit(last_commit_op)
-        else {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        };
+        let store = witness::Store::init(journal, strategy, &commit_codec_config).await?;
         Ok(Self {
-            last_commit_metadata,
-            inactivity_floor_loc,
             commit_codec_config,
-            witness,
+            store,
         })
     }
 
     /// Return the root of the db.
     pub const fn root(&self) -> H::Digest {
-        self.witness.tip().root
+        self.store.tip().root
     }
 
     /// Return the inactivity floor declared by the last committed batch.
     pub const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.inactivity_floor_loc
+        self.store.tip().inactivity_floor_loc
     }
 
     /// Return the location of the next operation appended to this db.
     pub const fn size(&self) -> Location<F> {
-        self.witness.tip().size()
+        self.store.tip().size()
     }
 
     /// Get the metadata associated with the last commit.
     pub fn get_metadata(&self) -> Option<O::Metadata> {
-        self.last_commit_metadata.clone()
+        self.store.tip().metadata.clone()
     }
 
     /// Return the compact-sync target described by the current witness.
@@ -383,7 +320,7 @@ where
     /// This reflects the most recently applied batch. The target remains non-durable until a
     /// covering [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] completes.
     pub const fn target(&self) -> CompactTarget<F, H::Digest> {
-        self.witness.tip().target()
+        self.store.tip().target()
     }
 
     /// The [`Commitment`] for the database's current state.
@@ -399,10 +336,10 @@ where
     /// Create an owned merkleized batch representing the current applied state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, O, S>> {
         Arc::new(MerkleizedBatch {
-            merkle_batch: self.witness.merkle().to_batch(),
-            commit_metadata: self.last_commit_metadata.clone(),
+            merkle_batch: self.store.merkle().to_batch(),
+            commit_metadata: self.get_metadata(),
             parent: None,
-            bounds: Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+            bounds: Bounds::from_db(self.commitment(), self.inactivity_floor_loc()),
         })
     }
 
@@ -417,7 +354,7 @@ where
     ) -> Result<(), Error<F>> {
         batch
             .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+            .validate_apply_to(self.commitment(), self.inactivity_floor_loc())
     }
 
     /// Apply a merkleized batch to the database.
@@ -447,14 +384,14 @@ where
         self.validate_batch(&batch)?;
 
         let start_loc = self.size();
-        let op_bytes =
-            Self::encode_commit_op(batch.commit_metadata.clone(), batch.bounds.inactivity_floor);
-        self.witness = self
-            .witness
-            .apply(&batch.merkle_batch, batch.bounds.inactivity_floor, op_bytes)
+        self.store = self
+            .store
+            .apply(
+                &batch.merkle_batch,
+                batch.commit_metadata.clone(),
+                batch.bounds.inactivity_floor,
+            )
             .await?;
-        self.last_commit_metadata = batch.commit_metadata.clone();
-        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         debug_assert_eq!(self.commitment(), batch.bounds.tip);
         Ok((self, start_loc..batch.bounds.tip.size))
     }
@@ -474,7 +411,7 @@ where
     )]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let handle;
-        (self.witness, handle) = self.witness.start_sync().await?;
+        (self.store, handle) = self.store.start_sync().await?;
         Ok((self, handle))
     }
 
@@ -487,7 +424,7 @@ where
         fields(variant = O::NAME)
     )]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        self.witness = self.witness.commit().await?;
+        self.store = self.store.commit().await?;
         Ok(self)
     }
 
@@ -500,7 +437,7 @@ where
         fields(variant = O::NAME)
     )]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
-        self.witness = self.witness.sync().await?;
+        self.store = self.store.sync().await?;
         Ok(self)
     }
 
@@ -519,24 +456,7 @@ where
         fields(variant = O::NAME)
     )]
     pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>> {
-        // A clean current target only needs to settle its pipelined sync. An uncommitted target
-        // takes the regular rewind path so the witness journal becomes durable before return.
-        if self.witness.tip().size() == target && !self.witness.has_uncommitted_state() {
-            self.witness.wait_for_sync().await?;
-            return Ok(self);
-        }
-
-        let last_commit_op;
-        (self.witness, last_commit_op) = self
-            .witness
-            .rewind::<O>(target, &self.commit_codec_config)
-            .await?;
-        let Some((last_commit_metadata, inactivity_floor_loc)) = O::into_commit(last_commit_op)
-        else {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        };
-        self.last_commit_metadata = last_commit_metadata;
-        self.inactivity_floor_loc = inactivity_floor_loc;
+        self.store = self.store.rewind(target, &self.commit_codec_config).await?;
         Ok(self)
     }
 
@@ -556,14 +476,14 @@ where
         fields(variant = O::NAME)
     )]
     pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
-        self.witness = self.witness.prune(pruning_boundary).await?;
+        self.store = self.store.prune(pruning_boundary).await?;
         Ok(self)
     }
 
     /// Destroy all persisted state associated with this database.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.witness.destroy().await?;
+        self.store.destroy().await?;
         Ok(())
     }
 }
@@ -599,11 +519,7 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), Self::Error> {
-        Ok((
-            self.witness
-                .compact_state(&self.commit_codec_config, request)?,
-            None,
-        ))
+        Ok((self.store.compact_state(request)?, None))
     }
 }
 
