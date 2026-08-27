@@ -173,8 +173,7 @@ pub struct Config {
     ///
     /// Defaults to [BlobLayout::ALL]. New blobs use the latest layout in the configured range.
     /// This is separate from the application-owned blob versions passed to
-    /// [crate::Storage::open_versioned]. The configured range must be non-empty and fully
-    /// supported by the runtime.
+    /// [crate::Storage::open_versioned]. The configured range must be non-empty.
     storage_blob_layout: RangeInclusive<BlobLayout>,
 
     /// Maximum buffer size for operations on blobs.
@@ -265,12 +264,7 @@ impl Config {
     }
     /// See [Config]
     pub fn with_storage_blob_layout(mut self, layout: RangeInclusive<BlobLayout>) -> Self {
-        assert!(
-            !layout.is_empty()
-                && BlobLayout::ALL.contains(layout.start())
-                && BlobLayout::ALL.contains(layout.end()),
-            "storage blob layout must be non-empty and fully supported"
-        );
+        assert!(!layout.is_empty(), "storage blob layout must be non-empty");
         self.storage_blob_layout = layout;
         self
     }
