@@ -486,37 +486,6 @@ impl Stream {
         }
     }
 
-    /// Submit a recv request to io_uring and wait for completion.
-    ///
-    /// `offset` is the byte offset into `buffer` where received data should
-    /// start. `len` is the number of bytes to read starting at that offset.
-    ///
-    /// Returns the buffer and either the number of bytes read for this
-    /// invocation or an error.
-    async fn submit_recv(
-        &self,
-        buffer: IoBufMut,
-        offset: usize,
-        len: usize,
-        exact: bool,
-        deadline: Instant,
-    ) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
-        self.handle
-            .recv(
-                self.fd.clone(),
-                buffer,
-                offset,
-                offset + len,
-                exact,
-                deadline,
-            )
-            .await
-            .map(|(buf, total)| {
-                // Translate the total-bytes-received into bytes-read-in-this-call.
-                (buf, total - offset)
-            })
-    }
-
     /// Fills the internal buffer by reading from the socket via io_uring.
     async fn fill_buffer(&mut self, deadline: Instant) -> Result<usize, Error> {
         self.buffer_pos = 0;
@@ -525,7 +494,11 @@ impl Stream {
         let buffer = std::mem::take(&mut self.buffer);
         let len = buffer.capacity();
 
-        self.buffer_len = match self.submit_recv(buffer, 0, len, false, deadline).await {
+        self.buffer_len = match self
+            .handle
+            .recv(self.fd.clone(), buffer, 0, len, false, deadline)
+            .await
+        {
             Ok((buffer, read)) => {
                 self.buffer = buffer;
                 read
@@ -578,12 +551,20 @@ impl crate::Stream for Stream {
                 let buffer_capacity = self.buffer.capacity();
                 if buffer_capacity == 0 || remaining >= buffer_capacity {
                     match self
-                        .submit_recv(owned_buf, bytes_received, remaining, true, deadline)
+                        .handle
+                        .recv(
+                            self.fd.clone(),
+                            owned_buf,
+                            bytes_received,
+                            len,
+                            true,
+                            deadline,
+                        )
                         .await
                     {
-                        Ok((buf, read)) => {
+                        Ok((buf, total)) => {
                             owned_buf = buf;
-                            bytes_received += read;
+                            bytes_received = total;
                         }
                         Err((_, err)) => return Err(err),
                     }
@@ -617,7 +598,7 @@ impl crate::Stream for Stream {
 mod tests {
     use super::{RawSocketAddr, Sink, Stream, local_addr, new_socket};
     use crate::{
-        BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
+        BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, Listener as _, Network as _,
         Runner as _, Sink as _, Stream as _, Supervisor as _, iouring,
         iouring::testing::{TestLoop, poll_once},
         network::{
@@ -628,7 +609,7 @@ mod tests {
     };
     use commonware_macros::test_group;
     use std::{
-        io::{Read, Write},
+        io::Read,
         net::SocketAddr,
         os::{fd::AsRawFd, unix::net::UnixStream},
         sync::Arc,
@@ -1042,43 +1023,6 @@ mod tests {
 
             let ((), (_sink, _stream)) = futures::join!(reader, sender);
         });
-    }
-
-    #[test]
-    fn test_submit_recv_returns_bytes_for_this_call() {
-        // Verify `submit_recv` translates the request state's cumulative total
-        // back into the per-call byte count expected by the higher-level recv loop.
-        let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry("pool"));
-        let mut harness = TestLoop::new(iouring::RingConfig::default());
-
-        // Build the wrapper directly so the test exercises `submit_recv`
-        // without involving the higher-level buffered recv machinery.
-        let (left, mut right) = UnixStream::pair().unwrap();
-        let stream = Stream::new(
-            Arc::new(left.into()),
-            harness.handle.clone(),
-            Duration::from_secs(1),
-            0,
-            pool,
-        );
-
-        // Pretend the caller already filled two bytes, then complete exactly
-        // three more bytes from the socket.
-        right.write_all(b"abc").unwrap();
-        let buffer = IoBufMut::with_capacity(5);
-        let result = harness.block_on(stream.submit_recv(
-            buffer,
-            2,
-            3,
-            true,
-            Instant::now() + Duration::from_secs(1),
-        ));
-
-        // The wrapper should report only the bytes read by this invocation,
-        // not the cumulative total tracked inside the request state.
-        let (_buffer, read) = result.expect("submit_recv should succeed");
-        assert_eq!(read, 3);
     }
 
     #[test]
