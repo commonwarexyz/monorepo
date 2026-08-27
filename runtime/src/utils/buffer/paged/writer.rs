@@ -612,8 +612,7 @@ impl<B: Blob> Writer<B> {
         self.view().try_read_ranges_sync_into(buf, ranges)
     }
 
-    /// Warm the page cache for sorted, non-overlapping `(offset, len)` byte ranges, admitting
-    /// missing pages with coalesced blob reads.
+    /// Warm the page cache for sorted, non-overlapping `(offset, len)` byte ranges.
     pub async fn warm_ranges(&self, ranges: &[(u64, usize)]) -> Result<(), Error> {
         self.view().warm_ranges(ranges).await
     }

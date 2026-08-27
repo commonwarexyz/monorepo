@@ -179,8 +179,8 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: warm the missing pages behind the remaining ranges with coalesced blob
-        // reads, then serve the ranges from the now-warm cache.
+        // Slow path: warm the missing pages behind the remaining ranges with coalesced blob reads,
+        // then serve the ranges from the now-warm cache.
         let miss_ranges: Vec<(u64, usize)> = cache_ranges
             .iter()
             .map(|(item_buf, offset)| (*offset, item_buf.len()))
@@ -188,8 +188,8 @@ impl<B: Blob> View<'_, B> {
         self.warm_ranges(&miss_ranges).await?;
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
 
-        // Ranges whose pages were evicted between admission and the re-probe (possible only
-        // when the batch exceeds the cache capacity) fall back to per-range reads.
+        // Ranges whose pages were evicted between admission and the re-probe (possible only when
+        // the batch exceeds the cache capacity) fall back to per-range reads.
         if !cache_ranges.is_empty() {
             let mut reads = cache_ranges
                 .iter_mut()
@@ -205,13 +205,11 @@ impl<B: Blob> View<'_, B> {
         Ok(offsets.len() - blob_reads)
     }
 
-    /// Warm the page cache for the given `(offset, len)` byte ranges: compute the distinct
-    /// pages the ranges touch below the in-memory tail and admit the missing ones with
-    /// coalesced blob reads. Ranges must be sorted by offset and non-overlapping; bytes served
-    /// by the in-memory tail are skipped.
+    /// Warm the page cache for the given `(offset, len)` byte ranges. Ranges must be sorted by
+    /// offset and non-overlapping. Bytes already in the in-memory tail are skipped.
     pub async fn warm_ranges(&self, ranges: &[(u64, usize)]) -> Result<(), Error> {
-        // The sorted, non-overlapping ranges make the touched pages ascend; adjacent ranges
-        // sharing a page are deduplicated by continuing from one past the last recorded page.
+        // The sorted, non-overlapping ranges make the touched pages ascend; adjacent ranges sharing
+        // a page are deduplicated by continuing from one past the last recorded page.
         let mut pages: Vec<u64> = Vec::new();
         for &(offset, len) in ranges {
             if len == 0 || offset >= self.tail_offset {

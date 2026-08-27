@@ -707,8 +707,8 @@ mod tests {
         });
     }
 
-    /// A cold `Sealed::read_many_into` fetches the missing pages in coalesced runs and admits
-    /// them, so a subsequent sync probe of the same offsets is a full hit.
+    /// A cold `Sealed::read_many_into` fetches the missing pages in coalesced runs and admits them,
+    /// so a subsequent sync probe of the same offsets is a full hit.
     #[test_traced("DEBUG")]
     fn test_sealed_read_many_into_bulk_cold() {
         let executor = deterministic::Runner::default();
