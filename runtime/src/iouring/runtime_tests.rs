@@ -1514,68 +1514,6 @@ fn test_worker_spawn_races_registry_close() {
     runtime.join().expect("runtime thread should join");
 }
 
-/// A worker panic already observed by an opportunistic reap happened
-/// before a later root panic and must remain the payload propagated by
-/// `start` (earliest cause wins over its cascade).
-#[test]
-fn test_reaped_worker_panic_precedes_root_panic() {
-    struct PanicOnDrop;
-
-    impl Future for PanicOnDrop {
-        type Output = ();
-
-        fn poll(self: Pin<&mut Self>, _: &mut std_task::Context<'_>) -> Poll<()> {
-            Poll::Ready(())
-        }
-    }
-
-    impl Drop for PanicOnDrop {
-        fn drop(&mut self) {
-            panic!("worker panic");
-        }
-    }
-
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        Runner::default().start(|context| async move {
-            let executor = context.executor.upgrade().unwrap();
-            let handle = context
-                .child("panicking_worker")
-                .dedicated()
-                .spawn(|_| PanicOnDrop);
-            assert!(matches!(handle.await, Err(Error::Closed)));
-
-            // Wait until the worker has exited, then exercise the
-            // opportunistic reaper so its payload is stashed before the
-            // root panics.
-            loop {
-                let finished = executor
-                    .shared
-                    .workers
-                    .lock()
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .any(std::thread::JoinHandle::is_finished);
-                if finished {
-                    break;
-                }
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            executor.shared.reap_workers();
-            assert!(executor.shared.worker_panic.lock().is_some());
-
-            panic!("root panic");
-        })
-    }));
-
-    let payload = result.expect_err("start should propagate the first panic");
-    let message = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-    assert_eq!(message, Some("worker panic"));
-}
-
 /// Completion of a dedicated task must abort the consumed context's node
 /// before the handle resolves (as the inline path does): contexts derived
 /// from it before the spawn cannot spawn afterwards.

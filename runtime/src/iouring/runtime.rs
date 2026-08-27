@@ -1082,18 +1082,6 @@ impl crate::Runner for Runner {
             worker.run(root, Arc::clone(&root_tree))
         }));
 
-        // Snapshot reap-stashed panics before triggering any further
-        // teardown: a payload present at this point was captured while the
-        // root still ran, so it predates (and usually causes) any root
-        // panic. Taking it after the joins below would let a worker panicked
-        // BY that cascade (and reaped by a racing foreign-thread spawn)
-        // outrank the root panic it resulted from. A cascade panic from
-        // `run`'s own internal abort can still slip in through the same
-        // foreign-reap race. Distinguishing it would require stamping
-        // stashes with a teardown epoch, which the diagnostic payoff does
-        // not justify.
-        let stashed = shared.worker_panic.lock().take();
-
         // Close the registry and take every dedicated worker atomically.
         // `spawn_worker` holds this same mutex across its open check, thread
         // creation, and handle registration. A racing spawn is therefore in
@@ -1112,15 +1100,9 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Panic precedence: earliest cause first. A worker panic stashed
-        // while the root still ran predates the root's own panic (and is
-        // usually its cause: a dead worker fails the tasks that depended on
-        // it), so it wins. The root panic beats join-loop and teardown-era
-        // payloads, which are its downstream cascade.
+        // Prefer a root panic when present. Otherwise retain worker panics in
+        // stash-then-join order.
         let mut first_panic = None;
-        if let Some(payload) = stashed {
-            retain_first_panic(&mut first_panic, payload);
-        }
         let output = match output {
             Ok(output) => Some(output),
             Err(payload) => {
