@@ -13,8 +13,8 @@
 //! Op futures ([Op]) stage requests by inserting into the slab and pushing
 //! onto the backlog during `poll`. The loop builds and submits SQEs in
 //! its own turn, parks ordinary op results in the slot, and wakes the stored
-//! task waker. Detached ticket results move to an independently generational
-//! completion arena before their waiter is recycled. Dropping an op future
+//! task waker. Detached ticket results move to an independent completion arena
+//! before their waiter is recycled. Dropping an op future
 //! orphans its slot: cancelable kinds are
 //! async-cancelled eagerly, while storage writes and syncs detach and keep
 //! running for durability parity with the tokio backend. Dropping an admitted
@@ -31,23 +31,19 @@
 //! full waiter slab
 //!       |
 //!       v
-//! Queued CapacityId --slot freed--> Granted CapacityId
-//!       |       |                          |       |
-//!       |       +--deadline--------------->|-------+--> Expired
-//!       |                                  |
-//!       | drop or close                    | owner repolls
-//!       v                                  v
-//! Free or Closed <-------------------- waiter owns request
-//!                                          |
-//!                    +---------------------+---------------------+
-//!                    |                                           |
-//!                 Op Ready                               Ticket Pending
-//!                    |                                           |
-//!                    v                                           v
-//!             recycle waiter                    publish Ticket Ready
-//!                                                        |
-//!                                                        v
-//!                                                 recycle waiter
+//! Queued CapacityId --slot freed--> Granted CapacityId --owner repolls--> waiter owns request
+//!       |                                  |                                      |
+//!       | deadline, drop, or close         | deadline, drop, or close             |
+//!       v                                  v                                      |
+//!      Free <------------------------------+                  +-------------------+-------------------+
+//!                                                             |                                       |
+//!                                                          Op Ready                           Ticket Pending
+//!                                                             |                                       |
+//!                                                             v                                       v
+//!                                                      recycle waiter                 publish Ticket Ready
+//!                                                                                                     |
+//!                                                                                                     v
+//!                                                                                              recycle waiter
 //! ```
 //!
 //! Every state transition completes while [Ops] is borrowed. Stored waker
@@ -384,16 +380,6 @@ enum CapacityState {
         /// Absolute operation deadline, retained until waiter insertion.
         deadline: Option<Instant>,
     },
-    /// Deadline elapsed before admission.
-    ///
-    /// The queued waker moved into the deferred wake action. The node remains
-    /// generation-live until the owner repolls or drops, preventing a stale
-    /// registration from silently rejoining the FIFO.
-    Expired,
-    /// Driver closure won the race with the operation deadline.
-    ///
-    /// Queued owners have already been moved into the close wake batch.
-    Closed,
 }
 
 /// Result of one atomic capacity-admission transition.
@@ -408,10 +394,6 @@ enum CapacityAdmission {
     Granted,
     /// Keep or create a FIFO registration and wait for a grant.
     Queued,
-    /// The request deadline elapsed while it waited for capacity.
-    Expired,
-    /// The driver closed while the request waited for capacity.
-    Closed,
 }
 
 /// Payload-free admission result used by capacity state-machine tests.
@@ -424,10 +406,6 @@ enum CapacityAdmissionKind {
     Granted,
     /// The poll remains registered in the FIFO.
     Queued,
-    /// The poll observes a pre-admission deadline expiry.
-    Expired,
-    /// The poll observes driver closure before admission.
-    Closed,
 }
 
 #[cfg(test)]
@@ -438,8 +416,6 @@ impl CapacityAdmission {
             Self::Direct => CapacityAdmissionKind::Direct,
             Self::Granted => CapacityAdmissionKind::Granted,
             Self::Queued => CapacityAdmissionKind::Queued,
-            Self::Expired => CapacityAdmissionKind::Expired,
-            Self::Closed => CapacityAdmissionKind::Closed,
         }
     }
 }
@@ -521,38 +497,6 @@ impl CapacityWaiters {
                     *registration = None;
                     return CapacityAdmission::Granted;
                 }
-                CapacityState::Expired => {
-                    actions.reserve(1);
-                    let CapacityState::Expired = self
-                        .take_live(id)
-                        .expect("validated capacity expiry disappeared")
-                    else {
-                        unreachable!("validated capacity expiry changed state")
-                    };
-                    *registration = None;
-                    actions.push(WakerAction::Drop(
-                        incoming_waker
-                            .take()
-                            .expect("capacity waker consumed twice"),
-                    ));
-                    return CapacityAdmission::Expired;
-                }
-                CapacityState::Closed => {
-                    actions.reserve(1);
-                    let CapacityState::Closed = self
-                        .take_live(id)
-                        .expect("validated capacity closure disappeared")
-                    else {
-                        unreachable!("validated capacity closure changed state")
-                    };
-                    *registration = None;
-                    actions.push(WakerAction::Drop(
-                        incoming_waker
-                            .take()
-                            .expect("capacity waker consumed twice"),
-                    ));
-                    return CapacityAdmission::Closed;
-                }
                 CapacityState::Free { .. } => unreachable!("free capacity node reported live"),
             }
         }
@@ -578,9 +522,8 @@ impl CapacityWaiters {
 
     /// Expire every queued registration whose deadline is at or before `now`.
     ///
-    /// Each expired node remains generation-live for its owner, but leaves the
-    /// FIFO and no longer participates in grants. Its waker runs only after
-    /// the surrounding [Ops] borrow is released.
+    /// Each expired node is recycled after leaving the FIFO or releasing its
+    /// grant. Its waker runs only after the surrounding [Ops] borrow is released.
     pub(super) fn expire(
         &mut self,
         now: Instant,
@@ -602,8 +545,10 @@ impl CapacityWaiters {
                 actions.reserve(1);
             }
             self.deadlines.pop();
-            let state = std::mem::replace(&mut self.nodes[id.index].state, CapacityState::Expired);
-            match state {
+            match self
+                .take_live(id)
+                .expect("live capacity deadline disappeared")
+            {
                 CapacityState::Queued {
                     prev, next, waker, ..
                 } => {
@@ -616,7 +561,9 @@ impl CapacityWaiters {
                         .checked_sub(1)
                         .expect("capacity reservation underflow");
                 }
-                _ => unreachable!("live capacity deadline had a terminal state"),
+                CapacityState::Free { .. } => {
+                    unreachable!("free capacity deadline reported live")
+                }
             }
             changed = true;
         }
@@ -722,7 +669,6 @@ impl CapacityWaiters {
                 }
                 self.reconcile(free_len, actions);
             }
-            CapacityState::Expired | CapacityState::Closed => {}
             CapacityState::Free { .. } => unreachable!("free capacity node reported live"),
         }
     }
@@ -765,11 +711,7 @@ impl CapacityWaiters {
         self.compact_deadlines();
     }
 
-    /// Mark every live registration closed and return queued owner wakers.
-    ///
-    /// Expired nodes preserve timeout-before-close precedence. Other live
-    /// nodes become closure tombstones until their generation owner repolls or
-    /// drops. Free slots and arena allocation remain reusable at high water.
+    /// Recycle every live registration and return queued owner wakers.
     fn close(&mut self) -> Vec<Waker> {
         let queued = self
             .nodes
@@ -782,13 +724,18 @@ impl CapacityWaiters {
         self.reserved = 0;
         self.deadlines.clear();
         self.deadline_tombstones = 0;
-        for node in self.nodes.iter_mut().rev() {
-            let state = std::mem::replace(&mut node.state, CapacityState::Closed);
+        for index in (0..self.nodes.len()).rev() {
+            let id = CapacityId {
+                index,
+                generation: self.nodes[index].generation,
+            };
+            let Some(state) = self.take_live(id) else {
+                continue;
+            };
             match state {
                 CapacityState::Queued { waker, .. } => wakers.push(waker),
-                CapacityState::Expired => node.state = CapacityState::Expired,
-                CapacityState::Free { next } => node.state = CapacityState::Free { next },
-                CapacityState::Granted { .. } | CapacityState::Closed => {}
+                CapacityState::Granted { .. } => {}
+                CapacityState::Free { .. } => unreachable!("free capacity node reported live"),
             }
         }
         wakers
@@ -943,8 +890,8 @@ impl CapacityWaiters {
 /// admission poll) and cancelled when the attempt is dropped while parked. A
 /// foreign-thread drop cannot touch the thread-affine arena, so it transfers
 /// the generation-tagged ID through [OrphanMailbox]. The loop cancels that ID
-/// and transfers any released permit on its next turn. Expired registrations
-/// stay generation-live until this guard observes or cancels them.
+/// and transfers any released permit on its next turn. Expiry and close
+/// recycle the slot immediately, so a later stale cancellation is a no-op.
 struct Registration<'a> {
     /// Affine driver state and cross-thread orphan mailbox.
     handle: &'a Handle,
@@ -1300,24 +1247,6 @@ fn poll_admission<T>(
         .expect("request missing before admission")
         .deadline();
     let outcome = handle.with(|ops| {
-        if registration.slot.is_some_and(|id| {
-            matches!(
-                ops.capacity.live_state(id),
-                Some(CapacityState::Expired | CapacityState::Closed)
-            )
-        }) {
-            return match ops.capacity.poll(
-                &mut registration.slot,
-                ops.waiters.free_len(),
-                deadline,
-                &mut incoming_waker,
-                &mut actions,
-            ) {
-                CapacityAdmission::Expired => Admission::Expired,
-                CapacityAdmission::Closed => Admission::Closed,
-                _ => unreachable!("terminal capacity registration changed state"),
-            };
-        }
         if ops.closed {
             if let Some(slot) = registration.slot.take() {
                 ops.capacity
@@ -1352,8 +1281,6 @@ fn poll_admission<T>(
             &mut actions,
         ) {
             CapacityAdmission::Queued => return Admission::Full,
-            CapacityAdmission::Expired => return Admission::Expired,
-            CapacityAdmission::Closed => return Admission::Closed,
             CapacityAdmission::Direct | CapacityAdmission::Granted => {}
         }
         let request = request.take().expect("request consumed before admission");
@@ -2025,14 +1952,12 @@ mod tests {
         capacity.expire(now + Duration::from_millis(15), 1, &mut actions);
         wake_batch(actions);
         assert_eq!(*log.lock(), vec![0, 1]);
-        assert!(matches!(
-            capacity.live_state(registrations[0].unwrap()),
-            Some(CapacityState::Expired)
-        ));
+        assert!(capacity.live_state(registrations[0].unwrap()).is_none());
         assert!(matches!(
             capacity.live_state(registrations[1].unwrap()),
             Some(CapacityState::Granted { .. })
         ));
+        assert_eq!(capacity.registered(), 2);
         assert_eq!(capacity.queued(), 1);
         assert_eq!(capacity.reserved(), 1);
         assert_eq!(
@@ -2040,16 +1965,9 @@ mod tests {
             Some(Duration::from_millis(5))
         );
 
-        assert_eq!(
-            poll_capacity_with_deadline(
-                &mut capacity,
-                &mut registrations[0],
-                1,
-                Some(now + Duration::from_millis(10)),
-                &wakers[0],
-            ),
-            CapacityAdmissionKind::Expired
-        );
+        cancel_capacity(&mut capacity, registrations[0].unwrap(), 1);
+        assert_eq!(capacity.registered(), 2);
+        assert_eq!(capacity.reserved(), 1);
         assert_eq!(
             poll_capacity_with_deadline(
                 &mut capacity,
@@ -2060,7 +1978,12 @@ mod tests {
             ),
             CapacityAdmissionKind::Granted
         );
-        cancel_capacity(&mut capacity, registrations[2].unwrap(), 0);
+        reconcile_capacity(&mut capacity, 1);
+        assert_eq!(
+            poll_capacity(&mut capacity, &mut registrations[2], 1, &wakers[2]),
+            CapacityAdmissionKind::Granted
+        );
+        assert_eq!(*log.lock(), vec![0, 1, 2]);
         assert_eq!(capacity.registered(), 0);
     }
 
@@ -2106,61 +2029,46 @@ mod tests {
     }
 
     #[test]
-    fn test_capacity_timeout_precedes_later_close() {
-        let now = Instant::now();
-        let mut capacity = CapacityWaiters::new();
+    fn test_capacity_close_wins_after_unobserved_expiry() {
+        let handle = Handle::new(1, RingWaker::new().unwrap());
+        let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(handle.recv(
+            Arc::new(blocker_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(3600),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (expired_left, _expired_right) = UnixStream::pair().unwrap();
+        let mut expired = Box::pin(handle.recv(
+            Arc::new(expired_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            deadline,
+        ));
         let waker = futures::task::noop_waker();
-        let mut expired = None;
-        assert_eq!(
-            poll_capacity_with_deadline(
-                &mut capacity,
-                &mut expired,
-                0,
-                Some(now + Duration::from_millis(1)),
-                &waker,
-            ),
-            CapacityAdmissionKind::Queued
-        );
-        let mut actions = Vec::new();
-        capacity.expire(now + Duration::from_millis(2), 0, &mut actions);
-        wake_batch(actions);
-        for waker in capacity.close() {
-            waker.wake();
-        }
-        assert_eq!(
-            poll_capacity_with_deadline(
-                &mut capacity,
-                &mut expired,
-                0,
-                Some(now + Duration::from_millis(1)),
-                &waker,
-            ),
-            CapacityAdmissionKind::Expired
-        );
+        let mut cx = Context::from_waker(&waker);
+        assert!(blocker.as_mut().poll(&mut cx).is_pending());
+        assert!(expired.as_mut().poll(&mut cx).is_pending());
 
-        let mut closed = None;
-        let mut fresh = CapacityWaiters::new();
-        assert_eq!(
-            poll_capacity_with_deadline(
-                &mut fresh,
-                &mut closed,
-                0,
-                Some(now + Duration::from_secs(1)),
-                &waker,
-            ),
-            CapacityAdmissionKind::Queued
-        );
-        drop(fresh.close());
-        assert_eq!(
-            poll_capacity_with_deadline(
-                &mut fresh,
-                &mut closed,
-                0,
-                Some(now + Duration::from_secs(1)),
-                &waker,
-            ),
-            CapacityAdmissionKind::Closed
-        );
+        let actions = handle.with(|ops| {
+            let mut actions = Vec::new();
+            ops.capacity
+                .expire(deadline, ops.waiters.free_len(), &mut actions);
+            assert_eq!(ops.capacity.registered(), 0);
+            actions
+        });
+        wake_batch(actions);
+        assert!(handle.close().is_empty());
+
+        assert!(matches!(
+            expired.as_mut().poll(&mut cx),
+            Poll::Ready(Err((_, Error::RecvFailed)))
+        ));
     }
 
     unsafe fn count_clone(data: *const ()) -> RawWaker {
@@ -2320,7 +2228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_capacity_close_preserves_terminal_ownership() {
+    fn test_capacity_close_recycles_terminal_registrations() {
         let mut capacity = CapacityWaiters::new();
         let counts: Vec<_> = (0..3)
             .map(|_| Arc::new(CountWaker(AtomicUsize::new(0))))
@@ -2342,10 +2250,16 @@ mod tests {
         let closed = capacity.close();
         assert_eq!(closed.len(), 1);
         assert!(closed[0].will_wake(&wakers[2]));
-        assert_eq!(capacity.registered(), 3);
+        assert_eq!(capacity.registered(), 0);
         assert_eq!(capacity.reserved(), 0);
         assert_eq!(capacity.queued(), 0);
         assert_eq!(capacity.arena_len(), 3);
+        assert!(
+            registrations
+                .iter()
+                .flatten()
+                .all(|id| capacity.live_state(*id).is_none())
+        );
         for waker in closed {
             waker.wake();
         }
@@ -2355,11 +2269,23 @@ mod tests {
                 .all(|count| count.0.load(Ordering::Acquire) == 1)
         );
 
-        // Owner or mailbox cancellation recycles each closure tombstone once.
-        for id in registrations.into_iter().flatten() {
+        // Stale owner or mailbox cancellation cannot affect a recycled slot.
+        let stale = registrations[0].unwrap();
+        for id in registrations.iter().flatten().copied() {
             cancel_capacity(&mut capacity, id, 2);
         }
         assert_eq!(capacity.registered(), 0);
+
+        let mut replacement = None;
+        assert_eq!(
+            poll_capacity(&mut capacity, &mut replacement, 0, &wakers[0]),
+            CapacityAdmissionKind::Queued
+        );
+        let replacement = replacement.unwrap();
+        assert_eq!(replacement.index, stale.index);
+        assert_ne!(replacement.generation, stale.generation);
+        assert_eq!(capacity.arena_len(), 3);
+        cancel_capacity(&mut capacity, replacement, 0);
     }
 
     #[test]

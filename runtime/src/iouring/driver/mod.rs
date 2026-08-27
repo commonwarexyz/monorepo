@@ -3388,8 +3388,8 @@ mod tests {
             .handle
             .with(|ops| assert_eq!(ops.capacity.arena_len(), 1));
 
-        // Close retains a generation-live terminal tombstone until its owner
-        // observes closure or drops the registration.
+        // Close recycles the terminal registration immediately. A later owner
+        // drop carries a stale generation and cannot affect another waiter.
         let (left, _right) = UnixStream::pair().unwrap();
         let mut parked = Box::pin(handle.recv(
             Arc::new(left.into()),
@@ -3403,7 +3403,7 @@ mod tests {
         harness.driver().close();
         harness
             .handle
-            .with(|ops| assert_eq!(ops.capacity.registered(), 1));
+            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
         drop(parked);
         harness
             .handle
