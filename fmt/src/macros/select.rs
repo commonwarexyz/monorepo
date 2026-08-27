@@ -53,6 +53,9 @@ pub(super) fn select_at_depth(
 ) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<SelectInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
+    if pretty::source_has_internal_blank_line(source) {
+        return preserve_select(source, &source_map, &input, options, depth);
+    }
     let Some(shell_trivia) = select_shell_trivia(source, &source_map, &input)? else {
         return preserve_select(source, &source_map, &input, options, depth);
     };
@@ -88,6 +91,9 @@ pub(super) fn select_loop_at_depth(
     let input = syn::parse_str::<SelectLoopInput>(source).map_err(Error::Parse)?;
     input.validate().map_err(Error::Validate)?;
     let source_map = SourceMap::new(source);
+    if pretty::source_has_internal_blank_line(source) {
+        return preserve_select_loop(source, &source_map, &input, options, depth);
+    }
     let Some(shell_trivia) = select_loop_shell_trivia(source, &source_map, &input)? else {
         return preserve_select_loop(source, &source_map, &input, options, depth);
     };
@@ -1109,6 +1115,24 @@ mod tests {
     fn preserves_comment_at_structural_seam() {
         let source = "value = receive() /* keep seam */ => value";
         let formatted = select(source, OPTIONS).expect("select should be preserved");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn preserves_blank_line_between_branches() {
+        let source = "first = receive_first() => first,\n\nsecond = receive_second() => second,";
+        let formatted = select(source, OPTIONS).expect("select should be protected");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn preserves_blank_line_between_select_loop_entries() {
+        let source = "context,\non_stopped => {},\n\nvalue = receive() => value,";
+        let formatted = select_loop(source, OPTIONS).expect("select loop should be protected");
 
         assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
         assert_eq!(formatted.text(), source);

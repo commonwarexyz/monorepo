@@ -259,4 +259,25 @@ mod tests {
         assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
         assert_eq!(formatted.text(), source);
     }
+
+    #[test]
+    fn preserves_internal_item_blank_lines() {
+        let source = "BETA {\n    pub struct First;\n\n    pub trait Example {\n        type Value;\n\n        fn value(&self) -> Self::Value;\n    }\n\n    pub struct Last;\n}";
+        let formatted =
+            stability_scope(source, OPTIONS, 0).expect("stability scope should be protected");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn formats_nested_macro_without_collapsing_item_blank_lines() {
+        let source = "BETA {\n    pub struct First;\n\n    fn run() { select! { value=receive()=>value } }\n}";
+        let formatted = stability_scope(source, OPTIONS, 0)
+            .expect("nested selection should format")
+            .into_string();
+
+        assert!(formatted.contains("pub struct First;\n\n    fn run()"));
+        assert!(formatted.contains("value = receive() => value"));
+    }
 }

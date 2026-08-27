@@ -285,6 +285,38 @@ pub(super) fn preserve_with_nested(
     for expression in expressions {
         collector.visit_expr(expression);
     }
+    preserve_collected(source, source_map, collector, options, depth)
+}
+
+pub(super) fn preserve_bodies_with_nested(
+    source: &str,
+    source_map: &SourceMap<'_>,
+    item_groups: &[&[Item]],
+    statement_groups: &[&[Stmt]],
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    let mut collector = ChildCollector::default();
+    for items in item_groups {
+        for item in *items {
+            collector.visit_item(item);
+        }
+    }
+    for statements in statement_groups {
+        for statement in *statements {
+            collector.visit_stmt(statement);
+        }
+    }
+    preserve_collected(source, source_map, collector, options, depth)
+}
+
+fn preserve_collected(
+    source: &str,
+    source_map: &SourceMap<'_>,
+    collector: ChildCollector,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
     if collector.macros.is_empty() {
         return Ok(ProtectedFragment::preserved(source));
     }

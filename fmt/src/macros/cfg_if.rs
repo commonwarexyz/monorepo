@@ -150,6 +150,9 @@ pub(super) fn cfg_if(
 ) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<CfgIfInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
+    if pretty::source_has_internal_blank_line(source) {
+        return preserve_cfg_if(source, &source_map, &input, options, depth);
+    }
     let Some(ranges) = source_ranges(&source_map, &input)? else {
         return Ok(ProtectedFragment::preserved(source));
     };
@@ -187,6 +190,36 @@ pub(super) fn cfg_if(
     );
     syn::parse_str::<CfgIfInput>(&output).map_err(Error::Output)?;
     Ok(ProtectedFragment::formatted(output))
+}
+
+fn preserve_cfg_if(
+    source: &str,
+    source_map: &SourceMap<'_>,
+    input: &CfgIfInput,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    let mut item_groups = Vec::new();
+    let mut statement_groups = Vec::new();
+    for body in input
+        .branches
+        .iter()
+        .map(|branch| &branch.body)
+        .chain(input.else_branch.iter().map(|branch| &branch.body))
+    {
+        match body {
+            Body::Items(items) => item_groups.push(items.as_slice()),
+            Body::Statements(statements) => statement_groups.push(statements.as_slice()),
+        }
+    }
+    nested::preserve_bodies_with_nested(
+        source,
+        source_map,
+        &item_groups,
+        &statement_groups,
+        options,
+        depth,
+    )
 }
 
 fn source_ranges(
@@ -448,6 +481,36 @@ mod tests {
         let formatted = cfg_if(block, OPTIONS, 0).expect("cfg_if should be preserved");
         assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
         assert_eq!(formatted.text(), block);
+    }
+
+    #[test]
+    fn preserves_internal_item_blank_lines() {
+        let source = "if #[cfg(test)] {\n    pub struct First;\n\n    pub trait Example {\n        type Value;\n\n        fn value(&self) -> Self::Value;\n    }\n}";
+        let formatted = cfg_if(source, OPTIONS, 0).expect("cfg_if should be protected");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn formats_nested_macro_without_collapsing_item_blank_lines() {
+        let source = "if #[cfg(test)] {\n    pub struct First;\n\n    fn run() { select! { value=receive()=>value } }\n}";
+        let formatted = cfg_if(source, OPTIONS, 0).expect("nested selection should format");
+
+        assert_eq!(
+            formatted.disposition(),
+            Disposition::PreservedWithNestedFormatting
+        );
+        assert!(
+            formatted
+                .text()
+                .contains("pub struct First;\n\n    fn run()")
+        );
+        assert!(formatted.text().contains("value = receive() => value,"));
+        let reparsed = syn::parse_str::<CfgIfInput>(formatted.text()).expect("cfg_if should parse");
+        let twice = cfg_if(formatted.text(), OPTIONS, 0).expect("cfg_if should format twice");
+        assert_eq!(reparsed.branches.len(), 1);
+        assert_eq!(formatted.text(), twice.text());
     }
 
     #[test]

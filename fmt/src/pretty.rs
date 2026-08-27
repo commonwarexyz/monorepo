@@ -274,6 +274,9 @@ fn format_or_preserve_with_policy(
     preserve_source_docs: bool,
     format: impl FnOnce() -> Result<String, Error>,
 ) -> Result<ProtectedFragment, Error> {
+    if source_has_internal_blank_line(source) {
+        return Ok(ProtectedFragment::preserved(source));
+    }
     if source_requires_preservation_with_policy(source, preserve_source_docs) {
         let comments = if preserve_source_docs {
             crate::trivia::LineComments::prepare(source)
@@ -377,6 +380,22 @@ pub(crate) fn source_has_multiline_literal(source: &str) -> bool {
     )
     .is_err()
         || has_multiline_literal
+}
+
+pub(crate) fn source_has_internal_blank_line(source: &str) -> bool {
+    let mut saw_content = false;
+    let mut saw_blank_after_content = false;
+    for line in source.lines() {
+        if line.trim().is_empty() {
+            saw_blank_after_content |= saw_content;
+        } else {
+            if saw_blank_after_content {
+                return true;
+            }
+            saw_content = true;
+        }
+    }
+    false
 }
 
 fn source_requires_preservation_with_policy(source: &str, preserve_source_docs: bool) -> bool {
@@ -582,6 +601,27 @@ mod tests {
             "{}",
             formatted.text()
         );
+        assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn preserves_internal_blank_lines_in_items() {
+        let source = "pub struct First;\n\npub trait Example {\n    type Value;\n\n    fn value(&self) -> Self::Value;\n}\n\npub struct Last;";
+        let file = syn::parse_file(source).expect("items should parse");
+        let formatted = items(&file.items, source).expect("items should be protected");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn preserves_internal_blank_lines_in_statements() {
+        let source = "let first=source();\n\nlet second=source();\nfirst + second";
+        let block: syn::Block =
+            syn::parse_str(&format!("{{{source}}}")).expect("block should parse");
+        let formatted = statements(&block.stmts, source).expect("statements should be protected");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
         assert_eq!(formatted.text(), source);
     }
 
