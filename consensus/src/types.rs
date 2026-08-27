@@ -978,24 +978,24 @@ commonware_macros::stability_scope!(ALPHA {
         }
 
         impl<B: Digestible, C: Scheme, H: Hasher> Commitment<B, C, H> {
-            const BLOCK_DIGEST_OFFSET: usize = 0;
-            const CODING_ROOT_OFFSET: usize = Self::BLOCK_DIGEST_OFFSET + COMMITMENT_DIGEST_SIZE;
-            const CONTEXT_DIGEST_OFFSET: usize = Self::CODING_ROOT_OFFSET + COMMITMENT_DIGEST_SIZE;
-            const CONFIG_OFFSET: usize = Self::CONTEXT_DIGEST_OFFSET + COMMITMENT_DIGEST_SIZE;
+            const BLOCK_OFFSET: usize = 0;
+            const ROOT_OFFSET: usize = Self::BLOCK_OFFSET + COMMITMENT_DIGEST_SIZE;
+            const CONTEXT_OFFSET: usize = Self::ROOT_OFFSET + COMMITMENT_DIGEST_SIZE;
+            const CONFIG_OFFSET: usize = Self::CONTEXT_OFFSET + COMMITMENT_DIGEST_SIZE;
 
             /// Returns the block [`Digest`] from this [`Commitment`].
             pub fn block(&self) -> B::Digest {
-                self.field(Self::BLOCK_DIGEST_OFFSET)
+                self.field(Self::BLOCK_OFFSET)
             }
 
             /// Returns the coding root [`Digest`] from this [`Commitment`].
             pub fn root(&self) -> C::Commitment {
-                self.field(Self::CODING_ROOT_OFFSET)
+                self.field(Self::ROOT_OFFSET)
             }
 
             /// Returns the context [`Digest`] from this [`Commitment`].
             pub fn context(&self) -> H::Digest {
-                self.field(Self::CONTEXT_DIGEST_OFFSET)
+                self.field(Self::CONTEXT_OFFSET)
             }
 
             /// Extracts the [`CodingConfig`] from this [`Commitment`].
@@ -1090,17 +1090,17 @@ commonware_macros::stability_scope!(ALPHA {
 
                 Self::validate_field::<B::Digest>(
                     &arr,
-                    Self::BLOCK_DIGEST_OFFSET,
+                    Self::BLOCK_OFFSET,
                     "invalid block digest",
                 )?;
                 Self::validate_field::<C::Commitment>(
                     &arr,
-                    Self::CODING_ROOT_OFFSET,
+                    Self::ROOT_OFFSET,
                     "invalid coding root",
                 )?;
                 Self::validate_field::<H::Digest>(
                     &arr,
-                    Self::CONTEXT_DIGEST_OFFSET,
+                    Self::CONTEXT_OFFSET,
                     "invalid context digest",
                 )?;
                 let mut cursor = &arr[Self::CONFIG_OFFSET..];
@@ -1153,11 +1153,11 @@ commonware_macros::stability_scope!(ALPHA {
                 const { Self::assert_layout() };
 
                 let mut buf = [0u8; COMMITMENT_SIZE];
-                buf[Self::BLOCK_DIGEST_OFFSET..Self::BLOCK_DIGEST_OFFSET + B::Digest::SIZE]
+                buf[Self::BLOCK_OFFSET..Self::BLOCK_OFFSET + B::Digest::SIZE]
                     .copy_from_slice(&block);
-                buf[Self::CODING_ROOT_OFFSET..Self::CODING_ROOT_OFFSET + C::Commitment::SIZE]
+                buf[Self::ROOT_OFFSET..Self::ROOT_OFFSET + C::Commitment::SIZE]
                     .copy_from_slice(&root);
-                buf[Self::CONTEXT_DIGEST_OFFSET..Self::CONTEXT_DIGEST_OFFSET + H::Digest::SIZE]
+                buf[Self::CONTEXT_OFFSET..Self::CONTEXT_OFFSET + H::Digest::SIZE]
                     .copy_from_slice(&context);
                 buf[Self::CONFIG_OFFSET..].copy_from_slice(&config.encode());
                 Self(buf, PhantomData)
