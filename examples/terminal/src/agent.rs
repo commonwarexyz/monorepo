@@ -16,7 +16,7 @@ use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalAction},
     commitment::VectorKind,
-    payment::{PaymentContext, SignedSend},
+    payment::{Entry, PaymentContext, SignedSend},
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Hasher, Sha256};
@@ -202,23 +202,26 @@ impl Agent {
         .balance)
     }
 
+    /// Pays every `(recipient index, amount)` entry with one batched send.
     pub(crate) async fn pay<E: Network>(
         &mut self,
         network: &E,
         settlement: SocketAddr,
         operator: SocketAddr,
-        recipient: usize,
-        amount: u64,
-    ) -> Result<operator_rpc::AcceptedPaymentResponse> {
-        ensure!(amount > 0, "payment amount must be positive");
-        let recipient = self.recipients[recipient % self.recipients.len()]
-            .key
-            .clone();
+        entries: &[(usize, u64)],
+    ) -> Result<operator_rpc::AcceptedBatchResponse> {
+        let mut requested = Vec::with_capacity(entries.len());
+        for (recipient, amount) in entries {
+            let recipient = self.recipients[recipient % self.recipients.len()]
+                .key
+                .clone();
+            requested.push(Entry::new(recipient, *amount).context("stage payment entry")?);
+        }
+        requested.sort_unstable_by(|left, right| left.recipient().cmp(right.recipient()));
         let (context, send, predecessor_state_root) = match &self.pending_payment {
             Some(pending) => {
                 ensure!(
-                    pending.send.body().recipient() == &recipient
-                        && pending.send.body().amount() == amount,
+                    pending.send.body().entries() == requested,
                     "another payment retry is pending"
                 );
                 self.store
@@ -283,11 +286,10 @@ impl Agent {
                 self.store
                     .retain_recovery_opening(&quote.root, &quote.opening)
                     .context("durably retain payer state opening")?;
-                let send = SignedSend::sign_next(
+                let send = SignedSend::sign_next_batch(
                     &quote.context,
                     self.wallet.signer(),
-                    recipient.clone(),
-                    amount,
+                    requested.clone(),
                     self.cumulative_debit,
                 )
                 .context("sign payment")?;
@@ -301,10 +303,6 @@ impl Agent {
                 (quote.context, send, quote.root)
             }
         };
-        ensure!(
-            context.operator() == &operator_key(),
-            "payment context has an unexpected operator"
-        );
         let accepted = operator_rpc::accept_send(
             network,
             operator,
@@ -312,16 +310,20 @@ impl Agent {
         )
         .await
         .context("submit payment")?;
+        let total = send
+            .body()
+            .total()
+            .context("staged payment total is checked")?;
         ensure!(
-            accepted.payment.send() == &send
-                && accepted.amount == amount
-                && accepted.epoch == context.epoch(),
+            accepted.epoch == context.epoch()
+                && accepted.total == total
+                && accepted.acceptance.send == send,
             "operator returned another payment"
         );
         accepted
-            .payment
-            .verify_linked::<Sha256>(&context)
-            .context("verify operator receipt")?;
+            .acceptance
+            .verify(&context)
+            .context("verify operator receipts")?;
         settlement_rpc::confirm_registration(
             network,
             settlement,
@@ -335,8 +337,12 @@ impl Agent {
         .context("confirm payment registration")?;
         let receipt_count = self
             .store
-            .commit_payment(&accepted.payment, self.cumulative_debit, self.receipt_count)
-            .context("commit accepted receipt")?;
+            .commit_payment(
+                &accepted.acceptance,
+                self.cumulative_debit,
+                self.receipt_count,
+            )
+            .context("commit accepted receipts")?;
         self.cumulative_debit = send.body().cumulative_debit();
         self.pending_payment = None;
         self.receipt_count = receipt_count;
@@ -794,7 +800,12 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{operator::Operator, protocol::AccountCache, rpc, settlement::Settlement};
+    use crate::{
+        operator::Operator,
+        protocol::{Acceptance, AccountCache},
+        rpc,
+        settlement::Settlement,
+    };
     use commonware_clearing::bajillion::{
         boundary::{DepositBatch, WithdrawalBatch},
         payment::{Payment, SignedReceipt},
@@ -1049,33 +1060,38 @@ mod tests {
                         panic!("payment retry unexpectedly requested another quote");
                     };
                     assert_eq!(request.send.body().cumulative_debit(), 7);
+                    let recipient = request.send.body().entries()[0].recipient().clone();
                     let receipt = SignedReceipt::issue_next::<Sha256, _>(
                         &payment_context,
                         &request.send,
+                        &recipient,
                         0,
                         0,
                         0,
                         operator.signer(),
                     )
                     .unwrap();
-                    first_payment = Some(
-                        Payment::new::<Sha256>(
-                            &payment_context,
-                            request.send.clone(),
-                            receipt.clone(),
-                        )
-                        .unwrap(),
-                    );
+                    let linked =
+                        Payment::new::<Sha256>(&payment_context, request.send.clone(), receipt)
+                            .unwrap();
+                    let (send, receipt) = linked.into_parts();
+                    first_payment = Some(Acceptance {
+                        send,
+                        receipts: vec![receipt],
+                    });
                     let forged = SignedReceipt::sign_body_by_authority(
-                        receipt.body().clone(),
+                        first_payment.as_ref().unwrap().receipts[0].body().clone(),
                         impostor.signer(),
                     );
                     rpc::Response::Success {
-                        body: operator_rpc::AcceptedPaymentResponse {
+                        body: operator_rpc::AcceptedBatchResponse {
                             epoch: payment_context.epoch(),
                             sequence: 0,
-                            amount: 7,
-                            payment: Payment::from_parts_unchecked(request.send, forged),
+                            total: 7,
+                            acceptance: Acceptance {
+                                send: request.send,
+                                receipts: vec![forged],
+                            },
                         }
                         .encode(),
                     }
@@ -1087,13 +1103,13 @@ mod tests {
                     let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
                         panic!("payment retry unexpectedly requested another quote");
                     };
-                    assert_eq!(request.send, *first_payment.send());
+                    assert_eq!(request.send, first_payment.send);
                     rpc::Response::Success {
-                        body: operator_rpc::AcceptedPaymentResponse {
+                        body: operator_rpc::AcceptedBatchResponse {
                             epoch: payment_context.epoch(),
                             sequence: 0,
-                            amount: 7,
-                            payment: first_payment.clone(),
+                            total: 7,
+                            acceptance: first_payment.clone(),
                         }
                         .encode(),
                     }
@@ -1132,23 +1148,31 @@ mod tests {
                         panic!("expected the second signed send");
                     };
                     assert_eq!(request.send.body().cumulative_debit(), 10);
+                    let recipient = request.send.body().entries()[0].recipient().clone();
                     let receipt = SignedReceipt::issue_next::<Sha256, _>(
                         &payment_context,
                         &request.send,
+                        &recipient,
                         0,
                         7,
                         1,
                         operator.signer(),
                     )
                     .unwrap();
-                    let payment =
-                        Payment::new::<Sha256>(&payment_context, request.send, receipt).unwrap();
+                    let (send, receipt) =
+                        Payment::new::<Sha256>(&payment_context, request.send, receipt)
+                            .unwrap()
+                            .into_parts();
+                    let payment = Acceptance {
+                        send,
+                        receipts: vec![receipt],
+                    };
                     rpc::Response::Success {
-                        body: operator_rpc::AcceptedPaymentResponse {
+                        body: operator_rpc::AcceptedBatchResponse {
                             epoch: payment_context.epoch(),
                             sequence: 1,
-                            amount: 3,
-                            payment,
+                            total: 3,
+                            acceptance: payment,
                         }
                         .encode(),
                     }
@@ -1159,24 +1183,24 @@ mod tests {
 
             let mut agent = Agent::new(0).unwrap();
             let rejected = agent
-                .pay(&context, operator_address, operator_address, 1, 7)
+                .pay(&context, operator_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap_err();
             assert!(format!("{rejected:#}").contains("verify operator receipt"));
             assert_eq!(agent.receipt_count(), 0);
 
             let accepted = agent
-                .pay(&context, operator_address, operator_address, 1, 7)
+                .pay(&context, operator_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap();
-            assert_eq!(accepted.payment.amount(), 7);
+            assert_eq!(accepted.acceptance.receipts[0].body().amount(), 7);
             assert_eq!(agent.receipt_count(), 1);
 
             let accepted = agent
-                .pay(&context, operator_address, operator_address, 1, 3)
+                .pay(&context, operator_address, operator_address, &[(1, 3)])
                 .await
                 .unwrap();
-            assert_eq!(accepted.payment.amount(), 3);
+            assert_eq!(accepted.acceptance.receipts[0].body().amount(), 3);
             assert_eq!(agent.receipt_count(), 2);
             operator_server.await.unwrap();
         });
@@ -1695,7 +1719,7 @@ mod tests {
 
             let mut agent = Agent::open(database.path(), 0).unwrap();
             let error = agent
-                .pay(&context, operator_address, operator_address, 1, 7)
+                .pay(&context, operator_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap_err();
             assert!(format!("{error:#}").contains("unexpected operator"));
@@ -1764,7 +1788,7 @@ mod tests {
 
                 let mut agent = Agent::open(database.path(), 0).unwrap();
                 let error = agent
-                    .pay(&context, settlement_address, operator_address, 1, 7)
+                    .pay(&context, settlement_address, operator_address, &[(1, 7)])
                     .await
                     .unwrap_err();
                 let error = format!("{error:#}");
@@ -1853,7 +1877,7 @@ mod tests {
 
             let mut agent = Agent::new(0).unwrap();
             let error = agent
-                .pay(&context, settlement_address, operator_address, 1, 7)
+                .pay(&context, settlement_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap_err();
             let error = format!("{error:#}");
@@ -1871,10 +1895,10 @@ mod tests {
             );
 
             let accepted = agent
-                .pay(&context, settlement_address, operator_address, 1, 7)
+                .pay(&context, settlement_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap();
-            assert_eq!(accepted.payment.amount(), 7);
+            assert_eq!(accepted.acceptance.receipts[0].body().amount(), 7);
             assert_eq!(agent.cumulative_debit, 7);
             assert_eq!(agent.receipt_count(), 1);
             assert!(agent.pending_payment.is_none());
@@ -1937,18 +1961,25 @@ mod tests {
                     };
                     assert_eq!(request.send.body().cumulative_debit(), 7);
                     first_send = request.send;
+                    let recipient = first_send.body().entries()[0].recipient().clone();
                     let receipt = SignedReceipt::issue_next::<Sha256, _>(
                         &payment_context,
                         &first_send,
+                        &recipient,
                         0,
                         0,
                         0,
                         operator.signer(),
                     )
                     .unwrap();
-                    accepted =
+                    let (send, receipt) =
                         Payment::new::<Sha256>(&payment_context, first_send.clone(), receipt)
-                            .unwrap();
+                            .unwrap()
+                            .into_parts();
+                    accepted = Acceptance {
+                        send,
+                        receipts: vec![receipt],
+                    };
                 }
 
                 respond(&mut listener, |request| {
@@ -1957,11 +1988,11 @@ mod tests {
                     };
                     assert_eq!(request.send.encode(), first_send.encode());
                     rpc::Response::Success {
-                        body: operator_rpc::AcceptedPaymentResponse {
+                        body: operator_rpc::AcceptedBatchResponse {
                             epoch: payment_context.epoch(),
                             sequence: 0,
-                            amount: 7,
-                            payment: accepted,
+                            total: 7,
+                            acceptance: accepted,
                         }
                         .encode(),
                     }
@@ -1972,7 +2003,7 @@ mod tests {
 
             let mut agent = Agent::open(database.path(), 0).unwrap();
             let error = agent
-                .pay(&context, operator_address, operator_address, 1, 7)
+                .pay(&context, operator_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap_err();
             assert!(format!("{error:#}").contains("submit payment"));
@@ -1982,10 +2013,10 @@ mod tests {
             let mut recovered = Agent::open(database.path(), 0).unwrap();
             assert!(recovered.pending_payment.is_some());
             let accepted = recovered
-                .pay(&context, operator_address, operator_address, 1, 7)
+                .pay(&context, operator_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap();
-            assert_eq!(accepted.payment.amount(), 7);
+            assert_eq!(accepted.acceptance.receipts[0].body().amount(), 7);
             assert_eq!(recovered.cumulative_debit, 7);
             assert_eq!(recovered.receipt_count(), 1);
             assert!(recovered.pending_payment.is_none());
@@ -2044,23 +2075,31 @@ mod tests {
                         panic!("expected the first signed send");
                     };
                     assert_eq!(request.send.body().cumulative_debit(), 7);
+                    let recipient = request.send.body().entries()[0].recipient().clone();
                     let receipt = SignedReceipt::issue_next::<Sha256, _>(
                         &payment_context,
                         &request.send,
+                        &recipient,
                         0,
                         0,
                         0,
                         operator.signer(),
                     )
                     .unwrap();
-                    let payment =
-                        Payment::new::<Sha256>(&payment_context, request.send, receipt).unwrap();
+                    let (send, receipt) =
+                        Payment::new::<Sha256>(&payment_context, request.send, receipt)
+                            .unwrap()
+                            .into_parts();
+                    let payment = Acceptance {
+                        send,
+                        receipts: vec![receipt],
+                    };
                     rpc::Response::Success {
-                        body: operator_rpc::AcceptedPaymentResponse {
+                        body: operator_rpc::AcceptedBatchResponse {
                             epoch: payment_context.epoch(),
                             sequence: 0,
-                            amount: 7,
-                            payment,
+                            total: 7,
+                            acceptance: payment,
                         }
                         .encode(),
                     }
@@ -2097,23 +2136,31 @@ mod tests {
                         panic!("expected the second signed send");
                     };
                     assert_eq!(request.send.body().cumulative_debit(), 10);
+                    let recipient = request.send.body().entries()[0].recipient().clone();
                     let receipt = SignedReceipt::issue_next::<Sha256, _>(
                         &payment_context,
                         &request.send,
+                        &recipient,
                         0,
                         7,
                         1,
                         operator.signer(),
                     )
                     .unwrap();
-                    let payment =
-                        Payment::new::<Sha256>(&payment_context, request.send, receipt).unwrap();
+                    let (send, receipt) =
+                        Payment::new::<Sha256>(&payment_context, request.send, receipt)
+                            .unwrap()
+                            .into_parts();
+                    let payment = Acceptance {
+                        send,
+                        receipts: vec![receipt],
+                    };
                     rpc::Response::Success {
-                        body: operator_rpc::AcceptedPaymentResponse {
+                        body: operator_rpc::AcceptedBatchResponse {
                             epoch: payment_context.epoch(),
                             sequence: 1,
-                            amount: 3,
-                            payment,
+                            total: 3,
+                            acceptance: payment,
                         }
                         .encode(),
                     }
@@ -2124,7 +2171,7 @@ mod tests {
 
             let mut agent = Agent::open(database.path(), 0).unwrap();
             agent
-                .pay(&context, operator_address, operator_address, 1, 7)
+                .pay(&context, operator_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap();
             drop(agent);
@@ -2133,7 +2180,7 @@ mod tests {
             assert_eq!(recovered.cumulative_debit, 7);
             assert_eq!(recovered.receipt_count(), 1);
             recovered
-                .pay(&context, operator_address, operator_address, 1, 3)
+                .pay(&context, operator_address, operator_address, &[(1, 3)])
                 .await
                 .unwrap();
             drop(recovered);

@@ -10,7 +10,7 @@ use crate::{
     settlement::SettlementSubmission,
     settlement_rpc,
     store::{
-        AcceptedPayment, CloseRejected, CommitUnknown, EpochData, ExternalPayoutEvidence,
+        AcceptedBatch, CloseRejected, CommitUnknown, EpochData, ExternalPayoutEvidence,
         MutationFailed, StagedDeposit, StagedWithdrawal, Store, StoreStatus, StoredCloseOutcome,
         WithdrawalEvidence,
     },
@@ -71,7 +71,7 @@ pub(crate) struct PaymentQuote {
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
-pub(crate) struct WithdrawalQuote {
+pub(crate) struct WithdrawalOpening {
     pub(crate) root: VectorRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
 }
@@ -87,7 +87,7 @@ pub(crate) struct SettlementRegistration {
 
 pub(crate) struct CloseFinished {
     pub(crate) epoch: u64,
-    pub(crate) header: String,
+    pub(crate) header_digest: String,
     pub(crate) rows: usize,
     pub(crate) slices: usize,
     pub(crate) payout_total: u64,
@@ -254,7 +254,7 @@ impl Operator {
         payer: usize,
         recipient: usize,
         amount: u64,
-    ) -> Result<AcceptedPayment> {
+    ) -> Result<AcceptedBatch> {
         self.ensure_operating()?;
         ensure!(amount > 0, "payment amount must be positive");
         let payer = &self.wallets[payer % self.wallets.len()];
@@ -307,9 +307,9 @@ impl Operator {
         })
     }
 
-    pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedPayment> {
+    pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedBatch> {
         self.ensure_operating()?;
-        self.validate_recipient(send.body().recipient())?;
+        self.validate_recipients(&send)?;
         if self.store.payment_requires_epoch_registration(
             self.registration.context.payment(),
             &send,
@@ -331,7 +331,7 @@ impl Operator {
         send: &SignedSend<Key, Digest>,
     ) -> Result<bool> {
         self.ensure_operating()?;
-        self.validate_recipient(send.body().recipient())?;
+        self.validate_recipients(send)?;
         let required = self.store.payment_requires_epoch_registration(
             self.registration.context.payment(),
             send,
@@ -438,7 +438,7 @@ impl Operator {
         self.apply_withdrawal(request)
     }
 
-    pub(crate) fn withdrawal_opening(&self, account: &Key) -> Result<WithdrawalQuote> {
+    pub(crate) fn withdrawal_opening(&self, account: &Key) -> Result<WithdrawalOpening> {
         self.ensure_operating()?;
         self.ensure_close_horizon()?;
         let current = self.store.load_current()?;
@@ -448,7 +448,7 @@ impl Operator {
             self.protocol.strategy(),
         )
         .context("commit withdrawal safety state")?;
-        Ok(WithdrawalQuote {
+        Ok(WithdrawalOpening {
             root: predecessor.root(),
             opening: predecessor
                 .opening(account)
@@ -606,7 +606,7 @@ impl Operator {
             StoredCloseOutcome::Pending => Ok(None),
             StoredCloseOutcome::Finished(close) => Ok(Some(CloseEvent::Finished(CloseFinished {
                 epoch,
-                header: short_digest(close.header.digest()),
+                header_digest: short_digest(close.header.digest()),
                 rows: close.rows,
                 slices: close.slices,
                 payout_total: close.payout_total,
@@ -759,15 +759,18 @@ impl Operator {
         ensure_close_horizon(self.registration.context.payment().epoch())
     }
 
-    fn validate_recipient(&self, recipient: &Key) -> Result<()> {
-        ensure!(
-            recipient == &self.external.key
-                || self
-                    .identities
-                    .iter()
-                    .any(|identity| &identity.key == recipient),
-            "payment recipient is neither a registered account nor the configured external recipient"
-        );
+    fn validate_recipients(&self, send: &SignedSend<Key, Digest>) -> Result<()> {
+        for entry in send.body().entries() {
+            let recipient = entry.recipient();
+            ensure!(
+                recipient == &self.external.key
+                    || self
+                        .identities
+                        .iter()
+                        .any(|identity| &identity.key == recipient),
+                "payment recipient is neither a registered account nor the configured external recipient"
+            );
+        }
         Ok(())
     }
 
@@ -1015,7 +1018,7 @@ impl Operator {
         self.store.finish_close(&result, self.genesis_root)?;
         Ok(CloseFinished {
             epoch: result.epoch,
-            header: short_digest(result.header.digest()),
+            header_digest: short_digest(result.header.digest()),
             rows: result.rows,
             slices: result.slices,
             payout_total: result.finalized.payout_total,
@@ -1159,7 +1162,7 @@ fn projected_liability(data: &EpochData) -> Result<u64> {
     })
 }
 
-#[derive(Clone, Default, Eq, PartialEq)]
+#[derive(Clone, Default)]
 struct AccountActivity {
     debit: u64,
     credit: u64,
@@ -1244,6 +1247,7 @@ fn assemble_epoch(
         .iter()
         .map(|(key, account)| (key.clone(), account.predecessor.cumulative_debit))
         .collect::<BTreeMap<_, _>>();
+    let mut payer_batches = BTreeMap::<Key, Digest>::new();
     let mut receipt_endpoints = BTreeMap::<(Key, u64), (u64, u64)>::new();
     let mut outgoing = BTreeMap::<Key, Payment>::new();
     let mut heads = BTreeMap::<Key, BTreeMap<u64, Payment>>::new();
@@ -1285,11 +1289,20 @@ fn assemble_epoch(
             .get(&payer)
             .copied()
             .context("payer endpoint is missing")?;
-        payment
-            .send()
-            .verify_next(registration.context.payment(), previous_debit)
-            .context("stored payer endpoint is not consecutive")?;
-        payer_endpoints.insert(payer.clone(), payment.send().body().cumulative_debit());
+        if payer_batches.get(&payer) == Some(&stored.tx_id) {
+            // Later entries of one batched send share the endpoint its first entry advanced.
+            ensure!(
+                payment.send().body().cumulative_debit() == previous_debit,
+                "stored batch entry endpoint is inconsistent"
+            );
+        } else {
+            payment
+                .send()
+                .verify_next(registration.context.payment(), previous_debit)
+                .context("stored payer endpoint is not consecutive")?;
+            payer_endpoints.insert(payer.clone(), payment.send().body().cumulative_debit());
+            payer_batches.insert(payer.clone(), stored.tx_id);
+        }
 
         let shard = payment.receipt().body().shard();
         let endpoint = receipt_endpoints
@@ -1558,7 +1571,7 @@ fn assemble_epoch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::FixedSize;
+    use commonware_clearing::bajillion::payment::Entry;
     use commonware_utils::TestRng;
     use std::{
         fs,
@@ -1684,10 +1697,7 @@ mod tests {
         operator.pay(0, 1, 1).unwrap();
         let connection = rusqlite::Connection::open(database.path()).unwrap();
         connection
-            .execute(
-                "UPDATE payments SET encoded = zeroblob(?1)",
-                [i64::try_from(Payment::SIZE).unwrap()],
-            )
+            .execute("UPDATE payments SET encoded = zeroblob(256)", [])
             .unwrap();
 
         let status = operator.status().unwrap();
@@ -1714,7 +1724,7 @@ mod tests {
         let first = operator.accept_send(send.clone()).unwrap();
         let retry = operator.accept_send(send).unwrap();
         assert_eq!(retry.sequence, first.sequence);
-        assert_eq!(retry.payment, first.payment);
+        assert_eq!(retry.acceptance, first.acceptance);
 
         let snapshot = operator.snapshot().unwrap();
         assert_eq!(snapshot.payments.len(), 1);
@@ -1751,7 +1761,7 @@ mod tests {
 
         assert_eq!(retry.epoch, first.epoch);
         assert_eq!(retry.sequence, first.sequence);
-        assert_eq!(retry.payment, first.payment);
+        assert_eq!(retry.acceptance, first.acceptance);
         assert_eq!(operator.snapshot().unwrap().payments.len(), 0);
     }
 
@@ -1770,6 +1780,64 @@ mod tests {
 
         let replay = operator.poll_close(epoch).unwrap();
         assert!(matches!(replay, Some(CloseEvent::Finished(close)) if close.epoch == epoch));
+    }
+
+    #[test]
+    fn batched_send_survives_retry_and_closes() {
+        let mut operator = operator();
+        let quote = operator
+            .payment_quote(&operator.wallets[0].public_key())
+            .unwrap();
+        let send = SignedSend::sign_next_batch(
+            &quote.context,
+            operator.wallets[0].signer(),
+            vec![
+                Entry::new(operator.wallets[1].public_key(), 2).unwrap(),
+                Entry::new(operator.wallets[2].public_key(), 3).unwrap(),
+                Entry::new(operator.external.key.clone(), 1).unwrap(),
+            ],
+            quote.state.cumulative_debit,
+        )
+        .unwrap();
+
+        let first = operator.accept_send(send.clone()).unwrap();
+        assert_eq!(first.total, 6);
+        assert_eq!(first.acceptance.receipts.len(), 3);
+        let tx_id = send.tx_id::<Sha256>();
+        assert!(
+            first
+                .acceptance
+                .receipts
+                .iter()
+                .all(|receipt| receipt.body().tx_id() == &tx_id)
+        );
+        let retry = operator.accept_send(send).unwrap();
+        assert_eq!(retry.sequence, first.sequence);
+        assert_eq!(retry.acceptance, first.acceptance);
+
+        let snapshot = operator.snapshot().unwrap();
+        assert_eq!(snapshot.payments.len(), 3);
+        let balance = |name: &str| {
+            snapshot
+                .accounts
+                .iter()
+                .find(|account| account.name == name)
+                .unwrap()
+                .balance
+        };
+        assert_eq!(balance("Alice"), INITIAL_BALANCE - 6);
+        assert_eq!(balance("Bob"), INITIAL_BALANCE + 2);
+        assert_eq!(balance("Carol"), INITIAL_BALANCE + 3);
+
+        // The close replay walks the payer's endpoint once per batch and each entry's shard step.
+        let epoch = start_current_close(&mut operator).unwrap().epoch;
+        let event = loop {
+            if let Some(event) = operator.poll_close(epoch).unwrap() {
+                break event;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(matches!(event, CloseEvent::Finished(ref close) if close.epoch == epoch));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     challenge::{Challenge, ChallengeKind, HigherShardTipLookup, Verdict, adjudicate},
     credit::{CreditTipLookup, ShardHead, ShardSet},
-    payment::{Payment, PaymentContext, PaymentWitness, SignedReceipt, SignedSend},
+    payment::{Entry, Payment, PaymentContext, PaymentWitness, SignedReceipt, SignedSend},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
         Assignment, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, Header,
@@ -257,6 +257,7 @@ fn signed_payment(
     let receipt = SignedReceipt::issue_next::<Sha256, _>(
         context,
         &send,
+        &recipient.public_key(),
         shard,
         previous_credit,
         previous_index,
@@ -641,7 +642,7 @@ pub(crate) fn active_chain_fixture(
             0,
         )
         .expect("benchmark recipient and shard lookup are aligned");
-    let HigherShardTipLookup::Present { proof, shard, .. } = &recipient else {
+    let HigherShardTipLookup::Present { proof, tip, .. } = &recipient else {
         unreachable!("benchmark recipient is present")
     };
     assert_eq!(proof.position, 0);
@@ -649,7 +650,7 @@ pub(crate) fn active_chain_fixture(
         proof.proof.leaf_count,
         u32::try_from(fixture.rows.len()).expect("benchmark row count fits in u32")
     );
-    let CreditTipLookup::Present { opening, .. } = shard else {
+    let CreditTipLookup::Present { opening, .. } = tip else {
         unreachable!("benchmark shard zero is present")
     };
     assert_eq!(opening.position, 0);
@@ -674,6 +675,59 @@ pub(crate) fn active_chain_fixture(
         Verdict::Proven(ChallengeKind::HigherShardTip)
     );
     (fixture, challenge, claim_signer)
+}
+
+/// Rebuilds the fixture's challenge witness as a batched send with `entries` recipients.
+///
+/// The first entry credits the challenged recipient at the fixture's retained endpoint, so the
+/// contradiction is unchanged. Filler entries pay distinct synthetic recipients, growing only the
+/// signed send that challenge adjudication must hash and verify.
+pub(crate) fn batched_challenge(
+    fixture: &ChallengeFixture,
+    entries: usize,
+) -> Challenge<VerifyingKey, Digest> {
+    const FILLER_SEED_START: u64 = 1_000_000;
+    let Challenge::HigherShardTip { recipient, .. } = &fixture.challenge else {
+        unreachable!("the challenge fixture is a higher-shard-tip challenge")
+    };
+    let operator = SigningKey::from_seed(OPERATOR_SEED);
+    let payer = SigningKey::from_seed(ACCOUNT_SEED_START + 1);
+    let challenged = SigningKey::from_seed(ACCOUNT_SEED_START).public_key();
+    let mut batch = vec![Entry::new(challenged.clone(), 1).expect("benchmark entry is positive")];
+    for filler in 1..entries {
+        let filler = SigningKey::from_seed(FILLER_SEED_START + filler as u64).public_key();
+        batch.push(Entry::new(filler, 1).expect("benchmark entry is positive"));
+    }
+    let send = SignedSend::sign_next_batch(fixture.context.payment(), &payer, batch, 1)
+        .expect("benchmark batch signs");
+    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+        fixture.context.payment(),
+        &send,
+        &challenged,
+        0,
+        1,
+        1,
+        &operator,
+    )
+    .expect("benchmark batch receipt issues");
+    let payment = Payment::new::<Sha256>(fixture.context.payment(), send, receipt)
+        .expect("benchmark batch payment links");
+    let challenge = Challenge::HigherShardTip {
+        payment: Box::new(PaymentWitness::from_payment(&payment)),
+        recipient: recipient.clone(),
+    };
+    assert_eq!(
+        adjudicate::<Sha256, _>(
+            &fixture.context,
+            &fixture.header,
+            &fixture.roots,
+            fixture.context.challenge_deadline(),
+            &challenge,
+        )
+        .expect("benchmark batched challenge is well formed"),
+        Verdict::Proven(ChallengeKind::HigherShardTip)
+    );
+    challenge
 }
 
 pub(crate) fn challenge_fixture(

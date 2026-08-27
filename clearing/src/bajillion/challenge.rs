@@ -6,12 +6,13 @@ use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     credit::{self, CreditTipLookup},
     payment::{
-        Payment, PaymentError, PaymentWitness, PaymentWitnessParts, receipt_range_is_feasible,
+        Entry, Payment, PaymentError, PaymentWitness, PaymentWitnessParts, read_entries,
+        receipt_range_is_feasible,
     },
     state::{AccountChange, AccountState, ChangeGuard, ChangeValue, ChangeValueCore, StateLeaf},
     transition::{self, CloseContext, Header, RootBundle},
 };
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
@@ -131,7 +132,7 @@ impl<P: PublicKey, D: Digest> StateLookup<P, D> {
         &self,
         root: &VectorRoot<D>,
         account: &P,
-    ) -> Result<Option<crate::bajillion::state::AccountState>, ChallengeError> {
+    ) -> Result<Option<AccountState>, ChallengeError> {
         match self {
             Self::Present(opening) => {
                 let leaf = StateLeaf {
@@ -181,7 +182,7 @@ impl<P: PublicKey, D: Digest> StateAbsence<P, D> {
             .iter()
             .chain(self.successor.iter())
             .map(Encode::encode)
-            .collect::<alloc::vec::Vec<_>>();
+            .collect::<Vec<_>>();
         self.opening
             .verify::<H, _>(VectorKind::State, root, &encoded)?;
         Ok(())
@@ -383,7 +384,7 @@ impl<P: PublicKey, D: Digest> ChangeAbsence<P, D> {
             .iter()
             .chain(self.successor.iter())
             .map(Encode::encode)
-            .collect::<alloc::vec::Vec<_>>();
+            .collect::<Vec<_>>();
         self.opening
             .verify::<H, _>(VectorKind::Change, root, &encoded)?;
         Ok(())
@@ -545,7 +546,7 @@ pub enum HigherShardTipLookup<P: PublicKey, D: Digest> {
         /// Membership opening under the change root.
         proof: commitment::Opening<D>,
         /// Membership or ordered absence under the reconstructed credit-tip root.
-        shard: CreditTipLookup<D>,
+        tip: CreditTipLookup<D>,
     },
     /// The recipient is absent from the change vector and therefore has no terminal credit tip.
     Absent(ChangeAbsence<P, D>),
@@ -560,12 +561,8 @@ impl<P: PublicKey, D: Digest> HigherShardTipLookup<P, D> {
         shard: u64,
     ) -> Result<Option<credit::CreditTip>, ChallengeError> {
         match self {
-            Self::Present {
-                value,
-                proof,
-                shard: lookup,
-            } => {
-                let (credit_tip_root, tip) = lookup.reconstruct::<H>(shard)?;
+            Self::Present { value, proof, tip } => {
+                let (credit_tip_root, tip) = tip.reconstruct::<H>(shard)?;
                 let value = ChangeValue::from_core(*value, credit_tip_root);
                 let guard = ChangeGuard::from_value::<H>(recipient.clone(), &value);
                 proof.verify::<H>(VectorKind::Change, change_root, guard.encode().as_ref())?;
@@ -582,15 +579,11 @@ impl<P: PublicKey, D: Digest> HigherShardTipLookup<P, D> {
 impl<P: PublicKey, D: Digest> Write for HigherShardTipLookup<P, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Present {
-                value,
-                proof,
-                shard,
-            } => {
+            Self::Present { value, proof, tip } => {
                 1_u8.write(buf);
                 value.write(buf);
                 proof.write(buf);
-                shard.write(buf);
+                tip.write(buf);
             }
             Self::Absent(absence) => {
                 2_u8.write(buf);
@@ -604,11 +597,9 @@ impl<P: PublicKey, D: Digest> EncodeSize for HigherShardTipLookup<P, D> {
     fn encode_size(&self) -> usize {
         u8::SIZE
             + match self {
-                Self::Present {
-                    value,
-                    proof,
-                    shard,
-                } => value.encode_size() + proof.encode_size() + shard.encode_size(),
+                Self::Present { value, proof, tip } => {
+                    value.encode_size() + proof.encode_size() + tip.encode_size()
+                }
                 Self::Absent(absence) => absence.encode_size(),
             }
     }
@@ -622,7 +613,7 @@ impl<P: PublicKey, D: Digest> Read for HigherShardTipLookup<P, D> {
             1 => Ok(Self::Present {
                 value: ChangeValueCore::read(buf)?,
                 proof: commitment::Opening::read(buf)?,
-                shard: CreditTipLookup::read(buf)?,
+                tip: CreditTipLookup::read(buf)?,
             }),
             2 => Ok(Self::Absent(ChangeAbsence::read(buf)?)),
             tag => Err(CodecError::InvalidEnum(tag)),
@@ -645,7 +636,7 @@ where
             Ok(Self::Present {
                 value: u.arbitrary()?,
                 proof: u.arbitrary()?,
-                shard: u.arbitrary()?,
+                tip: u.arbitrary()?,
             })
         } else {
             Ok(Self::Absent(u.arbitrary()?))
@@ -772,7 +763,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScopedPaymentWitness<P: PublicKey> {
     payer: P,
-    amount: u64,
+    entries: Vec<Entry<P>>,
     cumulative_debit: u64,
     payer_signature: P::Signature,
     cumulative_shard_credit: u64,
@@ -791,7 +782,7 @@ impl<P: PublicKey> ScopedPaymentWitness<P> {
         let parts = payment.parts();
         Self {
             payer: parts.payer,
-            amount: parts.amount,
+            entries: parts.entries,
             cumulative_debit: parts.cumulative_debit,
             payer_signature: parts.payer_signature,
             cumulative_shard_credit: parts.cumulative_shard_credit,
@@ -803,10 +794,10 @@ impl<P: PublicKey> ScopedPaymentWitness<P> {
     fn with_scope(&self, recipient: P, shard: u64) -> PaymentWitness<P> {
         PaymentWitness::from_parts(PaymentWitnessParts {
             payer: self.payer.clone(),
-            recipient,
-            amount: self.amount,
+            entries: self.entries.clone(),
             cumulative_debit: self.cumulative_debit,
             payer_signature: self.payer_signature.clone(),
+            recipient,
             shard,
             cumulative_shard_credit: self.cumulative_shard_credit,
             index: self.index,
@@ -818,7 +809,7 @@ impl<P: PublicKey> ScopedPaymentWitness<P> {
 impl<P: PublicKey> Write for ScopedPaymentWitness<P> {
     fn write(&self, buf: &mut impl BufMut) {
         self.payer.write(buf);
-        self.amount.write(buf);
+        self.entries.write(buf);
         self.cumulative_debit.write(buf);
         self.payer_signature.write(buf);
         self.cumulative_shard_credit.write(buf);
@@ -827,8 +818,10 @@ impl<P: PublicKey> Write for ScopedPaymentWitness<P> {
     }
 }
 
-impl<P: PublicKey> FixedSize for ScopedPaymentWitness<P> {
-    const SIZE: usize = P::SIZE + u64::SIZE * 4 + P::Signature::SIZE * 2;
+impl<P: PublicKey> EncodeSize for ScopedPaymentWitness<P> {
+    fn encode_size(&self) -> usize {
+        P::SIZE + self.entries.encode_size() + u64::SIZE * 3 + P::Signature::SIZE * 2
+    }
 }
 
 impl<P: PublicKey> Read for ScopedPaymentWitness<P> {
@@ -837,7 +830,7 @@ impl<P: PublicKey> Read for ScopedPaymentWitness<P> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             payer: P::read(buf)?,
-            amount: u64::read(buf)?,
+            entries: read_entries(buf)?,
             cumulative_debit: u64::read(buf)?,
             payer_signature: P::Signature::read(buf)?,
             cumulative_shard_credit: u64::read(buf)?,
@@ -856,7 +849,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             payer: u.arbitrary()?,
-            amount: u.arbitrary()?,
+            entries: u.arbitrary()?,
             cumulative_debit: u.arbitrary()?,
             payer_signature: u.arbitrary()?,
             cumulative_shard_credit: u.arbitrary()?,
@@ -948,7 +941,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SameIndexPaymentWitness<P: PublicKey> {
     payer: P,
-    amount: u64,
+    entries: Vec<Entry<P>>,
     cumulative_debit: u64,
     payer_signature: P::Signature,
     cumulative_shard_credit: u64,
@@ -966,7 +959,7 @@ impl<P: PublicKey> SameIndexPaymentWitness<P> {
         let parts = payment.parts();
         Self {
             payer: parts.payer,
-            amount: parts.amount,
+            entries: parts.entries,
             cumulative_debit: parts.cumulative_debit,
             payer_signature: parts.payer_signature,
             cumulative_shard_credit: parts.cumulative_shard_credit,
@@ -977,10 +970,10 @@ impl<P: PublicKey> SameIndexPaymentWitness<P> {
     fn with_index_scope(&self, recipient: P, shard: u64, index: u64) -> PaymentWitness<P> {
         PaymentWitness::from_parts(PaymentWitnessParts {
             payer: self.payer.clone(),
-            recipient,
-            amount: self.amount,
+            entries: self.entries.clone(),
             cumulative_debit: self.cumulative_debit,
             payer_signature: self.payer_signature.clone(),
+            recipient,
             shard,
             cumulative_shard_credit: self.cumulative_shard_credit,
             index,
@@ -992,7 +985,7 @@ impl<P: PublicKey> SameIndexPaymentWitness<P> {
 impl<P: PublicKey> Write for SameIndexPaymentWitness<P> {
     fn write(&self, buf: &mut impl BufMut) {
         self.payer.write(buf);
-        self.amount.write(buf);
+        self.entries.write(buf);
         self.cumulative_debit.write(buf);
         self.payer_signature.write(buf);
         self.cumulative_shard_credit.write(buf);
@@ -1000,8 +993,10 @@ impl<P: PublicKey> Write for SameIndexPaymentWitness<P> {
     }
 }
 
-impl<P: PublicKey> FixedSize for SameIndexPaymentWitness<P> {
-    const SIZE: usize = P::SIZE + u64::SIZE * 3 + P::Signature::SIZE * 2;
+impl<P: PublicKey> EncodeSize for SameIndexPaymentWitness<P> {
+    fn encode_size(&self) -> usize {
+        P::SIZE + self.entries.encode_size() + u64::SIZE * 2 + P::Signature::SIZE * 2
+    }
 }
 
 impl<P: PublicKey> Read for SameIndexPaymentWitness<P> {
@@ -1010,7 +1005,7 @@ impl<P: PublicKey> Read for SameIndexPaymentWitness<P> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             payer: P::read(buf)?,
-            amount: u64::read(buf)?,
+            entries: read_entries(buf)?,
             cumulative_debit: u64::read(buf)?,
             payer_signature: P::Signature::read(buf)?,
             cumulative_shard_credit: u64::read(buf)?,
@@ -1028,7 +1023,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             payer: u.arbitrary()?,
-            amount: u.arbitrary()?,
+            entries: u.arbitrary()?,
             cumulative_debit: u.arbitrary()?,
             payer_signature: u.arbitrary()?,
             cumulative_shard_credit: u.arbitrary()?,
@@ -1040,7 +1035,7 @@ where
 /// Lower endpoint for an inconsistent-range challenge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RangeLower<P: PublicKey> {
-    /// Canonical `(credit,index)=(0,0)` shard opening.
+    /// Canonical `(credit,index)=(0,0)` shard start.
     ShardStart,
     /// Earlier linked payment in the same receive shard.
     Payment(Box<ScopedPaymentWitness<P>>),
@@ -1106,7 +1101,7 @@ impl<P: PublicKey> Read for RangeLower<P> {
 /// Canonical relation-specific evidence for a receipt fork.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiptForkWitness<P: PublicKey> {
-    /// Both receipts share one exact signed send.
+    /// Both receipts share one exact signed send and credited entry recipient.
     SameSend {
         /// Canonically first complete linked payment.
         left: Box<PaymentWitness<P>>,
@@ -1143,10 +1138,10 @@ impl<P: PublicKey> ReceiptForkWitness<P> {
         let left = left.parts();
         let right = right.parts();
         left.payer == right.payer
-            && left.recipient == right.recipient
-            && left.amount == right.amount
+            && left.entries == right.entries
             && left.cumulative_debit == right.cumulative_debit
             && left.payer_signature == right.payer_signature
+            && left.recipient == right.recipient
     }
 
     fn same_index(left: &PaymentWitness<P>, right: &PaymentWitness<P>) -> bool {
@@ -1285,7 +1280,7 @@ pub enum Challenge<P: PublicKey, D: Digest> {
         /// Earlier linked endpoint or the canonical shard start.
         lower: RangeLower<P>,
     },
-    /// Two distinct receipt bodies fork one shard index or payer transaction.
+    /// Two distinct receipt bodies fork one shard index or one payer transaction entry.
     ReceiptFork {
         /// Canonical relation-specific linked payment evidence.
         fork: Box<ReceiptForkWitness<P>>,
@@ -1327,9 +1322,9 @@ where
 impl<P: PublicKey, D: Digest> Challenge<P, D> {
     /// Constructs a receipt fork in canonical encoded order.
     #[must_use]
-    pub fn receipt_fork(left: Payment<P, D>, right: Payment<P, D>) -> Self {
+    pub fn receipt_fork(left: &Payment<P, D>, right: &Payment<P, D>) -> Self {
         Self::ReceiptFork {
-            fork: Box::new(ReceiptForkWitness::from_payments(&left, &right)),
+            fork: Box::new(ReceiptForkWitness::from_payments(left, right)),
         }
     }
 }
@@ -1394,7 +1389,7 @@ where
     let context = context.payment();
     let change_root = &roots.change;
     match challenge {
-        Challenge::LatestAcknowledgedSend { payment, payer, .. } => {
+        Challenge::LatestAcknowledgedSend { payment, payer } => {
             let (payment, resolved) = strategy.try_run(
                 2,
                 || -> Result<_, ChallengeError> {
@@ -1415,21 +1410,23 @@ where
             )?;
             let disclosed = payment.send().body().cumulative_debit();
             let committed = resolved.terminal_debit;
-            let bodies_differ = resolved
+
+            // Equal endpoints contradict only through the signed authorization itself. Any entry
+            // receipt may accompany a committed batched send, so the receipt bytes prove nothing
+            // here; a forked receipt for one entry is a receipt-fork challenge instead.
+            let sends_differ = resolved
                 .leaf
                 .as_ref()
-                .is_none_or(|leaf| !leaf.matches_outgoing::<H>(&payment));
+                .is_none_or(|leaf| !leaf.matches_outgoing::<H>(payment.send().body()));
             Ok(
-                if disclosed > committed || (disclosed == committed && bodies_differ) {
+                if disclosed > committed || (disclosed == committed && sends_differ) {
                     Verdict::Proven(ChallengeKind::LatestAcknowledgedSend)
                 } else {
                     Verdict::NoContradiction
                 },
             )
         }
-        Challenge::HigherShardTip {
-            payment, recipient, ..
-        } => {
+        Challenge::HigherShardTip { payment, recipient } => {
             let (payment, resolved) = strategy.try_run(
                 2,
                 || -> Result<_, ChallengeError> {
@@ -1468,7 +1465,7 @@ where
                 },
             )
         }
-        Challenge::InconsistentReceiptRange { upper, lower, .. } => {
+        Challenge::InconsistentReceiptRange { upper, lower } => {
             let (upper, lower_credit, lower_index) = match lower {
                 RangeLower::ShardStart => {
                     let upper =
@@ -1530,21 +1527,18 @@ where
             })
         }
         Challenge::ReceiptFork { fork } => {
-            let (left, right, relation) = match fork.as_ref() {
+            let (left, right) = match fork.as_ref() {
                 ReceiptForkWitness::SameSend { left, right } => {
-                    (left.as_ref(), right.with_send(left), 1_u8)
+                    (left.as_ref(), right.with_send(left))
                 }
                 ReceiptForkWitness::SameIndex { left, right } => {
                     let parts = left.parts();
                     (
                         left.as_ref(),
                         right.with_index_scope(parts.recipient, parts.shard, parts.index),
-                        2_u8,
                     )
                 }
-                ReceiptForkWitness::Full { left, right } => {
-                    (left.as_ref(), right.as_ref().clone(), 3_u8)
-                }
+                ReceiptForkWitness::Full { left, right } => (left.as_ref(), right.as_ref().clone()),
             };
             let (left_payment, right_payment) = strategy.try_run(
                 2,
@@ -1567,23 +1561,26 @@ where
             }
             let left_receipt = left_payment.receipt().body();
             let right_receipt = right_payment.receipt().body();
-            let same_send = left_payment.send() == right_payment.send();
-            let same_index = left_receipt.recipient() == right_receipt.recipient()
+            let same_recipient = left_receipt.recipient() == right_receipt.recipient();
+            let same_send = left_payment.send() == right_payment.send() && same_recipient;
+            let same_index = same_recipient
                 && left_receipt.shard() == right_receipt.shard()
                 && left_receipt.index() == right_receipt.index();
-            if !match relation {
-                1 => same_send,
-                2 => !same_send && same_index,
-                3 => !same_send && !same_index,
-                _ => unreachable!("receipt-fork relation is a local enum tag"),
+            if !match fork.as_ref() {
+                ReceiptForkWitness::SameSend { .. } => same_send,
+                ReceiptForkWitness::SameIndex { .. } => !same_send && same_index,
+                ReceiptForkWitness::Full { .. } => !same_send && !same_index,
             } {
                 return Err(ChallengeError::NonCanonicalFork);
             }
             if left_receipt == right_receipt {
                 return Ok(Verdict::NoContradiction);
             }
-            let same_transaction = left_receipt.tx_id() == right_receipt.tx_id();
-            Ok(if same_index || same_transaction {
+
+            // Sibling receipts of one batched send legitimately share a transaction identifier,
+            // so a transaction fork requires the same credited entry recipient.
+            let same_entry = same_recipient && left_receipt.tx_id() == right_receipt.tx_id();
+            Ok(if same_index || same_entry {
                 Verdict::Proven(ChallengeKind::ReceiptFork)
             } else {
                 Verdict::NoContradiction
@@ -1622,13 +1619,13 @@ impl<P: PublicKey, D: Digest> EncodeSize for Challenge<P, D> {
     fn encode_size(&self) -> usize {
         u8::SIZE
             + match self {
-                Self::LatestAcknowledgedSend { payment, payer, .. } => {
+                Self::LatestAcknowledgedSend { payment, payer } => {
                     payment.encode_size() + payer.encode_size()
                 }
-                Self::HigherShardTip {
-                    payment, recipient, ..
-                } => payment.encode_size() + recipient.encode_size(),
-                Self::InconsistentReceiptRange { upper, lower, .. } => {
+                Self::HigherShardTip { payment, recipient } => {
+                    payment.encode_size() + recipient.encode_size()
+                }
+                Self::InconsistentReceiptRange { upper, lower } => {
                     upper.encode_size() + lower.encode_size()
                 }
                 Self::ReceiptFork { fork } => fork.encode_size(),
@@ -1835,11 +1832,12 @@ mod tests {
         previous_credit: u64,
         previous_index: u64,
     ) -> TestPayment {
-        let send =
-            SignedSend::sign_next(context, payer, recipient, amount, previous_debit).unwrap();
+        let send = SignedSend::sign_next(context, payer, recipient.clone(), amount, previous_debit)
+            .unwrap();
         let receipt = SignedReceipt::issue_next::<Sha256, _>(
             context,
             &send,
+            &recipient,
             shard,
             previous_credit,
             previous_index,
@@ -1857,12 +1855,13 @@ mod tests {
         credit: u64,
         index: u64,
     ) -> TestPayment {
+        let entry = send.body().entries().first().unwrap();
         let body = ReceiptBody::from_raw_unchecked(
             *context.anchor(),
             context.epoch(),
-            send.body().recipient().clone(),
+            entry.recipient().clone(),
             shard,
-            send.body().amount(),
+            entry.amount(),
             send.tx_id::<Sha256>(),
             credit,
             index,
@@ -2073,7 +2072,7 @@ mod tests {
                     HigherShardTipLookup::Present {
                         value: fixture.change_leaves[position].value().core(),
                         proof: fixture.change_tree.opening(position as u32).unwrap(),
-                        shard: fixture.shards[position].lookup::<Sha256>(shard).unwrap(),
+                        tip: fixture.shards[position].lookup::<Sha256>(shard).unwrap(),
                     }
                 },
             )
@@ -2187,8 +2186,7 @@ mod tests {
                 *fixture.context.payment().anchor(),
                 fixture.context.payment().epoch(),
                 counting_key(next_key),
-                counting_key(next_key),
-                1,
+                vec![Entry::from_raw_unchecked(counting_key(next_key), 1)],
                 1,
             ),
             fixture.payment.send().signature().clone(),
@@ -2219,8 +2217,7 @@ mod tests {
                 *fixture.context.payment().anchor(),
                 fixture.context.payment().epoch(),
                 payer,
-                recipient.clone(),
-                10,
+                vec![Entry::from_raw_unchecked(recipient.clone(), 10)],
                 10,
             ),
             fixture.payment.send().signature().clone(),
@@ -2240,7 +2237,7 @@ mod tests {
         );
         let payment = Payment::from_parts_unchecked(send, receipt);
         let value = fixture.change_leaves[0].value();
-        let shard = fixture
+        let tip = fixture
             .shards
             .iter()
             .find(|set| set.recipient() == &fixture.recipient.public_key())
@@ -2252,25 +2249,25 @@ mod tests {
             recipient: Box::new(HigherShardTipLookup::Present {
                 value: value.core(),
                 proof: fixture.change_tree.opening(0).unwrap(),
-                shard,
+                tip,
             }),
         };
         PUBLIC_KEY_WRITES.store(0, Ordering::Relaxed);
         let encoded = challenge.encode();
-        assert_eq!(PUBLIC_KEY_WRITES.load(Ordering::Relaxed), 2);
+        assert_eq!(PUBLIC_KEY_WRITES.load(Ordering::Relaxed), 3);
 
         PUBLIC_KEY_DECODE_ATTEMPTS.store(0, Ordering::Relaxed);
         PUBLIC_KEY_DECODE_SUCCESSES.store(0, Ordering::Relaxed);
         let decoded = Challenge::<CountingKey, ShaDigest>::decode(encoded.clone()).unwrap();
 
-        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 2);
-        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 2);
+        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 3);
+        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 3);
         assert_eq!(decoded.encode(), encoded);
         assert_eq!(decoded.encode_size(), encoded.len());
 
         Challenge::<CountingKey, ShaDigest>::decode(encoded).unwrap();
-        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 4);
-        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 4);
+        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 6);
+        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 6);
     }
 
     #[test]
@@ -2293,7 +2290,7 @@ mod tests {
             recipient: Box::new(HigherShardTipLookup::Present {
                 value: value.core(),
                 proof: fixture.change_tree.opening(0).unwrap(),
-                shard: CreditTipLookup::Absent {
+                tip: CreditTipLookup::Absent {
                     predecessor: Some(tips[0].clone()),
                     successor: Some(tips[1].clone()),
                     opening: credit_tree.range_opening(0, 2).unwrap(),
@@ -2303,7 +2300,7 @@ mod tests {
 
         PUBLIC_KEY_WRITES.store(0, Ordering::Relaxed);
         let encoded = challenge.encode();
-        assert_eq!(PUBLIC_KEY_WRITES.load(Ordering::Relaxed), 2);
+        assert_eq!(PUBLIC_KEY_WRITES.load(Ordering::Relaxed), 3);
         assert_eq!(challenge.encode_size(), encoded.len());
 
         PUBLIC_KEY_DECODE_ATTEMPTS.store(0, Ordering::Relaxed);
@@ -2312,8 +2309,8 @@ mod tests {
             Challenge::<CountingKey, ShaDigest>::decode(encoded.clone()).unwrap(),
             challenge
         );
-        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 2);
-        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 2);
+        assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 3);
+        assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 3);
 
         for split in 0..=encoded.len() {
             PUBLIC_KEY_DECODE_ATTEMPTS.store(0, Ordering::Relaxed);
@@ -2325,8 +2322,8 @@ mod tests {
                 challenge,
                 "segmentation boundary {split}"
             );
-            assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 2);
-            assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 2);
+            assert_eq!(PUBLIC_KEY_DECODE_ATTEMPTS.load(Ordering::Relaxed), 3);
+            assert_eq!(PUBLIC_KEY_DECODE_SUCCESSES.load(Ordering::Relaxed), 3);
         }
 
         for length in 0..encoded.len() {
@@ -2403,7 +2400,7 @@ mod tests {
                 upper: witness(&fixture.payment),
                 lower: RangeLower::from_payment(&fixture.payment),
             },
-            Challenge::receipt_fork(fixture.payment.clone(), fixture.payment.clone()),
+            Challenge::receipt_fork(&fixture.payment, &fixture.payment),
         ];
 
         for challenge in challenges {
@@ -2424,7 +2421,7 @@ mod tests {
             upper: witness(&fixture.payment),
             lower: RangeLower::from_payment(&fixture.payment),
         };
-        assert_eq!(range.encode_size(), 426);
+        assert_eq!(range.encode_size(), 492);
 
         let same_send_payment = payment_with_endpoint(
             fixture.context.payment(),
@@ -2434,13 +2431,13 @@ mod tests {
             11,
             1,
         );
-        let same_send = Challenge::receipt_fork(fixture.payment.clone(), same_send_payment.clone());
+        let same_send = Challenge::receipt_fork(&fixture.payment, &same_send_payment);
         assert!(matches!(
             &same_send,
             Challenge::ReceiptFork { fork }
                 if matches!(fork.as_ref(), ReceiptForkWitness::SameSend { .. })
         ));
-        assert_eq!(same_send.encode_size(), 322);
+        assert_eq!(same_send.encode_size(), 355);
 
         let same_index_payment = payment(
             fixture.context.payment(),
@@ -2453,13 +2450,13 @@ mod tests {
             0,
             0,
         );
-        let same_index = Challenge::receipt_fork(fixture.payment.clone(), same_index_payment);
+        let same_index = Challenge::receipt_fork(&fixture.payment, &same_index_payment);
         assert!(matches!(
             &same_index,
             Challenge::ReceiptFork { fork }
                 if matches!(fork.as_ref(), ReceiptForkWitness::SameIndex { .. })
         ));
-        assert_eq!(same_index.encode_size(), 418);
+        assert_eq!(same_index.encode_size(), 484);
 
         let full_payment = payment(
             fixture.context.payment(),
@@ -2472,7 +2469,7 @@ mod tests {
             0,
             1,
         );
-        let full = Challenge::receipt_fork(fixture.payment.clone(), full_payment);
+        let full = Challenge::receipt_fork(&fixture.payment, &full_payment);
         assert!(matches!(
             &full,
             Challenge::ReceiptFork { fork }
@@ -2686,7 +2683,7 @@ mod tests {
         let composed = HigherShardTipLookup::Present {
             value: value.core(),
             proof,
-            shard: shard.clone(),
+            tip: shard.clone(),
         };
 
         let encoded = composed.encode();
@@ -2748,7 +2745,7 @@ mod tests {
         assert!(matches!(
             &decoded,
             HigherShardTipLookup::Present {
-                shard: CreditTipLookup::Absent {
+                tip: CreditTipLookup::Absent {
                     predecessor: None,
                     successor: None,
                     ..
@@ -2789,7 +2786,7 @@ mod tests {
 
         let mut child_value = composed.clone();
         let HigherShardTipLookup::Present {
-            shard: CreditTipLookup::Present { value, .. },
+            tip: CreditTipLookup::Present { value, .. },
             ..
         } = &mut child_value
         else {
@@ -2800,7 +2797,7 @@ mod tests {
 
         let mut child_proof = composed.clone();
         let HigherShardTipLookup::Present {
-            shard: CreditTipLookup::Present { opening, .. },
+            tip: CreditTipLookup::Present { opening, .. },
             ..
         } = &mut child_proof
         else {
@@ -2888,9 +2885,11 @@ mod tests {
             PaymentWitness::<VerifyingKey>::decode(encoded.clone()).unwrap(),
             witness
         );
-        assert_eq!(encoded.len(), PaymentWitness::<VerifyingKey>::SIZE);
+        assert_eq!(encoded.len(), witness.encode_size());
 
-        let payer_signature = VerifyingKey::SIZE * 2 + u64::SIZE * 2;
+        let entries =
+            witness.encode_size() - (VerifyingKey::SIZE * 2 + u64::SIZE * 4 + Signature::SIZE * 2);
+        let payer_signature = VerifyingKey::SIZE + entries + u64::SIZE;
         let mut tampered = encoded.to_vec();
         tampered[payer_signature] ^= 1;
         let tampered = PaymentWitness::<VerifyingKey>::decode(tampered.as_slice()).unwrap();
@@ -2899,7 +2898,8 @@ mod tests {
             Err(PaymentError::InvalidPayerSignature)
         ));
 
-        let operator_signature = VerifyingKey::SIZE * 2 + u64::SIZE * 5 + Signature::SIZE;
+        let operator_signature =
+            payer_signature + Signature::SIZE + VerifyingKey::SIZE + u64::SIZE * 3;
         let mut tampered = encoded.to_vec();
         tampered[operator_signature] ^= 1;
         let tampered = PaymentWitness::<VerifyingKey>::decode(tampered.as_slice()).unwrap();
@@ -2928,7 +2928,7 @@ mod tests {
                 upper: witness(&fixture.payment),
                 lower: RangeLower::ShardStart,
             },
-            Challenge::receipt_fork(fixture.payment.clone(), fixture.payment.clone()),
+            Challenge::receipt_fork(&fixture.payment, &fixture.payment),
         ];
         for challenge in &valid {
             assert_eq!(
@@ -3049,6 +3049,100 @@ mod tests {
         assert_eq!(
             adjudicate(&fixture, &challenge).unwrap(),
             Verdict::Proven(ChallengeKind::LatestAcknowledgedSend)
+        );
+    }
+
+    #[test]
+    fn equal_debit_with_the_committed_send_and_another_receipt_is_clean() {
+        let fixture = fixture();
+
+        // The change leaf pins only the committed terminal send, so a second receipt for it
+        // contradicts nothing here. That receipt fork is a receipt-fork challenge instead.
+        let other_receipt = payment_with_endpoint(
+            fixture.context.payment(),
+            &fixture.operator,
+            fixture.payment.send().clone(),
+            7,
+            10,
+            1,
+        );
+        let challenge = Challenge::LatestAcknowledgedSend {
+            payment: witness(&other_receipt),
+            payer: Box::new(lookup(&fixture, &fixture.payer.public_key())),
+        };
+        assert_eq!(
+            adjudicate(&fixture, &challenge).unwrap(),
+            Verdict::NoContradiction
+        );
+        let fork = Challenge::receipt_fork(&fixture.payment, &other_receipt);
+        assert_eq!(
+            adjudicate(&fixture, &fork).unwrap(),
+            Verdict::Proven(ChallengeKind::ReceiptFork)
+        );
+    }
+
+    #[test]
+    fn batched_entries_share_a_transaction_without_forking() {
+        let fixture = fixture();
+        let first = fixture.recipient.public_key();
+        let second = fixture.dormant.public_key();
+        let send = SignedSend::sign_next_batch(
+            fixture.context.payment(),
+            &fixture.payer,
+            vec![
+                Entry::new(first.clone(), 3).unwrap(),
+                Entry::new(second.clone(), 4).unwrap(),
+            ],
+            0,
+        )
+        .unwrap();
+        let issue = |recipient: &VerifyingKey| {
+            let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                fixture.context.payment(),
+                &send,
+                recipient,
+                0,
+                0,
+                0,
+                &fixture.operator,
+            )
+            .unwrap();
+            Payment::new::<Sha256>(fixture.context.payment(), send.clone(), receipt).unwrap()
+        };
+
+        // Distinct entries of one batch share a transaction identifier legitimately.
+        let siblings = Challenge::receipt_fork(&issue(&first), &issue(&second));
+        assert!(matches!(
+            &siblings,
+            Challenge::ReceiptFork { fork }
+                if matches!(fork.as_ref(), ReceiptForkWitness::Full { .. })
+        ));
+        assert_eq!(
+            adjudicate(&fixture, &siblings).unwrap(),
+            Verdict::NoContradiction
+        );
+
+        // Two distinct receipt bodies for one entry remain a proven fork.
+        let head = send.body().entries()[0].clone();
+        let doubled = Challenge::receipt_fork(
+            &issue(head.recipient()),
+            &payment_with_endpoint(
+                fixture.context.payment(),
+                &fixture.operator,
+                send.clone(),
+                5,
+                head.amount(),
+                1,
+            ),
+        );
+        assert!(matches!(
+            &doubled,
+            Challenge::ReceiptFork { fork }
+                if matches!(fork.as_ref(), ReceiptForkWitness::SameSend { .. })
+        ));
+        assert_eq!(
+            adjudicate(&fixture, &doubled).unwrap(),
+            Verdict::Proven(ChallengeKind::ReceiptFork)
         );
     }
 
@@ -3220,7 +3314,7 @@ mod tests {
             0,
             0,
         );
-        let challenge = Challenge::receipt_fork(fixture.payment.clone(), other);
+        let challenge = Challenge::receipt_fork(&fixture.payment, &other);
         assert_eq!(
             adjudicate(&fixture, &challenge).unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
@@ -3234,13 +3328,13 @@ mod tests {
             10,
             1,
         );
-        let challenge = Challenge::receipt_fork(fixture.payment.clone(), reused);
+        let challenge = Challenge::receipt_fork(&fixture.payment, &reused);
         assert_eq!(
             adjudicate(&fixture, &challenge).unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
 
-        let duplicate = Challenge::receipt_fork(fixture.payment.clone(), fixture.payment.clone());
+        let duplicate = Challenge::receipt_fork(&fixture.payment, &fixture.payment);
         assert_eq!(
             adjudicate(&fixture, &duplicate).unwrap(),
             Verdict::NoContradiction

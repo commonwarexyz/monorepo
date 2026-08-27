@@ -5,7 +5,7 @@
 
 use crate::{
     operator_rpc,
-    protocol::{Key, MAX_ACCOUNTS, Payment},
+    protocol::{Acceptance, Key, MAX_ACCEPTANCE_BYTES, MAX_ACCOUNTS, MAX_PAYMENT_BYTES},
     settlement_rpc,
 };
 use anyhow::{Context, Result, ensure};
@@ -21,7 +21,7 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + AccountState::SIZE + u32::SIZE * 2 + 1;
 const MAX_STATE_OPENING_BYTES: usize =
@@ -166,10 +166,7 @@ impl AgentStore {
         root: &VectorRoot<Digest>,
         opening: &StateOpening<Key, Digest>,
     ) -> Result<()> {
-        ensure!(
-            !self.poisoned,
-            "agent database is unusable after a failed mutation"
-        );
+        self.ensure_usable()?;
         validate_recovery_opening(root, opening, &self.account)?;
         let encoded_root = root.encode();
         let encoded_opening = opening.encode();
@@ -190,20 +187,14 @@ impl AgentStore {
             opening,
             encoded_opening.as_ref(),
         );
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
+        self.finish_mutation(result)
     }
 
     pub(crate) fn recovery_opening(
         &self,
         root: &VectorRoot<Digest>,
     ) -> Result<Option<StateOpening<Key, Digest>>> {
-        ensure!(
-            !self.poisoned,
-            "agent database is unusable after a failed mutation"
-        );
+        self.ensure_usable()?;
         read_recovery_opening(&self.connection, root, &self.account)
     }
 
@@ -340,16 +331,13 @@ impl AgentStore {
         recovery_root: &VectorRoot<Digest>,
         previous_debit: u64,
     ) -> Result<()> {
-        ensure!(
-            !self.poisoned,
-            "agent database is unusable after a failed mutation"
-        );
+        self.ensure_usable()?;
         validate_send(send, &self.account, &self.operator, previous_debit)?;
         sql_u64(send.body().cumulative_debit(), "pending cumulative debit")?;
         let encoded = send.encode();
         ensure!(
-            encoded.len() == SignedSend::<Key, Digest>::SIZE,
-            "signed send encoding has an unexpected length"
+            encoded.len() <= MAX_PAYMENT_BYTES,
+            "signed send encoding exceeds its bound"
         );
 
         let encoded_root = recovery_root.encode();
@@ -361,51 +349,33 @@ impl AgentStore {
             encoded_root.as_ref(),
             encoded.as_ref(),
         );
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
+        self.finish_mutation(result)
     }
 
+    /// Durably commits one accepted send's receipts and advances the endpoint.
     pub(crate) fn commit_payment(
         &mut self,
-        payment: &Payment,
+        acceptance: &Acceptance,
         previous_debit: u64,
         receipt_count: u64,
     ) -> Result<u64> {
-        ensure!(
-            !self.poisoned,
-            "agent database is unusable after a failed mutation"
-        );
-        let context = context_for_send(payment.send(), &self.operator);
-        ensure!(
-            payment.payer() == &self.account,
-            "accepted payment belongs to another payer"
-        );
-        payment
-            .verify_linked::<Sha256>(&context)
-            .context("verify payment before persistence")?;
-        payment
-            .send()
-            .verify_next(&context, previous_debit)
+        self.ensure_usable()?;
+        validate_acceptance(acceptance, &self.account, &self.operator)?;
+        let send = &acceptance.send;
+        send.verify_next(&context_for_send(send, &self.operator), previous_debit)
             .context("verify persisted debit successor")?;
-        let endpoint = sql_u64(
-            payment.send().body().cumulative_debit(),
-            "accepted cumulative debit",
-        )?;
+        let endpoint = sql_u64(send.body().cumulative_debit(), "accepted cumulative debit")?;
+        let receipts =
+            u64::try_from(acceptance.receipts.len()).context("agent receipt count overflow")?;
         let next_receipt_count = receipt_count
-            .checked_add(1)
+            .checked_add(receipts)
             .context("agent receipt count overflow")?;
         sql_u64(next_receipt_count, "agent receipt count")?;
-        let encoded_send = payment.send().encode();
-        let encoded_payment = payment.encode();
+        let encoded_send = send.encode();
+        let encoded = acceptance.encode();
         ensure!(
-            encoded_send.len() == SignedSend::<Key, Digest>::SIZE,
-            "signed send encoding has an unexpected length"
-        );
-        ensure!(
-            encoded_payment.len() == Payment::SIZE,
-            "payment encoding has an unexpected length"
+            encoded.len() <= MAX_ACCEPTANCE_BYTES,
+            "acceptance encoding exceeds its bound"
         );
 
         let result = commit_payment_transaction(
@@ -413,14 +383,21 @@ impl AgentStore {
             &self.account,
             previous_debit,
             endpoint,
+            receipts,
             encoded_send.as_ref(),
-            encoded_payment.as_ref(),
+            encoded.as_ref(),
         );
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result.map(|()| next_receipt_count)
+        self.finish_mutation(result).map(|()| next_receipt_count)
     }
+}
+
+/// Verifies one acceptance owned by `account`: every entry pair is linked and in entry order.
+fn validate_acceptance(acceptance: &Acceptance, account: &Key, operator: &Key) -> Result<()> {
+    ensure!(
+        acceptance.send.body().payer() == account,
+        "accepted payment belongs to another payer"
+    );
+    acceptance.verify(&context_for_send(&acceptance.send, operator))
 }
 
 enum SchemaPresence {
@@ -533,7 +510,9 @@ fn initialize_schema(
          CREATE TABLE agent_pending_payment (
              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
              recovery_root BLOB NOT NULL CHECK (length(recovery_root) = {root_size}),
-             send BLOB NOT NULL CHECK (length(send) = {send_size}),
+             send BLOB NOT NULL CHECK (
+                 length(send) BETWEEN 1 AND {max_send_size}
+             ),
              FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE,
              FOREIGN KEY (recovery_root) REFERENCES agent_state_openings(root)
          );
@@ -551,14 +530,17 @@ fn initialize_schema(
          CREATE TABLE agent_receipts (
              cumulative_debit INTEGER PRIMARY KEY CHECK (cumulative_debit > 0),
              recovery_root BLOB NOT NULL CHECK (length(recovery_root) = {root_size}),
-             payment BLOB NOT NULL CHECK (length(payment) = {payment_size}),
+             receipts INTEGER NOT NULL CHECK (receipts > 0),
+             acceptance BLOB NOT NULL CHECK (
+                 length(acceptance) BETWEEN 1 AND {max_acceptance_size}
+             ),
              FOREIGN KEY (recovery_root) REFERENCES agent_state_openings(root)
          );",
         key_size = Key::SIZE,
         digest_size = Digest::SIZE,
         root_size = VectorRoot::<Digest>::SIZE,
-        send_size = SignedSend::<Key, Digest>::SIZE,
-        payment_size = Payment::SIZE,
+        max_send_size = MAX_PAYMENT_BYTES,
+        max_acceptance_size = MAX_ACCEPTANCE_BYTES,
         min_opening_size = MIN_STATE_OPENING_BYTES,
         max_opening_size = MAX_STATE_OPENING_BYTES,
         max_claim_size = MAX_PENDING_CLAIM_BYTES,
@@ -654,14 +636,18 @@ fn read_receipt_state(
     operator: &Key,
 ) -> Result<(u64, u64)> {
     let receipt_count = from_sql_u64(
-        connection.query_row("SELECT COUNT(*) FROM agent_receipts", [], |row| row.get(0))?,
+        connection.query_row(
+            "SELECT COALESCE(SUM(receipts), 0) FROM agent_receipts",
+            [],
+            |row| row.get(0),
+        )?,
         "agent receipt count",
     )?;
     let stored = connection
         .query_row(
-            "SELECT cumulative_debit,
+            "SELECT cumulative_debit, receipts,
                     length(recovery_root), recovery_root,
-                    length(payment), payment
+                    length(acceptance), acceptance
              FROM agent_receipts
              ORDER BY cumulative_debit DESC
              LIMIT 1",
@@ -669,34 +655,34 @@ fn read_receipt_state(
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    read_fixed_blob(row, 1, 2, VectorRoot::<Digest>::SIZE, "recovery root")?,
-                    read_fixed_blob(row, 3, 4, Payment::SIZE, "agent receipt")?,
+                    row.get::<_, i64>(1)?,
+                    read_fixed_blob(row, 2, 3, VectorRoot::<Digest>::SIZE, "recovery root")?,
+                    read_bounded_blob(row, 4, 5, MAX_ACCEPTANCE_BYTES, "retained acceptance")?,
                 ))
             },
         )
         .optional()?;
-    let Some((stored_endpoint, encoded_root, encoded)) = stored else {
+    let Some((stored_endpoint, stored_receipts, encoded_root, encoded)) = stored else {
         ensure!(receipt_count == 0, "agent receipt count is inconsistent");
         return Ok((0, 0));
     };
     ensure!(receipt_count > 0, "agent receipt count is inconsistent");
     let stored_endpoint = from_sql_u64(stored_endpoint, "retained cumulative debit")?;
+    let stored_receipts = from_sql_u64(stored_receipts, "retained receipt count")?;
     let recovery_root =
         VectorRoot::decode(encoded_root.as_slice()).context("decode receipt recovery root")?;
     read_recovery_opening(connection, &recovery_root, account)?
         .context("receipt recovery opening is missing")?;
-    let payment = Payment::decode(encoded.as_slice()).context("decode retained payment")?;
-    let context = context_for_send(payment.send(), operator);
+    let acceptance =
+        Acceptance::decode(encoded.as_slice()).context("decode retained acceptance")?;
+    validate_acceptance(&acceptance, account, operator).context("verify retained acceptance")?;
     ensure!(
-        payment.payer() == account,
-        "retained payment belongs to another payer"
+        u64::try_from(acceptance.receipts.len()).ok() == Some(stored_receipts),
+        "retained acceptance receipt count is inconsistent"
     );
-    payment
-        .verify_linked::<Sha256>(&context)
-        .context("verify retained payment")?;
     ensure!(
-        payment.send().body().cumulative_debit() == stored_endpoint,
-        "retained payment has another debit endpoint"
+        acceptance.send.body().cumulative_debit() == stored_endpoint,
+        "retained acceptance has another debit endpoint"
     );
     Ok((stored_endpoint, receipt_count))
 }
@@ -725,13 +711,7 @@ fn read_pending_payment(connection: &Connection, account: &Key) -> Result<Option
         VectorRoot::<Digest>::SIZE,
         "pending recovery root",
     )?;
-    let encoded_send = read_fixed_blob(
-        row,
-        3,
-        4,
-        SignedSend::<Key, Digest>::SIZE,
-        "pending signed send",
-    )?;
+    let encoded_send = read_bounded_blob(row, 3, 4, MAX_PAYMENT_BYTES, "pending signed send")?;
     ensure!(
         rows.next()?.is_none(),
         "agent database has multiple pending payments"
@@ -978,8 +958,9 @@ fn commit_payment_transaction(
     account: &Key,
     previous_debit: u64,
     endpoint: i64,
+    receipts: u64,
     encoded_send: &[u8],
-    encoded_payment: &[u8],
+    encoded_payments: &[u8],
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -996,10 +977,15 @@ fn commit_payment_transaction(
     );
     ensure!(
         transaction.execute(
-            "INSERT INTO agent_receipts (cumulative_debit, recovery_root, payment)
-             SELECT ?1, recovery_root, ?2
-             FROM agent_pending_payment WHERE singleton = 1 AND send = ?3",
-            params![endpoint, encoded_payment, encoded_send],
+            "INSERT INTO agent_receipts (cumulative_debit, recovery_root, receipts, acceptance)
+             SELECT ?1, recovery_root, ?2, ?3
+             FROM agent_pending_payment WHERE singleton = 1 AND send = ?4",
+            params![
+                endpoint,
+                sql_u64(receipts, "retained receipt count")?,
+                encoded_payments,
+                encoded_send,
+            ],
         )? == 1,
         "pending payment changed before receipt commit"
     );

@@ -1,8 +1,9 @@
 //! SQLite ownership boundary for the operator.
 
 use crate::protocol::{
-    AccountIdentity, DepositEvent, INITIAL_BALANCE, Key, MAX_ACCEPTED_PAYMENTS, MAX_DEPOSIT_EVENTS,
-    MAX_WITHDRAWALS, Payment, SQLITE_U64_MAX, SettlementResult, encoded_artifacts,
+    Acceptance, AccountIdentity, DepositEvent, INITIAL_BALANCE, Key, MAX_ACCEPTED_PAYMENTS,
+    MAX_DEPOSIT_EVENTS, MAX_PAYMENT_BYTES, MAX_WITHDRAWALS, Payment, SQLITE_U64_MAX,
+    SettlementResult, encoded_artifacts,
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
@@ -29,7 +30,7 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_CLAIM_BYTES: usize = 16 * 1024;
 const MAX_CLOSE_ERROR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_DESTINATION_BYTES: usize = 256;
@@ -44,6 +45,7 @@ const EFFECTIVE_ACCOUNT_SQL: &str = "SELECT state.epoch, identity.name,
      JOIN account_identities AS identity USING(public_key)
      WHERE state.public_key = ?1 AND state.epoch <= ?2
      ORDER BY state.epoch DESC LIMIT 1";
+
 // Starting from the identity catalog performs one indexed history probe per account. `CROSS JOIN`
 // keeps SQLite from reversing that loop and walking every version accumulated across epochs.
 const EPOCH_ACCOUNTS_SQL: &str = "SELECT identity.name,
@@ -246,25 +248,30 @@ pub(crate) enum StoredCloseOutcome {
     Failed(String),
 }
 
+/// One accepted send and its position in the payment log.
 #[derive(Clone)]
-pub(crate) struct AcceptedPayment {
+pub(crate) struct AcceptedBatch {
     pub(crate) epoch: u64,
     pub(crate) sequence: u64,
-    pub(crate) amount: u64,
-    pub(crate) payment: Payment,
+    pub(crate) total: u64,
+    pub(crate) acceptance: Acceptance,
 }
 
 struct NewPaymentPlan {
     epoch: u64,
     payer: StoredAccount,
+    live_liability: Option<u64>,
+    total: u64,
+    entries: Vec<EntryPlan>,
+}
+
+struct EntryPlan {
+    recipient_key: Key,
     recipient: Option<StoredAccount>,
-    payer_name: String,
     recipient_name: String,
     external: bool,
-    live_liability: Option<u64>,
     previous_credit: u64,
     previous_index: u64,
-    amount: u64,
 }
 
 pub(crate) struct StagedDeposit {
@@ -446,11 +453,14 @@ impl Store {
                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
                  payer_name TEXT NOT NULL,
+                 recipient BLOB NOT NULL CHECK (length(recipient) = 32),
                  recipient_name TEXT NOT NULL,
                  external INTEGER NOT NULL CHECK (external IN (0, 1)),
                  tx_id BLOB NOT NULL CHECK (length(tx_id) = 32),
-                 encoded BLOB NOT NULL CHECK (length(encoded) = {payment_size}),
-                 UNIQUE(tx_id)
+                 encoded BLOB NOT NULL CHECK (
+                     length(encoded) > 0 AND length(encoded) <= {max_payment_bytes}
+                 ),
+                 UNIQUE(tx_id, recipient)
              );
              CREATE INDEX IF NOT EXISTS payments_epoch_sequence
                  ON payments(epoch, sequence);
@@ -541,7 +551,7 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS withdrawal_claims_account_unclaimed
                  ON withdrawal_claims(account) WHERE claimed = 0;",
-            payment_size = Payment::SIZE,
+            max_payment_bytes = MAX_PAYMENT_BYTES,
             context_size = EpochPaymentContext::SIZE,
             max_deposit_events = MAX_DEPOSIT_EVENTS,
             max_close_error_bytes = MAX_CLOSE_ERROR_BYTES,
@@ -615,23 +625,12 @@ impl Store {
     }
 
     pub(crate) fn epoch(&self) -> Result<u64> {
-        let value = self.connection.query_row(
-            "SELECT epoch FROM operator_meta WHERE singleton = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        from_sql_u64(value, "epoch")
+        metadata_epoch(&self.connection)
     }
 
     /// Returns the cached liability of the current account state without constructing its BMT.
     pub(crate) fn current_liability(&self) -> Result<u64> {
-        let encoded: Vec<u8> = self.connection.query_row(
-            "SELECT length(live_liability), live_liability
-             FROM operator_meta WHERE singleton = 1",
-            [],
-            |row| read_fixed_blob(row, 0, 1, 8, "live liability"),
-        )?;
-        decode_live_liability(&encoded)
+        metadata_live_liability(&self.connection)
     }
 
     /// Projects the successor liability by sweeping only accounts with a pending Close.
@@ -650,12 +649,7 @@ impl Store {
     }
 
     pub(crate) fn current_deposit_events(&self) -> Result<usize> {
-        let count = self.connection.query_row(
-            "SELECT deposit_events FROM operator_meta WHERE singleton = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        usize::try_from(count).context("deposit event count does not fit usize")
+        metadata_deposit_events(&self.connection)
     }
 
     pub(crate) fn staged_deposit(&self, id: &Digest) -> Result<Option<StagedDeposit>> {
@@ -692,18 +686,10 @@ impl Store {
                  FROM withdrawals WHERE epoch = ?1 AND account = ?2",
                 params![sql_u64(self.epoch()?, "epoch")?, account.as_ref()],
                 |row| {
-                    let length = usize::try_from(row.get::<_, i64>(2)?).map_err(|_| {
-                        to_sqlite_error(anyhow::anyhow!("invalid encoded withdrawal length"))
-                    })?;
-                    if length == 0 || length > MAX_WITHDRAWAL_BYTES {
-                        return Err(to_sqlite_error(anyhow::anyhow!(
-                            "invalid encoded withdrawal length"
-                        )));
-                    }
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Vec<u8>>(3)?,
+                        read_bounded_blob(row, 2, 3, MAX_WITHDRAWAL_BYTES, "encoded withdrawal")?,
                     ))
                 },
             )
@@ -738,18 +724,10 @@ impl Store {
                  FROM withdrawals WHERE request_id = ?1",
                 [request_id.digest().as_ref()],
                 |row| {
-                    let length = usize::try_from(row.get::<_, i64>(2)?).map_err(|_| {
-                        to_sqlite_error(anyhow::anyhow!("invalid encoded withdrawal length"))
-                    })?;
-                    if length == 0 || length > MAX_WITHDRAWAL_BYTES {
-                        return Err(to_sqlite_error(anyhow::anyhow!(
-                            "invalid encoded withdrawal length"
-                        )));
-                    }
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Vec<u8>>(3)?,
+                        read_bounded_blob(row, 2, 3, MAX_WITHDRAWAL_BYTES, "encoded withdrawal")?,
                     ))
                 },
             )
@@ -936,8 +914,9 @@ impl Store {
                 let tx_id = Digest::decode(tx_id.as_slice()).map_err(|error| {
                     to_sqlite_error(anyhow::anyhow!("decode stored transaction id: {error}"))
                 })?;
+
                 // Check SQLite's scalar length before asking rusqlite to materialize the blob.
-                let encoded = read_fixed_blob(row, 6, 7, Payment::SIZE, "encoded payment")?;
+                let encoded = read_bounded_blob(row, 6, 7, MAX_PAYMENT_BYTES, "encoded payment")?;
                 let payment = Payment::decode(encoded.as_slice()).map_err(|error| {
                     to_sqlite_error(anyhow::anyhow!("decode stored payment: {error}"))
                 })?;
@@ -1020,15 +999,8 @@ impl Store {
         let withdrawals = statement
             .query_map([epoch_sql], |row| {
                 let applied_amount = row.get::<_, Option<i64>>(0)?;
-                let length = usize::try_from(row.get::<_, i64>(1)?).map_err(|_| {
-                    to_sqlite_error(anyhow::anyhow!("invalid encoded withdrawal length"))
-                })?;
-                if length == 0 || length > MAX_WITHDRAWAL_BYTES {
-                    return Err(to_sqlite_error(anyhow::anyhow!(
-                        "invalid encoded withdrawal length"
-                    )));
-                }
-                let encoded = row.get::<_, Vec<u8>>(2)?;
+                let encoded =
+                    read_bounded_blob(row, 1, 2, MAX_WITHDRAWAL_BYTES, "encoded withdrawal")?;
                 let request = SignedWithdrawal::<Key, Digest>::decode_cfg(
                     encoded.as_slice(),
                     &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
@@ -1056,40 +1028,26 @@ impl Store {
 
     pub(crate) fn accept_send(
         &mut self,
-        context: &PaymentContext<Key, Digest>,
+        context: &EpochPaymentContext,
         operator: &SigningKey,
         send: SignedSend<Key, Digest>,
         shard: u64,
-    ) -> Result<AcceptedPayment> {
+    ) -> Result<AcceptedBatch> {
         #[cfg(test)]
         let fail_commit = std::mem::take(&mut self.fail_payment_commit);
         #[cfg(test)]
         let fail_write = std::mem::take(&mut self.fail_payment_write);
         let accepted = mutate(&mut self.connection, "payment", |transaction| {
-            if let Some(accepted) = find_accepted_payment(transaction, &send)? {
+            if let Some(accepted) = find_accepted_batch(transaction, &send)? {
                 return Ok(accepted);
             }
             let plan = validate_new_payment(transaction, context, &send, shard)?;
             let epoch = plan.epoch;
+            let epoch_sql = sql_u64(epoch, "epoch")?;
             let tx_id = send.tx_id::<Sha256>();
-            let recipient_key = send.body().recipient().clone();
             let shard_sql = sql_u64(shard, "receive shard")?;
-            let receipt = SignedReceipt::issue_next::<Sha256, _>(
-                context,
-                &send,
-                shard,
-                plan.previous_credit,
-                plan.previous_index,
-                operator,
-            )
-            .context("issue operator receipt")?;
-            let payment =
-                Payment::new::<Sha256>(context, send, receipt).context("link accepted payment")?;
 
             upsert_account_state(transaction, epoch, &plan.payer)?;
-            if let Some(recipient) = plan.recipient.as_ref() {
-                upsert_account_state(transaction, epoch, recipient)?;
-            }
             if let Some(live_liability) = plan.live_liability {
                 let updated = transaction.execute(
                     "UPDATE operator_meta SET live_liability = ?1 WHERE singleton = 1",
@@ -1097,47 +1055,76 @@ impl Store {
                 )?;
                 ensure!(updated == 1, "operator metadata disappeared during payment");
             }
-            transaction.execute(
-                "INSERT INTO receive_shards(
-                 epoch, recipient, shard, cumulative_credit, receipt_index
-             ) VALUES(?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(epoch, recipient, shard) DO UPDATE SET
-                 cumulative_credit = excluded.cumulative_credit,
-                 receipt_index = excluded.receipt_index",
-                params![
-                    sql_u64(epoch, "epoch")?,
-                    recipient_key.as_ref(),
-                    shard_sql,
-                    sql_u64(
-                        payment.receipt().body().cumulative_shard_credit(),
-                        "shard credit",
-                    )?,
-                    sql_u64(payment.receipt().body().index(), "receipt index")?,
-                ],
-            )?;
-            transaction.execute(
-                "INSERT INTO payments(
-                 epoch, payer_name, recipient_name, external, tx_id, encoded
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    sql_u64(epoch, "epoch")?,
-                    plan.payer_name,
-                    plan.recipient_name,
-                    i64::from(plan.external),
-                    tx_id.digest().as_ref(),
-                    payment.encode().as_ref(),
-                ],
-            )?;
+
+            // Every entry lands in this one transaction: the payer debit, each recipient credit,
+            // each shard advance, and each linked payment row commit or roll back together.
+            let mut sequence = None;
+            let mut receipts = Vec::with_capacity(plan.entries.len());
+            for entry in &plan.entries {
+                let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                    context,
+                    &send,
+                    &entry.recipient_key,
+                    shard,
+                    entry.previous_credit,
+                    entry.previous_index,
+                    operator,
+                )
+                .context("issue operator receipt")?;
+                let payment = Payment::new::<Sha256>(context, send.clone(), receipt)
+                    .context("link accepted payment")?;
+                if let Some(recipient) = entry.recipient.as_ref() {
+                    upsert_account_state(transaction, epoch, recipient)?;
+                }
+                transaction.execute(
+                    "INSERT INTO receive_shards(
+                     epoch, recipient, shard, cumulative_credit, receipt_index
+                 ) VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(epoch, recipient, shard) DO UPDATE SET
+                     cumulative_credit = excluded.cumulative_credit,
+                     receipt_index = excluded.receipt_index",
+                    params![
+                        epoch_sql,
+                        entry.recipient_key.as_ref(),
+                        shard_sql,
+                        sql_u64(
+                            payment.receipt().body().cumulative_shard_credit(),
+                            "shard credit",
+                        )?,
+                        sql_u64(payment.receipt().body().index(), "receipt index")?,
+                    ],
+                )?;
+                transaction.execute(
+                    "INSERT INTO payments(
+                     epoch, payer_name, recipient, recipient_name, external, tx_id, encoded
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        epoch_sql,
+                        plan.payer.name,
+                        entry.recipient_key.as_ref(),
+                        entry.recipient_name,
+                        i64::from(entry.external),
+                        tx_id.digest().as_ref(),
+                        payment.encode().as_ref(),
+                    ],
+                )?;
+                if sequence.is_none() {
+                    sequence = Some(from_sql_u64(
+                        transaction.last_insert_rowid(),
+                        "payment sequence",
+                    )?);
+                }
+                receipts.push(payment.into_parts().1);
+            }
             #[cfg(test)]
             if fail_write {
                 return Err(rusqlite::Error::ExecuteReturnedResults.into());
             }
-            let sequence = from_sql_u64(transaction.last_insert_rowid(), "payment sequence")?;
-            Ok(AcceptedPayment {
+            Ok(AcceptedBatch {
                 epoch,
-                sequence,
-                amount: plan.amount,
-                payment,
+                sequence: sequence.context("accepted batch has no entries")?,
+                total: plan.total,
+                acceptance: Acceptance { send, receipts },
             })
         })?;
         #[cfg(test)]
@@ -1151,11 +1138,11 @@ impl Store {
 
     pub(crate) fn payment_requires_epoch_registration(
         &self,
-        context: &PaymentContext<Key, Digest>,
+        context: &EpochPaymentContext,
         send: &SignedSend<Key, Digest>,
         shard: u64,
     ) -> Result<bool> {
-        if find_accepted_payment(&self.connection, send)?.is_some() {
+        if find_accepted_batch(&self.connection, send)?.is_some() {
             return Ok(false);
         }
         validate_new_payment(&self.connection, context, send, shard)?;
@@ -2179,14 +2166,10 @@ impl Store {
 
 fn validate_new_payment(
     connection: &Connection,
-    context: &PaymentContext<Key, Digest>,
+    context: &EpochPaymentContext,
     send: &SignedSend<Key, Digest>,
     shard: u64,
 ) -> Result<NewPaymentPlan> {
-    ensure!(
-        send.body().payer() != send.body().recipient(),
-        "self-payments are omitted from this operator"
-    );
     let epoch = metadata_epoch(connection)?;
     ensure!(epoch == context.epoch(), "payment context is stale");
     ensure!(
@@ -2194,8 +2177,9 @@ fn validate_new_payment(
         "payment anchor is stale"
     );
     let epoch_sql = sql_u64(epoch, "epoch")?;
+    let accepted = epoch_payment_count(connection, epoch_sql)?;
     ensure!(
-        epoch_payment_count(connection, epoch_sql)? < MAX_ACCEPTED_PAYMENTS,
+        send.body().entries().len() <= MAX_ACCEPTED_PAYMENTS - accepted.min(MAX_ACCEPTED_PAYMENTS),
         "epoch payment capacity is exhausted"
     );
 
@@ -2204,113 +2188,141 @@ fn validate_new_payment(
         .context("payer is not a live registered account")?;
     send.verify_next(context, payer.current.cumulative_debit)
         .context("verify payer authorization")?;
-    let amount = send.body().amount();
+    let total = send
+        .body()
+        .total()
+        .context("verified send total is checked")?;
     ensure!(
-        payer.current.balance >= amount,
+        payer.current.balance >= total,
         "payer has insufficient available balance"
     );
     payer.current.cumulative_debit = checked_sql_add(
         payer.current.cumulative_debit,
-        amount,
+        total,
         "payer cumulative debit",
     )?;
-    payer.current.balance -= amount;
+    payer.current.balance -= total;
 
-    let recipient_key = send.body().recipient().clone();
-    let mut recipient = effective_account(connection, epoch, &recipient_key)?;
-    let external = recipient.is_none();
-    let recipient_name = recipient.as_ref().map_or_else(
-        || "external".to_string(),
-        |recipient| recipient.name.clone(),
-    );
-    if let Some(recipient) = recipient.as_mut() {
-        recipient.current.balance = checked_sql_add(
-            recipient.current.balance,
-            amount,
-            "recipient account balance",
-        )?;
-        recipient.current.cumulative_credit = checked_sql_add(
-            recipient.current.cumulative_credit,
-            amount,
-            "recipient cumulative credit",
-        )?;
-        recipient.current.receipt_count = checked_sql_add(
-            recipient.current.receipt_count,
-            1,
-            "recipient receipt count",
-        )?;
+    let shard_sql = sql_u64(shard, "receive shard")?;
+    let mut external_total = 0_u64;
+    let mut entries = Vec::with_capacity(send.body().entries().len());
+    for entry in send.body().entries() {
+        let recipient_key = entry.recipient().clone();
+        ensure!(
+            recipient_key != payer_key,
+            "self-payments are omitted from this operator"
+        );
+        let amount = entry.amount();
+        let mut recipient = effective_account(connection, epoch, &recipient_key)?;
+        let external = recipient.is_none();
+        let recipient_name = recipient.as_ref().map_or_else(
+            || "external".to_string(),
+            |recipient| recipient.name.clone(),
+        );
+        if let Some(recipient) = recipient.as_mut() {
+            recipient.current.balance = checked_sql_add(
+                recipient.current.balance,
+                amount,
+                "recipient account balance",
+            )?;
+            recipient.current.cumulative_credit = checked_sql_add(
+                recipient.current.cumulative_credit,
+                amount,
+                "recipient cumulative credit",
+            )?;
+            recipient.current.receipt_count = checked_sql_add(
+                recipient.current.receipt_count,
+                1,
+                "recipient receipt count",
+            )?;
+        } else {
+            external_total = checked_sql_add(external_total, amount, "external payment total")?;
+        }
+        let endpoint = connection
+            .query_row(
+                "SELECT cumulative_credit, receipt_index FROM receive_shards
+                 WHERE epoch = ?1 AND recipient = ?2 AND shard = ?3",
+                params![epoch_sql, recipient_key.as_ref(), shard_sql],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .unwrap_or((0, 0));
+        let previous_credit = from_sql_u64(endpoint.0, "shard credit")?;
+        checked_sql_add(previous_credit, amount, "receive-shard cumulative credit")?;
+        entries.push(EntryPlan {
+            recipient_key,
+            recipient,
+            recipient_name,
+            external,
+            previous_credit,
+            previous_index: from_sql_u64(endpoint.1, "receipt index")?,
+        });
     }
-    let live_liability = if external {
+    let live_liability = if external_total > 0 {
         Some(
             metadata_live_liability(connection)?
-                .checked_sub(amount)
+                .checked_sub(external_total)
                 .context("external payment exceeds live liability")?,
         )
     } else {
         None
     };
-    let endpoint = connection
-        .query_row(
-            "SELECT cumulative_credit, receipt_index FROM receive_shards
-             WHERE epoch = ?1 AND recipient = ?2 AND shard = ?3",
-            params![
-                epoch_sql,
-                recipient_key.as_ref(),
-                sql_u64(shard, "receive shard")?,
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()?
-        .unwrap_or((0, 0));
-    let previous_credit = from_sql_u64(endpoint.0, "shard credit")?;
-    checked_sql_add(previous_credit, amount, "receive-shard cumulative credit")?;
     Ok(NewPaymentPlan {
         epoch,
-        payer_name: payer.name.clone(),
-        recipient_name,
         payer,
-        recipient,
-        external,
         live_liability,
-        previous_credit,
-        previous_index: from_sql_u64(endpoint.1, "receipt index")?,
-        amount,
+        total,
+        entries,
     })
 }
 
-fn find_accepted_payment(
+fn find_accepted_batch(
     connection: &Connection,
     send: &SignedSend<Key, Digest>,
-) -> Result<Option<AcceptedPayment>> {
+) -> Result<Option<AcceptedBatch>> {
     let tx_id = send.tx_id::<Sha256>();
-    connection
-        .query_row(
-            "SELECT epoch, sequence, length(encoded), encoded
-             FROM payments WHERE tx_id = ?1",
-            [tx_id.digest().as_ref()],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    read_fixed_blob(row, 2, 3, Payment::SIZE, "encoded payment")?,
-                ))
-            },
-        )
-        .optional()?
-        .map(|(epoch, sequence, encoded)| {
-            let payment = Payment::decode(encoded.as_slice()).context("decode accepted payment")?;
-            ensure!(
-                payment.send() == send,
-                "transaction id is bound to another payment request"
-            );
-            Ok(AcceptedPayment {
-                epoch: from_sql_u64(epoch, "payment epoch")?,
-                sequence: from_sql_u64(sequence, "payment sequence")?,
-                amount: payment.amount(),
-                payment,
-            })
-        })
-        .transpose()
+    let mut statement = connection.prepare(
+        "SELECT epoch, sequence, length(encoded), encoded
+         FROM payments WHERE tx_id = ?1 ORDER BY sequence",
+    )?;
+    let rows = statement
+        .query_map([tx_id.digest().as_ref()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                read_bounded_blob(row, 2, 3, MAX_PAYMENT_BYTES, "encoded payment")?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some((epoch, sequence, _)) = rows.first() else {
+        return Ok(None);
+    };
+    let epoch = from_sql_u64(*epoch, "payment epoch")?;
+    let sequence = from_sql_u64(*sequence, "payment sequence")?;
+    ensure!(
+        rows.len() == send.body().entries().len(),
+        "transaction id is bound to another payment request"
+    );
+    let mut total = 0_u64;
+    let mut receipts = Vec::with_capacity(rows.len());
+    for (_, _, encoded) in &rows {
+        let payment = Payment::decode(encoded.as_slice()).context("decode accepted payment")?;
+        ensure!(
+            payment.send() == send,
+            "transaction id is bound to another payment request"
+        );
+        total = checked_sql_add(total, payment.amount(), "accepted batch total")?;
+        receipts.push(payment.into_parts().1);
+    }
+    Ok(Some(AcceptedBatch {
+        epoch,
+        sequence,
+        total,
+        acceptance: Acceptance {
+            send: send.clone(),
+            receipts,
+        },
+    }))
 }
 
 fn read_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredAccount> {
@@ -2554,6 +2566,23 @@ fn epoch_payment_count(connection: &Connection, epoch: i64) -> Result<usize> {
 
 // SQLite exposes a blob's length without copying its contents. Materialize only after the declared
 // fixed-width persistence contract has been checked.
+fn read_bounded_blob(
+    row: &rusqlite::Row<'_>,
+    length_column: usize,
+    value_column: usize,
+    maximum: usize,
+    field: &str,
+) -> rusqlite::Result<Vec<u8>> {
+    let length = usize::try_from(row.get::<_, i64>(length_column)?)
+        .map_err(|_| to_sqlite_error(anyhow::anyhow!("invalid {field} length")))?;
+    if length == 0 || length > maximum {
+        return Err(to_sqlite_error(anyhow::anyhow!(
+            "invalid {field} length {length}, maximum {maximum}"
+        )));
+    }
+    row.get(value_column)
+}
+
 fn read_fixed_blob(
     row: &rusqlite::Row<'_>,
     length_column: usize,
@@ -2749,7 +2778,7 @@ mod tests {
         payment_context(predecessor_liability, deposits)
     }
 
-    fn rejected_payment(result: Result<AcceptedPayment>) -> anyhow::Error {
+    fn rejected_payment(result: Result<AcceptedBatch>) -> anyhow::Error {
         match result {
             Ok(_) => panic!("payment was accepted"),
             Err(error) => error,
@@ -2798,7 +2827,13 @@ mod tests {
             .store
             .accept_send(&fixture.context, &fixture.operator, initial_send, 0)
             .unwrap();
-        let encoded = initial.payment.encode();
+        let payment = initial
+            .acceptance
+            .payments()
+            .next()
+            .expect("accepted batch has one entry");
+        let recipient = payment.recipient().clone();
+        let encoded = payment.encode();
         let transaction = fixture.store.connection.transaction().unwrap();
         for index in 1..(MAX_ACCEPTED_PAYMENTS - 1) {
             let index = u64::try_from(index).unwrap();
@@ -2807,9 +2842,9 @@ mod tests {
             transaction
                 .execute(
                     "INSERT INTO payments(
-                         epoch, payer_name, recipient_name, external, tx_id, encoded
-                     ) VALUES(0, 'fixture payer', 'fixture recipient', 0, ?1, ?2)",
-                    params![tx_id.as_ref(), encoded.as_ref()],
+                         epoch, payer_name, recipient, recipient_name, external, tx_id, encoded
+                     ) VALUES(0, 'fixture payer', ?1, 'fixture recipient', 0, ?2, ?3)",
+                    params![recipient.as_ref(), tx_id.as_ref(), encoded.as_ref()],
                 )
                 .unwrap();
         }
@@ -2838,7 +2873,7 @@ mod tests {
             .accept_send(&fixture.context, &fixture.operator, retry_send, 0)
             .unwrap();
         assert_eq!(replay.sequence, first.sequence);
-        assert_eq!(replay.payment, first.payment);
+        assert_eq!(replay.acceptance, first.acceptance);
         assert_eq!(fixture.store.total_changes(), changes);
 
         let new_send = fixture.send(2);

@@ -282,6 +282,17 @@ const FORK_UNRELATED: Endpoint = Endpoint {
     index: 1,
 };
 
+const FORK_SIBLING_ENTRY: Endpoint = Endpoint {
+    transaction: 6,
+    payer: Account::Alice,
+    recipient: Account::Carol,
+    amount: 1,
+    cumulative_debit: 1,
+    shard: 5,
+    cumulative_shard_credit: 1,
+    index: 1,
+};
+
 const fn other_batch(target: Batch) -> Batch {
     match target {
         Batch::B0 => Batch::B1,
@@ -328,7 +339,8 @@ fn range_feasible(lower_credit: u8, lower_index: u8, upper: Endpoint) -> bool {
 }
 
 fn same_signed_send(left: Witness, right: Witness) -> bool {
-    left.endpoint.payer == right.endpoint.payer
+    left.endpoint.transaction == right.endpoint.transaction
+        && left.endpoint.payer == right.endpoint.payer
         && left.endpoint.recipient == right.endpoint.recipient
         && left.endpoint.amount == right.endpoint.amount
         && left.endpoint.cumulative_debit == right.endpoint.cumulative_debit
@@ -395,9 +407,14 @@ fn semantic_contradiction(target: Batch, evidence: Evidence) -> bool {
         Evidence::Latest { payment, .. } => {
             let endpoint = payment.endpoint;
             let committed = public_debit(target, endpoint.payer);
+
+            // The committed leaf pins the terminal signed send only. A batched send is
+            // acknowledged by one receipt per entry, so equal endpoints contradict exactly when
+            // the disclosed transaction differs from the committed one.
             endpoint.cumulative_debit > committed
                 || (endpoint.cumulative_debit == committed
-                    && public_outgoing(target, endpoint.payer) != Some(endpoint))
+                    && public_outgoing(target, endpoint.payer)
+                        .is_none_or(|outgoing| outgoing.transaction != endpoint.transaction))
         }
         Evidence::HigherShardTip { payment, .. } => {
             let endpoint = payment.endpoint;
@@ -415,8 +432,12 @@ fn semantic_contradiction(target: Batch, evidence: Evidence) -> bool {
         Evidence::ReceiptFork { left, right, .. } => {
             let left = left.endpoint;
             let right = right.endpoint;
+
+            // Sibling entries of one batched send share a transaction identifier, so a
+            // transaction fork requires the same credited entry recipient.
             !receipt_equal(left, right)
-                && (same_index(left, right) || same_transaction(left, right))
+                && (same_index(left, right)
+                    || (same_transaction(left, right) && left.recipient == right.recipient))
         }
     }
 }
@@ -724,6 +745,57 @@ fn adversarial_cases() -> Vec<ChallengeState> {
             expected: Verdict::NoContradiction,
             verdict: None,
         },
+        // Sibling entries of one batched send share a transaction without forking it.
+        ChallengeState {
+            target: Batch::B1,
+            evidence: Evidence::ReceiptFork {
+                left: Witness::valid(FORK_LEFT, Batch::B1),
+                right: Witness::valid(FORK_SIBLING_ENTRY, Batch::B1),
+                canonical_order: true,
+                encoded_relation: ForkRelation::Full,
+            },
+            expected: Verdict::NoContradiction,
+            verdict: None,
+        },
+        // A receipt for another entry of the committed terminal send does not contradict an
+        // equal committed endpoint.
+        ChallengeState {
+            target: Batch::B1,
+            evidence: Evidence::Latest {
+                payment: Witness::valid(
+                    Endpoint {
+                        recipient: Account::Bob,
+                        amount: 2,
+                        shard: 5,
+                        cumulative_shard_credit: 2,
+                        index: 1,
+                        ..PUBLIC_OUTGOING
+                    },
+                    Batch::B1,
+                ),
+                typed_opening: true,
+            },
+            expected: Verdict::NoContradiction,
+            verdict: None,
+        },
+        // Two different acknowledged authorizations at one committed endpoint fork the payer's
+        // debit chain.
+        ChallengeState {
+            target: Batch::B1,
+            evidence: Evidence::Latest {
+                payment: Witness::valid(
+                    Endpoint {
+                        transaction: 9,
+                        amount: 3,
+                        ..PUBLIC_OUTGOING
+                    },
+                    Batch::B1,
+                ),
+                typed_opening: true,
+            },
+            expected: Verdict::Fault(ChallengeKind::LatestAcknowledgedSend),
+            verdict: None,
+        },
     ]);
     cases
 }
@@ -854,7 +926,7 @@ pub(crate) fn explore(address: &str) {
 fn challenge_checker_exhausts_authentication_and_relation_classes() {
     let checker = ChallengeModel.checker().threads(1).spawn_bfs().join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 15_782);
+    assert_eq!(checker.unique_state_count(), 15_788);
     checker.assert_properties();
 }
 

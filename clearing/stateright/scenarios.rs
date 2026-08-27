@@ -20,12 +20,6 @@ fn rejected(model: SettlementModel, state: &SettlementState, action: SettlementA
     );
 }
 
-fn rejected_unchanged(model: SettlementModel, state: &SettlementState, action: SettlementAction) {
-    let snapshot = state.clone();
-    rejected(model, state, action);
-    assert_eq!(state, &snapshot);
-}
-
 fn register_and_admit(model: SettlementModel, state: &mut SettlementState, batch: Batch) {
     step(
         model,
@@ -113,7 +107,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     // Signed request and destination predicates fail before intake state changes.
     let mut invalid_signature = valid;
     invalid_signature.request.signature_valid = false;
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(invalid_signature),
@@ -122,7 +116,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     let mut wrong_deployment = valid;
     wrong_deployment.request.deployment = Deployment::Other;
     wrong_deployment.replay_key = wrong_deployment.request.replay_key();
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(wrong_deployment),
@@ -131,7 +125,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     let mut wrong_context = valid;
     wrong_context.request.context_root = Root::R1;
     wrong_context.replay_key = wrong_context.request.replay_key();
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(wrong_context),
@@ -140,7 +134,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     let mut oversized_destination = valid;
     oversized_destination.request.destination = Destination::TooLong;
     oversized_destination.replay_key = oversized_destination.request.replay_key();
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(oversized_destination),
@@ -148,7 +142,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
 
     let mut ineligible_destination = valid;
     ineligible_destination.destination_eligible = false;
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(ineligible_destination),
@@ -157,7 +151,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     // Every safety root requires one authenticated opening for the exact account and state.
     let mut wrong_count = valid;
     wrong_count.safety_openings[0] = None;
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(wrong_count),
@@ -165,7 +159,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
 
     let mut extra_opening = valid;
     extra_opening.safety_openings[1] = extra_opening.safety_openings[0];
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(extra_opening),
@@ -176,7 +170,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         .as_mut()
         .unwrap()
         .authenticated_state = false;
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(unauthenticated),
@@ -184,7 +178,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
 
     let mut wrong_account = valid;
     wrong_account.safety_openings[0].as_mut().unwrap().account = Account::Bob;
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(wrong_account),
@@ -192,14 +186,14 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
 
     let mut wrong_root = valid;
     wrong_root.safety_openings[0].as_mut().unwrap().root = Root::R1;
-    rejected_unchanged(model, &state, SettlementAction::QueueWithdrawal(wrong_root));
+    rejected(model, &state, SettlementAction::QueueWithdrawal(wrong_root));
 
     let mut wrong_state = valid;
     wrong_state.safety_openings[0].as_mut().unwrap().state = AccountState {
         active: false,
         balance: 0,
     };
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(wrong_state),
@@ -208,7 +202,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     // Replay identity binds the full body, whose action must be affordable at every safety root.
     let mut mismatched_replay_key = valid;
     mismatched_replay_key.request.action = WithdrawalAction::Amount(1);
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(mismatched_replay_key),
@@ -217,7 +211,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     let mut unaffordable_current = valid;
     unaffordable_current.request.action = WithdrawalAction::Amount(11);
     unaffordable_current.replay_key = unaffordable_current.request.replay_key();
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(unaffordable_current),
@@ -226,7 +220,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     let mut zero_amount = valid;
     zero_amount.request.action = WithdrawalAction::Amount(0);
     zero_amount.replay_key = zero_amount.request.replay_key();
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::QueueWithdrawal(zero_amount),
@@ -235,12 +229,12 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     let mut too_soon = valid;
     too_soon.request.deadline = 1;
     too_soon.replay_key = too_soon.request.replay_key();
-    rejected_unchanged(model, &state, SettlementAction::QueueWithdrawal(too_soon));
+    rejected(model, &state, SettlementAction::QueueWithdrawal(too_soon));
 
     let mut too_late = valid;
     too_late.request.deadline = 13;
     too_late.replay_key = too_late.request.replay_key();
-    rejected_unchanged(model, &state, SettlementAction::QueueWithdrawal(too_late));
+    rejected(model, &state, SettlementAction::QueueWithdrawal(too_late));
 
     let mut with_successor = SettlementState::default();
     step(
@@ -253,7 +247,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         SettlementModel::withdrawal_attempt(&with_successor, WithdrawalId::CloseAfterFault);
     unaffordable_successor.request.action = WithdrawalAction::Amount(9);
     unaffordable_successor.replay_key = unaffordable_successor.request.replay_key();
-    rejected_unchanged(
+    rejected(
         model,
         &with_successor,
         SettlementAction::QueueWithdrawal(unaffordable_successor),
@@ -264,7 +258,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         SettlementModel::withdrawal_attempt(&with_successor, WithdrawalId::CloseAfterFault);
     unaffordable_tail.request.action = WithdrawalAction::Amount(8);
     unaffordable_tail.replay_key = unaffordable_tail.request.replay_key();
-    rejected_unchanged(
+    rejected(
         model,
         &with_successor,
         SettlementAction::QueueWithdrawal(unaffordable_tail),
@@ -276,7 +270,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         &mut accepted,
         SettlementAction::QueueWithdrawal(valid),
     );
-    rejected_unchanged(model, &accepted, SettlementAction::QueueWithdrawal(valid));
+    rejected(model, &accepted, SettlementAction::QueueWithdrawal(valid));
 }
 
 fn admit_first_three(model: SettlementModel) -> SettlementState {
@@ -850,7 +844,7 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
     step(model, &mut state, SettlementAction::Finalize);
 
     // Wrong positions, proof roots, and claim namespaces stutter without consuming reserves.
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::ClaimWithdrawal {
@@ -859,7 +853,7 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
             position: 1,
         },
     );
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::ClaimWithdrawal {
@@ -868,7 +862,7 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
             position: 0,
         },
     );
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::ClaimWithdrawal {
@@ -877,7 +871,7 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
             position: 0,
         },
     );
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::ClaimWithdrawal {
@@ -886,7 +880,7 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
             position: 1,
         },
     );
-    rejected_unchanged(
+    rejected(
         model,
         &state,
         SettlementAction::ClaimPayout {
@@ -898,7 +892,7 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
 
     // Each exact positioned output consumes only its own batch-scoped reserve.
     step(model, &mut state, withdrawal_claim(Batch::B2));
-    rejected_unchanged(model, &state, withdrawal_claim(Batch::B2));
+    rejected(model, &state, withdrawal_claim(Batch::B2));
     step(model, &mut state, withdrawal_claim(Batch::B3));
     step(model, &mut state, payout_claim(Batch::B1));
     assert_eq!(state.withdrawal_reserve, [0; 5]);
@@ -960,7 +954,7 @@ fn withdrawal_replay_ids_prune_at_the_exact_deadline_and_recheck_context_on_reus
     // Finalization clears the obligation but retains replay protection through its deadline.
     step(model, &mut finalized, SettlementAction::Observe(9));
     let before_deadline = SettlementModel::withdrawal_attempt(&finalized, WithdrawalId::Amount);
-    rejected_unchanged(
+    rejected(
         model,
         &finalized,
         SettlementAction::QueueWithdrawal(before_deadline),
@@ -978,7 +972,7 @@ fn withdrawal_replay_ids_prune_at_the_exact_deadline_and_recheck_context_on_reus
         None
     );
     let stale_context = SettlementModel::withdrawal_attempt(&finalized, WithdrawalId::Amount);
-    rejected_unchanged(
+    rejected(
         model,
         &finalized,
         SettlementAction::QueueWithdrawal(stale_context),

@@ -25,7 +25,7 @@ pub(crate) enum Account {
 impl Account {
     const ALL: [Self; ACCOUNT_COUNT] = [Self::Alice, Self::Bob, Self::Carol];
 
-    const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         match self {
             Self::Alice => 0,
             Self::Bob => 1,
@@ -237,7 +237,7 @@ pub(crate) enum DepositId {
 impl DepositId {
     const ALL: [Self; 3] = [Self::BobTwo, Self::AliceOne, Self::BobOne];
 
-    const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         match self {
             Self::BobTwo => 0,
             Self::AliceOne => 1,
@@ -595,7 +595,7 @@ impl Fault {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Terminal {
     Dormant,
     Claiming {
@@ -897,8 +897,6 @@ impl SettlementModel {
         registration.epoch == Self::next_admission_epoch(state)
             && registration.predecessor == Self::head_root(state)
             && registration.predecessor_state == Self::head_state(state)
-            && state_liability(&registration.predecessor_state)
-                == state_liability(&Self::head_state(state))
             && registration.deposits == Self::boundary_deposits(state)
             && registration.withdrawals == state.pending_withdrawals
             && state.now <= registration.admission_deadline
@@ -1373,7 +1371,7 @@ impl SettlementModel {
             frozen_state,
             remaining_state,
             remaining_deposits,
-        } = state.terminal.clone()
+        } = state.terminal
         {
             let remaining_deposits = remaining_deposits.checked_sub(amount)?;
             finishes = remaining_state == 0 && remaining_deposits == 0;
@@ -1468,7 +1466,7 @@ impl SettlementModel {
             frozen_state,
             remaining_state,
             remaining_deposits,
-        } = state.terminal.clone()
+        } = state.terminal
         else {
             return None;
         };
@@ -1652,7 +1650,6 @@ impl SettlementModel {
             state.admission_fence_epoch.is_some()
                 && state.registered.is_none()
                 && state.clean_prefix_len <= 3
-                && (state.terminal != Terminal::Settled || !state.fault.healthy())
         }
     }
 

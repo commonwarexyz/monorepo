@@ -1,10 +1,9 @@
-//! Runtime-owning service loops for the settlement and operator binaries.
+//! Runtime-owning service loops for the three terminal binaries.
 
 use crate::{
     agent::Agent, operator::Operator, operator_rpc, rpc, settlement::Settlement, settlement_rpc, ui,
 };
 use anyhow::{Context, Result, ensure};
-use bytes::Bytes;
 use commonware_runtime::{Listener, Network, Runner as _, tokio};
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf, time::Duration};
 
@@ -20,16 +19,8 @@ fn runtime() -> tokio::Runner {
 }
 
 fn error_response(error: anyhow::Error) -> rpc::Response {
-    let mut message = format!("{error:#}");
-    if message.len() > MAX_ERROR_BYTES {
-        let mut end = MAX_ERROR_BYTES;
-        while !message.is_char_boundary(end) {
-            end -= 1;
-        }
-        message.truncate(end);
-    }
     rpc::Response::Error {
-        error: Bytes::from(message),
+        error: rpc::bounded_utf8(format!("{error:#}"), MAX_ERROR_BYTES),
     }
 }
 
@@ -201,6 +192,7 @@ mod tests {
         protocol::wallets,
         settlement_rpc,
     };
+    use bytes::Bytes;
     use commonware_clearing::bajillion::{
         boundary::{SignedWithdrawal, WithdrawalAction},
         payment::SignedSend,
@@ -677,7 +669,7 @@ mod tests {
                                     panic!("operator did not accept the staged payment");
                                 };
                                 accepted = Some(
-                                    operator_rpc::AcceptedPaymentResponse::decode(body).unwrap(),
+                                    operator_rpc::AcceptedBatchResponse::decode(body).unwrap(),
                                 );
                                 continue;
                             }
@@ -687,17 +679,17 @@ mod tests {
                     });
 
             let error = agent
-                .pay(&context, settlement_address, operator_address, 1, 7)
+                .pay(&context, settlement_address, operator_address, &[(1, 7)])
                 .await
                 .unwrap_err();
             assert!(format!("{error:#}").contains("submit payment"));
             assert_eq!(agent.receipt_count(), 0);
             let accepted = operator_server.await.unwrap();
             assert_eq!(accepted.epoch, registration.epoch);
-            assert_eq!(accepted.amount, 7);
-            assert_eq!(accepted.payment.amount(), 7);
-            assert_eq!(accepted.payment.send().body().anchor(), &payment_anchor);
-            assert_eq!(accepted.payment.send().body().cumulative_debit(), 7);
+            assert_eq!(accepted.total, 7);
+            assert_eq!(accepted.acceptance.receipts[0].body().amount(), 7);
+            assert_eq!(accepted.acceptance.send.body().anchor(), &payment_anchor);
+            assert_eq!(accepted.acceptance.send.body().cumulative_debit(), 7);
             drop(agent);
 
             let agent_database = rusqlite::Connection::open(databases.agent()).unwrap();
@@ -719,7 +711,7 @@ mod tests {
                 })
                 .unwrap();
             let pending_send = SignedSend::decode(Bytes::from(persisted_send)).unwrap();
-            assert_eq!(&pending_send, accepted.payment.send());
+            assert_eq!(&pending_send, &accepted.acceptance.send);
             drop(agent_database);
 
             let recovered_agent = Agent::open(databases.agent(), 0).unwrap();
@@ -730,7 +722,7 @@ mod tests {
             let mut recovered_operator =
                 Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap();
             let persisted_retry = recovered_operator.accept_send(pending_send).unwrap();
-            assert_eq!(persisted_retry.payment, accepted.payment);
+            assert_eq!(persisted_retry.acceptance, accepted.acceptance);
             let operator_snapshot = recovered_operator.snapshot().unwrap();
             assert_eq!(operator_snapshot.payments.len(), 1);
             assert_eq!(
@@ -752,10 +744,15 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 Bytes::from(persisted_operator_receipt),
-                accepted.payment.encode()
+                accepted
+                    .acceptance
+                    .payments()
+                    .next()
+                    .expect("acceptance has one entry")
+                    .encode()
             );
 
-            // The operator is gone before recovery; only the live settlement server participates.
+            // The operator is gone before recovery. Only the live settlement server participates.
             let before_expiry = settlement_rpc::status(&context, settlement_address)
                 .await
                 .unwrap();

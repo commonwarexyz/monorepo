@@ -210,6 +210,7 @@ fn make_payment(
     let receipt = SignedReceipt::issue_next::<Sha256, _>(
         context,
         &send,
+        &recipient.public_key(),
         shard,
         previous_credit,
         previous_index,
@@ -391,7 +392,7 @@ fn invalidate_challenge_scope(challenge: &mut TestChallenge, context: &TestConte
     match challenge {
         Challenge::LatestAcknowledgedSend { payer, .. } => invalidate_lookup(payer),
         Challenge::HigherShardTip { recipient, .. } => match recipient.as_mut() {
-            HigherShardTipLookup::Present { shard, .. } if child => match shard {
+            HigherShardTipLookup::Present { tip, .. } if child => match tip {
                 CreditTipLookup::Present { opening, .. } => opening.proof.leaf_count ^= 1,
                 CreditTipLookup::Absent { opening, .. } => opening.proof.leaf_count ^= 1,
             },
@@ -479,7 +480,7 @@ fn exercise_challenge(
             if matches!(
                 recipient.as_ref(),
                 HigherShardTipLookup::Present {
-                    shard: CreditTipLookup::Present { .. },
+                    tip: CreditTipLookup::Present { .. },
                     ..
                 }
             )
@@ -489,7 +490,7 @@ fn exercise_challenge(
             unreachable!("matched higher-tip challenge");
         };
         let HigherShardTipLookup::Present {
-            shard: CreditTipLookup::Present { value, .. },
+            tip: CreditTipLookup::Present { value, .. },
             ..
         } = recipient.as_mut()
         else {
@@ -770,7 +771,7 @@ fn fuzz_challenge(case: ChallengeCase) {
             if matches!(
                 recipient.as_ref(),
                 HigherShardTipLookup::Present {
-                    shard: CreditTipLookup::Present { .. },
+                    tip: CreditTipLookup::Present { .. },
                     ..
                 }
             )
@@ -846,7 +847,7 @@ fn fuzz_challenge(case: ChallengeCase) {
             index: 1,
         },
     );
-    let same_send_fork = Challenge::receipt_fork(acknowledged.clone(), same_send_right);
+    let same_send_fork = Challenge::receipt_fork(&acknowledged, &same_send_right);
     assert!(matches!(
         &same_send_fork,
         Challenge::ReceiptFork { fork }
@@ -864,7 +865,7 @@ fn fuzz_challenge(case: ChallengeCase) {
         retained_credit,
         retained_index,
     );
-    let same_index_fork = Challenge::receipt_fork(acknowledged.clone(), right);
+    let same_index_fork = Challenge::receipt_fork(&acknowledged, &right);
     assert!(matches!(
         &same_index_fork,
         Challenge::ReceiptFork { fork }
@@ -901,7 +902,7 @@ fn fuzz_challenge(case: ChallengeCase) {
         0,
         1,
     );
-    let full_fork = Challenge::receipt_fork(acknowledged, unrelated);
+    let full_fork = Challenge::receipt_fork(&acknowledged, &unrelated);
     assert!(matches!(
         &full_fork,
         Challenge::ReceiptFork { fork }

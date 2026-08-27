@@ -28,7 +28,7 @@ use commonware_utils::Participant;
 use hashbrown::HashSet;
 use rand_core::CryptoRng;
 
-/// One exact-quorum validator attestation over a clearing header.
+/// One validator attestation over a clearing header.
 pub type Vote = bls12381::Vote;
 
 fn verify_payment_signatures<'a, P, D, B, R, I>(
@@ -226,7 +226,7 @@ impl<P: PublicKey, D: Digest> SealedDealing<P, D> {
         self.slices
             .binary_search_by_key(&slice, |candidate| candidate.index)
             .ok()
-            .and_then(|position| self.slices.get(position))
+            .map(|position| &self.slices[position])
     }
 }
 
@@ -782,9 +782,16 @@ mod tests {
         .unwrap();
         let send = SignedSend::sign_next(context.payment(), &payer, recipient.public_key(), 20, 0)
             .unwrap();
-        let receipt =
-            SignedReceipt::issue_next::<Sha256, _>(context.payment(), &send, 0, 0, 0, &operator)
-                .unwrap();
+        let receipt = SignedReceipt::issue_next::<Sha256, _>(
+            context.payment(),
+            &send,
+            &recipient.public_key(),
+            0,
+            0,
+            0,
+            &operator,
+        )
+        .unwrap();
         let payment = Payment::new::<Sha256>(context.payment(), send, receipt).unwrap();
         let invalid_send = SignedSend::sign_body_by_authority(
             payment.send().body().clone(),

@@ -59,23 +59,13 @@ impl Drop for TerminalMode {
     }
 }
 
-fn initialize_while_guarded<T, G, E>(
-    guard: G,
-    initialize: impl FnOnce() -> Result<T, E>,
-) -> Result<(T, G), E> {
-    let value = initialize()?;
-    Ok((value, guard))
-}
-
 impl TerminalSession {
     fn enter() -> Result<Self> {
         // Arm restoration before the final fallible constructor so setup errors also restore the
         // terminal.
         let mode = TerminalMode::enter()?;
         let backend = CrosstermBackend::new(std::io::stdout());
-        let (terminal, mode) = initialize_while_guarded(mode, || {
-            Terminal::new(backend).context("initialize terminal")
-        })?;
+        let terminal = Terminal::new(backend).context("initialize terminal")?;
         Ok(Self {
             terminal,
             _mode: mode,
@@ -86,6 +76,7 @@ impl TerminalSession {
 struct UiState {
     recipient: usize,
     amount: u64,
+    staged: Vec<(usize, u64)>,
     balance: Option<u64>,
     operator: Option<OperatorStatus>,
     settlement: Option<SettlementStatus>,
@@ -103,6 +94,7 @@ impl UiState {
         Self {
             recipient: 1,
             amount: DEFAULT_AMOUNT,
+            staged: Vec::new(),
             balance: None,
             operator: None,
             settlement: None,
@@ -157,14 +149,54 @@ pub(crate) async fn run<E: Network>(
             KeyCode::Char('p') => {
                 let recipient = agent.recipient_name(state.recipient);
                 match agent
-                    .pay(network, settlement, operator, state.recipient, state.amount)
+                    .pay(network, settlement, operator, &[(state.recipient, state.amount)])
                     .await
                 {
                     Ok(payment) => state.log(format!(
                         "epoch {} payment #{} to {recipient}: {}",
-                        payment.epoch, payment.sequence, payment.amount
+                        payment.epoch, payment.sequence, payment.total
                     )),
                     Err(error) => state.log(format!("payment rejected: {error:#}")),
+                }
+            }
+            KeyCode::Char('a') => {
+                if state
+                    .staged
+                    .iter()
+                    .any(|(recipient, _)| *recipient == state.recipient)
+                {
+                    state.log(format!(
+                        "{} is already staged; batch entries name unique recipients",
+                        agent.recipient_name(state.recipient)
+                    ));
+                } else {
+                    state.staged.push((state.recipient, state.amount));
+                    state.log(format!(
+                        "staged {} to {}; press b to send the batch",
+                        state.amount,
+                        agent.recipient_name(state.recipient)
+                    ));
+                }
+            }
+            KeyCode::Char('b') => {
+                if state.staged.is_empty() {
+                    state.log("no staged entries; press a to stage the selected payment");
+                } else {
+                    match agent.pay(network, settlement, operator, &state.staged).await {
+                        Ok(payment) => {
+                            state.log(format!(
+                                "epoch {} batch #{} paid {} across {} recipients",
+                                payment.epoch,
+                                payment.sequence,
+                                payment.total,
+                                payment.acceptance.receipts.len()
+                            ));
+                            state.staged.clear();
+                        }
+                        Err(error) => state.log(format!(
+                            "batch rejected; press b to retry the same batch: {error:#}"
+                        )),
+                    }
                 }
             }
             KeyCode::Char('h') => {
@@ -398,6 +430,17 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
             )
         },
     );
+    let staged = if state.staged.is_empty() {
+        "Batch: empty".to_string()
+    } else {
+        let entries = state
+            .staged
+            .iter()
+            .map(|(recipient, amount)| format!("{} {amount}", agent.recipient_name(*recipient)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("Batch: {entries}")
+    };
     let controls = Paragraph::new(vec![
         Line::raw(operator),
         Line::raw(settlement),
@@ -406,8 +449,9 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
             agent.recipient_name(state.recipient),
             state.amount
         )),
+        Line::raw(staged),
         Line::raw(
-            "p pay  d deposit  r refund deposit  w withdraw  f Close  c claim  e payout  h recover state  s close",
+            "p pay  a stage  b pay batch  d deposit  r refund deposit  w withdraw  f Close  c claim  e payout  h recover state  s cut epoch",
         ),
         Line::raw("Left/Right recipient  +/- amount  PgUp/PgDn +/-10"),
     ])
@@ -472,18 +516,27 @@ pub(crate) async fn scripted<E: Network>(
         ),
     };
     println!("epoch {} queued withdrawal 3", withdrawal);
-    let payment = agent.pay(network, settlement, operator, 1, 5).await?;
+    let payment = agent.pay(network, settlement, operator, &[(1, 5)]).await?;
     println!(
         "epoch {} accepted payment #{}",
         payment.epoch, payment.sequence
+    );
+    let batch = agent
+        .pay(network, settlement, operator, &[(2, 2), (3, 1)])
+        .await?;
+    println!(
+        "epoch {} accepted batch #{} paying {} across {} recipients",
+        batch.epoch,
+        batch.sequence,
+        batch.total,
+        batch.acceptance.receipts.len()
     );
     let external = agent
         .pay(
             network,
             settlement,
             operator,
-            agent.recipient_count() - 1,
-            2,
+            &[(agent.recipient_count() - 1, 2)],
         )
         .await?;
     println!(
@@ -514,7 +567,7 @@ pub(crate) async fn scripted<E: Network>(
             }
         }
     }
-    let successor = agent.pay(network, settlement, operator, 1, 1).await?;
+    let successor = agent.pay(network, settlement, operator, &[(1, 1)]).await?;
     println!(
         "epoch {} accepted successor payment #{} after epoch {} finalized",
         successor.epoch, successor.sequence, close.epoch
@@ -533,41 +586,14 @@ pub(crate) async fn scripted<E: Network>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        UiState, handle_hard_fault_recovery, handle_pending_deposit_recovery,
-        initialize_while_guarded, refresh,
-    };
+    use super::{UiState, handle_hard_fault_recovery, handle_pending_deposit_recovery, refresh};
     use crate::{agent::Agent, rpc, settlement::Settlement, settlement_rpc};
     use bytes::Bytes;
     use commonware_codec::Encode as _;
     use commonware_runtime::{
         Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
-    use std::{
-        net::SocketAddr,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-    };
-
-    struct DropProbe(Arc<AtomicBool>);
-
-    impl Drop for DropProbe {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Relaxed);
-        }
-    }
-
-    #[test]
-    fn failed_terminal_initialization_drops_the_active_guard() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let result: Result<((), DropProbe), ()> =
-            initialize_while_guarded(DropProbe(Arc::clone(&dropped)), || Err(()));
-
-        assert!(result.is_err());
-        assert!(dropped.load(Ordering::Relaxed));
-    }
+    use std::net::SocketAddr;
 
     #[test]
     fn unavailable_operator_keeps_settlement_visible_and_recovery_reachable() {

@@ -361,7 +361,7 @@ impl CloseLimits {
         self.max_total_shards
     }
 
-    /// Returns the gross payment limit applied independently to debit and credit.
+    /// Returns the gross payment limit applied independently to debit, credit, and payout.
     pub const fn max_payment_total(&self) -> u64 {
         self.max_payment_total
     }
@@ -926,7 +926,7 @@ impl<D: Digest> WithdrawalClaim<D> {
 
     /// Verifies and returns the exact certified settlement output.
     ///
-    /// Every sealer derives this output from the exact signed request assigned to the same
+    /// Every validator derives this output from the exact signed request assigned to the same
     /// position. The embedding must bind `output_root` to the finalized batch and consume the
     /// batch position atomically with the release.
     pub fn verify<H>(
@@ -1726,7 +1726,7 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
         })
     }
 
-    /// Returns the authenticated change-vector root indexed by this cache.
+    /// Returns the authenticated change-vector root committed by this index.
     #[must_use]
     pub const fn root(&self) -> VectorRoot<D> {
         self.tree.root()
@@ -1792,15 +1792,15 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
                 if shards.recipient() != account {
                     return Err(TransitionError::ShardAlignment);
                 }
-                let shard_lookup = shards.lookup::<H>(shard)?;
-                let (credit_tip_root, _) = shard_lookup.reconstruct::<H>(shard)?;
+                let tip = shards.lookup::<H>(shard)?;
+                let (credit_tip_root, _) = tip.reconstruct::<H>(shard)?;
                 if credit_tip_root != opening.value.credit_tip_root() {
                     return Err(TransitionError::ShardAlignment);
                 }
                 Ok(HigherShardTipLookup::Present {
                     value: opening.value.core(),
                     proof: opening.proof,
-                    shard: shard_lookup,
+                    tip,
                 })
             }
             ChangeLookup::Absent(absence) => {
@@ -2383,9 +2383,12 @@ where
     match (&row.outgoing, debit) {
         (None, 0) => {}
         (Some(payment), debit) if debit != 0 => {
+            // The whole terminal batch clears inside this epoch, so its total must fit in the
+            // epoch's debit advance even though only one entry's receipt accompanies the send.
+            let total = payment.send().body().total();
             if payment.payer() != &row.account
                 || payment.send().body().cumulative_debit() != row.successor.cumulative_debit
-                || payment.amount() > debit
+                || total.is_none_or(|total| total > debit)
             {
                 return Err(TransitionError::OutgoingEndpoint);
             }
@@ -2612,19 +2615,15 @@ where
     {
         return Err(TransitionError::SliceCoverage);
     }
+    let totals = close
+        .rows
+        .last()
+        .map_or_else(Prefix::default, |row| row.prefix);
     let expected_liability = checked_successor_liability(
         context.predecessor_liability(),
         deposits.total(),
-        close
-            .rows
-            .last()
-            .map_or_else(Prefix::default, |row| row.prefix)
-            .withdrawal,
-        close
-            .rows
-            .last()
-            .map_or_else(Prefix::default, |row| row.prefix)
-            .payout,
+        totals.withdrawal,
+        totals.payout,
     )?;
     if state_liability(&successor)? != expected_liability {
         return Err(TransitionError::LiabilityEquation);
@@ -2665,11 +2664,11 @@ pub enum TransitionError {
     /// A derived withdrawal output and opening do not form one finalized claim.
     #[error("withdrawal claim is not canonical")]
     WithdrawalClaim,
-    /// The predecessor state vector exceeds the protocol bound.
-    #[error("predecessor state vector exceeds the protocol bound")]
+    /// A state vector exceeds its length bound.
+    #[error("state vector exceeds its length bound")]
     TooManyStates,
     /// State accounts are not strictly sorted and unique.
-    #[error("predecessor state accounts are not strictly sorted and unique")]
+    #[error("state accounts are not strictly sorted and unique")]
     NonCanonicalStateOrder,
     /// A committed leaf or projected row side is not active with positive balance.
     #[error("live state must be active with positive balance")]
@@ -2704,8 +2703,8 @@ pub enum TransitionError {
     /// Admission does not precede a challenge deadline with a representable resolution time.
     #[error("admission must precede a challenge deadline below the maximum timestamp")]
     DeadlineOrder,
-    /// Change-root, unchanged-state, or row counts exceed their bounds.
-    #[error("close row counts are inconsistent")]
+    /// Changed-row or unchanged-state counts exceed their bounds.
+    #[error("close row or unchanged-state counts exceed their bounds")]
     RowCount,
     /// Rows and receive-shard sets are not aligned one-for-one.
     #[error("changed rows and terminal shard sets are not aligned")]
@@ -2755,7 +2754,8 @@ pub enum TransitionError {
     /// Terminal outgoing evidence is not present exactly when debit advanced.
     #[error("terminal outgoing evidence presence does not match debit activity")]
     OutgoingPresence,
-    /// Terminal outgoing evidence names another payer or debit endpoint.
+    /// Terminal outgoing evidence names another payer or debit endpoint, or its batch total
+    /// exceeds the epoch debit advance.
     #[error("terminal outgoing evidence does not match the terminal debit endpoint")]
     OutgoingEndpoint,
     /// Receive-shard totals do not match the account credit and receipt deltas.
@@ -2796,7 +2796,7 @@ mod tests {
     use crate::bajillion::{
         boundary::{DepositRecord, SignedWithdrawal},
         credit::ShardHead,
-        payment::{Payment, SignedReceipt, SignedSend},
+        payment::{Entry, Payment, SignedReceipt, SignedSend},
         state::AccountState,
     };
     use bytes::{Bytes, BytesMut};
@@ -2998,8 +2998,16 @@ mod tests {
     ) -> Payment<VerifyingKey, ShaDigest> {
         let send =
             SignedSend::sign_next(context, payer, recipient.public_key(), amount, 0).unwrap();
-        let receipt =
-            SignedReceipt::issue_next::<Sha256, _>(context, &send, 0, 0, 0, operator).unwrap();
+        let receipt = SignedReceipt::issue_next::<Sha256, _>(
+            context,
+            &send,
+            &recipient.public_key(),
+            0,
+            0,
+            0,
+            operator,
+        )
+        .unwrap();
         Payment::new::<Sha256>(context, send, receipt).unwrap()
     }
 
@@ -3026,6 +3034,7 @@ mod tests {
         let receipt = SignedReceipt::issue_next::<Sha256, _>(
             context,
             &send,
+            &recipient.public_key(),
             shard,
             previous_credit,
             previous_index,
@@ -3181,6 +3190,192 @@ mod tests {
 
     fn payment_fixture() -> PaymentFixture {
         payment_fixture_with_slice_bits(0)
+    }
+
+    #[test]
+    fn batched_terminal_send_validates_and_bounds_its_total() {
+        let operator = SigningKey::from_seed(1);
+        let payer = SigningKey::from_seed(2);
+        let first = SigningKey::from_seed(3);
+        let second = SigningKey::from_seed(4);
+        let payer_opening = state(100);
+        let first_opening = state(40);
+        let second_opening = state(10);
+        let mut leaves = vec![
+            StateLeaf {
+                account: payer.public_key(),
+                state: payer_opening,
+            },
+            StateLeaf {
+                account: first.public_key(),
+                state: first_opening,
+            },
+            StateLeaf {
+                account: second.public_key(),
+                state: second_opening,
+            },
+        ];
+        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let cache = StateCache::new::<Sha256>(leaves).unwrap();
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let context = close_context::<Sha256, _, _>(
+            Sha256::hash(&[b"deployment"]),
+            7,
+            operator.public_key(),
+            &cache,
+            &deposits,
+            &withdrawals,
+            98,
+            99,
+            CloseLimits::protocol_maximum(),
+            assignment(0),
+        )
+        .unwrap();
+        let payment_context = context.payment().clone();
+        let send = SignedSend::sign_next_batch(
+            &payment_context,
+            &payer,
+            vec![
+                Entry::new(first.public_key(), 15).unwrap(),
+                Entry::new(second.public_key(), 5).unwrap(),
+            ],
+            0,
+        )
+        .unwrap();
+        let first_payment = Payment::new::<Sha256>(
+            &payment_context,
+            send.clone(),
+            SignedReceipt::issue_next::<Sha256, _>(
+                &payment_context,
+                &send,
+                &first.public_key(),
+                0,
+                0,
+                0,
+                &operator,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let second_payment = Payment::new::<Sha256>(
+            &payment_context,
+            send.clone(),
+            SignedReceipt::issue_next::<Sha256, _>(
+                &payment_context,
+                &send,
+                &second.public_key(),
+                0,
+                0,
+                0,
+                &operator,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut pairs = vec![
+            (
+                AccountRow {
+                    account: payer.public_key(),
+                    predecessor: payer_opening,
+                    successor: AccountState {
+                        balance: 80,
+                        cumulative_debit: 20,
+                        ..payer_opening
+                    },
+                    outgoing: Some(second_payment.clone()),
+                    output: SettlementOutput::None,
+                    prefix: Prefix::default(),
+                },
+                ShardSet::empty(payment_context.epoch(), payer.public_key()),
+            ),
+            (
+                AccountRow {
+                    account: first.public_key(),
+                    predecessor: first_opening,
+                    successor: AccountState {
+                        balance: 55,
+                        cumulative_credit: 15,
+                        receipt_count: 1,
+                        ..first_opening
+                    },
+                    outgoing: None,
+                    output: SettlementOutput::None,
+                    prefix: Prefix::default(),
+                },
+                ShardSet::new(
+                    payment_context.epoch(),
+                    first.public_key(),
+                    vec![ShardHead::new(0, first_payment)],
+                )
+                .unwrap(),
+            ),
+            (
+                AccountRow {
+                    account: second.public_key(),
+                    predecessor: second_opening,
+                    successor: AccountState {
+                        balance: 15,
+                        cumulative_credit: 5,
+                        receipt_count: 1,
+                        ..second_opening
+                    },
+                    outgoing: None,
+                    output: SettlementOutput::None,
+                    prefix: Prefix::default(),
+                },
+                ShardSet::new(
+                    payment_context.epoch(),
+                    second.public_key(),
+                    vec![ShardHead::new(0, second_payment.clone())],
+                )
+                .unwrap(),
+            ),
+        ];
+        pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
+        assign_prefixes(&mut pairs, &deposits, &withdrawals);
+        let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        let close = build_close::<Sha256, _, _>(
+            &cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            rows,
+            shard_sets,
+        )
+        .unwrap();
+        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+
+        // A terminal batch whose total exceeds the epoch debit advance is rejected even though
+        // its endpoint matches the successor debit.
+        let row = AccountRow {
+            account: payer.public_key(),
+            predecessor: AccountState {
+                balance: 95,
+                cumulative_debit: 5,
+                ..payer_opening
+            },
+            successor: AccountState {
+                balance: 80,
+                cumulative_debit: 20,
+                ..payer_opening
+            },
+            outgoing: Some(second_payment),
+            output: SettlementOutput::None,
+            prefix: Prefix::default(),
+        };
+        let shards = ShardSet::empty(payment_context.epoch(), payer.public_key());
+        assert!(matches!(
+            validate_row_structure::<Sha256, _, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &row,
+                &shards
+            ),
+            Err(TransitionError::OutgoingEndpoint)
+        ));
     }
 
     fn empty_fixture() -> (TestContext, TestDeposits, TestWithdrawals, TestClose) {

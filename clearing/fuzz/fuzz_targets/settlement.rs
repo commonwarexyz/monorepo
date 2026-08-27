@@ -532,7 +532,7 @@ impl Harness {
                 .iter()
                 .map(|account| {
                     self.chain
-                        .pending_withdrawal_deadline(&account.public_key())
+                        .unfinalized_withdrawal_deadline(&account.public_key())
                 })
                 .collect(),
             hard_fault: self.chain.hard_fault().cloned(),
@@ -734,7 +734,7 @@ impl Harness {
                 })
                 .flatten();
             assert_eq!(
-                self.chain.pending_withdrawal_deadline(&public),
+                self.chain.unfinalized_withdrawal_deadline(&public),
                 expected_deadline
             );
         }
@@ -2140,7 +2140,7 @@ impl Harness {
             ),
             _ => (
                 Challenge::receipt_fork(
-                    linked_payment(
+                    &linked_payment(
                         context,
                         &self.operator,
                         account,
@@ -2149,7 +2149,7 @@ impl Harness {
                         previous_debit,
                         shard,
                     ),
-                    linked_payment(
+                    &linked_payment(
                         context,
                         &self.operator,
                         account,
@@ -3205,9 +3205,16 @@ fn linked_payment(
         previous_debit,
     )
     .expect("positive bounded send signs");
-    let receipt =
-        SignedReceipt::issue_next::<Sha256, _>(context.payment(), &send, shard, 0, 0, operator)
-            .expect("positive bounded receipt issues");
+    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+        context.payment(),
+        &send,
+        recipient,
+        shard,
+        0,
+        0,
+        operator,
+    )
+    .expect("positive bounded receipt issues");
     Payment::new::<Sha256>(context.payment(), send, receipt)
         .expect("honestly linked payment verifies")
 }

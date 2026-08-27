@@ -84,13 +84,13 @@
   <circle cx="300" cy="195.3" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
   <circle cx="450" cy="232.0" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
   <circle cx="600" cy="268.6" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value green-text" x="162" y="147">582</text>
-  <text class="value orange-text" x="162" y="184">58.9</text>
-  <text class="value purple-text" x="162" y="219">6.56</text>
+  <text class="value green-text" x="162" y="147">583</text>
+  <text class="value orange-text" x="162" y="184">59.0</text>
+  <text class="value purple-text" x="162" y="219">6.57</text>
   <text class="value blue-text" x="162" y="245">1.26</text>
-  <text class="value green-text" x="588" y="257" text-anchor="end">0.582</text>
-  <text class="value orange-text" x="588" y="294" text-anchor="end">0.0589</text>
-  <text class="value purple-text" x="588" y="329" text-anchor="end">0.00656</text>
+  <text class="value green-text" x="588" y="257" text-anchor="end">0.583</text>
+  <text class="value orange-text" x="588" y="294" text-anchor="end">0.0590</text>
+  <text class="value purple-text" x="588" y="329" text-anchor="end">0.00657</text>
   <text class="value blue-text" x="588" y="355" text-anchor="end">0.00126</text>
 
   <rect class="frame" x="670" y="90" width="620" height="360" rx="3"/>

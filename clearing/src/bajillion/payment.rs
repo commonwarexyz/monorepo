@@ -1,7 +1,10 @@
 //! Payer-authorized debits and individually signed operator receipts.
 
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
+};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use commonware_parallel::{Sequential, Strategy};
 use thiserror::Error;
@@ -17,10 +20,17 @@ pub const TX_ID_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_PAYMENT_TX_ID";
 pub type Epoch = u64;
 /// Receive-shard identifier local to a recipient and epoch.
 pub type Shard = u64;
-/// Cumulative amount value.
+/// Payment or cumulative amount value.
 pub type Amount = u64;
 /// Monotonically increasing receipt index local to a receive shard.
 pub type ReceiptIndex = u64;
+
+/// Maximum entries in one batched send.
+///
+/// This bounds adversarial decoding of send bodies nested inside rows, shard heads, and challenge
+/// evidence. Constructors and verification reject longer entry vectors, so an overlong batch can
+/// never become linkable payment evidence.
+pub const MAX_ENTRIES: usize = 256;
 
 /// Authenticated context shared by every payment in one epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,19 +135,76 @@ impl<D: Digest> Read for TxId<D> {
     }
 }
 
+/// One credited recipient and positive amount inside a batched send.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Entry<P: PublicKey> {
+    recipient: P,
+    amount: Amount,
+}
+
+impl<P: PublicKey> Entry<P> {
+    /// Creates a positive send entry.
+    pub fn new(recipient: P, amount: Amount) -> Result<Self, PaymentError> {
+        if amount == 0 {
+            return Err(PaymentError::ZeroAmount);
+        }
+        Ok(Self { recipient, amount })
+    }
+
+    /// Constructs an unchecked entry for adversarial decoding fixtures.
+    pub const fn from_raw_unchecked(recipient: P, amount: Amount) -> Self {
+        Self { recipient, amount }
+    }
+
+    /// Returns the credited recipient.
+    pub const fn recipient(&self) -> &P {
+        &self.recipient
+    }
+
+    /// Returns the positive payment amount.
+    pub const fn amount(&self) -> Amount {
+        self.amount
+    }
+}
+
+impl<P: PublicKey> Write for Entry<P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.recipient.write(buf);
+        self.amount.write(buf);
+    }
+}
+
+impl<P: PublicKey> FixedSize for Entry<P> {
+    const SIZE: usize = P::SIZE + u64::SIZE;
+}
+
+impl<P: PublicKey> Read for Entry<P> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            recipient: P::read(buf)?,
+            amount: u64::read(buf)?,
+        })
+    }
+}
+
 /// Canonical payer-authorized send payload.
+///
+/// One signature covers every entry under one cumulative debit endpoint, so a batch is accepted
+/// or rejected as a whole. Entries are strictly recipient-sorted and unique. A single payment
+/// is a batch of one.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SendBody<P: PublicKey, D: Digest> {
     anchor: D,
     epoch: Epoch,
     payer: P,
-    recipient: P,
-    amount: Amount,
+    entries: Vec<Entry<P>>,
     cumulative_debit: Amount,
 }
 
 impl<P: PublicKey, D: Digest> SendBody<P, D> {
-    /// Creates the exact successor debit body from a prior cumulative debit.
+    /// Creates the exact successor debit body for one recipient.
     pub fn next(
         context: &PaymentContext<P, D>,
         payer: P,
@@ -145,18 +212,34 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
         amount: Amount,
         previous_debit: Amount,
     ) -> Result<Self, PaymentError> {
-        if amount == 0 {
-            return Err(PaymentError::ZeroAmount);
-        }
+        Self::next_batch(
+            context,
+            payer,
+            alloc::vec![Entry::new(recipient, amount)?],
+            previous_debit,
+        )
+    }
+
+    /// Creates the exact successor debit body covering every entry at once.
+    ///
+    /// Entries are sorted by recipient. Empty batches and repeated recipients are rejected. A
+    /// caller paying one recipient twice must merge the amounts into one entry.
+    pub fn next_batch(
+        context: &PaymentContext<P, D>,
+        payer: P,
+        mut entries: Vec<Entry<P>>,
+        previous_debit: Amount,
+    ) -> Result<Self, PaymentError> {
+        entries.sort_unstable_by(|left, right| left.recipient.cmp(&right.recipient));
+        let total = validate_entries(&entries)?;
         let cumulative_debit = previous_debit
-            .checked_add(amount)
+            .checked_add(total)
             .ok_or(PaymentError::ArithmeticOverflow)?;
         Ok(Self {
             anchor: *context.anchor(),
             epoch: context.epoch(),
             payer,
-            recipient,
-            amount,
+            entries,
             cumulative_debit,
         })
     }
@@ -164,22 +247,20 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
     /// Constructs an arbitrary raw body without checking protocol invariants.
     ///
     /// This constructor exists for decoding adversarial evidence and for tests that model a
-    /// faulty signing authority. Applications should normally use [`Self::next`].
-    #[allow(clippy::too_many_arguments)]
+    /// faulty signing authority. Applications should normally use [`Self::next`] or
+    /// [`Self::next_batch`].
     pub const fn from_raw_unchecked(
         anchor: D,
         epoch: Epoch,
         payer: P,
-        recipient: P,
-        amount: Amount,
+        entries: Vec<Entry<P>>,
         cumulative_debit: Amount,
     ) -> Self {
         Self {
             anchor,
             epoch,
             payer,
-            recipient,
-            amount,
+            entries,
             cumulative_debit,
         }
     }
@@ -199,14 +280,26 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
         &self.payer
     }
 
-    /// Returns the recipient key.
-    pub const fn recipient(&self) -> &P {
-        &self.recipient
+    /// Returns the recipient-sorted entries.
+    pub fn entries(&self) -> &[Entry<P>] {
+        &self.entries
     }
 
-    /// Returns the positive payment amount.
-    pub const fn amount(&self) -> Amount {
-        self.amount
+    /// Returns the checked sum of every entry amount.
+    pub fn total(&self) -> Option<Amount> {
+        self.entries
+            .iter()
+            .try_fold(0_u64, |total, entry| total.checked_add(entry.amount))
+    }
+
+    /// Returns the entry crediting `recipient`, if present.
+    ///
+    /// Lookup assumes the canonical recipient order that verification enforces.
+    pub fn entry(&self, recipient: &P) -> Option<&Entry<P>> {
+        self.entries
+            .binary_search_by(|entry| entry.recipient.cmp(recipient))
+            .ok()
+            .map(|position| &self.entries[position])
     }
 
     /// Returns the payer's authorized cumulative debit endpoint.
@@ -217,7 +310,8 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
     /// Derives the transaction identifier from this unsigned body.
     ///
     /// Signature bytes are deliberately excluded, so re-signing the same authorization cannot
-    /// change receipt linkage or idempotency.
+    /// change receipt linkage or idempotency. Every receipt issued for a batch links this one
+    /// identifier. Within a batch, an entry is identified by its unique recipient.
     pub fn tx_id<H: Hasher<Digest = D>>(&self) -> TxId<D> {
         let body = self.encode();
         TxId(H::hash(&[TX_ID_HASH_NAMESPACE, body.as_ref()]))
@@ -227,18 +321,17 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
         if self.anchor != *context.anchor() || self.epoch != context.epoch() {
             return Err(PaymentError::WrongContext);
         }
-        if self.amount == 0 {
-            return Err(PaymentError::ZeroAmount);
-        }
-        if self.cumulative_debit < self.amount {
+        let total = validate_entries(&self.entries)?;
+        if self.cumulative_debit < total {
             return Err(PaymentError::MalformedDebitEndpoint);
         }
         Ok(())
     }
 
     fn validate_next(&self, previous_debit: Amount) -> Result<(), PaymentError> {
+        let total = self.total().ok_or(PaymentError::ArithmeticOverflow)?;
         let expected = previous_debit
-            .checked_add(self.amount)
+            .checked_add(total)
             .ok_or(PaymentError::ArithmeticOverflow)?;
         if self.cumulative_debit != expected {
             return Err(PaymentError::NonConsecutiveDebit);
@@ -247,19 +340,51 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
     }
 }
 
+/// Reads a send entry vector bounded by [`MAX_ENTRIES`].
+pub(crate) fn read_entries<P: PublicKey>(buf: &mut impl Buf) -> Result<Vec<Entry<P>>, CodecError> {
+    Vec::<Entry<P>>::read_cfg(buf, &(RangeCfg::new(..=MAX_ENTRIES), ()))
+}
+
+/// Checks entry canonicality and returns the checked batch total.
+fn validate_entries<P: PublicKey>(entries: &[Entry<P>]) -> Result<Amount, PaymentError> {
+    if entries.is_empty() {
+        return Err(PaymentError::NoEntries);
+    }
+    if entries.len() > MAX_ENTRIES {
+        return Err(PaymentError::TooManyEntries);
+    }
+    if entries
+        .windows(2)
+        .any(|pair| pair[0].recipient >= pair[1].recipient)
+    {
+        return Err(PaymentError::NonCanonicalEntries);
+    }
+    let mut total = 0_u64;
+    for entry in entries {
+        if entry.amount == 0 {
+            return Err(PaymentError::ZeroAmount);
+        }
+        total = total
+            .checked_add(entry.amount)
+            .ok_or(PaymentError::ArithmeticOverflow)?;
+    }
+    Ok(total)
+}
+
 impl<P: PublicKey, D: Digest> Write for SendBody<P, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.anchor.write(buf);
         self.epoch.write(buf);
         self.payer.write(buf);
-        self.recipient.write(buf);
-        self.amount.write(buf);
+        self.entries.write(buf);
         self.cumulative_debit.write(buf);
     }
 }
 
-impl<P: PublicKey, D: Digest> FixedSize for SendBody<P, D> {
-    const SIZE: usize = D::SIZE + u64::SIZE + P::SIZE * 2 + u64::SIZE * 2;
+impl<P: PublicKey, D: Digest> EncodeSize for SendBody<P, D> {
+    fn encode_size(&self) -> usize {
+        D::SIZE + u64::SIZE + P::SIZE + self.entries.encode_size() + u64::SIZE
+    }
 }
 
 impl<P: PublicKey, D: Digest> Read for SendBody<P, D> {
@@ -270,8 +395,7 @@ impl<P: PublicKey, D: Digest> Read for SendBody<P, D> {
             anchor: D::read(buf)?,
             epoch: u64::read(buf)?,
             payer: P::read(buf)?,
-            recipient: P::read(buf)?,
-            amount: u64::read(buf)?,
+            entries: read_entries(buf)?,
             cumulative_debit: u64::read(buf)?,
         })
     }
@@ -285,7 +409,7 @@ pub struct SignedSend<P: PublicKey, D: Digest> {
 }
 
 impl<P: PublicKey, D: Digest> SignedSend<P, D> {
-    /// Signs the exact successor of `previous_debit`.
+    /// Signs the exact successor of `previous_debit` for one recipient.
     pub fn sign_next<S: Signer<PublicKey = P, Signature = P::Signature>>(
         context: &PaymentContext<P, D>,
         payer: &S,
@@ -300,6 +424,17 @@ impl<P: PublicKey, D: Digest> SignedSend<P, D> {
             amount,
             previous_debit,
         )?;
+        Ok(Self::sign_body_by_authority(body, payer))
+    }
+
+    /// Signs the exact successor of `previous_debit` covering every entry at once.
+    pub fn sign_next_batch<S: Signer<PublicKey = P, Signature = P::Signature>>(
+        context: &PaymentContext<P, D>,
+        payer: &S,
+        entries: Vec<Entry<P>>,
+        previous_debit: Amount,
+    ) -> Result<Self, PaymentError> {
+        let body = SendBody::next_batch(context, payer.public_key(), entries, previous_debit)?;
         Ok(Self::sign_body_by_authority(body, payer))
     }
 
@@ -381,8 +516,10 @@ impl<P: PublicKey, D: Digest> Write for SignedSend<P, D> {
     }
 }
 
-impl<P: PublicKey, D: Digest> FixedSize for SignedSend<P, D> {
-    const SIZE: usize = SendBody::<P, D>::SIZE + P::Signature::SIZE;
+impl<P: PublicKey, D: Digest> EncodeSize for SignedSend<P, D> {
+    fn encode_size(&self) -> usize {
+        self.body.encode_size() + P::Signature::SIZE
+    }
 }
 
 impl<P: PublicKey, D: Digest> Read for SignedSend<P, D> {
@@ -530,11 +667,15 @@ pub struct SignedReceipt<P: PublicKey, D: Digest> {
 }
 
 impl<P: PublicKey, D: Digest> SignedReceipt<P, D> {
-    /// Issues the exact successor of a receive-shard endpoint.
+    /// Issues the exact successor of the named entry recipient's receive-shard endpoint.
+    ///
+    /// A batched send is acknowledged entry by entry: the caller issues one receipt per entry
+    /// and must persist all of them atomically with the payer's debit.
     #[allow(clippy::too_many_arguments)]
     pub fn issue_next<H: Hasher<Digest = D>, S: Signer<PublicKey = P, Signature = P::Signature>>(
         context: &PaymentContext<P, D>,
         send: &SignedSend<P, D>,
+        recipient: &P,
         shard: Shard,
         previous_credit: Amount,
         previous_index: ReceiptIndex,
@@ -544,8 +685,12 @@ impl<P: PublicKey, D: Digest> SignedReceipt<P, D> {
             return Err(PaymentError::WrongOperator);
         }
         send.verify(context)?;
+        let entry = send
+            .body
+            .entry(recipient)
+            .ok_or(PaymentError::UnknownRecipient)?;
         let cumulative_shard_credit = previous_credit
-            .checked_add(send.body.amount)
+            .checked_add(entry.amount)
             .ok_or(PaymentError::ArithmeticOverflow)?;
         let index = previous_index
             .checked_add(1)
@@ -553,9 +698,9 @@ impl<P: PublicKey, D: Digest> SignedReceipt<P, D> {
         let body = ReceiptBody {
             anchor: *context.anchor(),
             epoch: context.epoch(),
-            recipient: send.body.recipient.clone(),
+            recipient: entry.recipient.clone(),
             shard,
-            amount: send.body.amount,
+            amount: entry.amount,
             tx_id: send.tx_id::<H>(),
             cumulative_shard_credit,
             index,
@@ -645,6 +790,9 @@ impl<P: PublicKey, D: Digest> Read for SignedReceipt<P, D> {
 }
 
 /// Transferable acceptance evidence containing both required signatures.
+///
+/// The receipt acknowledges exactly one entry of the signed send. A batched send transfers as
+/// one such pair per entry, each sharing the send and its signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Payment<P: PublicKey, D: Digest> {
     send: SignedSend<P, D>,
@@ -689,14 +837,14 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
         self.send.body.payer()
     }
 
-    /// Returns the credited recipient.
+    /// Returns the credited recipient of the acknowledged entry.
     pub const fn recipient(&self) -> &P {
-        self.send.body.recipient()
+        self.receipt.body.recipient()
     }
 
-    /// Returns the payment amount.
+    /// Returns the acknowledged entry amount.
     pub const fn amount(&self) -> Amount {
-        self.send.body.amount()
+        self.receipt.body.amount()
     }
 
     /// Consumes the evidence into its signed parts.
@@ -704,32 +852,19 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
         (self.send, self.receipt)
     }
 
+    /// Requires the receipt to acknowledge exactly one entry of the linked send.
+    ///
+    /// Entry lookup assumes the canonical recipient order that send verification enforces, so
+    /// linkage must only be checked together with [`SignedSend::verify`].
     fn validate_linkage<H: Hasher<Digest = D>>(&self) -> Result<(), PaymentError> {
-        if self.receipt.body.recipient != self.send.body.recipient
-            || self.receipt.body.amount != self.send.body.amount
-            || self.receipt.body.tx_id != self.send.tx_id::<H>()
-        {
+        if self.receipt.body.tx_id != self.send.tx_id::<H>() {
+            return Err(PaymentError::ReceiptMismatch);
+        }
+        let entry = self.send.body.entry(&self.receipt.body.recipient);
+        if !entry.is_some_and(|entry| entry.amount == self.receipt.body.amount) {
             return Err(PaymentError::ReceiptMismatch);
         }
         Ok(())
-    }
-
-    pub(crate) fn linked_body_digest<H: Hasher<Digest = D>>(&self, domain: &[u8]) -> D {
-        let send = self.send.body.encode();
-        let receipt = self.receipt.body.encode();
-        let send_len = u32::try_from(send.len())
-            .expect("a fixed-size payment send body length fits in u32")
-            .to_be_bytes();
-        let receipt_len = u32::try_from(receipt.len())
-            .expect("a fixed-size payment receipt body length fits in u32")
-            .to_be_bytes();
-        H::hash(&[
-            domain,
-            &send_len,
-            send.as_ref(),
-            &receipt_len,
-            receipt.as_ref(),
-        ])
     }
 
     pub(crate) fn validate_terminal_structure<H: Hasher<Digest = D>>(
@@ -739,6 +874,11 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
         self.send.body.validate_context(context)?;
         self.receipt.body.validate_context(context)?;
         self.validate_linkage::<H>()?;
+        self.validate_terminal_feasibility()
+    }
+
+    /// Requires the receipt endpoint to be reachable from the canonical zero shard opening.
+    fn validate_terminal_feasibility(&self) -> Result<(), PaymentError> {
         if !receipt_range_is_feasible(
             0,
             0,
@@ -803,16 +943,7 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
         context: &PaymentContext<P, D>,
     ) -> Result<(), PaymentError> {
         self.verify_linked::<H>(context)?;
-        if !receipt_range_is_feasible(
-            0,
-            0,
-            self.amount(),
-            self.receipt.body.cumulative_shard_credit,
-            self.receipt.body.index,
-        ) {
-            return Err(PaymentError::InfeasibleReceiptRange);
-        }
-        Ok(())
+        self.validate_terminal_feasibility()
     }
 }
 
@@ -823,8 +954,10 @@ impl<P: PublicKey, D: Digest> Write for Payment<P, D> {
     }
 }
 
-impl<P: PublicKey, D: Digest> FixedSize for Payment<P, D> {
-    const SIZE: usize = SignedSend::<P, D>::SIZE + SignedReceipt::<P, D>::SIZE;
+impl<P: PublicKey, D: Digest> EncodeSize for Payment<P, D> {
+    fn encode_size(&self) -> usize {
+        self.send.encode_size() + SignedReceipt::<P, D>::SIZE
+    }
 }
 
 impl<P: PublicKey, D: Digest> Read for Payment<P, D> {
@@ -842,10 +975,10 @@ impl<P: PublicKey, D: Digest> Read for Payment<P, D> {
 #[derive(Clone)]
 pub(crate) struct PaymentWitnessParts<P: PublicKey> {
     pub payer: P,
-    pub recipient: P,
-    pub amount: Amount,
+    pub entries: Vec<Entry<P>>,
     pub cumulative_debit: Amount,
     pub payer_signature: P::Signature,
+    pub recipient: P,
     pub shard: Shard,
     pub cumulative_shard_credit: Amount,
     pub index: ReceiptIndex,
@@ -854,16 +987,17 @@ pub(crate) struct PaymentWitnessParts<P: PublicKey> {
 
 /// Context-relative linked payment evidence used by settlement challenges.
 ///
-/// The payment anchor, epoch, operator key, receipt recipient and amount, and receipt transaction
-/// identifier are reconstructed from the trusted context and payer-signed send. Both signatures
-/// remain explicit, and reconstruction runs the ordinary linked-payment verifier.
+/// The payment anchor, epoch, operator key, receipt transaction identifier, and receipt amount
+/// are reconstructed from the trusted context, the payer-signed entries, and the credited
+/// recipient. Both signatures remain explicit, and reconstruction runs the ordinary
+/// linked-payment verifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentWitness<P: PublicKey> {
     payer: P,
-    recipient: P,
-    amount: Amount,
+    entries: Vec<Entry<P>>,
     cumulative_debit: Amount,
     payer_signature: P::Signature,
+    recipient: P,
     shard: Shard,
     cumulative_shard_credit: Amount,
     index: ReceiptIndex,
@@ -876,10 +1010,10 @@ impl<P: PublicKey> PaymentWitness<P> {
     pub fn from_payment<D: Digest>(payment: &Payment<P, D>) -> Self {
         Self {
             payer: payment.payer().clone(),
-            recipient: payment.recipient().clone(),
-            amount: payment.amount(),
+            entries: payment.send().body().entries().to_vec(),
             cumulative_debit: payment.send().body().cumulative_debit(),
             payer_signature: payment.send().signature().clone(),
+            recipient: payment.recipient().clone(),
             shard: payment.receipt().body().shard(),
             cumulative_shard_credit: payment.receipt().body().cumulative_shard_credit(),
             index: payment.receipt().body().index(),
@@ -890,10 +1024,10 @@ impl<P: PublicKey> PaymentWitness<P> {
     pub(crate) fn parts(&self) -> PaymentWitnessParts<P> {
         PaymentWitnessParts {
             payer: self.payer.clone(),
-            recipient: self.recipient.clone(),
-            amount: self.amount,
+            entries: self.entries.clone(),
             cumulative_debit: self.cumulative_debit,
             payer_signature: self.payer_signature.clone(),
+            recipient: self.recipient.clone(),
             shard: self.shard,
             cumulative_shard_credit: self.cumulative_shard_credit,
             index: self.index,
@@ -904,10 +1038,10 @@ impl<P: PublicKey> PaymentWitness<P> {
     pub(crate) fn from_parts(parts: PaymentWitnessParts<P>) -> Self {
         Self {
             payer: parts.payer,
-            recipient: parts.recipient,
-            amount: parts.amount,
+            entries: parts.entries,
             cumulative_debit: parts.cumulative_debit,
             payer_signature: parts.payer_signature,
+            recipient: parts.recipient,
             shard: parts.shard,
             cumulative_shard_credit: parts.cumulative_shard_credit,
             index: parts.index,
@@ -941,17 +1075,20 @@ impl<P: PublicKey> PaymentWitness<P> {
             *context.anchor(),
             context.epoch(),
             self.payer.clone(),
-            self.recipient.clone(),
-            self.amount,
+            self.entries.clone(),
             self.cumulative_debit,
         );
+        let amount = send_body
+            .entry(&self.recipient)
+            .ok_or(PaymentError::ReceiptMismatch)?
+            .amount();
         let send = SignedSend::from_raw_unchecked(send_body, self.payer_signature.clone());
         let receipt_body = ReceiptBody::from_raw_unchecked(
             *context.anchor(),
             context.epoch(),
             self.recipient.clone(),
             self.shard,
-            self.amount,
+            amount,
             send.tx_id::<H>(),
             self.cumulative_shard_credit,
             self.index,
@@ -969,7 +1106,7 @@ impl<P: PublicKey> PaymentWitness<P> {
         &self.payer
     }
 
-    /// Returns the recipient shared by the reconstructed send and receipt.
+    /// Returns the recipient credited by the reconstructed receipt.
     #[must_use]
     pub const fn recipient(&self) -> &P {
         &self.recipient
@@ -985,10 +1122,10 @@ impl<P: PublicKey> PaymentWitness<P> {
 impl<P: PublicKey> Write for PaymentWitness<P> {
     fn write(&self, buf: &mut impl BufMut) {
         self.payer.write(buf);
-        self.recipient.write(buf);
-        self.amount.write(buf);
+        self.entries.write(buf);
         self.cumulative_debit.write(buf);
         self.payer_signature.write(buf);
+        self.recipient.write(buf);
         self.shard.write(buf);
         self.cumulative_shard_credit.write(buf);
         self.index.write(buf);
@@ -996,8 +1133,10 @@ impl<P: PublicKey> Write for PaymentWitness<P> {
     }
 }
 
-impl<P: PublicKey> FixedSize for PaymentWitness<P> {
-    const SIZE: usize = P::SIZE * 2 + u64::SIZE * 5 + P::Signature::SIZE * 2;
+impl<P: PublicKey> EncodeSize for PaymentWitness<P> {
+    fn encode_size(&self) -> usize {
+        P::SIZE * 2 + self.entries.encode_size() + u64::SIZE * 4 + P::Signature::SIZE * 2
+    }
 }
 
 impl<P: PublicKey> Read for PaymentWitness<P> {
@@ -1006,10 +1145,10 @@ impl<P: PublicKey> Read for PaymentWitness<P> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             payer: P::read(buf)?,
-            recipient: P::read(buf)?,
-            amount: u64::read(buf)?,
+            entries: read_entries(buf)?,
             cumulative_debit: u64::read(buf)?,
             payer_signature: P::Signature::read(buf)?,
+            recipient: P::read(buf)?,
             shard: u64::read(buf)?,
             cumulative_shard_credit: u64::read(buf)?,
             index: u64::read(buf)?,
@@ -1027,10 +1166,10 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             payer: u.arbitrary()?,
-            recipient: u.arbitrary()?,
-            amount: u.arbitrary()?,
+            entries: u.arbitrary()?,
             cumulative_debit: u.arbitrary()?,
             payer_signature: u.arbitrary()?,
+            recipient: u.arbitrary()?,
             shard: u.arbitrary()?,
             cumulative_shard_credit: u.arbitrary()?,
             index: u.arbitrary()?,
@@ -1043,7 +1182,7 @@ where
 ///
 /// The upper receipt's payment is explicit. Every earlier omitted receipt must contribute at
 /// least one unit, so an index gap constrains the minimum possible credit increase. This function
-/// checks arithmetic feasibility only; it does not claim the omitted signatures exist.
+/// checks arithmetic feasibility only. It does not claim the omitted signatures exist.
 #[must_use]
 pub fn receipt_range_is_feasible(
     lower_credit: Amount,
@@ -1154,6 +1293,15 @@ pub enum PaymentError {
     /// A payment amount was zero.
     #[error("payment amount must be positive")]
     ZeroAmount,
+    /// A send authorizes no entries.
+    #[error("send must name at least one entry")]
+    NoEntries,
+    /// A send exceeds the protocol entry bound.
+    #[error("send exceeds the maximum entry count")]
+    TooManyEntries,
+    /// Send entries are not strictly recipient-sorted and unique.
+    #[error("send entries are not strictly recipient-sorted and unique")]
+    NonCanonicalEntries,
     /// Checked debit, credit, or index arithmetic failed.
     #[error("checked payment arithmetic overflowed")]
     ArithmeticOverflow,
@@ -1161,7 +1309,7 @@ pub enum PaymentError {
     #[error("payment binds another anchor or epoch")]
     WrongContext,
     /// A cumulative debit cannot be reached from a nonnegative predecessor.
-    #[error("cumulative debit is smaller than the payment amount")]
+    #[error("cumulative debit is smaller than the batch total")]
     MalformedDebitEndpoint,
     /// A cumulative debit is not the exact successor supplied by the caller.
     #[error("payer debit is not the exact next debit")]
@@ -1175,14 +1323,20 @@ pub enum PaymentError {
     /// The context operator signature does not authenticate the receipt body.
     #[error("operator signature is invalid")]
     InvalidOperatorSignature,
-    /// Receipt recipient, amount, or transaction identifier does not match the send.
-    #[error("receipt does not match its payer-authorized send")]
+    /// The requested recipient is not an entry of the send.
+    #[error("send does not name the requested recipient")]
+    UnknownRecipient,
+    /// Receipt recipient, amount, or transaction identifier matches no entry of the send.
+    #[error("receipt does not match an entry of its payer-authorized send")]
     ReceiptMismatch,
     /// Two endpoints do not belong to the same recipient-local shard.
     #[error("receipt endpoints belong to different recipient shards")]
     DifferentReceiptRange,
-    /// A transaction identifier was acknowledged at two receipt endpoints.
-    #[error("one payer transaction appears at multiple receipt endpoints")]
+    /// One entry of one payer transaction was acknowledged at two receipt endpoints.
+    ///
+    /// Entries are recipient-unique and a shard belongs to one recipient, so one transaction
+    /// identifier can appear at most once per shard.
+    #[error("one payer transaction entry appears at multiple receipt endpoints")]
     ReusedTransaction,
     /// The endpoint range cannot be completed by positive payment amounts.
     #[error("receipt range has no positive-credit completion")]
@@ -1222,6 +1376,18 @@ mod arbitrary_impls {
         }
     }
 
+    impl<'a, P> arbitrary::Arbitrary<'a> for Entry<P>
+    where
+        P: PublicKey + arbitrary::Arbitrary<'a>,
+    {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self {
+                recipient: u.arbitrary()?,
+                amount: u.arbitrary()?,
+            })
+        }
+    }
+
     impl<'a, P, D> arbitrary::Arbitrary<'a> for SendBody<P, D>
     where
         P: PublicKey + arbitrary::Arbitrary<'a>,
@@ -1232,8 +1398,7 @@ mod arbitrary_impls {
                 anchor: u.arbitrary()?,
                 epoch: u.arbitrary()?,
                 payer: u.arbitrary()?,
-                recipient: u.arbitrary()?,
-                amount: u.arbitrary()?,
+                entries: u.arbitrary()?,
                 cumulative_debit: u.arbitrary()?,
             })
         }
@@ -1360,6 +1525,7 @@ mod tests {
         let receipt = SignedReceipt::issue_next::<Sha256, _>(
             context,
             &send,
+            &recipient.public_key(),
             shard,
             previous_credit,
             previous_index,
@@ -1543,11 +1709,11 @@ mod tests {
     }
 
     #[test]
-    fn payment_codec_is_fixed_and_round_trips() {
+    fn payment_codec_round_trips() {
         let (context, operator, payer, recipient) = context();
         let payment = payment(&context, &operator, &payer, &recipient, 17, 4, 2, 9, 3);
         let encoded = payment.encode();
-        assert_eq!(encoded.len(), TestPayment::SIZE);
+        assert_eq!(encoded.len(), payment.encode_size());
         assert_eq!(TestPayment::decode(encoded).unwrap(), payment);
     }
 
@@ -1557,8 +1723,7 @@ mod tests {
         let payment = payment(&context, &operator, &payer, &recipient, 17, 4, 2, 9, 3);
         let witness = PaymentWitness::from_payment(&payment);
 
-        assert_eq!(PaymentWitness::<VerifyingKey>::SIZE, 232);
-        assert_eq!(witness.encode().len(), 232);
+        assert_eq!(witness.encode().len(), witness.encode_size());
         assert_eq!(
             witness.reconstruct::<Sha256, ShaDigest>(&context),
             Ok(payment)
@@ -1575,10 +1740,13 @@ mod tests {
         );
 
         let mut altered = witness.clone();
-        altered.amount ^= 1;
+        altered.entries[0].amount ^= 1;
         assert!(altered.reconstruct::<Sha256, ShaDigest>(&context).is_err());
         let mut altered = witness.clone();
         altered.cumulative_debit ^= 1;
+        assert!(altered.reconstruct::<Sha256, ShaDigest>(&context).is_err());
+        let mut altered = witness.clone();
+        altered.recipient = SigningKey::from_seed(50).public_key();
         assert!(altered.reconstruct::<Sha256, ShaDigest>(&context).is_err());
         let mut altered = witness.clone();
         altered.shard ^= 1;
@@ -1592,12 +1760,183 @@ mod tests {
     }
 
     #[test]
+    fn batched_send_credits_each_entry_once() {
+        let (context, operator, payer, first) = context();
+        let second = SigningKey::from_seed(4);
+        let send = SignedSend::sign_next_batch(
+            &context,
+            &payer,
+            vec![
+                Entry::new(first.public_key(), 5).unwrap(),
+                Entry::new(second.public_key(), 2).unwrap(),
+            ],
+            10,
+        )
+        .unwrap();
+        assert_eq!(send.body().cumulative_debit(), 17);
+        assert_eq!(send.body().total(), Some(7));
+        assert_eq!(send.verify_next(&context, 10), Ok(()));
+
+        let first_receipt = SignedReceipt::issue_next::<Sha256, _>(
+            &context,
+            &send,
+            &first.public_key(),
+            0,
+            0,
+            0,
+            &operator,
+        )
+        .unwrap();
+        let second_receipt = SignedReceipt::issue_next::<Sha256, _>(
+            &context,
+            &send,
+            &second.public_key(),
+            0,
+            0,
+            0,
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(first_receipt.body().amount(), 5);
+        assert_eq!(second_receipt.body().amount(), 2);
+        assert_eq!(first_receipt.body().tx_id(), second_receipt.body().tx_id());
+
+        let first = Payment::new::<Sha256>(&context, send.clone(), first_receipt).unwrap();
+        let second = Payment::new::<Sha256>(&context, send.clone(), second_receipt).unwrap();
+        assert_eq!(first.amount(), 5);
+        assert_eq!(second.amount(), 2);
+        assert_eq!(first.verify_terminal::<Sha256>(&context), Ok(()));
+        assert_eq!(second.verify_terminal::<Sha256>(&context), Ok(()));
+
+        let witness = PaymentWitness::from_payment(&second);
+        assert_eq!(
+            witness.reconstruct::<Sha256, ShaDigest>(&context),
+            Ok(second)
+        );
+
+        let absent = SigningKey::from_seed(60);
+        assert_eq!(
+            SignedReceipt::issue_next::<Sha256, _>(
+                &context,
+                &send,
+                &absent.public_key(),
+                0,
+                0,
+                0,
+                &operator,
+            ),
+            Err(PaymentError::UnknownRecipient)
+        );
+    }
+
+    #[test]
+    fn batch_construction_rejects_noncanonical_entries() {
+        let (context, _, payer, recipient) = context();
+        let other = SigningKey::from_seed(4);
+        assert_eq!(
+            SignedSend::sign_next_batch(&context, &payer, vec![], 0),
+            Err(PaymentError::NoEntries)
+        );
+        assert_eq!(
+            SignedSend::sign_next_batch(
+                &context,
+                &payer,
+                vec![
+                    Entry::new(recipient.public_key(), 1).unwrap(),
+                    Entry::new(recipient.public_key(), 2).unwrap(),
+                ],
+                0,
+            ),
+            Err(PaymentError::NonCanonicalEntries)
+        );
+        assert_eq!(
+            Entry::new(other.public_key(), 0),
+            Err(PaymentError::ZeroAmount)
+        );
+        assert_eq!(
+            SignedSend::sign_next_batch(
+                &context,
+                &payer,
+                vec![
+                    Entry::new(recipient.public_key(), 1).unwrap(),
+                    Entry::new(other.public_key(), u64::MAX).unwrap(),
+                ],
+                0,
+            ),
+            Err(PaymentError::ArithmeticOverflow)
+        );
+
+        // An unsorted raw body signs but never verifies, so it cannot become linkable evidence.
+        let unsorted = {
+            let mut entries = vec![
+                Entry::new(recipient.public_key(), 1).unwrap(),
+                Entry::new(other.public_key(), 2).unwrap(),
+            ];
+            entries.sort_unstable_by(|left, right| right.recipient().cmp(left.recipient()));
+            SendBody::from_raw_unchecked(
+                *context.anchor(),
+                context.epoch(),
+                payer.public_key(),
+                entries,
+                3,
+            )
+        };
+        let unsorted = SignedSend::sign_body_by_authority(unsorted, &payer);
+        assert_eq!(
+            unsorted.verify(&context),
+            Err(PaymentError::NonCanonicalEntries)
+        );
+    }
+
+    #[test]
+    fn receipt_for_wrong_entry_amount_is_rejected() {
+        let (context, operator, payer, recipient) = context();
+        let other = SigningKey::from_seed(4);
+        let send = SignedSend::sign_next_batch(
+            &context,
+            &payer,
+            vec![
+                Entry::new(recipient.public_key(), 5).unwrap(),
+                Entry::new(other.public_key(), 2).unwrap(),
+            ],
+            0,
+        )
+        .unwrap();
+
+        // The receipt swaps one entry's recipient onto the other entry's amount.
+        let crossed = ReceiptBody::from_raw_unchecked(
+            *context.anchor(),
+            context.epoch(),
+            recipient.public_key(),
+            0,
+            2,
+            send.tx_id::<Sha256>(),
+            2,
+            1,
+        );
+        let crossed = SignedReceipt::sign_body_by_authority(crossed, &operator);
+        let crossed = Payment::from_parts_unchecked(send, crossed);
+        assert_eq!(
+            crossed.verify_linked::<Sha256>(&context),
+            Err(PaymentError::ReceiptMismatch)
+        );
+    }
+
+    #[test]
     fn wrong_context_and_operator_are_rejected() {
         let (context, operator, payer, recipient) = context();
         let send = SignedSend::sign_next(&context, &payer, recipient.public_key(), 2, 0).unwrap();
         let wrong_operator = SigningKey::from_seed(22);
         assert_eq!(
-            SignedReceipt::issue_next::<Sha256, _>(&context, &send, 0, 0, 0, &wrong_operator,),
+            SignedReceipt::issue_next::<Sha256, _>(
+                &context,
+                &send,
+                &recipient.public_key(),
+                0,
+                0,
+                0,
+                &wrong_operator,
+            ),
             Err(PaymentError::WrongOperator)
         );
 

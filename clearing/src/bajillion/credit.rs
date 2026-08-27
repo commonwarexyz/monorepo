@@ -6,7 +6,7 @@
 
 use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
-    payment::{Epoch, Payment},
+    payment::{Amount, Epoch, Payment, ReceiptIndex, Shard},
 };
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
@@ -21,7 +21,7 @@ use thiserror::Error;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShardHead<P: PublicKey, D: Digest> {
     /// Recipient-local receive-shard identifier.
-    pub shard: u64,
+    pub shard: Shard,
     /// Last accepted payment in the shard.
     pub payment: Payment<P, D>,
 }
@@ -29,7 +29,7 @@ pub struct ShardHead<P: PublicKey, D: Digest> {
 impl<P: PublicKey, D: Digest> ShardHead<P, D> {
     /// Creates a terminal shard head.
     #[must_use]
-    pub const fn new(shard: u64, payment: Payment<P, D>) -> Self {
+    pub const fn new(shard: Shard, payment: Payment<P, D>) -> Self {
         Self { shard, payment }
     }
 
@@ -94,20 +94,20 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreditTip {
     /// Recipient-local receive-shard identifier.
-    pub shard: u64,
+    pub shard: Shard,
     /// Terminal cumulative credit in this shard.
-    pub cumulative_credit: u64,
+    pub cumulative_credit: Amount,
     /// Terminal receipt index in this shard.
-    pub index: u64,
+    pub index: ReceiptIndex,
 }
 
 /// Shard-relative value for a compact credit-tip membership opening.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreditTipValue {
     /// Terminal cumulative credit in the challenged shard.
-    pub cumulative_credit: u64,
+    pub cumulative_credit: Amount,
     /// Terminal receipt index in the challenged shard.
-    pub index: u64,
+    pub index: ReceiptIndex,
 }
 
 impl CreditTip {
@@ -131,7 +131,7 @@ impl CreditTip {
         }
     }
 
-    const fn from_value(shard: u64, value: CreditTipValue) -> Self {
+    const fn from_value(shard: Shard, value: CreditTipValue) -> Self {
         Self {
             shard,
             cumulative_credit: value.cumulative_credit,
@@ -320,7 +320,7 @@ impl<P: PublicKey, D: Digest> ShardSet<P, D> {
     }
 
     /// Produces either a membership opening or an adjacent-neighbor absence proof.
-    pub fn lookup<H: Hasher<Digest = D>>(&self, shard: u64) -> Result<CreditTipLookup<D>, Error> {
+    pub fn lookup<H: Hasher<Digest = D>>(&self, shard: Shard) -> Result<CreditTipLookup<D>, Error> {
         let (tips, tree) = self.commitment::<H>()?;
         match self.heads.binary_search_by_key(&shard, |head| head.shard) {
             Ok(position) => Ok(CreditTipLookup::Present {
@@ -441,13 +441,13 @@ pub enum CreditTipLookup<D: Digest> {
 impl<D: Digest> CreditTipLookup<D> {
     pub(crate) fn reconstruct<H: Hasher<Digest = D>>(
         &self,
-        shard: u64,
+        shard: Shard,
     ) -> Result<(VectorRoot<D>, Option<CreditTip>), Error> {
         match self {
             Self::Present { value, opening } => {
                 let tip = CreditTip::from_value(shard, value.clone());
                 if tip.cumulative_credit == 0 || tip.index == 0 {
-                    return Err(Error::LookupKey);
+                    return Err(Error::ZeroEndpoint);
                 }
                 let root =
                     opening.reconstruct::<H>(VectorKind::CreditTip, tip.encode().as_ref())?;
@@ -457,7 +457,6 @@ impl<D: Digest> CreditTipLookup<D> {
                 predecessor,
                 successor,
                 opening,
-                ..
             } => {
                 let insertion = opening
                     .start
@@ -511,7 +510,6 @@ impl<D: Digest> Write for CreditTipLookup<D> {
                 predecessor,
                 successor,
                 opening,
-                ..
             } => {
                 2_u8.write(writer);
                 predecessor.write(writer);
@@ -551,7 +549,6 @@ impl<D: Digest> EncodeSize for CreditTipLookup<D> {
                 predecessor,
                 successor,
                 opening,
-                ..
             } => {
                 u8::SIZE
                     + predecessor.encode_size()
@@ -611,15 +608,12 @@ pub enum Error {
     /// Summing terminal shard endpoints overflowed.
     #[error("terminal shard aggregate arithmetic overflowed")]
     Arithmetic,
-    /// A root or opening does not authenticate the supplied value.
-    #[error("credit-tip root does not authenticate the supplied set or opening")]
+    /// The recomputed complete-set root does not match the expected root.
+    #[error("credit-tip root does not authenticate the supplied set")]
     RootMismatch,
     /// An opening position is outside the committed vector.
     #[error("credit-tip opening position is outside the committed vector")]
     IndexOutOfRange,
-    /// A lookup was supplied for another shard identifier.
-    #[error("credit-tip lookup was supplied for another shard")]
-    LookupKey,
     /// An absence proof does not contain the adjacent ordered neighbors.
     #[error("credit-tip absence proof is not an adjacent ordered bracket")]
     LookupOrder,
@@ -672,6 +666,7 @@ mod tests {
         let receipt = SignedReceipt::issue_next::<Sha256, _>(
             context,
             &send,
+            &recipient.public_key(),
             shard,
             cumulative_credit - 1,
             index - 1,

@@ -2,7 +2,7 @@
 
 use crate::{
     operator::{CloseEvent, Operator},
-    protocol::{DepositEvent, Key, MAX_ACCOUNTS, Payment},
+    protocol::{Acceptance, DepositEvent, Key, MAX_ACCOUNTS},
     rpc,
     store::MAX_DESTINATION_BYTES,
 };
@@ -316,41 +316,42 @@ impl Read for PaymentQuoteResponse {
     }
 }
 
+/// One accepted send: the shared batch send and one receipt per entry, in entry order.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AcceptedPaymentResponse {
+pub(crate) struct AcceptedBatchResponse {
     pub(crate) epoch: u64,
     pub(crate) sequence: u64,
-    pub(crate) amount: u64,
-    pub(crate) payment: Payment,
+    pub(crate) total: u64,
+    pub(crate) acceptance: Acceptance,
 }
 
-impl Write for AcceptedPaymentResponse {
+impl Write for AcceptedBatchResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.sequence.write(buf);
-        self.amount.write(buf);
-        self.payment.write(buf);
+        self.total.write(buf);
+        self.acceptance.write(buf);
     }
 }
 
-impl EncodeSize for AcceptedPaymentResponse {
+impl EncodeSize for AcceptedBatchResponse {
     fn encode_size(&self) -> usize {
         self.epoch.encode_size()
             + self.sequence.encode_size()
-            + self.amount.encode_size()
-            + self.payment.encode_size()
+            + self.total.encode_size()
+            + self.acceptance.encode_size()
     }
 }
 
-impl Read for AcceptedPaymentResponse {
+impl Read for AcceptedBatchResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             epoch: u64::read(buf)?,
             sequence: u64::read(buf)?,
-            amount: u64::read(buf)?,
-            payment: Payment::read(buf)?,
+            total: u64::read(buf)?,
+            acceptance: Acceptance::read(buf)?,
         })
     }
 }
@@ -669,22 +670,11 @@ impl Read for PollCloseResponse {
     }
 }
 
-fn count(value: usize, name: &'static str) -> anyhow::Result<u64> {
+fn count(value: usize, name: &'static str) -> Result<u64> {
     u64::try_from(value).with_context(|| format!("{name} does not fit the RPC representation"))
 }
 
-fn bounded_utf8(mut value: String, maximum: usize) -> Bytes {
-    if value.len() > maximum {
-        let mut end = maximum;
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        value.truncate(end);
-    }
-    Bytes::from(value)
-}
-
-fn build_status(operator: &Operator) -> anyhow::Result<StatusResponse> {
+fn build_status(operator: &Operator) -> Result<StatusResponse> {
     let close_in_progress = operator.close_in_progress();
     let faulted = operator.fault().is_some();
     let status = operator.status().context("read operator status")?;
@@ -699,14 +689,14 @@ fn build_status(operator: &Operator) -> anyhow::Result<StatusResponse> {
     })
 }
 
-fn close_event(event: Option<CloseEvent>) -> anyhow::Result<PollCloseResponse> {
+fn close_event(event: Option<CloseEvent>) -> Result<PollCloseResponse> {
     let Some(event) = event else {
         return Ok(PollCloseResponse::NoEvent);
     };
     match event {
         CloseEvent::Finished(finished) => Ok(PollCloseResponse::Finished(CloseFinishedResponse {
             epoch: finished.epoch,
-            header: bounded_utf8(finished.header, MAX_CLOSE_HEADER_BYTES),
+            header: rpc::bounded_utf8(finished.header_digest, MAX_CLOSE_HEADER_BYTES),
             rows: count(finished.rows, "close row count")?,
             slices: count(finished.slices, "close slice count")?,
             payout_total: finished.payout_total,
@@ -718,7 +708,7 @@ fn close_event(event: Option<CloseEvent>) -> anyhow::Result<PollCloseResponse> {
         })),
         CloseEvent::Failed { epoch, error } => Ok(PollCloseResponse::Failed {
             epoch,
-            error: bounded_utf8(error, MAX_CLOSE_ERROR_BYTES),
+            error: rpc::bounded_utf8(error, MAX_CLOSE_ERROR_BYTES),
         }),
     }
 }
@@ -783,7 +773,7 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
     }
 }
 
-fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result<Bytes> {
+fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> {
     match request {
         OperatorRequest::Status => Ok(build_status(operator)?.encode()),
         OperatorRequest::PaymentQuote(request) => {
@@ -802,11 +792,11 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result
             let accepted = operator
                 .accept_send(request.send)
                 .context("accept payment send")?;
-            Ok(AcceptedPaymentResponse {
+            Ok(AcceptedBatchResponse {
                 epoch: accepted.epoch,
                 sequence: accepted.sequence,
-                amount: accepted.amount,
-                payment: accepted.payment,
+                total: accepted.total,
+                acceptance: accepted.acceptance,
             }
             .encode())
         }
@@ -871,8 +861,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result
             }
             .encode())
         }
-        OperatorRequest::AcknowledgeWithdrawal(request) => {
-            let _ = request;
+        OperatorRequest::AcknowledgeWithdrawal(_) => {
             bail!("settlement confirmation is required before acknowledging a withdrawal")
         }
         OperatorRequest::ExternalPayoutEvidence(request) => {
@@ -885,8 +874,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result
             }
             .encode())
         }
-        OperatorRequest::AcknowledgeExternalPayout(request) => {
-            let _ = request;
+        OperatorRequest::AcknowledgeExternalPayout(_) => {
             bail!("settlement confirmation is required before acknowledging an external payout")
         }
     }
@@ -894,7 +882,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> anyhow::Result
 
 fn error_response(error: String) -> rpc::Response {
     rpc::Response::Error {
-        error: bounded_utf8(error, MAX_ERROR_BYTES),
+        error: rpc::bounded_utf8(error, MAX_ERROR_BYTES),
     }
 }
 
@@ -980,8 +968,8 @@ pub(crate) async fn accept_send<E: Network>(
     network: &E,
     address: SocketAddr,
     request: AcceptSendRequest,
-) -> Result<AcceptedPaymentResponse> {
-    AcceptedPaymentResponse::decode(
+) -> Result<AcceptedBatchResponse> {
+    AcceptedBatchResponse::decode(
         invoke(network, address, METHOD_ACCEPT_SEND, request.encode()).await?,
     )
     .context("decode accepted payment")
@@ -1464,18 +1452,15 @@ mod tests {
             quote.state.cumulative_debit,
         )
         .unwrap();
-        let accepted = AcceptedPaymentResponse::decode(success_body(handle(
+        let accepted = AcceptedBatchResponse::decode(success_body(handle(
             &mut operator,
             request(METHOD_ACCEPT_SEND, AcceptSendRequest { send }.encode()),
         )))
         .unwrap();
         assert_eq!(accepted.epoch, 0);
-        assert_eq!(accepted.amount, 5);
-        assert_eq!(accepted.payment.amount(), 5);
-        accepted
-            .payment
-            .verify_linked::<Sha256>(&quote.context)
-            .unwrap();
+        assert_eq!(accepted.total, 5);
+        assert_eq!(accepted.acceptance.receipts[0].body().amount(), 5);
+        accepted.acceptance.verify(&quote.context).unwrap();
 
         let started = StartCloseResponse::decode(success_body(handle(
             &mut operator,

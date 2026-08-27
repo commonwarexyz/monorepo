@@ -3,13 +3,15 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-08-26T00:00:00Z"
+modified-time: "2026-08-27T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
 image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
+
+*Update (8/27/26): Bajillion sends now batch entries. One signature and one cumulative endpoint pay many recipients, acknowledged atomically with one receipt per entry.*
 
 *Updated (8/26/26): Bajillion now strengthens admission and close coverage while making finalized claims and paired challenge evidence more compact.*
 
@@ -37,7 +39,15 @@ $$
 
 After authenticating $S$ and checking spendability, the operator atomically commits the debit, shard advance, close reservation, replay record, and receipt body. It then signs and returns $R$.
 
-The matching pair $(S,R)$ is the accepted payment and the preconfirmation. The payer verifies and durably retains it, advances its local $D_a$ in that atomic local receipt commit, then forwards the pair to any recipient that will rely on it. The wallet keeps at most one unacknowledged send for this payer: it does not sign the next cumulative endpoint until the prior pair is verified and committed. An operator-reported counter is never the payer's authority. A rejection before the operator's commit changes no balance; the wallet retains the exact staged request for retry. If the response is lost, retrying that request returns the same pair without a second debit. This ordering serializes one payer account, not independent payers or a recipient's receive shards.
+A send may also batch entries. One signature names strictly recipient-sorted, unique $(b_i,x_i)$ pairs under a single cumulative endpoint:
+
+$$
+S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;(a\xrightarrow{\,x_i\,}b_i)_{i=1}^{m},\;D_a+\textstyle\sum_i x_i\bigr).
+$$
+
+The operator accepts or rejects the batch as a whole: it atomically commits the debit and every entry's shard advance, then signs and returns one receipt per entry. Each receipt links the batch's transaction identifier and its own unique entry recipient. A single payment is a batch of one.
+
+The matching pair $(S,R)$ is the accepted payment and the preconfirmation, one pair per entry. The payer verifies and durably retains every pair, advances its local $D_a$ in that atomic local receipt commit, then forwards each pair to any recipient that will rely on it. The wallet keeps at most one unacknowledged send for this payer: it does not sign the next cumulative endpoint until the prior send's pairs are all verified and committed. An operator-reported counter is never the payer's authority. A rejection before the operator's commit changes no balance; the wallet retains the exact staged request for retry. If the response is lost, retrying that request returns the same pairs without a second debit. This ordering serializes one payer account, not independent payers or a recipient's receive shards.
 
 Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$.
 
@@ -161,7 +171,7 @@ $$
 \end{aligned}
 $$
 
-The $\mathsf{ChangeValue}$ exposes only the settlement output, terminal debit, outgoing-body digest, and credit-tip root. $\mathsf{OutDigest}_a$ binds the terminal outgoing bodies (or a distinguished absence). Validators still check the complete row in the proof-slice corpus, but the change tree commits only this public projection. Membership and challenge proofs expose the $\mathsf{ChangeValue}$ rather than the full row, while its digested guard keeps ordered range boundaries compact.
+The $\mathsf{ChangeValue}$ exposes only the settlement output, terminal debit, outgoing-body digest, and credit-tip root. $\mathsf{OutDigest}_a$ binds the unsigned terminal send body (or a distinguished absence). It deliberately does not pin one acknowledging receipt: a batched send is acknowledged by one receipt per entry, and any of them may accompany the committed row. Validators still check the complete row in the proof-slice corpus, but the change tree commits only this public projection. Membership and challenge proofs expose the $\mathsf{ChangeValue}$ rather than the full row, while its digested guard keeps ordered range boundaries compact.
 
 A $\mathsf{StateRoot}$ commits every field and the exact length of the strictly sorted vector of live accounts. A live leaf has a positive balance; a deposit can insert a new account, a close removes its account from the successor, and any other net balance of zero also leaves no live leaf. There are no permanent zero-balance tombstones.
 
@@ -240,7 +250,7 @@ The operator is Byzantine: it may halt, censor, equivocate, withhold messages, a
 
 Sealing is not a totals-only check. Each validator authenticates the exact coverage and state ranges in its slices, every changed-account equation and settlement output, terminal outgoing pair, terminal receive-shard head, boundary contribution, prefix transition, state update, and distinct payment signature in its dealing. The terminal prefix then binds the exact vector lengths, deposits, withdrawals, external payouts, payment conservation, and successor liability. What certification cannot establish is that the operator never signed an additional receipt outside the selected public corpus.
 
-Each payer account is one linear cumulative-debit sequence. A wallet using the base safety guarantee stages one exact send, retries those same bytes after response loss, verifies and durably commits the matching pair, advances its locally owned debit, and only then signs the next endpoint. A later endpoint authorizes the whole debit delta up to that value, while the public row carries only the terminal outgoing pair. If a wallet deliberately signs several cumulative endpoints before obtaining the earlier receipts, an intermediate receipt may be neither held privately nor selected as that terminal pair; that exposure is outside the base guarantee. This per-payer ordering does not limit parallel sends from independent accounts or parallel incoming receive shards.
+Each payer account is one linear cumulative-debit sequence, and a batch advances it by exactly its total. A wallet using the base safety guarantee stages one exact send, retries those same bytes after response loss, verifies and durably commits every matching pair, advances its locally owned debit, and only then signs the next endpoint. A later endpoint authorizes the whole debit delta up to that value, while the public row carries only the terminal outgoing pair. If a wallet deliberately signs several cumulative endpoints before obtaining the earlier receipts, an intermediate receipt may be neither held privately nor selected as that terminal pair; that exposure is outside the base guarantee, and it covers the entries of a batch whose receipts the wallet never obtained. This per-payer ordering does not limit parallel sends from independent accounts or parallel incoming receive shards.
 
 The linked pair is private, transferable evidence. Any holder may submit a challenge; the chain does not require the caller to be the payer or recipient. Neither role must remain continuously online, but the availability assumption is per receipt: at least one honest holder must obtain and retain the required pair or pairs and get the bounded challenge included by $\Delta_e$. A recipient that wants an independently enforceable preconfirmation obtains the pair before relying on it. Honest validators retain public proof slices, but they cannot reconstruct a private receipt that no independent holder received or retained. This is not a single global observer assumption: different receipts may depend on different holders.
 
@@ -258,13 +268,13 @@ $$
 
 If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or SNARK/STARK) can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature. Every represented payment in challenge evidence retains both its payer and operator signatures; paired forms share repeated relation fields without discarding either signature. Through the inclusive deadline $t\le\Delta_e$, any holder may submit one of four bounded contradictions:
 
-1. **Payer debit contradiction.** A matching acknowledged pair carries a debit above the public debit marker, or the same debit with a different send or receipt body. A bare payer request is insufficient. The receipt proves operator acknowledgement.
+1. **Payer debit contradiction.** A matching acknowledged pair carries a debit above the public debit marker, or the same debit with a different send body. A bare payer request is insufficient. The receipt proves operator acknowledgement. Equal endpoints compare only the signed authorization, since any entry receipt may accompany a committed batched send.
 
 2. **Higher receive-shard tip.** Authenticate the public tip $(G^\star,J^\star)$ for one shard, using $(0,0)$ for authenticated absence, and present a matching retained receipt at $(G^+,J^+)$. Either strict increase, $G^+>G^\star$ or $J^+>J^\star$, is a contradiction.
 
 3. **Inconsistent receipt range.** For lower and upper pairs in one anchor, recipient, and shard, where each receipt is linked to its own valid send, adjacent receipts must increase credit by exactly the upper payment, and an index gap must leave at least one base unit for each omitted positive payment. A violation is a contradiction.
 
-4. **Receipt fork.** Two distinct linked receipt bodies either reuse one receipt index within a shard or acknowledge the same payer transaction differently. Different signature bytes over one identical receipt body are not a fork.
+4. **Receipt fork.** Two distinct linked receipt bodies either reuse one receipt index within a shard or acknowledge the same payer transaction entry differently. Entries of one batched send share the transaction identifier without forking it. Different signature bytes over one identical receipt body are not a fork.
 
 Each challenge is one-shot. There is no interactive dispute game and no execution trace to bisect: the holder submits the signed pair or pairs and the bounded openings that expose the contradiction, and the chain checks fixed signature, arithmetic, and Merkle predicates in one call.
 
@@ -343,7 +353,7 @@ Rollover changes only live serving state, without changing the evidence required
 
 Every profile below uses a 100-validator committee and divides the evidence into 256 slices. Strategy-enabled prepare, deal, seal, and challenge checks share one adaptive eight-worker pool (M5 Pro); certificate and withdrawal-claim checks are scalar calling-thread measurements. The matrix varies $N$, the number of live accounts. Every account sends, the same 512 accounts receive, and each recipient uses one receive shard. The fixture therefore holds $A=N$, $B=512$, and $h=1$ while $N$ grows from 1,024 to one million.
 
-No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. Each stage is measured independently. The fixture constructs the predecessor-state proof cache before measurement. Prepare builds the compact change, withdrawal-output, successor-state, and coverage roots from the owned close inputs while reusing that cache; deal derives all proof slices from the prepared close; seal checks and retains the busiest validator's dealing, verifies every distinct send and receipt signature in one randomized batch, and signs the commitment. The two withdrawal-claim proof checks reuse separately constructed fixtures between samples.
+No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. Every fixture send is a batch of one entry. A terminal batch with more entries adds 40 bytes per extra entry to its row and to each shard head that carries it, still independent of $T$. Each stage is measured independently. The fixture constructs the predecessor-state proof cache before measurement. Prepare builds the compact change, withdrawal-output, successor-state, and coverage roots from the owned close inputs while reusing that cache; deal derives all proof slices from the prepared close; seal checks and retains the busiest validator's dealing, verifies every distinct send and receipt signature in one randomized batch, and signs the commitment. The two withdrawal-claim proof checks reuse separately constructed fixtures between samples.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -365,9 +375,9 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     <tr>
       <td style="padding-left:20px;">proof-slice corpus</td>
       <td style="text-align:right;">1.26 MB</td>
-      <td style="text-align:right;">6.56 MB</td>
-      <td style="text-align:right;">58.9 MB</td>
-      <td style="text-align:right;">582 MB</td>
+      <td style="text-align:right;">6.57 MB</td>
+      <td style="text-align:right;">59.0 MB</td>
+      <td style="text-align:right;">583 MB</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
@@ -386,10 +396,10 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
       <td style="padding-left:20px;">largest dealing</td>
-      <td style="text-align:right;">0.865 MB <span style="color:#666;">(-31.3%)</span></td>
-      <td style="text-align:right;">4.45 MB <span style="color:#666;">(-32.2%)</span></td>
-      <td style="text-align:right;">39.7 MB <span style="color:#666;">(-32.6%)</span></td>
-      <td style="text-align:right;">391 MB <span style="color:#666;">(-32.8%)</span></td>
+      <td style="text-align:right;">0.866 MB <span style="color:#666;">(-31.3%)</span></td>
+      <td style="text-align:right;">4.46 MB <span style="color:#666;">(-32.2%)</span></td>
+      <td style="text-align:right;">39.8 MB <span style="color:#666;">(-32.6%)</span></td>
+      <td style="text-align:right;">392 MB <span style="color:#666;">(-32.8%)</span></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
@@ -451,10 +461,10 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
     <tr>
       <td style="padding-left:20px;">HigherShardTip challenge</td>
-      <td style="text-align:right;"><strong>630 B</strong></td>
-      <td style="text-align:right;"><strong>758 B</strong></td>
-      <td style="text-align:right;"><strong>854 B</strong></td>
-      <td style="text-align:right;"><strong>950 B</strong></td>
+      <td style="text-align:right;"><strong>663 B</strong></td>
+      <td style="text-align:right;"><strong>791 B</strong></td>
+      <td style="text-align:right;"><strong>887 B</strong></td>
+      <td style="text-align:right;"><strong>983 B</strong></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">check HigherShardTip</td>
@@ -480,11 +490,11 @@ Figure 4: The operator prepares the roots, then deals the evidence into slices. 
 Figure 5: These are four measured profiles, not an interpolation. Both axes are logarithmic, and each point is labeled with its measured latency. Construction and sealing scale approximately linearly once the fixed costs are amortized.
 :::
 
-Even the largest validator dealing is 31.3–32.8% smaller than the complete proof-slice corpus because it contains only that validator's assigned slices. At one million live accounts it checks 391 MB rather than the complete 582 MB corpus. This is the explicit cost of the simpler fresh-BMT design: evidence distribution grows with live state, while settlement and disputes remain bounded.
+Even the largest validator dealing is 31.3–32.8% smaller than the complete proof-slice corpus because it contains only that validator's assigned slices. At one million live accounts it checks 392 MB rather than the complete 583 MB corpus. This is the explicit cost of the simpler fresh-BMT design: evidence distribution grows with live state, while settlement and disputes remain bounded.
 
-The proof-slice corpus is constant for a profile, so accepted payments only divide it. Ten million payments spread the one-million-account profile's 581,907,036 bytes to 58.2 offchain bytes per payment; a billion spread it to 0.582 offchain bytes per payment. The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap; proofs of possession were checked when the committee registered. With the 32-byte commitment and this encoding's eight-byte bitmap-length prefix, the external 100-validator certified package is 101 bytes total. If the Bajillion validators are also the settlement chain's validators, inclusion itself supplies the attestation and only the 32-byte commitment need be retained. The 128-byte $\mathsf{RootBundle}$ admission witness and terminal proof are not included in either commitment figure. Each figure likewise shrinks as $1/T$.
+The proof-slice corpus is constant for a profile, so accepted payments only divide it. Ten million payments spread the one-million-account profile's 582,907,548 bytes to 58.3 offchain bytes per payment; a billion spread it to 0.583 offchain bytes per payment. The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap; proofs of possession were checked when the committee registered. With the 32-byte commitment and this encoding's eight-byte bitmap-length prefix, the external 100-validator certified package is 101 bytes total. If the Bajillion validators are also the settlement chain's validators, inclusion itself supplies the attestation and only the 32-byte commitment need be retained. The 128-byte $\mathsf{RootBundle}$ admission witness and terminal proof are not included in either commitment figure. Each figure likewise shrinks as $1/T$.
 
-The certified close itself queues no withdrawals. Separate one-record fixtures use $W=1$ and a 21-byte destination without adding the claims to certification. The identical $\mathsf{Amount}$ and $\mathsf{Close}$ claim proofs are 39 bytes and verify in 0.186–0.190 µs; each carries only the validator-derived destination and amount plus one $\mathsf{WithdrawalOutputRoot}$ opening. The $\mathsf{HigherShardTip}$ challenge is 630–950 bytes as lookup depth grows and verifies in 0.174–0.178 ms. It retains both signatures for its represented payment. Clean closes submit no fraud challenge at all, so average challenge traffic is smaller still. A challenge targets a commitment whose certificate was already checked at admission, so adjudication does not verify that certificate again.
+The certified close itself queues no withdrawals. Separate one-record fixtures use $W=1$ and a 21-byte destination without adding the claims to certification. The identical $\mathsf{Amount}$ and $\mathsf{Close}$ claim proofs are 39 bytes and verify in 0.186–0.190 µs; each carries only the validator-derived destination and amount plus one $\mathsf{WithdrawalOutputRoot}$ opening. The $\mathsf{HigherShardTip}$ challenge is 663–983 bytes as lookup depth grows and verifies in 0.174–0.178 ms. It retains both signatures for its represented payment. Challenge evidence embeds the whole signed send, so representing an entry of a larger batch adds 40 bytes per sibling entry while verification stays signature-dominated: the two signatures are checked once regardless of batch size, and only the hashed send bytes grow. Clean closes submit no fraud challenge at all, so average challenge traffic is smaller still. A challenge targets a commitment whose certificate was already checked at admission, so adjudication does not verify that certificate again.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows proof-slice corpus bytes per payment for four live-account counts; the right shows the 101-byte external certified package. Every line falls as one over T.">

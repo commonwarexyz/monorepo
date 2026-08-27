@@ -34,22 +34,6 @@ fn refinement_harness() -> Harness {
     harness_with_config(&[10, 5], refinement_config())
 }
 
-fn account_index(account: spec::Account) -> usize {
-    match account {
-        spec::Account::Alice => 0,
-        spec::Account::Bob => 1,
-        spec::Account::Carol => 2,
-    }
-}
-
-fn deposit_index(id: spec::DepositId) -> usize {
-    match id {
-        spec::DepositId::BobTwo => 0,
-        spec::DepositId::AliceOne => 1,
-        spec::DepositId::BobOne => 2,
-    }
-}
-
 fn spec_batch(registration: spec::RegistrationId) -> spec::Batch {
     match registration {
         spec::RegistrationId::B0 => spec::Batch::B0,
@@ -199,9 +183,16 @@ fn external_payout_refinement_close(
         payer_predecessor.cumulative_debit,
     )
     .unwrap();
-    let receipt =
-        SignedReceipt::issue_next::<Sha256, _>(context.payment(), &send, 0, 0, 0, operator)
-            .unwrap();
+    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+        context.payment(),
+        &send,
+        &recipient_key,
+        0,
+        0,
+        0,
+        operator,
+    )
+    .unwrap();
     let payment = Payment::new::<Sha256>(context.payment(), send, receipt).unwrap();
     let payer_shards = ShardSet::empty(context.payment().epoch(), payer_key.clone());
     let recipient_shards = ShardSet::new(
@@ -342,15 +333,8 @@ impl RefinementDriver {
     }
 
     fn cache(&self, root: spec::Root) -> &TestCache {
-        match root {
-            spec::Root::R0 => &self.fixture.cache,
-            spec::Root::R1 => &self.material(spec::Batch::B0).successor,
-            spec::Root::R2 => &self.material(spec::Batch::B1).successor,
-            spec::Root::R3 => &self.material(spec::Batch::B2).successor,
-            spec::Root::R4 => &self.material(spec::Batch::B3).successor,
-            spec::Root::Offset => &self.material(spec::Batch::Offset).successor,
-            spec::Root::Empty => panic!("the empty state has no account cache"),
-        }
+        self.available_cache(root)
+            .expect("the refined root has an admitted account cache")
     }
 
     fn available_cache(&self, root: spec::Root) -> Option<&TestCache> {
@@ -534,7 +518,7 @@ impl RefinementDriver {
             ACCOUNTS
                 .into_iter()
                 .filter_map(|account| {
-                    let amount = registration.deposits[account_index(account)];
+                    let amount = registration.deposits[account.index()];
                     (amount != 0)
                         .then(|| DepositRecord::new(self.key(account), u64::from(amount)).unwrap())
                 })
@@ -788,6 +772,7 @@ impl RefinementDriver {
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     material.context.payment(),
                     selected.send(),
+                    selected.recipient(),
                     selected.receipt().body().shard(),
                     selected.receipt().body().cumulative_shard_credit(),
                     selected.receipt().body().index(),
@@ -860,6 +845,7 @@ impl RefinementDriver {
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     material.context.payment(),
                     left.send(),
+                    left.recipient(),
                     1,
                     0,
                     0,
@@ -872,7 +858,7 @@ impl RefinementDriver {
                     receipt,
                 )
                 .unwrap();
-                Challenge::receipt_fork(left, right)
+                Challenge::receipt_fork(&left, &right)
             }
             spec::ChallengeKind::ReceiptFork(spec::ForkRelation::SameIndex) => {
                 let left = fork_payment(
@@ -889,7 +875,7 @@ impl RefinementDriver {
                     &self.carol,
                     3,
                 );
-                Challenge::receipt_fork(left, right)
+                Challenge::receipt_fork(&left, &right)
             }
             spec::ChallengeKind::ReceiptFork(spec::ForkRelation::Full) => {
                 // A proven Full fork needs two byte-distinct valid signed sends with one body
@@ -1027,7 +1013,7 @@ impl RefinementDriver {
                 position,
             } => self.claim_payout(batch, source, position),
             spec::SettlementAction::ClaimDeposit(account) => {
-                let index = account_index(account);
+                let index = account.index();
                 let expected = match self.state.terminal {
                     spec::Terminal::Dormant => self.state.pending_deposits[index],
                     spec::Terminal::Claiming { .. } => self.state.unfinalized_deposits[index],
@@ -1067,7 +1053,7 @@ impl RefinementDriver {
                         .chain
                         .claim_hard_fault(&opening)
                         .is_ok_and(|release| {
-                            let index = account_index(account);
+                            let index = account.index();
                             let balance = self.state.current_state[index].balance;
                             let request = self.state.outstanding_withdrawals[index];
                             let (withdrawal, residual) =
@@ -1190,7 +1176,7 @@ impl RefinementDriver {
             let cache = self.cache(self.state.current_root);
             assert_eq!(cache.liability(), u64::from(self.state.current_liability));
             for account in ACCOUNTS {
-                let expected = self.state.current_state[account_index(account)];
+                let expected = self.state.current_state[account.index()];
                 let actual = cache.opening(&self.key(account)).ok();
                 assert_eq!(actual.is_some(), expected.active);
                 if let Some(actual) = actual {
@@ -1263,7 +1249,7 @@ impl RefinementDriver {
             let (actual, _, _) = self.deposit(id);
             assert_eq!(
                 chain.consumed_deposit_ids.contains(&actual),
-                self.state.consumed_deposits & (1 << deposit_index(id)) != 0
+                self.state.consumed_deposits & (1 << id.index()) != 0
             );
         }
         for id in [
@@ -1318,7 +1304,7 @@ impl RefinementDriver {
             }
         }
         for account in ACCOUNTS {
-            let index = account_index(account);
+            let index = account.index();
             let key = self.key(account);
             let expected_deposit = self.state.pending_deposits[index];
             assert_eq!(
@@ -1354,7 +1340,7 @@ impl RefinementDriver {
         let expected_deposit_deadlines = ACCOUNTS
             .into_iter()
             .filter_map(|account| {
-                self.state.deposit_deadlines[account_index(account)]
+                self.state.deposit_deadlines[account.index()]
                     .map(|deadline| (u64::from(deadline), self.key(account)))
             })
             .collect::<BTreeSet<_>>();
@@ -1362,7 +1348,7 @@ impl RefinementDriver {
         let expected_withdrawal_deadlines = ACCOUNTS
             .into_iter()
             .filter_map(|account| {
-                self.state.pending_withdrawals[account_index(account)]
+                self.state.pending_withdrawals[account.index()]
                     .map(|request| (u64::from(request.deadline), self.key(account)))
             })
             .collect::<BTreeSet<_>>();
@@ -1479,7 +1465,7 @@ impl RefinementDriver {
                     u64::from(*remaining_deposits)
                 );
                 for account in ACCOUNTS {
-                    let index = account_index(account);
+                    let index = account.index();
                     let key = self.key(account);
                     let expected = self.state.unfinalized_deposits[index];
                     assert_eq!(

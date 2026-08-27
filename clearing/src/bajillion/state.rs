@@ -3,14 +3,13 @@
 use crate::bajillion::{
     commitment::VectorRoot,
     credit::{self, ShardSet},
-    payment::Payment,
+    payment::{Payment, SendBody},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 
 const CHANGE_OUTGOING_NONE_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_OUTGOING_NONE";
-const CHANGE_OUTGOING_SOME_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_OUTGOING_SOME";
 const CHANGE_VALUE_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_VALUE";
 
 /// Persistent state for one account row side.
@@ -247,7 +246,7 @@ where
 }
 
 impl<P: PublicKey, D: Digest> AccountRow<P, D> {
-    /// Returns the checked debit and credit advances.
+    /// Returns the checked debit, credit, and receipt-count advances.
     pub fn checked_deltas(&self) -> Option<(u64, u64, u64)> {
         Some((
             self.successor
@@ -394,7 +393,9 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
             account: row.account.clone(),
             output: row.output,
             terminal_debit: row.successor.cumulative_debit,
-            outgoing_digest: Self::derive_outgoing_digest::<H>(row.outgoing.as_ref()),
+            outgoing_digest: Self::derive_outgoing_digest::<H>(
+                row.outgoing.as_ref().map(|payment| payment.send().body()),
+            ),
             credit_tip_root: shards.root::<H>()?,
         })
     }
@@ -447,9 +448,13 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         self.credit_tip_root
     }
 
-    /// Returns whether `payment` has the exact committed unsigned outgoing bodies.
-    pub fn matches_outgoing<H: Hasher<Digest = D>>(&self, payment: &Payment<P, D>) -> bool {
-        self.outgoing_digest == Self::derive_outgoing_digest::<H>(Some(payment))
+    /// Returns whether `send` is the exact committed terminal outgoing authorization.
+    ///
+    /// The leaf pins the unsigned terminal send body through its transaction identifier. It
+    /// deliberately does not pin one acknowledging receipt: a batched send is acknowledged by
+    /// one receipt per entry, and any of them may accompany the committed evidence.
+    pub fn matches_outgoing<H: Hasher<Digest = D>>(&self, send: &SendBody<P, D>) -> bool {
+        self.outgoing_digest == Self::derive_outgoing_digest::<H>(Some(send))
     }
 
     /// Returns whether this leaf commits no outgoing payment.
@@ -457,10 +462,10 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         self.outgoing_digest == Self::derive_outgoing_digest::<H>(None)
     }
 
-    fn derive_outgoing_digest<H: Hasher<Digest = D>>(payment: Option<&Payment<P, D>>) -> D {
-        payment.map_or_else(
+    fn derive_outgoing_digest<H: Hasher<Digest = D>>(send: Option<&SendBody<P, D>>) -> D {
+        send.map_or_else(
             || H::hash(&[CHANGE_OUTGOING_NONE_HASH_NAMESPACE]),
-            |payment| payment.linked_body_digest::<H>(CHANGE_OUTGOING_SOME_HASH_NAMESPACE),
+            |send| send.tx_id::<H>().into_digest(),
         )
     }
 
@@ -475,7 +480,7 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
 }
 
 impl<D: Digest> ChangeValue<D> {
-    /// Returns the fields whose trailing credit-tip root can be reconstructed from a child proof.
+    /// Returns the fields that precede the credit-tip root, which a child proof reconstructs.
     #[must_use]
     pub const fn core(&self) -> ChangeValueCore<D> {
         self.core

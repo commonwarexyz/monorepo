@@ -150,8 +150,8 @@ pub enum Error {
     /// A certificate does not contain exactly `2f+1` attestations.
     #[error("certificate does not contain the exact quorum")]
     WrongQuorumSize,
-    /// A validator did not supply its complete canonical dealing.
-    #[error("validator dealing is incomplete or noncanonical")]
+    /// A dealing or slice request does not match the deterministic assignment.
+    #[error("dealing or slice request does not match the assignment")]
     IncompleteAssignment,
     /// An assigned proof slice failed semantic authentication.
     #[error("assigned proof slice is invalid")]
@@ -327,8 +327,6 @@ pub mod bls12381 {
                 return Err(Error::WrongQuorumSize);
             }
 
-            // Canonical signer order determines both the bitmap and aggregate signature.
-            entries.sort_unstable_by_key(|(signer, _)| *signer);
             Ok(Certificate {
                 signers: Signers::from(
                     self.committee.members().len(),

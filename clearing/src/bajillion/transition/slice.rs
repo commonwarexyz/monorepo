@@ -1056,8 +1056,11 @@ where
     D: Digest,
 {
     validate_slice_header::<H, P, D>(context, deposits, withdrawals, &close.header, &close.roots)?;
-    if cache.root() != *context.predecessor_root() || close.rows.len() != close.shard_sets.len() {
-        return Err(TransitionError::RowCount);
+    if cache.root() != *context.predecessor_root() {
+        return Err(TransitionError::PredecessorRoot);
+    }
+    if close.rows.len() != close.shard_sets.len() {
+        return Err(TransitionError::ShardAlignment);
     }
     let (change_leaves, change_guards, changes) =
         change_material_with_strategy::<H, P, D>(&close.rows, &close.shard_sets, strategy)?;

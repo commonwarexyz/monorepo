@@ -25,40 +25,45 @@
 //! and that each honest signer makes its [`admission::SealedDealing`] durable before releasing
 //! its vote, quorum intersection leaves at least one honest certificate signer retaining every
 //! slice. The honest signer can differ by slice. This proves the selected public corpus satisfies
-//! the encoded relation; it does not prove that the operator never signed another private receipt.
+//! the encoded relation. It does not prove that the operator never signed another private receipt.
 //!
 //! ## Payer sequencing and private evidence
 //!
-//! Each payer account is one linear cumulative-debit sequence. The base safety guarantee assumes a
-//! wallet has at most one unacknowledged send for that account: it stages one exact
-//! [`payment::SignedSend`], retries the same bytes after response loss, verifies and durably commits
-//! the linked [`payment::Payment`], advances its locally owned debit, and only then signs the next
-//! endpoint. This serializes one payer account, not independent payers or a recipient's receive
-//! shards.
+//! Each payer account is one linear cumulative-debit sequence. A [`payment::SignedSend`] names
+//! one or more recipient-sorted entries under one signature and one cumulative endpoint, so a
+//! batch is accepted or rejected as a whole and advances the sequence by exactly its total. The
+//! operator acknowledges an accepted send with one [`payment::SignedReceipt`] per entry, all
+//! recorded atomically with the debit.
+//!
+//! The base safety guarantee assumes a wallet has at most one unacknowledged send for that
+//! account: it stages one exact [`payment::SignedSend`], retries the same bytes after response
+//! loss, verifies and durably commits every linked [`payment::Payment`] entry pair, advances its
+//! locally owned debit, and only then signs the next endpoint. This serializes one payer account,
+//! not independent payers or a recipient's receive shards.
 //!
 //! A later cumulative endpoint authorizes the entire debit delta up to that endpoint, while a
 //! public account row carries only its terminal outgoing payment. If a wallet signs later endpoints
 //! before obtaining earlier receipts, an earlier receipt can be neither held privately nor selected
 //! as the public terminal endpoint. That intentionally pipelined exposure is outside the base safety
-//! guarantee.
+//! guarantee, and it covers the entries of a batch whose receipts the wallet never obtained.
 //!
 //! A send alone is not an accepted payment. The transferable evidence is the linked payer send and
 //! operator receipt. Challenge submission has no caller identity requirement, so neither payer nor
 //! recipient must remain continuously online. The actual assumption is per private receipt: at
 //! least one honest holder must obtain and retain the required payment pair or pairs and get a
 //! challenge included by the inclusive deadline. A recipient that wants an independently
-//! enforceable preconfirmation must obtain that pair before relying on it; the protocol cannot
+//! enforceable preconfirmation must obtain that pair before relying on it. The protocol cannot
 //! reconstruct a receipt that no independent holder received or retained.
 //!
 //! ## Availability and settlement
 //!
 //! Honest validators retain their assigned public slices through the challenge deadline, while the
 //! embedding makes the root bundle, public corpus, and required Merkle openings retrievable. Users
-//! must also retain or obtain later withdrawal, external-payout, and frozen-state claim openings;
-//! the crate does not provide a data-availability network.
+//! must also retain or obtain later withdrawal, external-payout, and frozen-state claim openings.
+//! The crate does not provide a data-availability network.
 //!
 //! Deposits do not depend on private receipt availability. Settlement records their refund account,
-//! amount, and inclusion deadline; an expired unadmitted deposit permanently faults the operator
+//! amount, and inclusion deadline. An expired unadmitted deposit permanently faults the operator
 //! and is directly refundable without an operator or state opening.
 //!
 //! A clean close finalizes only after its inclusive challenge window, and a withdrawal becomes
@@ -170,18 +175,18 @@
 //! payment evidence.
 //!
 //! Registration activates an immutable, one-shot payment context. `max_admission_delay` bounds
-//! that context's publication window; it is not a periodic heartbeat while the slot is `OPEN`.
+//! that context's publication window. It is not a periodic heartbeat while the slot is `OPEN`.
 //! Failed construction, certification, or admission can retry against the same registration through
 //! its inclusive deadline. Afterward the context cannot be rebased because its deadline is part of
 //! the payment anchor, so observing the missed deadline permanently faults the deployment and
 //! retains that exact anchor in the fault reason. Payments from a close that was never admitted do
-//! not enter state; terminal recovery freezes and settles against the last root reached by the
+//! not enter state. Terminal recovery freezes and settles against the last root reached by the
 //! valid finalized prefix.
 //!
 //! [`transition::prepare_close_with_strategy`] constructs the four trees but does not make arbitrary
 //! untrusted rows valid. Call [`transition::PreparedClose::validate`] when the application did not
 //! assemble the corpus from inputs it already validated. Prepared state retains the change,
-//! withdrawal-output, successor-state, and coverage trees; dealing still borrows the predecessor
+//! withdrawal-output, successor-state, and coverage trees. Dealing still borrows the predecessor
 //! [`transition::StateCache`]. Settlement admission sees the registered context, typed roots,
 //! terminal proof, and certificate, not the full corpus or every slice.
 //!
@@ -189,7 +194,7 @@
 //! a validator's "dealing" is its complete assigned subset. [`admission::seal`] rejects any other
 //! subset, authenticates its slices, and returns one [`admission::Vote`] plus the owned
 //! [`admission::SealedDealing`]. The dealing must be durable before the vote is released.
-//! The exact-quorum certificate authenticates the shared [`transition::Header`]; the separate
+//! The exact-quorum certificate authenticates the shared [`transition::Header`]. The separate
 //! [`transition::TerminalProof`] authenticates terminal counts and totals but does not re-establish
 //! certification or full-corpus validity.
 //!
@@ -314,7 +319,7 @@
 //! fences the deployment. The first fault reason and admission fence are retained. A later proof
 //! against an earlier Pending prefix may separately move `invalid_from` earlier and shorten the
 //! finalizable prefix. Fault attribution chooses the earliest first-fault instant. Registration
-//! wins a tie with intake so its active payment anchor remains in the permanent reason; among
+//! wins a tie with intake so its active payment anchor remains in the permanent reason. Among
 //! intake obligations, a withdrawal wins a tie with a deposit. All tied monetary obligations
 //! remain recoverable regardless of which reason names the fault.
 //!
@@ -356,13 +361,13 @@
 //!
 //! ACCEPTED PAYMENT
 //! ----------------
-//! payer signs one cumulative send
+//! payer signs one cumulative send (one or more entries)
 //!        |
 //!        v
-//! operator verifies and atomically records both endpoints
+//! operator verifies and atomically records the debit and every entry credit
 //!        |
 //!        v
-//! operator signs the exact linked receipt
+//! operator signs one exact linked receipt per entry
 //!        |
 //!        +-- selected in a clean close --> FIFO finalization
 //!        |                                  |              |
@@ -415,7 +420,7 @@
 //! ```
 //!
 //! A missed registered admission window takes the same permanent-fault path. The unadmitted close
-//! contributes no debit, credit, withdrawal reserve, or payout reserve; recovery therefore starts
+//! contributes no debit, credit, withdrawal reserve, or payout reserve. Recovery therefore starts
 //! from the last root finalized by the clean FIFO prefix. Finalized reserves are outside active
 //! state custody, so each remains independently claimable even if a later epoch faults. These
 //! disjoint buckets ensure that a sender's value is either represented by a finalized transition,
@@ -447,7 +452,7 @@
 //!              ChangeGuard = account + digest(ChangeValue)
 //! ```
 //!
-//! State roots contain only sorted, active, positive-balance leaves; zero balances are omitted,
+//! State roots contain only sorted, active, positive-balance leaves. Zero balances are omitted,
 //! not retained as tombstones. An [`boundary::WithdrawalAction::Amount`] authorizes one exact
 //! positive amount. [`boundary::WithdrawalAction::Close`] carries no amount, permits payment
 //! activity through the epoch, then sweeps the authenticated epoch-tail balance and removes the

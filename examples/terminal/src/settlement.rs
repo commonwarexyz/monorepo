@@ -2,7 +2,7 @@
 
 use crate::{
     protocol::{
-        DepositEvent, INITIAL_BALANCE, Key, MAX_WITHDRAWALS, SQLITE_U64_MAX, SettlementResult,
+        DepositEvent, INITIAL_BALANCE, Key, MAX_ACCOUNTS, SQLITE_U64_MAX, SettlementResult,
         committee, deployment, ensure_amount_withdrawal_horizon, ensure_balance_intake_horizon,
         ensure_close_horizon, epoch_context, identities, openable_epoch_after, operator_key,
         settlement_config,
@@ -164,7 +164,7 @@ impl Settlement {
         let finalized_replays = config.max_pending_epochs;
         let challenge_replays = config.max_pending_epochs;
         let hard_fault_claim_replays =
-            NonZeroUsize::new(MAX_WITHDRAWALS).expect("terminal account bound is nonzero");
+            NonZeroUsize::new(MAX_ACCOUNTS).expect("terminal account bound is nonzero");
         let deposit_refund_replays = config.max_deposit_ids;
         let mut leaves = identities()
             .into_iter()
@@ -463,7 +463,7 @@ impl Settlement {
         let deposited = self.chain.pending_deposits().amount_for(request.account());
         if let WithdrawalAction::Amount(amount) = request.body().action() {
             ensure!(
-                deposited == 0 || amount.get() != deposited,
+                amount.get() != deposited,
                 "this terminal does not defer an exactly offset deposit"
             );
         }
@@ -540,11 +540,7 @@ impl Settlement {
         &mut self,
         submission: SettlementSubmission,
     ) -> Result<AdmissionOutcome> {
-        let elapsed = self
-            .liveness_clock
-            .as_ref()
-            .map_or(Duration::ZERO, |clock| clock.started_at.elapsed());
-        self.observe_elapsed(elapsed)?;
+        self.observe_time()?;
         if let Some((existing, finalized)) = self.finalized_replays.get(&submission.epoch) {
             ensure!(
                 existing == &submission,
@@ -938,6 +934,7 @@ mod tests {
             let receipt = SignedReceipt::issue_next::<Sha256, _>(
                 &result.payment_context,
                 &send,
+                &recipient,
                 0,
                 0,
                 0,
@@ -946,7 +943,7 @@ mod tests {
             .unwrap();
             Payment::new::<Sha256>(&result.payment_context, send, receipt).unwrap()
         };
-        Challenge::receipt_fork(payment(0, 2), payment(1, 3))
+        Challenge::receipt_fork(&payment(0, 2), &payment(1, 3))
     }
 
     #[test]

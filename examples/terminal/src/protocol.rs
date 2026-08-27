@@ -6,6 +6,7 @@ use commonware_clearing::bajillion::{
     admission::{Committee, SealedDealing, Vote, assigned_slice_indices, bls12381, seal},
     boundary::{DepositBatch, WithdrawalAction, WithdrawalBatch},
     credit::ShardSet,
+    payment::{MAX_ENTRIES, PaymentContext, SignedReceipt, SignedSend},
     settlement::{EpochDeadlinePolicy, FinalizedBatch, SettlementChain, SettlementConfig},
     state::{AccountRow, StateLeaf},
     transition::{
@@ -13,7 +14,9 @@ use commonware_clearing::bajillion::{
         PreparedClose, RootBundle, StateCache, WithdrawalClaim, prepare_close_with_strategy,
     },
 };
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+};
 use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
     bls12381::primitives::{
@@ -44,8 +47,13 @@ const VALIDATOR_SEED_START: u64 = 10_000;
 const VALIDATORS: usize = 4;
 const SLICE_BITS: u8 = 2;
 pub(crate) const MAX_ACCOUNTS: usize = 1_024;
-/// Maximum distinct payments accepted into one epoch.
+/// Maximum accepted payments in one epoch, counting one per batched-send entry.
 pub(crate) const MAX_ACCEPTED_PAYMENTS: usize = 1_024;
+/// Bounds one encoded linked payment: a batch send at the protocol entry limit plus one receipt.
+pub(crate) const MAX_PAYMENT_BYTES: usize = 12 * 1024;
+/// Bounds one encoded [`Acceptance`]: a batch send at the protocol entry limit plus one receipt
+/// per entry.
+pub(crate) const MAX_ACCEPTANCE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_DEPOSIT_EVENTS: usize = MAX_ACCOUNTS;
 pub(crate) const MAX_WITHDRAWALS: usize = MAX_ACCOUNTS;
 const MAX_ROWS: u64 = 1_024;
@@ -125,6 +133,70 @@ pub(crate) fn external_identity() -> AccountIdentity {
     AccountIdentity {
         name: wallet.name,
         key: wallet.public_key(),
+    }
+}
+
+/// One accepted send: the signed batch and one operator receipt per entry, in entry order.
+///
+/// This is the shape the wire and both SQLite stores share. The send is carried once; per-entry
+/// [`Payment`] pairs are reassembled where linked evidence is needed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Acceptance {
+    pub(crate) send: SignedSend<Key, Digest>,
+    pub(crate) receipts: Vec<SignedReceipt<Key, Digest>>,
+}
+
+impl Acceptance {
+    /// Verifies every linked entry pair and that the receipts cover the entries in entry order.
+    pub(crate) fn verify(&self, context: &PaymentContext<Key, Digest>) -> Result<()> {
+        ensure!(
+            self.receipts.len() == self.send.body().entries().len(),
+            "acceptance does not cover every send entry"
+        );
+        for (payment, entry) in self.payments().zip(self.send.body().entries()) {
+            ensure!(
+                payment.recipient() == entry.recipient(),
+                "acceptance receipts are not in entry order"
+            );
+            payment
+                .verify_linked::<Sha256>(context)
+                .context("verify acceptance receipt")?;
+        }
+        Ok(())
+    }
+
+    /// Reassembles one transferable linked pair per entry.
+    pub(crate) fn payments(&self) -> impl Iterator<Item = Payment> + '_ {
+        self.receipts
+            .iter()
+            .map(|receipt| Payment::from_parts_unchecked(self.send.clone(), receipt.clone()))
+    }
+}
+
+impl Write for Acceptance {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.send.write(buf);
+        self.receipts.write(buf);
+    }
+}
+
+impl EncodeSize for Acceptance {
+    fn encode_size(&self) -> usize {
+        self.send.encode_size() + self.receipts.encode_size()
+    }
+}
+
+impl Read for Acceptance {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            send: SignedSend::read(buf)?,
+            receipts: Vec::<SignedReceipt<Key, Digest>>::read_cfg(
+                buf,
+                &(RangeCfg::new(1..=MAX_ENTRIES), ()),
+            )?,
+        })
     }
 }
 
@@ -256,7 +328,7 @@ impl Validators {
         let private = self
             .private_keys
             .get(usize::from(validator))
-            .context("validator index is in committee")?
+            .context("validator is not in the committee")?
             .clone();
         bls12381::Scheme::signer(self.committee.clone(), private)
             .context("construct operator validator signer")
@@ -309,8 +381,7 @@ pub(crate) fn committee() -> Result<Committee> {
 }
 
 pub(crate) fn assignment() -> Result<Assignment<Digest>> {
-    Assignment::new(committee()?.commitment::<Sha256>(), SLICE_BITS)
-        .context("construct operator slice assignment")
+    Validators::new()?.assignment()
 }
 
 pub(crate) const fn settlement_config() -> SettlementConfig {
@@ -358,7 +429,7 @@ pub(crate) fn epoch_context(
         limits,
         assignment()?,
     )
-    .context("construct epoch registration")
+    .context("construct epoch context")
 }
 
 /// Shared cryptographic and parallel machinery for every operator action.

@@ -1,9 +1,10 @@
 //! Bounded settlement-chain RPC bodies and dispatch.
 
 use crate::{
-    protocol::{DepositEvent, Key, verify_registration_signature},
+    protocol::{DepositEvent, Key, MAX_ACCOUNTS, verify_registration_signature},
     rpc,
     settlement::{AdmissionOutcome, Settlement, SettlementStatus, SettlementSubmission},
+    store::MAX_DESTINATION_BYTES,
 };
 use anyhow::{Context, Result, bail, ensure};
 use bytes::{Buf, BufMut, Bytes};
@@ -45,7 +46,6 @@ pub(crate) const METHOD_CLAIM_PENDING_DEPOSIT: u8 = 12;
 pub(crate) const METHOD_CONFIRM_REGISTRATION: u8 = 13;
 
 const MAX_BATCH_ITEMS: usize = 1_024;
-const MAX_DESTINATION_BYTES: usize = 256;
 const MAX_STATE_OPENINGS: usize = 5;
 const CERTIFICATE_PARTICIPANTS: usize = 4;
 const MAX_ERROR_BYTES: usize = 1_024;
@@ -190,7 +190,7 @@ impl Read for ClaimHardFaultRequest {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let opening = StateOpening::read(buf)?;
-        if opening.proof.proof.leaf_count > MAX_BATCH_ITEMS as u32 {
+        if opening.proof.proof.leaf_count > MAX_ACCOUNTS as u32 {
             return Err(CodecError::Invalid(
                 "clearing_terminal::ClaimHardFaultRequest",
                 "state opening exceeds the terminal account bound",
@@ -369,7 +369,7 @@ impl Read for AdmitRequest {
         };
         if request.certificate.signers.len() != CERTIFICATE_PARTICIPANTS {
             return Err(CodecError::Invalid(
-                "clearing_operator::AdmitRequest",
+                "clearing_terminal::AdmitRequest",
                 "certificate participant bitmap must have length four",
             ));
         }
@@ -1214,16 +1214,9 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
     }
 }
 
-fn error_response(mut error: String) -> rpc::Response {
-    if error.len() > MAX_ERROR_BYTES {
-        let mut end = MAX_ERROR_BYTES;
-        while !error.is_char_boundary(end) {
-            end -= 1;
-        }
-        error.truncate(end);
-    }
+fn error_response(error: String) -> rpc::Response {
     rpc::Response::Error {
-        error: Bytes::from(error),
+        error: rpc::bounded_utf8(error, MAX_ERROR_BYTES),
     }
 }
 

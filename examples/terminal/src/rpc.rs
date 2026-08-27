@@ -20,6 +20,18 @@ pub(crate) const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 /// frame while leaving the bound independent of the exact varint width.
 pub(crate) const MAX_BODY_SIZE: usize = MAX_FRAME_SIZE as usize - 16;
 
+/// Truncates a UTF-8 message to `maximum` bytes on a character boundary.
+pub(crate) fn bounded_utf8(mut value: String, maximum: usize) -> Bytes {
+    if value.len() > maximum {
+        let mut end = maximum;
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.truncate(end);
+    }
+    Bytes::from(value)
+}
+
 /// A single request sent over a native clearing connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Request {

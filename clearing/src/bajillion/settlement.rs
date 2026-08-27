@@ -5,16 +5,16 @@
 //! This module is a runtime-agnostic in-memory transition primitive, not a persistence or asset
 //! adapter. The embedding settlement environment must commit each state mutation and its returned
 //! custody effects atomically and idempotently. Every public mutation that accepts `now` first
-//! observes expired liveness deadlines; that permanent fence can be the method's only state
+//! observes expired liveness deadlines. That permanent fence can be the method's only state
 //! change even when the requested operation returns an error. Callers must therefore provide one
 //! authenticated, monotonic clock and persist mutation-on-error results.
 //!
 //! Queued deposits can be returned directly to their fixed accounts after a permanent fault,
-//! without a surviving-state witness. Terminal settlement freezes the last finalized state root;
-//! each surviving account then consumes one authenticated opening independently. Starting
+//! without a surviving-state witness. Terminal settlement freezes the last finalized state root.
+//! Each surviving account then consumes one authenticated opening independently. Starting
 //! terminal settlement only traverses the bounded admitted pipeline to recover unfinalized
-//! deposits and withdrawals. Deposit replay state is retained for the deployment lifetime;
-//! reaching its limit safely rejects new deposits.
+//! deposits and withdrawals. Deposit replay state is retained for the deployment lifetime.
+//! Reaching its limit safely rejects new deposits.
 //! Withdrawal replay identifiers are retained only through the configured maximum deadline.
 
 use crate::bajillion::{
@@ -56,7 +56,8 @@ pub enum BatchStatus<D: Digest> {
     Invalidated(BatchId<D>),
 }
 
-/// Header, root witness, exact certificate, and current status retained for an admitted close.
+/// Header, root witness, exact certificate, successor liability, and current status retained
+/// for an admitted close.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingBatch<D: Digest> {
     /// Admitted header.
@@ -167,7 +168,8 @@ pub struct HardFaultRelease<P: PublicKey> {
 /// Immutable deadline rules for every close in one settlement deployment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EpochDeadlinePolicy {
-    /// Maximum admission-deadline increment, measured from `now` with no pipeline or its tail.
+    /// Maximum admission-deadline increment, measured from the pipeline tail's admission
+    /// deadline, or from `now` when the pipeline is empty.
     pub max_admission_delay: NonZeroU64,
     /// Minimum interval from an epoch's admission deadline through its challenge deadline.
     pub minimum_challenge_duration: NonZeroU64,
@@ -330,10 +332,6 @@ impl<P: PublicKey, D: Digest> PackedWithdrawals<P, D> {
             .map(|position| &self.index[position])
     }
 
-    fn contains(&self, account: &P) -> bool {
-        self.find(account).is_some()
-    }
-
     fn deadline(&self, account: &P) -> Option<u64> {
         self.find(account).map(|entry| entry.deadline)
     }
@@ -404,7 +402,8 @@ struct HardFaultClaims<P: PublicKey, D: Digest> {
 /// permanently rejects new work, while preserving the earlier pending prefix for ordinary
 /// challenge and FIFO finalization before independent terminal claims.
 ///
-/// Every method accepting `now` may persist a deadline fence before returning an error.
+/// Every method accepting `now` may record a permanent deadline fence before returning an
+/// error.
 /// See the [module-level integration contract](self) for clock, durability, and custody-effect
 /// requirements.
 #[derive(Debug)]
@@ -797,14 +796,12 @@ where
     }
 
     fn has_unfinalized_withdrawal(&self, account: &P) -> bool {
-        self.pending_withdrawals.contains_key(account)
-            || self
-                .pipeline
-                .iter()
-                .any(|entry| entry.admitted.withdrawals.contains(account))
+        self.unfinalized_withdrawal_deadline(account).is_some()
     }
 
-    fn unfinalized_withdrawal_deadline(&self, account: &P) -> Option<u64> {
+    /// Returns one staged or admitted-but-unfinalized withdrawal's absolute deadline.
+    #[must_use]
+    pub fn unfinalized_withdrawal_deadline(&self, account: &P) -> Option<u64> {
         self.pending_withdrawals
             .get(account)
             .map(|request| request.body().deadline())
@@ -946,12 +943,6 @@ where
     pub fn pending_withdrawals(&self) -> WithdrawalBatch<P, H::Digest> {
         WithdrawalBatch::new(self.pending_withdrawals.values().cloned().collect())
             .expect("staged withdrawal aggregation is canonical and checked")
-    }
-
-    /// Returns one outstanding withdrawal's absolute deadline.
-    #[must_use]
-    pub fn pending_withdrawal_deadline(&self, account: &P) -> Option<u64> {
-        self.unfinalized_withdrawal_deadline(account)
     }
 
     /// Returns the finalized state root followed by every admitted successor-state root.
@@ -2320,7 +2311,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .challenge(5, batch_id, &Challenge::receipt_fork(left, right))
+                .challenge(5, batch_id, &Challenge::receipt_fork(&left, &right))
                 .unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
@@ -2400,7 +2391,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .challenge(5, batch_id, &Challenge::receipt_fork(left, right))
+                .challenge(5, batch_id, &Challenge::receipt_fork(&left, &right))
                 .unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
@@ -2992,8 +2983,8 @@ mod tests {
         assert!(requests[0].account().as_ref() > requests[1].account().as_ref());
 
         let packed = PackedWithdrawals::new(&requests);
-        assert!(packed.contains(requests[0].account()));
-        assert!(packed.contains(requests[1].account()));
+        assert!(packed.deadline(requests[0].account()).is_some());
+        assert!(packed.deadline(requests[1].account()).is_some());
         assert_eq!(
             packed.get(requests[0].account(), 0).unwrap(),
             Some(requests[0].clone())
@@ -3014,9 +3005,16 @@ mod tests {
         let send =
             SignedSend::sign_next(context.payment(), payer, recipient.public_key(), amount, 0)
                 .unwrap();
-        let receipt =
-            SignedReceipt::issue_next::<Sha256, _>(context.payment(), &send, 0, 0, 0, operator)
-                .unwrap();
+        let receipt = SignedReceipt::issue_next::<Sha256, _>(
+            context.payment(),
+            &send,
+            &recipient.public_key(),
+            0,
+            0,
+            0,
+            operator,
+        )
+        .unwrap();
         Payment::new::<Sha256>(context.payment(), send, receipt).unwrap()
     }
 
@@ -3302,7 +3300,7 @@ mod tests {
         } else {
             (left, right)
         };
-        let challenge = Challenge::receipt_fork(left, right);
+        let challenge = Challenge::receipt_fork(&left, &right);
         (fixture, challenge, first_id)
     }
 
@@ -3444,7 +3442,7 @@ mod tests {
             &fixture.accounts[2],
             3,
         );
-        let challenge = Challenge::receipt_fork(left, right);
+        let challenge = Challenge::receipt_fork(&left, &right);
 
         assert_eq!(
             fixture.chain.challenge(10, second_id, &challenge).unwrap(),
@@ -3507,6 +3505,7 @@ mod tests {
         let receipt = SignedReceipt::issue_next::<Sha256, _>(
             close_context.payment(),
             payment.send(),
+            payment.recipient(),
             payment.receipt().body().shard(),
             payment.receipt().body().cumulative_shard_credit(),
             payment.receipt().body().index(),
@@ -4302,7 +4301,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .pending_withdrawal_deadline(&account.public_key()),
+                .unfinalized_withdrawal_deadline(&account.public_key()),
             None
         );
 
@@ -4349,7 +4348,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .pending_withdrawal_deadline(&account.public_key()),
+                .unfinalized_withdrawal_deadline(&account.public_key()),
             Some(9)
         );
 
@@ -4394,7 +4393,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .pending_withdrawal_deadline(&account.public_key()),
+                .unfinalized_withdrawal_deadline(&account.public_key()),
             None
         );
         assert!(matches!(
@@ -5424,7 +5423,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, second_id, &Challenge::receipt_fork(left, right))
+                .challenge(8, second_id, &Challenge::receipt_fork(&left, &right))
                 .unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
@@ -5545,7 +5544,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, second_id, &Challenge::receipt_fork(left, right))
+                .challenge(8, second_id, &Challenge::receipt_fork(&left, &right))
                 .unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
@@ -5650,7 +5649,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, second_id, &Challenge::receipt_fork(left, right))
+                .challenge(8, second_id, &Challenge::receipt_fork(&left, &right))
                 .unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
@@ -5771,7 +5770,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, second_id, &Challenge::receipt_fork(left, right))
+                .challenge(8, second_id, &Challenge::receipt_fork(&left, &right))
                 .unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
@@ -6126,7 +6125,7 @@ mod tests {
             &fixture.accounts[2],
             3,
         );
-        let challenge = Challenge::receipt_fork(left, right);
+        let challenge = Challenge::receipt_fork(&left, &right);
         assert_eq!(
             fixture.chain.challenge(8, second_id, &challenge).unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
@@ -6269,7 +6268,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, middle_id, &Challenge::receipt_fork(left, right))
+                .challenge(8, middle_id, &Challenge::receipt_fork(&left, &right))
                 .unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
@@ -6399,7 +6398,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, third_id, &Challenge::receipt_fork(left, right))
+                .challenge(8, third_id, &Challenge::receipt_fork(&left, &right))
                 .unwrap(),
             Verdict::Proven(ChallengeKind::ReceiptFork)
         );
@@ -7150,7 +7149,7 @@ mod tests {
         assert_eq!(
             fixture
                 .chain
-                .pending_withdrawal_deadline(&source.public_key()),
+                .unfinalized_withdrawal_deadline(&source.public_key()),
             None
         );
 

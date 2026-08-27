@@ -18,14 +18,14 @@ const STATE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_STATE_LEAF";
 const STATE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_STATE_ROOT";
 const CHANGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_LEAF";
 const CHANGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_ROOT";
-const CREDIT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_LEAF";
-const CREDIT_TIP_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_VECTOR_ROOT";
+const CREDIT_TIP_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_TIP_LEAF";
+const CREDIT_TIP_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_TIP_ROOT";
 const DEPOSIT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_LEAF";
 const DEPOSIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_ROOT";
 const WITHDRAWAL_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_LEAF";
 const WITHDRAWAL_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_ROOT";
-const COVERAGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_LAYOUT_LEAF";
-const COVERAGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_LAYOUT_ROOT";
+const COVERAGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_COVERAGE_LEAF";
+const COVERAGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_COVERAGE_ROOT";
 const WITHDRAWAL_OUTPUT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_LEAF";
 const WITHDRAWAL_OUTPUT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_ROOT";
 
@@ -63,7 +63,7 @@ impl VectorKind {
         match self {
             Self::State => STATE_LEAF_DOMAIN,
             Self::Change => CHANGE_LEAF_DOMAIN,
-            Self::CreditTip => CREDIT_LEAF_DOMAIN,
+            Self::CreditTip => CREDIT_TIP_LEAF_DOMAIN,
             Self::Deposit => DEPOSIT_LEAF_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_LEAF_DOMAIN,
             Self::Coverage => COVERAGE_LEAF_DOMAIN,
@@ -341,7 +341,7 @@ impl<H: Hasher> Builder<H> {
     where
         T: Encode + Sync,
     {
-        let requested = u64::try_from(values.len()).unwrap_or(u64::MAX);
+        let requested = values.len() as u64;
         let count = u32::try_from(values.len()).map_err(|_| Error::TooManyValues(requested))?;
         let actual = self
             .added
@@ -637,9 +637,8 @@ impl<D: Digest> Opening<D> {
         kind: VectorKind,
         encoded: &[u8],
     ) -> Result<VectorRoot<D>, Error> {
+        self.validate_shape()?;
         let len = self.proof.leaf_count;
-        check_len(len)?;
-        check_positions(core::slice::from_ref(&self.position), len, false)?;
         let leaf = leaf_digest::<H>(kind, len, self.position, encoded)?;
         let inner = self
             .proof
@@ -736,7 +735,28 @@ impl<D: Digest> MultiOpening<D> {
         B: AsRef<[u8]>,
     {
         self.validate_shape()?;
-        verify_multi_opening::<H, D, B>(kind, &self.positions, &self.proof, root, encoded_values)
+        if self.positions.len() != encoded_values.len() {
+            return Err(Error::OpeningLengthMismatch {
+                positions: self.positions.len(),
+                values: encoded_values.len(),
+            });
+        }
+        let len = self.proof.leaf_count;
+        let mut leaves = Vec::with_capacity(self.positions.len());
+        for (&position, encoded) in self.positions.iter().zip(encoded_values) {
+            leaves.push((
+                leaf_digest::<H>(kind, len, position, encoded.as_ref())?,
+                position,
+            ));
+        }
+        let inner = self
+            .proof
+            .root_from_multi_inclusion::<H>(&leaves, &Sequential)?;
+        if bind_root::<H>(kind, len, &inner) == *root {
+            Ok(())
+        } else {
+            Err(Error::InvalidOpening)
+        }
     }
 
     /// Reads a multiproof without allocating more positions than its enclosing object permits.
@@ -752,40 +772,6 @@ impl<D: Digest> MultiOpening<D> {
             CodecError::Invalid("MultiOpening", "multiproof shape is not canonical")
         })?;
         Ok(opening)
-    }
-}
-
-pub(crate) fn verify_multi_opening<H, D, B>(
-    kind: VectorKind,
-    positions: &[u32],
-    proof: &bmt::Proof<D>,
-    root: &VectorRoot<D>,
-    encoded_values: &[B],
-) -> Result<(), Error>
-where
-    H: Hasher<Digest = D>,
-    D: Digest,
-    B: AsRef<[u8]>,
-{
-    if positions.len() != encoded_values.len() {
-        return Err(Error::OpeningLengthMismatch {
-            positions: positions.len(),
-            values: encoded_values.len(),
-        });
-    }
-    let len = proof.leaf_count;
-    let mut leaves = Vec::with_capacity(positions.len());
-    for (&position, encoded) in positions.iter().zip(encoded_values) {
-        leaves.push((
-            leaf_digest::<H>(kind, len, position, encoded.as_ref())?,
-            position,
-        ));
-    }
-    let inner = proof.root_from_multi_inclusion::<H>(&leaves, &Sequential)?;
-    if bind_root::<H>(kind, len, &inner) == *root {
-        Ok(())
-    } else {
-        Err(Error::InvalidOpening)
     }
 }
 

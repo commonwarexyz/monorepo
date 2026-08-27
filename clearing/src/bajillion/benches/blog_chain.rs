@@ -146,7 +146,7 @@ impl BlogChainFixture {
                 assert!(matches!(
                     recipient.as_ref(),
                     HigherShardTipLookup::Present {
-                        shard: CreditTipLookup::Present { .. },
+                        tip: CreditTipLookup::Present { .. },
                         ..
                     }
                 ));
