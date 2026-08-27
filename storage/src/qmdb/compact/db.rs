@@ -1719,6 +1719,94 @@ pub(crate) mod tests {
         });
     }
 
+    /// Applying a batch to an import-pending db journals the imported witness in place of the
+    /// partition's previous contents before appending the new one.
+    pub(crate) fn test_compact_import_then_apply_persists<O: TestVariant>() {
+        deterministic::Runner::default().start(|context| async move {
+            let dst = "compact-import-apply-dst";
+            let src = "compact-import-apply-src";
+            let meta_a = O::value(11);
+            let meta_b = O::value(22);
+            let meta_c = O::value(33);
+
+            // Build state B in a separate source partition and fetch its state the way a sync
+            // client would.
+            let (target_b, pinned_b) = {
+                let source = open_db::<O>(context.child("src"), src).await;
+                let batch = source
+                    .new_batch()
+                    .mutate(2)
+                    .merkleize(&source, Some(meta_b.clone()), Location::new(0))
+                    .await;
+                let (source, _) = source.apply_batch(batch).await.unwrap();
+                let source = source.sync().await.unwrap();
+                let target = source.target();
+                let (response, _) = source
+                    .serve(Request::Boundary {
+                        size: target.size,
+                        start: target.size - 1,
+                    })
+                    .await
+                    .unwrap();
+                let Response::Boundary { pinned_nodes, .. } = response else {
+                    panic!("boundary request should get a boundary response");
+                };
+                (target, pinned_nodes)
+            };
+
+            // Seed the destination partition with a different committed state A of the same size.
+            {
+                let seeded = open_db::<O>(context.child("seed"), dst).await;
+                let batch = seeded
+                    .new_batch()
+                    .mutate(1)
+                    .merkleize(&seeded, Some(meta_a), Location::new(0))
+                    .await;
+                let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
+                let seeded = seeded.sync().await.unwrap();
+                assert_eq!(seeded.target().size, target_b.size);
+                assert_ne!(seeded.target(), target_b);
+            }
+
+            // Import state B over the destination and apply a batch on top of it with no
+            // durability operation in between.
+            let target_c = {
+                let journal = open_witness_journal(context.child("import"), dst).await;
+                let imported = TestDb::<O>::init_from_sync(
+                    Sequential,
+                    journal,
+                    (),
+                    target_b.size - 1,
+                    pinned_b,
+                    O::commit_op(Some(meta_b.clone()), Location::new(0)),
+                )
+                .unwrap();
+                assert_eq!(imported.target(), target_b);
+                let floor = imported.inactivity_floor_loc();
+                let batch = imported
+                    .new_batch()
+                    .mutate(3)
+                    .merkleize(&imported, Some(meta_c.clone()), floor)
+                    .await;
+                let root_c = batch.root();
+                let (applied, _) = imported.apply_batch(batch).await.unwrap();
+                assert_eq!(applied.root(), root_c);
+                let target_c = applied.target();
+                let _applied = applied.sync().await.unwrap();
+                target_c
+            };
+
+            // Reopen lands on the applied state, and the retained history below it is B, not A.
+            let db = open_db::<O>(context.child("reopen"), dst).await;
+            assert_eq!(db.target(), target_c);
+            assert_eq!(db.get_metadata(), Some(meta_c));
+            let db = db.rewind(target_b.size).await.unwrap();
+            assert_eq!(db.target(), target_b);
+            assert_eq!(db.get_metadata(), Some(meta_b));
+            db.destroy().await.unwrap();
+        });
+    }
+
     pub(crate) fn test_compact_reopen_rejects_tampered_witness<O: TestVariant>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-witness-tamper";
@@ -2367,6 +2455,7 @@ pub(crate) mod tests {
                 test_compact_rewind_to_committed_entry_after_reopen,
                 test_compact_sync_after_commit,
                 test_compact_import_persists_with_commit,
+                test_compact_import_then_apply_persists,
                 test_compact_reopen_rejects_tampered_witness,
                 test_compact_rewind_rejects_corrupt_target_entry,
                 test_compact_reopen_rejects_interrupted_import,
