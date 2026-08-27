@@ -2102,12 +2102,12 @@ fn test_turn_refreshes_deadlines_after_waker_callback() {
     let sleepy = arc_waker(Arc::new(SleepPast(deadline + Duration::from_millis(5))));
     ioloop
         .pending_waker_actions
-        .push(handle::WakerAction::Wake(sleepy));
+        .push(WakerAction::Wake(sleepy));
     ioloop.turn(&mut ring);
     assert_eq!(ioloop.timeout_wheel.next_deadline(), None);
 
     drop(recv);
-    handle::wake_batch(handle.close().into_iter().map(handle::WakerAction::Wake));
+    wake_batch(handle.close().into_iter().map(WakerAction::Wake));
     ioloop.drain(&mut ring);
 }
 

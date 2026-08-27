@@ -3,6 +3,7 @@
 //!
 //! See [crate::iouring] for the full request flow and liveness discussion.
 
+mod callbacks;
 mod event_loop;
 pub use event_loop::MAX_RING_SIZE;
 pub(crate) use event_loop::{Driver, validate_ring_config};

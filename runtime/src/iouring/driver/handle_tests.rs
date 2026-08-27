@@ -4,6 +4,7 @@ use futures::task::{ArcWake, waker as arc_waker};
 use std::{
     cell::Cell,
     os::unix::net::UnixStream,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},

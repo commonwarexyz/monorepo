@@ -1,5 +1,7 @@
 use super::{
-    Handle, Ops, handle, request,
+    Handle, Ops, handle,
+    callbacks::{WakerAction, wake_batch},
+    request,
     spinner::Spinner,
     timeout::{self, Tick, TimeoutWheel},
     waiter::{CompletionId, CompletionOutcome, StageOutcome, WaiterId},
@@ -161,7 +163,7 @@ pub(crate) struct IoUringLoop {
     ///
     /// Empty at each outer turn or drain iteration boundary. Draining invokes
     /// no callback under the affinity borrow and retains the batch capacity.
-    pending_waker_actions: Vec<handle::WakerAction>,
+    pending_waker_actions: Vec<WakerAction>,
     /// Reusable batch of foreign-thread drop notifications.
     ///
     /// Empty before every mailbox drain and after every orphan-processing
@@ -236,7 +238,7 @@ impl IoUringLoop {
     /// Must be called outside any borrow of the driver state: wakers reenter
     /// executor scheduling but never the loop state itself.
     fn flush_wakers(&mut self) {
-        handle::wake_batch(self.pending_waker_actions.drain(..));
+        wake_batch(self.pending_waker_actions.drain(..));
     }
 
     /// Reconcile FIFO capacity grants against the waiter table.
@@ -416,7 +418,7 @@ impl IoUringLoop {
         match ops.waiters.stage(waiter_id) {
             StageOutcome::Ready { waker } => {
                 self.pending_waker_actions
-                    .extend(waker.map(handle::WakerAction::Wake));
+                    .extend(waker.map(WakerAction::Wake));
             }
             StageOutcome::Freed => self.notify_capacity(ops),
             StageOutcome::Ticket {
@@ -607,7 +609,7 @@ impl IoUringLoop {
                     self.timeout_wheel.remove(tick);
                 }
                 self.pending_waker_actions
-                    .extend(waker.map(handle::WakerAction::Wake));
+                    .extend(waker.map(WakerAction::Wake));
             }
             CompletionOutcome::Freed { target_tick } => {
                 if let Some(tick) = target_tick {
@@ -656,7 +658,7 @@ impl IoUringLoop {
         // Queue the ticket callback ahead of capacity callbacks to preserve
         // callback order, without executing it under the Ops borrow.
         self.pending_waker_actions
-            .extend(waker.map(handle::WakerAction::Wake));
+            .extend(waker.map(WakerAction::Wake));
 
         // Reconcile reservations against the waiter's authoritative free list.
         self.notify_capacity(ops);
@@ -979,7 +981,7 @@ impl Driver {
     /// attempted even if one panics, then the earliest panic is resumed.
     pub(crate) fn close(&self) {
         let wakers = self.inner.handle.close();
-        handle::wake_batch(wakers.into_iter().map(handle::WakerAction::Wake));
+        wake_batch(wakers.into_iter().map(WakerAction::Wake));
     }
 
     /// Drain in-flight ring work so kernel-owned buffers and descriptors are
