@@ -177,16 +177,22 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
     where
         O: EncodeShared + Read,
     {
-        let mut merkle = compact::Merkle::new(strategy);
         if journal.size() == 0 {
-            journal = bootstrap_initial_commit::<E, F, O, H, S>(journal, &mut merkle).await?;
+            // Leaf 0 has nothing pinned below it, so the genesis witness needs no tree.
+            let genesis = Witness {
+                op_bytes: encode_commit_op::<F, O>(None, Location::new(0)),
+                size: Location::new(1),
+                pinned_nodes: Vec::new(),
+            };
+            (journal, _) = journal.append(&genesis).await?;
+            journal = journal.sync().await?;
         }
-        let tip_witness =
-            load_tip::<E, F, O, H, S>(&journal, &mut merkle, commit_codec_config).await?;
+        let entry = journal.read(journal.size() - 1).await?;
+        let Rebuilt { merkle, tip } = rebuild::<F, O, H, S>(strategy, entry, commit_codec_config)?;
         Ok(Self {
             merkle,
             journal,
-            tip_witness,
+            tip_witness: tip,
             tip_state: TipState::Committed,
             pending_sync: None,
         })
@@ -211,19 +217,17 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
             return Err(Error::UnexpectedData(last_commit_loc));
         };
         validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-        let op_bytes = encode_commit_op::<F, O>(metadata.clone(), inactivity_floor_loc);
-
-        let mut merkle =
-            compact::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
-        let hasher = qmdb::hasher::<H>();
-        merkle.append_leaf(&hasher, &op_bytes)?;
-        let tip_witness =
-            build_witness::<F, H, S, _>(&merkle, metadata, inactivity_floor_loc, op_bytes)?;
-        merkle.prune_to_frontier();
+        let witness = Witness {
+            op_bytes: encode_commit_op::<F, O>(metadata.clone(), inactivity_floor_loc),
+            size: last_commit_loc + 1,
+            pinned_nodes,
+        };
+        let Rebuilt { merkle, tip } =
+            restore::<F, O, H, S>(strategy, witness, metadata, inactivity_floor_loc)?;
         Ok(Self {
             merkle,
             journal,
-            tip_witness,
+            tip_witness: tip,
             tip_state: TipState::Imported,
             pending_sync: None,
         })
@@ -462,12 +466,13 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
             .position_of(target)
             .await?
             .ok_or(Error::Merkle(merkle::Error::RewindBeyondHistory))?;
-        let witness =
-            rebuild::<F, H::Digest, O, H, S>(entry, &mut self.merkle, commit_codec_config)?;
+        let Rebuilt { merkle, tip } =
+            rebuild::<F, O, H, S>(self.merkle.strategy().clone(), entry, commit_codec_config)?;
         self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
+        self.merkle = merkle;
         self.pending_sync = None;
         self.tip_state = TipState::Committed;
-        self.tip_witness = witness;
+        self.tip_witness = tip;
         Ok(self)
     }
 
@@ -611,52 +616,62 @@ fn validate_inactivity_floor<F: Family>(
     Ok(())
 }
 
-/// Load the tip witness from the journal and rebuild the Merkle from it.
-async fn load_tip<E, F, O, H, S>(
-    journal: &Journal<E, F, H::Digest>,
-    merkle: &mut compact::Merkle<F, H::Digest, S>,
-    commit_codec_config: &O::Cfg,
-) -> Result<VerifiedWitness<F, H::Digest, O::Metadata>, Error<F>>
+/// A Merkle materialized from a witness, with the witness verified against it.
+struct Rebuilt<F: Family, O: Variant<F>, H: Hasher, S: Strategy> {
+    merkle: compact::Merkle<F, H::Digest, S>,
+    tip: VerifiedWitness<F, H::Digest, O::Metadata>,
+}
+
+/// Materialize the tree `witness` describes and derive its root and commit proof.
+///
+/// The tree is built from the pinned nodes one operation below the commit plus the commit
+/// itself, then pruned back to its frontier. Merkle errors propagate unchanged.
+fn restore<F, O, H, S>(
+    strategy: S,
+    witness: Witness<F, H::Digest>,
+    metadata: Option<O::Metadata>,
+    inactivity_floor_loc: Location<F>,
+) -> Result<Rebuilt<F, O, H, S>, Error<F>>
 where
-    E: Context,
+    F: Family,
+    O: Variant<F>,
+    H: Hasher,
+    S: Strategy,
+{
+    let Witness {
+        op_bytes,
+        size,
+        pinned_nodes,
+    } = witness;
+    let Some(last_commit_loc) = size.checked_sub(1) else {
+        return Err(Error::DataCorrupted("invalid compact witness"));
+    };
+    let mut merkle = compact::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
+    merkle.append_leaf(&qmdb::hasher::<H>(), &op_bytes)?;
+    let tip = build_witness::<F, H, S, _>(&merkle, metadata, inactivity_floor_loc, op_bytes)?;
+    merkle.prune_to_frontier();
+    Ok(Rebuilt { merkle, tip })
+}
+
+/// Decode and validate a journaled witness, then restore it. Any failure is
+/// [`Error::DataCorrupted`]: the entry came from this db's own journal.
+fn rebuild<F, O, H, S>(
+    strategy: S,
+    witness: Witness<F, H::Digest>,
+    commit_codec_config: &O::Cfg,
+) -> Result<Rebuilt<F, O, H, S>, Error<F>>
+where
     F: Family,
     O: Variant<F> + Read,
     H: Hasher,
     S: Strategy,
 {
-    let size = journal.size();
-    if size == 0 {
-        return Err(Error::DataCorrupted("missing compact witness"));
-    }
-    let entry = journal.read(size - 1).await?;
-    rebuild::<F, H::Digest, O, H, S>(entry, merkle, commit_codec_config)
-}
-
-/// Rebuild the Merkle from `witness` and derive its root and commit proof.
-///
-/// The Merkle is reset to the pinned nodes one operation below the commit, the commit operation is
-/// appended, and the root and the commit's inclusion proof are computed from the rebuilt
-/// state. A structurally invalid entry fails with [`Error::DataCorrupted`].
-fn rebuild<F, D, O, H, S>(
-    witness: Witness<F, D>,
-    merkle: &mut compact::Merkle<F, D, S>,
-    commit_codec_config: &O::Cfg,
-) -> Result<VerifiedWitness<F, D, O::Metadata>, Error<F>>
-where
-    F: Family,
-    D: Digest,
-    O: Variant<F> + Read,
-    H: Hasher<Digest = D>,
-    S: Strategy,
-{
-    let size = witness.size;
-    if size == 0 {
+    let Some(last_commit_loc) = witness.size.checked_sub(1) else {
         return Err(Error::DataCorrupted("invalid compact witness"));
-    }
+    };
 
     // Decode the commit op for its metadata and inactivity floor. The floor determines the
     // inactive peak boundary used for root computation.
-    let last_commit_loc = size - 1;
     let last_commit_op = O::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let Some((metadata, inactivity_floor_loc)) = O::into_commit(last_commit_op) else {
@@ -664,50 +679,8 @@ where
     };
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
-    let hasher = qmdb::hasher::<H>();
-    merkle
-        .reset_to(last_commit_loc, witness.pinned_nodes.clone())
-        .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
-    merkle
-        .append_leaf(&hasher, &witness.op_bytes)
-        .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
-    let verified =
-        build_witness::<F, H, S, _>(merkle, metadata, inactivity_floor_loc, witness.op_bytes)
-            .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
-    merkle.prune_to_frontier();
-    Ok(verified)
-}
-
-/// Insert and persist the initial `Commit(None, 0)` for a new compact db.
-async fn bootstrap_initial_commit<E, F, O, H, S>(
-    journal: Journal<E, F, H::Digest>,
-    merkle: &mut compact::Merkle<F, H::Digest, S>,
-) -> Result<Journal<E, F, H::Digest>, Error<F>>
-where
-    E: Context,
-    F: Family,
-    O: Variant<F> + EncodeShared,
-    H: Hasher,
-    S: Strategy,
-{
-    let last_commit_op_bytes = encode_commit_op::<F, O>(None, Location::new(0));
-    let hasher = qmdb::hasher::<H>();
-    let batch = {
-        let batch = merkle.new_batch().add(&hasher, &last_commit_op_bytes);
-        batch.merkleize(merkle.mem(), &hasher)
-    };
-    merkle.apply_batch(&batch)?;
-
-    // The initial commit has one leaf and an inactivity floor of 0.
-    let verified = build_witness::<F, H, S, O::Metadata>(
-        merkle,
-        None,
-        Location::new(0),
-        last_commit_op_bytes,
-    )?;
-    let (journal, _) = journal.append(&verified.witness).await?;
-    let journal = journal.sync().await?;
-    Ok(journal)
+    restore::<F, O, H, S>(strategy, witness, metadata, inactivity_floor_loc)
+        .map_err(|_| Error::DataCorrupted("invalid compact witness"))
 }
 
 #[cfg(test)]

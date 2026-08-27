@@ -7,8 +7,8 @@
 //! `(leaf_count, pinned_nodes)` snapshot has the same root and the same future append
 //! behavior as the original.
 //!
-//! Nodes created by appends are retained only until the structure is pruned to its frontier or
-//! reset to a snapshot; after that they are no longer readable.
+//! Nodes created by appends are retained only until the structure is pruned to its frontier;
+//! after that they are no longer readable.
 
 use crate::merkle::{
     Error, Family, Location, batch,
@@ -86,51 +86,31 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         }
     }
 
-    /// Create a `Merkle` from a compact state snapshot.
+    /// Create a `Merkle` with no retained nodes from a compact state snapshot.
     pub(crate) fn from_compact_state(
         strategy: S,
         leaves: Location<F>,
         pinned_nodes: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
-        Ok(Self {
-            mem: Arc::new(mem),
-            strategy,
-        })
-    }
-
-    /// Build a [`Mem`] with no retained nodes from a compact state snapshot.
-    fn mem_from_compact_state(
-        leaves: Location<F>,
-        pinned_nodes: Vec<D>,
-    ) -> Result<Mem<F, D>, Error<F>> {
         if !leaves.is_valid() {
             return Err(Error::LocationOverflow(leaves));
         }
         if pinned_nodes.len() != F::nodes_to_pin(leaves).count() {
             return Err(Error::InvalidPinnedNodes);
         }
-        if leaves == 0 {
-            Ok(Mem::new())
+        let mem = if leaves == 0 {
+            Mem::new()
         } else {
             Mem::init(MemConfig {
                 nodes: vec![],
                 pruning_boundary: leaves,
                 pinned_nodes,
-            })
-        }
-    }
-
-    /// Replace the in-memory tree with one rebuilt from a compact state snapshot, discarding
-    /// the current state.
-    pub(crate) fn reset_to(
-        &mut self,
-        leaves: Location<F>,
-        pinned_nodes: Vec<D>,
-    ) -> Result<(), Error<F>> {
-        let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
-        self.mem = Arc::new(mem);
-        Ok(())
+            })?
+        };
+        Ok(Self {
+            mem: Arc::new(mem),
+            strategy,
+        })
     }
 
     /// Discard all retained nodes except the pinned frontier.
@@ -230,7 +210,7 @@ mod tests {
             .collect()
     }
 
-    fn assert_reset_to_round_trip<F: Family>() {
+    fn assert_compact_state_round_trip<F: Family>() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut merkle = TestMerkle::<F>::new(Sequential);
         append(&mut merkle, &[b"a", b"b", b"c"]);
@@ -242,10 +222,9 @@ mod tests {
         merkle.prune_to_frontier();
         assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
 
-        // A fresh tree reset to the snapshot reproduces the same state.
-        let mut restored = TestMerkle::<F>::new(Sequential);
-        append(&mut restored, &[b"x"]);
-        restored.reset_to(leaves, pinned_nodes.clone()).unwrap();
+        // A tree built from the snapshot reproduces the same state.
+        let mut restored =
+            TestMerkle::<F>::from_compact_state(Sequential, leaves, pinned_nodes).unwrap();
         assert_eq!(restored.root(&hasher, 0).unwrap(), root);
         assert_eq!(restored.leaves(), leaves);
 
@@ -256,39 +235,34 @@ mod tests {
             restored.root(&hasher, 0).unwrap(),
             merkle.root(&hasher, 0).unwrap()
         );
-
-        // from_compact_state builds the same tree as reset_to.
-        let from_state =
-            TestMerkle::<F>::from_compact_state(Sequential, leaves, pinned_nodes).unwrap();
-        assert_eq!(from_state.root(&hasher, 0).unwrap(), root);
     }
 
     #[test]
-    fn test_reset_to_round_trip_mmr() {
-        assert_reset_to_round_trip::<mmr::Family>();
+    fn test_compact_state_round_trip_mmr() {
+        assert_compact_state_round_trip::<mmr::Family>();
     }
 
     #[test]
-    fn test_reset_to_round_trip_mmb() {
-        assert_reset_to_round_trip::<mmb::Family>();
+    fn test_compact_state_round_trip_mmb() {
+        assert_compact_state_round_trip::<mmb::Family>();
     }
 
     #[test]
-    fn test_reset_to_rejects_invalid_snapshot() {
+    fn test_from_compact_state_rejects_invalid_snapshot() {
         let mut merkle = TestMerkle::<mmr::Family>::new(Sequential);
         append(&mut merkle, &[b"a", b"b"]);
         let leaves = merkle.leaves();
 
         // Wrong pinned-node count.
         assert!(matches!(
-            merkle.reset_to(leaves, vec![]),
+            TestMerkle::<mmr::Family>::from_compact_state(Sequential, leaves, vec![]),
             Err(Error::InvalidPinnedNodes)
         ));
 
         // Leaf count beyond the family maximum.
         let too_many = mmr::Family::MAX_LEAVES + 1;
         assert!(matches!(
-            merkle.reset_to(too_many, vec![]),
+            TestMerkle::<mmr::Family>::from_compact_state(Sequential, too_many, vec![]),
             Err(Error::LocationOverflow(loc)) if loc == too_many
         ));
     }
