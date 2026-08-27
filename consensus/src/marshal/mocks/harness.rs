@@ -2091,10 +2091,7 @@ impl TestHarness for StandardHarness {
             context.child("finalizations_by_height"),
             prunable::Config {
                 translator: EightCap,
-                metadata_partition: format!(
-                    "{}-finalizations-by-height-markers",
-                    partition_prefix
-                ),
+                metadata_partition: format!("{}-finalizations-by-height-markers", partition_prefix),
                 key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{}-finalizations-by-height-value", partition_prefix),
@@ -2930,10 +2927,7 @@ impl TestHarness for CodingHarness {
             context.child("finalizations_by_height"),
             prunable::Config {
                 translator: EightCap,
-                metadata_partition: format!(
-                    "{}-finalizations-by-height-markers",
-                    partition_prefix
-                ),
+                metadata_partition: format!("{}-finalizations-by-height-markers", partition_prefix),
                 key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{}-finalizations-by-height-value", partition_prefix),
