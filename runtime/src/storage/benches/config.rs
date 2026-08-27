@@ -267,10 +267,11 @@ impl Config {
     /// Validated io_uring ring size for the requested concurrency.
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     pub fn iouring_ring_size(&self) -> Result<u32, String> {
-        crate::ring_size::iouring_ring_size(
-            self.inflight,
-            commonware_runtime::iouring::MAX_RING_SIZE,
-        )
+        let max_ring_size = commonware_runtime::iouring::MAX_RING_SIZE;
+        if self.inflight > (max_ring_size / 2) as usize {
+            return Err("--inflight requires an io_uring ring larger than MAX_RING_SIZE".into());
+        }
+        Ok((self.inflight as u32 * 2).max(1024))
     }
 
     fn validate(&self) -> Result<(), String> {

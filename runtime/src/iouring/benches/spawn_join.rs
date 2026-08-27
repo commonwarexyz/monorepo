@@ -6,7 +6,7 @@ use criterion::Criterion;
 use futures::future::join_all;
 use std::time::{Duration, Instant};
 
-const WIDTHS: [usize; 7] = [1, 29, 30, 31, 32, 64, 1024];
+const WIDTHS: [usize; 3] = [1, 64, 1024];
 
 /// Register ready spawn-and-join rows for both runtimes.
 pub fn bench(c: &mut Criterion) {

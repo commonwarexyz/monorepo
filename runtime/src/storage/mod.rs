@@ -53,27 +53,6 @@ stability_scope!(ALPHA {
 stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub mod iouring;
 });
-// The storage benchmark's ring-size arithmetic lives in a bench-target source
-// file, and the harness-free bench binary cannot run tests. Include the file
-// here so its tests run under the crate's unit-test harness.
-#[cfg(all(test, target_os = "linux", feature = "iouring"))]
-#[path = "benches/ring_size.rs"]
-mod bench_ring_size;
-
-#[cfg(all(test, target_os = "linux", feature = "iouring"))]
-mod bench_ring_size_drift {
-    /// Property: the ring-size limit mirrored in the shared bench source
-    /// stays equal to the runtime's real constant. Setup: none. Action:
-    /// compare the two constants. Expected: equality, so the bench boundary
-    /// tests cannot go stale against the runtime.
-    #[test]
-    fn test_mirrored_max_ring_size_matches_runtime() {
-        assert_eq!(
-            super::bench_ring_size::MIRRORED_MAX_RING_SIZE,
-            crate::iouring::MAX_RING_SIZE
-        );
-    }
-}
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });

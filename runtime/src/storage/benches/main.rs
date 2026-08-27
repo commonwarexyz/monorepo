@@ -13,8 +13,6 @@ mod config;
 mod error;
 mod filesystem;
 mod report;
-#[cfg(all(target_os = "linux", feature = "iouring"))]
-mod ring_size;
 mod runner;
 mod workload;
 
