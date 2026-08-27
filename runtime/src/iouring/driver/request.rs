@@ -108,61 +108,18 @@ pub(super) enum WriteBuffers {
 /// Buffers and iovec scratch for a vectored write.
 pub(super) struct VectoredBuffers {
     bufs: IoBufs,
-    iovecs: IovecScratch,
-    message: MessageHeader,
+    iovecs: Box<[libc::iovec]>,
+    message: libc::msghdr,
 }
 
-/// Reusable iovec scratch describing co-owned buffers to the kernel.
-///
-/// This newtype exists to carry the narrowest possible unsafe `Send`
-/// contract: `libc::iovec` contains raw pointers (making it `!Send` by
-/// default), so vouching at this level lets every containing type regain
-/// compiler-checked auto traits.
-struct IovecScratch(Box<[libc::iovec]>);
-
-// SAFETY: the scratch entries are initialized with dangling pointers and may
-// be stale between `build_sqe` calls, but they are never dereferenced in
-// Rust. Each `build_sqe` refreshes them from the co-owned `IoBufs` (owned by
-// the same waiter slot, itself `Send`) immediately before the kernel can
-// observe them, so the pointers never outlive or alias the buffers they
-// describe on any thread.
-unsafe impl Send for IovecScratch {}
-
-/// Stable message header for a vectored socket send.
-///
-/// The containing [VectoredBuffers] is boxed, so this header remains at a
-/// stable address while an SQE refers to it.
-struct MessageHeader(libc::msghdr);
-
-// SAFETY: the header starts with only null pointers and zero lengths. Before
-// submission, `refresh_message` points it at iovec scratch owned by the same
-// boxed `VectoredBuffers`. Rust never dereferences the raw pointers, and the
-// co-owned buffers and scratch remain alive until the kernel completes the
-// SQE, including if the request moves between threads.
-unsafe impl Send for MessageHeader {}
-
-impl MessageHeader {
-    /// Return an empty message header with no name or ancillary data.
-    const fn new() -> Self {
-        // SAFETY: an all-zero `msghdr` represents an empty message with null
-        // optional pointers and zero lengths.
-        Self(unsafe { std::mem::zeroed() })
-    }
-}
-
-impl std::ops::Deref for IovecScratch {
-    type Target = [libc::iovec];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for IovecScratch {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
+// SAFETY: every raw pointer in `iovecs` and `message` targets `bufs` or
+// `iovecs`, which this value owns. Each `build_sqe` refreshes those pointers
+// before submission, and Rust never dereferences them. `VectoredBuffers` is
+// held in the `Box` of `WriteBuffers::Vectored`, giving `message` a stable
+// address while an SQE refers to it, and all pointer targets remain owned
+// until the kernel completes the SQE even if the request moves between
+// threads.
+unsafe impl Send for VectoredBuffers {}
 
 impl From<IoBufs> for WriteBuffers {
     /// Normalize caller-provided buffers into either a single-buffer fast path
@@ -182,8 +139,10 @@ impl From<IoBufs> for WriteBuffers {
                 .collect();
                 Self::Vectored(Box::new(VectoredBuffers {
                     bufs,
-                    iovecs: IovecScratch(iovecs),
-                    message: MessageHeader::new(),
+                    iovecs,
+                    // SAFETY: an all-zero `msghdr` represents an empty message
+                    // with null optional pointers and zero lengths.
+                    message: unsafe { std::mem::zeroed() },
                 }))
             }
         }
@@ -214,9 +173,9 @@ impl VectoredBuffers {
     /// Refresh and return the stable message header for a socket send.
     fn refresh_message(&mut self) -> *const libc::msghdr {
         let (iovecs, iovecs_len) = self.refresh_iovecs();
-        self.message.0.msg_iov = iovecs.cast_mut();
-        self.message.0.msg_iovlen = iovecs_len as usize;
-        &raw const self.message.0
+        self.message.msg_iov = iovecs.cast_mut();
+        self.message.msg_iovlen = iovecs_len as usize;
+        &raw const self.message
     }
 }
 

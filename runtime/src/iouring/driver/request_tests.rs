@@ -1444,8 +1444,8 @@ fn test_vectored_send_builds_sendmsg() {
     let WriteBuffers::Vectored(v) = &request.write else {
         panic!("expected vectored write buffers");
     };
-    assert_eq!(v.message.0.msg_iov, v.iovecs.as_ptr().cast_mut());
-    assert_eq!(v.message.0.msg_iovlen, 2);
+    assert_eq!(v.message.msg_iov, v.iovecs.as_ptr().cast_mut());
+    assert_eq!(v.message.msg_iovlen, 2);
 }
 
 #[test]
