@@ -46,6 +46,20 @@ pub struct ProtectedFragment {
 }
 
 impl ProtectedFragment {
+    pub(crate) const fn formatted(text: String) -> Self {
+        Self {
+            text,
+            disposition: Disposition::Formatted,
+        }
+    }
+
+    pub(crate) fn preserved(source: &str) -> Self {
+        Self {
+            text: source.to_owned(),
+            disposition: Disposition::PreservedForTrivia,
+        }
+    }
+
     /// Returns the protected fragment text.
     pub fn text(&self) -> &str {
         &self.text
@@ -188,17 +202,11 @@ fn format_or_preserve(
     source: &str,
     format: impl FnOnce() -> Result<String, Error>,
 ) -> Result<ProtectedFragment, Error> {
-    if requires_preservation(source) {
-        return Ok(ProtectedFragment {
-            text: source.to_owned(),
-            disposition: Disposition::PreservedForTrivia,
-        });
+    if source_requires_preservation(source) {
+        return Ok(ProtectedFragment::preserved(source));
     }
 
-    Ok(ProtectedFragment {
-        text: format()?,
-        disposition: Disposition::Formatted,
-    })
+    Ok(ProtectedFragment::formatted(format()?))
 }
 
 fn parse_wrapper(tokens: TokenStream) -> Result<File, Error> {
@@ -265,7 +273,7 @@ fn dedent_wrapper(source: &str) -> Result<String, Error> {
     Ok(output)
 }
 
-fn requires_preservation(source: &str) -> bool {
+pub(crate) fn source_requires_preservation(source: &str) -> bool {
     let Ok(stream) = source.parse::<TokenStream>() else {
         return true;
     };

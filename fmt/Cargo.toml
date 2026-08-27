@@ -15,6 +15,7 @@ workspace = true
 bench = false
 
 [dependencies]
+commonware-macros-grammar.workspace = true
 prettyplease.workspace = true
 proc-macro2 = { workspace = true, features = ["span-locations"] }
 quote.workspace = true

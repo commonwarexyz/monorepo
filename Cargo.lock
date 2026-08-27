@@ -1645,6 +1645,7 @@ dependencies = [
 name = "commonware-fmt"
 version = "2026.7.0"
 dependencies = [
+ "commonware-macros-grammar",
  "prettyplease",
  "proc-macro2",
  "quote",

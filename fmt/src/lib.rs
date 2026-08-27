@@ -7,6 +7,10 @@
 )]
 
 #[cfg(not(commonware_stability_RESERVED))]
+pub mod macros;
+#[cfg(not(commonware_stability_RESERVED))]
 pub mod pretty;
 #[cfg(not(commonware_stability_RESERVED))]
 pub mod source;
+
+mod writer;
