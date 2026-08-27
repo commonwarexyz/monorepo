@@ -2770,10 +2770,12 @@ mod tests {
         let listener = Arc::new(Mutex::new(None));
         let escaped = Arc::clone(&listener);
         let (addr_send, addr_recv) = std::sync::mpsc::channel();
+        let (connected_send, connected_recv) = std::sync::mpsc::channel();
         let connector = std::thread::spawn(move || {
             let addr = addr_recv.recv().unwrap();
-            std::thread::sleep(Duration::from_millis(100));
-            std::net::TcpStream::connect(addr).unwrap()
+            let connection = std::net::TcpStream::connect(addr).unwrap();
+            connected_send.send(()).unwrap();
+            connection
         });
 
         let cfg = Config::default().with_ring(RingConfig {
@@ -2807,6 +2809,8 @@ mod tests {
                 std::mem::forget(blocked);
 
                 addr_send.send(addr).unwrap();
+                connected_recv.recv().unwrap();
+                std::thread::sleep(Duration::from_millis(100));
             })
         }));
         assert!(result.is_err(), "capacity waker should panic");
