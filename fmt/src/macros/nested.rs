@@ -20,6 +20,7 @@ const RECURSION_LIMIT: usize = 32;
 #[derive(Clone, Copy)]
 enum Style {
     Expression,
+    BlockExpression,
     ValueBlock,
 }
 
@@ -325,6 +326,23 @@ pub(super) fn expression(
     )
 }
 
+pub(super) fn block_expression(
+    expression: &Expr,
+    fragment_source: &str,
+    source: &str,
+    source_map: &SourceMap<'_>,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    format_expression(
+        expression,
+        fragment_source,
+        source,
+        source_map,
+        depth,
+        Style::BlockExpression,
+    )
+}
+
 pub(super) fn value_block(
     expression: &Expr,
     fragment_source: &str,
@@ -466,6 +484,7 @@ fn format_expression(
         }
         return match style {
             Style::Expression => pretty::expression(expression, fragment_source),
+            Style::BlockExpression => pretty::block_expression(expression, fragment_source),
             Style::ValueBlock => pretty::value_block(expression, fragment_source),
         }
         .map_err(Error::from);
@@ -500,6 +519,7 @@ fn format_expression(
 
     let formatted = match style {
         Style::Expression => pretty::expression(&shielded, &shielded_source)?,
+        Style::BlockExpression => pretty::block_expression(&shielded, &shielded_source)?,
         Style::ValueBlock => pretty::value_block(&shielded, &shielded_source)?,
     };
     if formatted.disposition() == Disposition::PreservedForTrivia {

@@ -26,6 +26,7 @@ struct BranchLayout {
 struct LifecycleLayout {
     keyword: String,
     expression: String,
+    expression_is_block: bool,
 }
 
 struct ShellTrivia {
@@ -146,15 +147,25 @@ fn render_select_loop(
     let output = render(options, |writer| {
         let mut boundary = 0;
         write_boundary(writer, false, &prefix.shell_trivia.boundaries[boundary]);
-        write_expression_entry(writer, None, &prefix.context);
+        write_expression_entry(writer, None, &prefix.context, false);
         boundary += 1;
         write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         if let Some(on_start) = &prefix.on_start {
-            write_expression_entry(writer, Some(&on_start.keyword), &on_start.expression);
+            write_expression_entry(
+                writer,
+                Some(&on_start.keyword),
+                &on_start.expression,
+                on_start.expression_is_block,
+            );
             boundary += 1;
             write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         }
-        write_expression_entry(writer, Some(&on_stopped.keyword), &on_stopped.expression);
+        write_expression_entry(
+            writer,
+            Some(&on_stopped.keyword),
+            &on_stopped.expression,
+            on_stopped.expression_is_block,
+        );
         boundary += 1;
         write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         for branch in &branches {
@@ -163,7 +174,12 @@ fn render_select_loop(
             write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         }
         if let Some(on_end) = &on_end {
-            write_expression_entry(writer, Some(&on_end.keyword), &on_end.expression);
+            write_expression_entry(
+                writer,
+                Some(&on_end.keyword),
+                &on_end.expression,
+                on_end.expression_is_block,
+            );
             boundary += 1;
             write_boundary(writer, true, &prefix.shell_trivia.boundaries[boundary]);
         }
@@ -264,13 +280,32 @@ fn format_lifecycle(
     lifecycle: &SelectLoopLifecycle,
     depth: usize,
 ) -> Result<Option<LifecycleLayout>, Error> {
-    let Some(expression) = format_expression(source, source_map, &lifecycle.expression, depth)?
-    else {
-        return Ok(None);
+    let expression_is_block = matches!(lifecycle.expression, Expr::Block(_));
+    let expression_source = spanned_source(source_map, &lifecycle.expression)?;
+    let expression = if expression_is_block {
+        nested::block_expression(
+            &lifecycle.expression,
+            expression_source,
+            source,
+            source_map,
+            depth,
+        )?
+    } else {
+        nested::expression(
+            &lifecycle.expression,
+            expression_source,
+            source,
+            source_map,
+            depth,
+        )?
     };
+    if is_immovable(&expression) {
+        return Ok(None);
+    }
     Ok(Some(LifecycleLayout {
         keyword: lifecycle.keyword.to_string(),
-        expression,
+        expression: expression.into_string(),
+        expression_is_block,
     }))
 }
 
@@ -597,7 +632,18 @@ fn write_block_body(writer: &mut Writer<'_>, body: &str) {
     writer.push(",");
 }
 
-fn write_expression_entry(writer: &mut Writer<'_>, keyword: Option<&str>, expression: &str) {
+fn write_expression_entry(
+    writer: &mut Writer<'_>,
+    keyword: Option<&str>,
+    expression: &str,
+    expression_is_block: bool,
+) {
+    if expression_is_block && let Some(keyword) = keyword {
+        writer.push(keyword);
+        write_block_body(writer, expression);
+        return;
+    }
+
     let prefix = keyword.map_or_else(String::new, |keyword| format!("{keyword} => "));
     let inline = format!("{prefix}{expression},");
     if !expression.contains('\n') && writer.fits(&inline) {
@@ -700,6 +746,21 @@ mod tests {
                 .contains("Some(value) = receive() else break => value,\n")
         );
         assert!(formatted.text().contains("on_end => finish(),\n"));
+    }
+
+    #[test]
+    fn keeps_lifecycle_block_attached_to_keyword() {
+        let source = "context,on_start=>{if !start_sync::<E,A,S,V>(&context,&mut state).await{return;}},on_stopped=>{},";
+        let once = select_loop(source, OPTIONS)
+            .expect("select loop should format")
+            .into_string();
+        let twice = select_loop(&once, OPTIONS)
+            .expect("select loop should format twice")
+            .into_string();
+
+        assert!(once.contains("on_start => {\n"), "{once}");
+        assert!(once.contains("start_sync::<E, A, S, V>("), "{once}");
+        assert_eq!(once, twice);
     }
 
     #[test]

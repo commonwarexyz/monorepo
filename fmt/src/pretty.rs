@@ -110,6 +110,32 @@ pub fn expression(expression: &Expr, source: &str) -> Result<ProtectedFragment, 
     })
 }
 
+/// Formats a block expression as a standalone function-body expression.
+///
+/// `source` must be the exact source text from which `expression` was parsed.
+pub(crate) fn block_expression(
+    expression: &Expr,
+    source: &str,
+) -> Result<ProtectedFragment, Error> {
+    if !matches!(expression, Expr::Block(_)) {
+        return Err(Error::WrapperShape);
+    }
+    format_or_preserve(source, || {
+        let wrapper = parse_wrapper(quote! {
+            fn __commonware_fmt() {
+                #expression
+            }
+        })?;
+        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
+        let function = sole_function(&reparsed)?;
+        let [Stmt::Expr(expression @ Expr::Block(_), None)] = function.block.stmts.as_slice()
+        else {
+            return Err(Error::WrapperShape);
+        };
+        extract_dedented(&formatted, expression.span())
+    })
+}
+
 pub(crate) fn value_block(expression: &Expr, source: &str) -> Result<ProtectedFragment, Error> {
     format_or_preserve(source, || {
         let wrapper = parse_wrapper(quote! {
@@ -456,6 +482,18 @@ mod tests {
             "value\n    .map(|item| {\n        let doubled = item * 2;\n        doubled + 1\n    })"
         );
         syn::parse_str::<Expr>(formatted.text()).expect("formatted expression should parse");
+    }
+
+    #[test]
+    fn formats_block_expression_without_initializer_prefix() {
+        let source = "{ // Keep this guard.\nif ready() && !start_sync::<E, A, S, V>(&context, &mut state).await { return; } }";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = block_expression(&input, source).expect("block should format");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(formatted.text().matches("// Keep this guard.").count(), 1);
+        assert!(formatted.text().contains("start_sync::<E, A, S, V>("));
+        syn::parse_str::<Expr>(formatted.text()).expect("formatted block should parse");
     }
 
     #[test]
