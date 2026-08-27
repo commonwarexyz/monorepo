@@ -11,7 +11,7 @@ pub(crate) use event_loop::{Driver, validate_ring_config};
 mod handle;
 pub(crate) use handle::{AcceptTicket, Affine, Handle, Ops, current_thread_id};
 mod request;
-pub(crate) use request::{Cache, RawSocketAddr};
+pub(crate) use request::Cache;
 pub(crate) mod spinner;
 mod timeout;
 use timeout::Tick;

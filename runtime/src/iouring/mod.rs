@@ -216,10 +216,12 @@
 pub(crate) mod driver;
 #[cfg(test)]
 pub(crate) use driver::testing;
-pub(crate) use driver::{AcceptTicket, Cache, Driver, Handle, RawSocketAddr};
+pub(crate) use driver::{AcceptTicket, Cache, Driver, Handle};
 pub use driver::{MAX_RING_SIZE, spinner::Config as SpinnerConfig};
 mod runtime;
 pub use runtime::{Config, Context, Runner};
+mod sockaddr;
+pub(crate) use sockaddr::RawSocketAddr;
 use std::time::Duration;
 
 /// Configuration for an io_uring instance.

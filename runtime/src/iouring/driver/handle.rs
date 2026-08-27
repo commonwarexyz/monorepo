@@ -57,8 +57,8 @@ use super::{
     callbacks::{CapacityActionSink, CapacityActions, WakerAction, wake_batch},
     capacity::{CapacityAdmission, CapacityId, CapacityWaiters},
     request::{
-        AcceptRequest, Cache, ConnectRequest, Output, RawSocketAddr, ReadAtRequest, RecvRequest,
-        Request, SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
+        AcceptRequest, Cache, ConnectRequest, Output, ReadAtRequest, RecvRequest, Request,
+        SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
     },
     waiter::{
         CompletionDropOutcome, CompletionId, DeferredPoll, DropOutcome, PollState,
@@ -66,7 +66,7 @@ use super::{
     },
     waker::Waker as RingWaker,
 };
-use crate::{Error, IoBufMut, IoBufs, WriteOptions};
+use crate::{Error, IoBufMut, IoBufs, WriteOptions, iouring::RawSocketAddr};
 use commonware_utils::sync::Mutex;
 use std::{
     cell::RefCell,
