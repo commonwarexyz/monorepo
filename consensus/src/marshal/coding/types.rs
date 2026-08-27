@@ -347,8 +347,12 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             ));
         }
 
-        // Recompute the coding root so the returned block satisfies the exact
-        // commitment requested by the caller.
+        // Recompute the coding root and require it to match the expected
+        // commitment.
+        //
+        // The context digest is not checkable here because [`Block`] does not
+        // expose a context, so callers that need the full commitment to match
+        // must compare it after decoding.
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);

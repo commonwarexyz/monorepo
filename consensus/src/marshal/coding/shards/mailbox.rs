@@ -81,7 +81,7 @@ where
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
     /// by its [`Commitment`].
     SubscribeByCommitment {
-        /// The block's digest.
+        /// The block's commitment.
         commitment: Commitment<B, C, H>,
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,

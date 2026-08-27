@@ -910,7 +910,7 @@ commonware_macros::stability_scope!(ALPHA {
         use commonware_coding::{Config as CodingConfig, Scheme};
         use commonware_cryptography::{Digest, Digestible, Hasher};
         use commonware_math::algebra::Random;
-        use commonware_utils::{Array, Span, NZU16};
+        use commonware_utils::{Array, NZU16, Span};
         use core::{
             cmp::Ordering,
             hash::{Hash, Hasher as StdHasher},
@@ -922,8 +922,8 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// The fixed wire width reserved for each digest field in a [`Commitment`].
         ///
-        /// A concrete width keeps the representation independent of `B`, `C`, and `H`;
-        /// stable Rust cannot use their associated sizes in the backing array length.
+        /// A concrete width keeps the representation independent of `B`, `C`, and `H`.
+        /// Stable Rust cannot use their associated sizes in the backing array length.
         pub const COMMITMENT_DIGEST_SIZE: usize = 32;
 
         /// The encoded size of a [`Commitment`].
@@ -1009,7 +1009,7 @@ commonware_macros::stability_scope!(ALPHA {
 
             fn field<T: ReadExt + FixedSize>(&self, offset: usize) -> T {
                 T::read(&mut &self.0[offset..offset + T::SIZE])
-                    .expect("Commitment fields are validated on construction")
+                    .expect("fields are validated on decode and typed construction")
             }
 
             /// Validates a typed digest field and its canonical zero padding.
@@ -1066,6 +1066,8 @@ commonware_macros::stability_scope!(ALPHA {
         }
 
         impl<B: Digestible, C: Scheme, H: Hasher> Digest for Commitment<B, C, H> {
+            /// The all-zero sentinel. Its config bytes are not a valid
+            /// [`CodingConfig`], so accessors must not be called on it.
             const EMPTY: Self = {
                 Self::assert_layout();
                 Self([0u8; COMMITMENT_SIZE], PhantomData)
