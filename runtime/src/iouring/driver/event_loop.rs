@@ -953,13 +953,16 @@ impl Driver {
         wake_batch(wakers.into_iter().map(WakerAction::Wake));
     }
 
-    /// Drain in-flight ring work so kernel-owned buffers and descriptors are
-    /// released, consuming the driver: the ring is destroyed afterwards.
+    /// Close admission and drain in-flight ring work before destroying the
+    /// ring.
     ///
-    /// A panic inside the drain aborts the process: unwinding would destroy
-    /// the ring and release the driver's op-table reference while the kernel
-    /// may still write into request buffers.
-    pub(crate) fn drain(mut self) {
+    /// A close callback panic is resumed only after the drain. A panic inside
+    /// the drain aborts the process because unwinding would release the
+    /// driver's op-table reference while the kernel may still access request
+    /// buffers.
+    pub(crate) fn shutdown(mut self) {
+        let close_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.close()));
+
         // The guard must live inside this frame: locals drop before
         // parameters during unwind, so the abort fires while `self` (the
         // ring and its op-table reference) is still alive. A guard at any
@@ -968,10 +971,14 @@ impl Driver {
         let guard = AbortOnUnwind;
         self.state.drain(&mut self.ring);
         std::mem::forget(guard);
+
+        if let Err(payload) = close_panic {
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
-/// Aborts the process when dropped during an unwind (see [Driver::drain]).
+/// Aborts the process when dropped during an unwind (see [Driver::shutdown]).
 struct AbortOnUnwind;
 
 impl Drop for AbortOnUnwind {

@@ -26,7 +26,7 @@ impl ArcWake for Unpark {
 /// polling a future, mirroring the runtime executor's structure.
 pub(crate) struct TestLoop {
     pub(super) handle: Handle,
-    /// The owned driver, taken by [TestLoop::shutdown] (drain consumes it).
+    /// The owned driver, taken by [TestLoop::shutdown].
     driver: Option<Driver>,
 }
 
@@ -108,13 +108,7 @@ impl TestLoop {
         let Some(driver) = self.driver.take() else {
             return;
         };
-        // Mirror the runtime's teardown: a waker panic must not skip the
-        // drain (drain panics abort inside [Driver::drain]).
-        let wakers = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.close()));
-        driver.drain();
-        if let Err(payload) = wakers {
-            std::panic::resume_unwind(payload);
-        }
+        driver.shutdown();
     }
 
     /// Number of tracked logical operations, including Ready tickets.

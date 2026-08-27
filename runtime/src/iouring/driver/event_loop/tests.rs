@@ -603,8 +603,7 @@ fn test_pending_operations_aggregates_across_drivers() {
     // Close and drain A: the parked result survives the drain, but
     // destroying the driver removes its contribution from the shared
     // gauge.
-    driver_a.close();
-    driver_a.drain();
+    driver_a.shutdown();
     assert_eq!(gauge.get(), 0);
 
     drop(ticket);
@@ -697,8 +696,7 @@ fn test_pending_operations_refreshes_after_reentrant_completion_poll() {
     assert_eq!(gauge.get(), 0);
     drop(completion_waker);
     drop(consumer);
-    driver.close();
-    driver.drain();
+    driver.shutdown();
 }
 
 #[test]
@@ -778,8 +776,7 @@ fn test_ticket_metric_counts_pending_and_ready_once() {
     ));
     driver.turn();
     assert_eq!(gauge.get(), 0);
-    driver.close();
-    driver.drain();
+    driver.shutdown();
 }
 
 #[test]
@@ -2107,8 +2104,7 @@ fn test_turn_refreshes_deadlines_after_waker_callback() {
     assert_eq!(driver.state.timeout_wheel.next_deadline(), None);
 
     drop(recv);
-    wake_batch(handle.close().into_iter().map(WakerAction::Wake));
-    driver.state.drain(&mut driver.ring);
+    driver.shutdown();
 }
 
 #[test]

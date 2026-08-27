@@ -52,7 +52,7 @@
 //! ```
 //!
 //! Worker teardown isolates cleanup callbacks, closes and drains the ring, and
-//! resumes only after quiescence. A panic inside [`Driver::drain`] aborts
+//! resumes only after quiescence. A panic inside [`Driver::shutdown`] aborts
 //! instead of unwinding ring state. [`crate::Runner::start`] joins every worker
 //! before resuming a retained payload. Exact ordering between concurrently
 //! observed failures is not guaranteed. Panic-capable output drops are
@@ -943,12 +943,10 @@ impl Worker {
         // its waiter slot until its deadline.
         //
         // Capacity wakers are arbitrary user code (any manually polled
-        // future supplies its own waker): a waker panic must not skip the
-        // drain, so it is retained and resumed only after the ring is
-        // quiesced. A panic inside the drain itself aborts the process
-        // before unwinding can free ring state (see [Driver::drain]).
-        capture_cleanup_panic(&mut first_panic, || driver.close());
-        driver.drain();
+        // future supplies its own waker). Driver shutdown retains a callback
+        // panic until the ring is quiesced, while a drain panic aborts before
+        // unwinding can free ring state.
+        capture_cleanup_panic(&mut first_panic, move || driver.shutdown());
 
         if first_panic.is_some() {
             // A completed root may return a value with adversarial drop glue.
