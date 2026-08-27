@@ -666,8 +666,7 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
 }
 
 /// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)`, returning the next
-/// `floor`: set bits in `[floor, min(len, tip))` ascending via one `ones_iter_from`, then
-/// locations in `[max(floor, len), tip)` sequentially.
+/// `floor`.
 pub(crate) fn fill_candidates<F: Family, B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
     floor: Location<F>,
@@ -2011,10 +2010,11 @@ where
     /// with prefetched committed-prefix candidates that must come from the same floor and
     /// the same bitmap (see [`PrefetchedCandidates`]).
     ///
-    /// `bitmap` may be speculative (the current variant's layered parent). The floor-raise loop
-    /// revalidates each candidate against the batch diff, ancestor diffs, and index: the
-    /// committed bitmap does not track uncommitted ancestor ops, so bits can be set for
-    /// locations an ancestor superseded.
+    /// `bitmap` is the committed bitmap or, for the current variant, a speculative view layered
+    /// over it. Either way it is a hint: a clear bit proves a location inactive, but a set bit
+    /// does not prove it active, and locations at or past `bitmap.len()` carry no bit. The
+    /// floor-raise loop therefore revalidates every candidate against the batch diff, the
+    /// ancestor diffs, and the index.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
@@ -2227,10 +2227,11 @@ where
     /// resolution would otherwise require: the caller's new value and the cached next key feed
     /// op generation directly) and scans `bitmap` for floor-raise candidates.
     ///
-    /// `bitmap` may be speculative (the current variant's layered parent). The floor-raise loop
-    /// revalidates each candidate against the batch diff, ancestor diffs, and index: the
-    /// committed bitmap does not track uncommitted ancestor ops, so bits can be set for
-    /// locations an ancestor superseded.
+    /// `bitmap` is the committed bitmap or, for the current variant, a speculative view layered
+    /// over it. Either way it is a hint: a clear bit proves a location inactive, but a set bit
+    /// does not prove it active, and locations at or past `bitmap.len()` carry no bit. The
+    /// floor-raise loop therefore revalidates every candidate against the batch diff, the
+    /// ancestor diffs, and the index.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
