@@ -1584,7 +1584,7 @@ enum TicketState {
     Waiting(CompletionId),
     /// Admission failed on a closed driver: the failure output is parked
     /// locally for the next poll.
-    Failed(Option<Output>),
+    Failed(Output),
     /// The output was delivered.
     Done,
 }
@@ -1627,9 +1627,7 @@ impl Ticket {
             );
             match admission {
                 Poll::Ready(Ok(id)) => Poll::Ready((TicketState::Waiting(id), actions)),
-                Poll::Ready(Err(output)) => {
-                    Poll::Ready((TicketState::Failed(Some(output)), actions))
-                }
+                Poll::Ready(Err(output)) => Poll::Ready((TicketState::Failed(output), actions)),
                 Poll::Pending => {
                     wake_batch(actions);
                     Poll::Pending
@@ -1657,9 +1655,12 @@ impl Future for Ticket {
                 this.state = TicketState::Done;
                 Poll::Ready(output)
             }
-            TicketState::Failed(output) => {
-                let output = output.take().expect("failed ticket already delivered");
-                this.state = TicketState::Done;
+            TicketState::Failed(_) => {
+                let TicketState::Failed(output) =
+                    std::mem::replace(&mut this.state, TicketState::Done)
+                else {
+                    unreachable!("ticket state verified failed above");
+                };
                 Poll::Ready(output)
             }
             TicketState::Done => panic!("io_uring ticket polled after completion"),
