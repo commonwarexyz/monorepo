@@ -103,14 +103,19 @@ impl Spinner {
         );
     }
 
-    /// Create a new spinner. Runs a one-time calibration loop using `probe`
-    /// to measure the per-iteration cost of the real spin condition. The probe
-    /// should have the same cost as the condition passed to [`Spinner::spin`].
+    /// Create a new spinner. When spinning is enabled, runs a one-time
+    /// calibration loop using `probe` to measure the per-iteration cost of the
+    /// real spin condition. The probe should have the same cost as the condition
+    /// passed to [`Spinner::spin`].
     ///
     /// Panics if `budget_us > max_budget_us`.
     pub fn new(cfg: &Config, probe: impl Fn() -> bool) -> Self {
         Self::validate_config(cfg);
-        let iters_per_us = calibrate(probe);
+        let iters_per_us = if cfg.budget_us == 0 {
+            0
+        } else {
+            calibrate(probe)
+        };
         let min_budget = cfg.budget_us.saturating_mul(iters_per_us);
         Self {
             budget: min_budget,
@@ -332,7 +337,15 @@ mod tests {
 
     #[test]
     fn test_disabled_spinner() {
-        let mut s = Spinner::new(&Config::disabled(), || false);
-        assert!(!s.spin(|| true));
+        let mut s = Spinner::new(
+            &Config {
+                budget_us: 0,
+                max_budget_us: 50,
+                quick_wake_us: 50,
+            },
+            || panic!("disabled spinner calibrated"),
+        );
+        s.on_wake(Duration::ZERO);
+        assert!(!s.spin(|| panic!("disabled spinner condition invoked")));
     }
 }
