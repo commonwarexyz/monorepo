@@ -1,12 +1,15 @@
 //! Complete-file collection and replacement of supported macro bodies.
 
 use crate::{
-    macros::{self, LineEnding, MacroKind, Options, macro_kind},
+    macros::{self, LineEnding, Options, delimiter_text, format_at_depth, macro_kind},
     pretty::Disposition,
+    skip,
     source::SourceMap,
 };
 use std::ops::Range;
-use syn::{Macro, spanned::Spanned, visit::Visit};
+use syn::{
+    Expr, ForeignItem, ImplItem, Item, Macro, Stmt, TraitItem, spanned::Spanned, visit::Visit,
+};
 use thiserror::Error;
 
 /// The result of formatting one Rust source file.
@@ -66,6 +69,48 @@ struct Collector<'ast> {
 }
 
 impl<'ast> Visit<'ast> for Collector<'ast> {
+    fn visit_item(&mut self, node: &'ast Item) {
+        if skip::item(node) {
+            return;
+        }
+        syn::visit::visit_item(self, node);
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        if skip::impl_item(node) {
+            return;
+        }
+        syn::visit::visit_impl_item(self, node);
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
+        if skip::trait_item(node) {
+            return;
+        }
+        syn::visit::visit_trait_item(self, node);
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
+        if skip::foreign_item(node) {
+            return;
+        }
+        syn::visit::visit_foreign_item(self, node);
+    }
+
+    fn visit_stmt(&mut self, node: &'ast Stmt) {
+        if skip::statement(node) {
+            return;
+        }
+        syn::visit::visit_stmt(self, node);
+    }
+
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        if skip::expression(node) {
+            return;
+        }
+        syn::visit::visit_expr(self, node);
+    }
+
     fn visit_macro(&mut self, node: &'ast Macro) {
         if macro_kind(&node.path, &node.delimiter).is_some() {
             self.macros.push(node);
@@ -116,8 +161,10 @@ fn format_once(source: &str) -> Result<Pass, Error> {
         let delimiter = invocation.delimiter.span();
         let open = source_map.span_range(delimiter.open())?;
         let close = source_map.span_range(delimiter.close())?;
-        if source_map.slice(open.clone())? != "{"
-            || source_map.slice(close.clone())? != "}"
+        let (expected_open, expected_close) =
+            delimiter_text(&invocation.delimiter).ok_or(Error::Delimiter)?;
+        if source_map.slice(open.clone())? != expected_open
+            || source_map.slice(close.clone())? != expected_close
             || open.end > close.start
         {
             return Err(Error::Delimiter);
@@ -129,10 +176,7 @@ fn format_once(source: &str) -> Result<Pass, Error> {
             indentation: line_indentation(source, path_start),
             line_ending,
         };
-        let body = match kind {
-            MacroKind::Select => macros::select(body_source, options)?,
-            MacroKind::SelectLoop => macros::select_loop(body_source, options)?,
-        };
+        let body = format_at_depth(kind, body_source, options, 0)?;
         if body.disposition() == Disposition::Formatted {
             formatted_macros += 1;
         } else {
@@ -207,6 +251,95 @@ mod tests {
         assert!(formatted.text().contains(
             "commonware_macros::select_loop! {\n        context,\n        on_stopped => shutdown(),\n    }"
         ));
+    }
+
+    #[test]
+    fn formats_stability_macros_and_nested_select() {
+        let source = "commonware_macros::stability_mod!(ALPHA,pub(crate) mod example);\nstability_scope!(BETA,cfg(test){\n// keep item comment\n/// Run one selection.\nfn run(){select! {value=receive()=>value}}\n});\n";
+        let once = format(source).expect("stability macros should format");
+        let twice = format(once.text()).expect("stability macros should format twice");
+
+        assert_eq!(once.formatted_macros(), 2);
+        assert_eq!(once.preserved_macros(), 0);
+        assert!(
+            once.text()
+                .contains("commonware_macros::stability_mod!(ALPHA, pub(crate) mod example);")
+        );
+        assert!(once.text().contains("stability_scope!(BETA, cfg(test) {\n"));
+        assert_eq!(once.text().matches("// keep item comment").count(), 1);
+        assert_eq!(once.text().matches("/// Run one selection.").count(), 1);
+        assert!(once.text().contains("value = receive() => value,"));
+        assert_eq!(once.text(), twice.text());
+    }
+
+    #[test]
+    fn honors_scoped_rustfmt_skip() {
+        let source = "#[rustfmt::skip]\nfn skipped() {\n    select! {value=receive()=>value}\n}\n\nfn formatted() {\n    select! {value=receive()=>value}\n}\n\nfn skipped_statement() {\n    #[rustfmt::skip]\n    select! {value=receive()=>value};\n    #[rustfmt::skip]\n    consume(select! {value=receive()=>value});\n}\n";
+        let formatted = format(source).expect("unskipped macro should format");
+
+        assert_eq!(formatted.formatted_macros(), 1);
+        assert!(
+            formatted.text().contains(
+                "#[rustfmt::skip]\nfn skipped() {\n    select! {value=receive()=>value}\n}"
+            )
+        );
+        assert!(formatted.text().contains(
+            "fn formatted() {\n    select! {\n        value = receive() => value,\n    }\n}"
+        ));
+        assert!(
+            formatted
+                .text()
+                .contains("#[rustfmt::skip]\n    select! {value=receive()=>value};")
+        );
+        assert!(
+            formatted
+                .text()
+                .contains("#[rustfmt::skip]\n    consume(select! {value=receive()=>value});")
+        );
+    }
+
+    #[test]
+    fn preserves_skipped_item_inside_stability_scope() {
+        let source = "stability_scope!(ALPHA {\n    #[rustfmt::skip]\n    fn skipped() { select! {value=receive()=>value} }\n    fn formatted() { select! {value=receive()=>value} }\n});\n";
+        let formatted = format(source).expect("unskipped nested macro should format");
+
+        assert_eq!(formatted.formatted_macros(), 0);
+        assert_eq!(formatted.preserved_macros(), 1);
+        assert!(
+            formatted.text().contains(
+                "#[rustfmt::skip]\n    fn skipped() { select! {value=receive()=>value} }"
+            )
+        );
+        assert!(formatted.text().contains("value = receive() => value,"));
+        assert_eq!(
+            formatted.text().matches("value=receive()=>value").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn preserves_crlf_while_restoring_nested_stability_items() {
+        let source = "stability_scope!(ALPHA {\r\n    #[rustfmt::skip]\r\n    fn skipped() { select! {value=receive()=>value} }\r\n    fn formatted() { select! {value=receive()=>value} }\r\n});\r\n";
+        let formatted = format(source).expect("nested macro should preserve CRLF");
+
+        assert!(!formatted.text().replace("\r\n", "").contains('\n'));
+        assert!(formatted.text().contains("value = receive() => value,"));
+    }
+
+    #[test]
+    fn keeps_deep_formatting_through_preserved_stability_item() {
+        let source = "stability_scope!(ALPHA {\n    fn run() {\n        select! {\n            outer=receive_outer()=>{\n                /* keep */\n                select! {inner=receive_inner()=>inner}\n            }\n        }\n    }\n});\n";
+        let formatted = format(source).expect("deep nested macro should format safely");
+
+        assert_eq!(formatted.text().matches("/* keep */").count(), 1);
+        assert_eq!(
+            formatted
+                .text()
+                .matches("inner = receive_inner() => inner,")
+                .count(),
+            1
+        );
+        assert!(!formatted.text().contains("__commonware_fmt_nested_"));
     }
 
     #[test]

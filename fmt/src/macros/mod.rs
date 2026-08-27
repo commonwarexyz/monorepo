@@ -2,6 +2,7 @@
 
 mod nested;
 mod select;
+mod stability;
 
 pub use select::{select, select_loop};
 use syn::{MacroDelimiter, Path};
@@ -11,10 +12,12 @@ use thiserror::Error;
 pub(crate) enum MacroKind {
     Select,
     SelectLoop,
+    StabilityMod,
+    StabilityScope,
 }
 
 pub(crate) fn macro_kind(path: &Path, delimiter: &MacroDelimiter) -> Option<MacroKind> {
-    if !matches!(delimiter, MacroDelimiter::Brace(_)) || path.leading_colon.is_some() {
+    if path.leading_colon.is_some() {
         return None;
     }
     let segments = path
@@ -23,15 +26,71 @@ pub(crate) fn macro_kind(path: &Path, delimiter: &MacroDelimiter) -> Option<Macr
         .map(|segment| segment.ident.to_string())
         .collect::<Vec<_>>();
     match segments.as_slice() {
-        [name] if name == "select" => Some(MacroKind::Select),
-        [name] if name == "select_loop" => Some(MacroKind::SelectLoop),
-        [prefix, name] if prefix == "commonware_macros" && name == "select" => {
+        [name] if name == "select" && matches!(delimiter, MacroDelimiter::Brace(_)) => {
             Some(MacroKind::Select)
         }
-        [prefix, name] if prefix == "commonware_macros" && name == "select_loop" => {
+        [name] if name == "select_loop" && matches!(delimiter, MacroDelimiter::Brace(_)) => {
             Some(MacroKind::SelectLoop)
         }
+        [name] if name == "stability_mod" && matches!(delimiter, MacroDelimiter::Paren(_)) => {
+            Some(MacroKind::StabilityMod)
+        }
+        [name] if name == "stability_scope" && matches!(delimiter, MacroDelimiter::Paren(_)) => {
+            Some(MacroKind::StabilityScope)
+        }
+        [prefix, name]
+            if prefix == "commonware_macros"
+                && name == "select"
+                && matches!(delimiter, MacroDelimiter::Brace(_)) =>
+        {
+            Some(MacroKind::Select)
+        }
+        [prefix, name]
+            if prefix == "commonware_macros"
+                && name == "select_loop"
+                && matches!(delimiter, MacroDelimiter::Brace(_)) =>
+        {
+            Some(MacroKind::SelectLoop)
+        }
+        [prefix, name]
+            if prefix == "commonware_macros"
+                && name == "stability_mod"
+                && matches!(delimiter, MacroDelimiter::Paren(_)) =>
+        {
+            Some(MacroKind::StabilityMod)
+        }
+        [prefix, name]
+            if prefix == "commonware_macros"
+                && name == "stability_scope"
+                && matches!(delimiter, MacroDelimiter::Paren(_)) =>
+        {
+            Some(MacroKind::StabilityScope)
+        }
         _ => None,
+    }
+}
+
+pub(crate) const fn delimiter_text(
+    delimiter: &MacroDelimiter,
+) -> Option<(&'static str, &'static str)> {
+    match delimiter {
+        MacroDelimiter::Paren(_) => Some(("(", ")")),
+        MacroDelimiter::Brace(_) => Some(("{", "}")),
+        MacroDelimiter::Bracket(_) => None,
+    }
+}
+
+pub(crate) fn format_at_depth(
+    kind: MacroKind,
+    source: &str,
+    options: Options,
+    depth: usize,
+) -> Result<crate::pretty::ProtectedFragment, Error> {
+    match kind {
+        MacroKind::Select => select::select_at_depth(source, options, depth),
+        MacroKind::SelectLoop => select::select_loop_at_depth(source, options, depth),
+        MacroKind::StabilityMod => stability::stability_mod(source),
+        MacroKind::StabilityScope => stability::stability_scope(source, options, depth),
     }
 }
 

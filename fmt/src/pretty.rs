@@ -155,7 +155,7 @@ pub fn pattern(pattern: &Pat, source: &str) -> Result<ProtectedFragment, Error> 
 ///
 /// `source` must be the exact source text from which `items` were parsed.
 pub fn items(items: &[Item], source: &str) -> Result<ProtectedFragment, Error> {
-    format_or_preserve(source, || {
+    format_or_preserve_with_docs(source, || {
         let wrapper = File {
             shebang: None,
             attrs: Vec::new(),
@@ -233,8 +233,28 @@ fn format_or_preserve(
     source: &str,
     format: impl FnOnce() -> Result<String, Error>,
 ) -> Result<ProtectedFragment, Error> {
-    if source_requires_preservation(source) {
-        if let Some(comments) = crate::trivia::LineComments::prepare(source) {
+    format_or_preserve_with_policy(source, true, format)
+}
+
+fn format_or_preserve_with_docs(
+    source: &str,
+    format: impl FnOnce() -> Result<String, Error>,
+) -> Result<ProtectedFragment, Error> {
+    format_or_preserve_with_policy(source, false, format)
+}
+
+fn format_or_preserve_with_policy(
+    source: &str,
+    preserve_source_docs: bool,
+    format: impl FnOnce() -> Result<String, Error>,
+) -> Result<ProtectedFragment, Error> {
+    if source_requires_preservation_with_policy(source, preserve_source_docs) {
+        let comments = if preserve_source_docs {
+            crate::trivia::LineComments::prepare(source)
+        } else {
+            crate::trivia::LineComments::prepare_allowing_docs(source)
+        };
+        if let Some(comments) = comments {
             let formatted = format()?;
             if let Some(restored) = comments.restore(&formatted) {
                 return Ok(ProtectedFragment::formatted(restored));
@@ -311,6 +331,10 @@ fn dedent_wrapper(source: &str) -> Result<String, Error> {
 }
 
 pub(crate) fn source_requires_preservation(source: &str) -> bool {
+    source_requires_preservation_with_policy(source, true)
+}
+
+fn source_requires_preservation_with_policy(source: &str, preserve_source_docs: bool) -> bool {
     let Ok(stream) = source.parse::<TokenStream>() else {
         return true;
     };
@@ -329,7 +353,9 @@ pub(crate) fn source_requires_preservation(source: &str) -> bool {
     {
         return true;
     }
-    if has_multiline_literal || has_source_spelled_doc_comment(source, &literal_ranges) {
+    if has_multiline_literal
+        || (preserve_source_docs && has_source_spelled_doc_comment(source, &literal_ranges))
+    {
         return true;
     }
 
@@ -569,16 +595,25 @@ mod tests {
     }
 
     #[test]
-    fn preserves_source_spelled_doc_comments() {
-        for source in [
-            "/// Exact doc text.  \npub struct Example;",
-            "/** Exact block doc text.  */\npub struct Example;",
+    fn formats_source_spelled_doc_comments_in_item_lists() {
+        for (source, expected) in [
+            (
+                "/// Exact doc text.  \npub struct Example;",
+                "Exact doc text.",
+            ),
+            (
+                "/** Exact block doc text.  */\npub struct Example;",
+                "Exact block doc text.",
+            ),
         ] {
             let file = syn::parse_file(source).expect("item should parse");
-            let formatted = items(&file.items, source).expect("item should be protected");
+            let once = items(&file.items, source).expect("item should format");
+            let reparsed = syn::parse_file(once.text()).expect("formatted item should parse");
+            let twice = items(&reparsed.items, once.text()).expect("item should format twice");
 
-            assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
-            assert_eq!(formatted.text(), source);
+            assert_eq!(once.disposition(), Disposition::Formatted);
+            assert_eq!(once.text().matches(expected).count(), 1);
+            assert_eq!(once.text(), twice.text());
         }
     }
 

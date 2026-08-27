@@ -16,5 +16,7 @@ pub mod pretty;
 pub mod source;
 
 #[cfg(not(commonware_stability_RESERVED))]
+mod skip;
+#[cfg(not(commonware_stability_RESERVED))]
 mod trivia;
 mod writer;

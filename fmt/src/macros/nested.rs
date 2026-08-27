@@ -1,14 +1,15 @@
 //! Marker-based preservation of supported nested macros.
 
-use super::{Error, LineEnding, MacroKind, Options, macro_kind, select};
+use super::{Error, LineEnding, MacroKind, Options, delimiter_text, format_at_depth, macro_kind};
 use crate::{
     pretty::{self, Disposition, ProtectedFragment},
+    skip,
     source::SourceMap,
 };
 use proc_macro2::{Ident, Span};
 use std::ops::Range;
 use syn::{
-    Expr, Macro,
+    Expr, ForeignItem, ImplItem, Item, Macro, Stmt, TraitItem,
     spanned::Spanned,
     visit::{self, Visit},
     visit_mut::{self, VisitMut},
@@ -20,6 +21,12 @@ const RECURSION_LIMIT: usize = 32;
 enum Style {
     Expression,
     ValueBlock,
+}
+
+#[derive(Clone, Copy)]
+enum RestoreStyle {
+    Expression,
+    Items,
 }
 
 struct NestedMacro {
@@ -35,6 +42,7 @@ struct Shield<'a> {
     source_map: &'a SourceMap<'a>,
     marker_prefix: String,
     nested: Vec<NestedMacro>,
+    had_skip: bool,
     error: Option<Error>,
 }
 
@@ -43,8 +51,10 @@ impl Shield<'_> {
         let delimiter = node.delimiter.span();
         let open = self.source_map.span_range(delimiter.open())?;
         let close = self.source_map.span_range(delimiter.close())?;
-        if self.source_map.slice(open.clone())? != "{"
-            || self.source_map.slice(close.clone())? != "}"
+        let (expected_open, expected_close) =
+            delimiter_text(&node.delimiter).ok_or(Error::MarkerDelimiter)?;
+        if self.source_map.slice(open.clone())? != expected_open
+            || self.source_map.slice(close.clone())? != expected_close
             || open.end > close.start
         {
             return Err(Error::MarkerDelimiter);
@@ -71,6 +81,54 @@ impl Shield<'_> {
 }
 
 impl VisitMut for Shield<'_> {
+    fn visit_expr_mut(&mut self, node: &mut Expr) {
+        if skip::expression(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit_mut::visit_expr_mut(self, node);
+    }
+
+    fn visit_item_mut(&mut self, node: &mut Item) {
+        if skip::item(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit_mut::visit_item_mut(self, node);
+    }
+
+    fn visit_impl_item_mut(&mut self, node: &mut ImplItem) {
+        if skip::impl_item(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit_mut::visit_impl_item_mut(self, node);
+    }
+
+    fn visit_trait_item_mut(&mut self, node: &mut TraitItem) {
+        if skip::trait_item(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit_mut::visit_trait_item_mut(self, node);
+    }
+
+    fn visit_foreign_item_mut(&mut self, node: &mut ForeignItem) {
+        if skip::foreign_item(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit_mut::visit_foreign_item_mut(self, node);
+    }
+
+    fn visit_stmt_mut(&mut self, node: &mut Stmt) {
+        if skip::statement(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit_mut::visit_stmt_mut(self, node);
+    }
+
     fn visit_macro_mut(&mut self, node: &mut Macro) {
         if self.error.is_some() {
             return;
@@ -102,6 +160,8 @@ struct ChildMacro {
     path_span: Span,
     open_span: Span,
     close_span: Span,
+    open_text: &'static str,
+    close_text: &'static str,
 }
 
 #[derive(Default)]
@@ -110,14 +170,61 @@ struct ChildCollector {
 }
 
 impl<'ast> Visit<'ast> for ChildCollector {
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        if skip::expression(node) {
+            return;
+        }
+        visit::visit_expr(self, node);
+    }
+
+    fn visit_item(&mut self, node: &'ast Item) {
+        if skip::item(node) {
+            return;
+        }
+        visit::visit_item(self, node);
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        if skip::impl_item(node) {
+            return;
+        }
+        visit::visit_impl_item(self, node);
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
+        if skip::trait_item(node) {
+            return;
+        }
+        visit::visit_trait_item(self, node);
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
+        if skip::foreign_item(node) {
+            return;
+        }
+        visit::visit_foreign_item(self, node);
+    }
+
+    fn visit_stmt(&mut self, node: &'ast Stmt) {
+        if skip::statement(node) {
+            return;
+        }
+        visit::visit_stmt(self, node);
+    }
+
     fn visit_macro(&mut self, node: &'ast Macro) {
         if let Some(kind) = macro_kind(&node.path, &node.delimiter) {
             let delimiter = node.delimiter.span();
+            let Some((open_text, close_text)) = delimiter_text(&node.delimiter) else {
+                return;
+            };
             self.macros.push(ChildMacro {
                 kind,
                 path_span: node.path.span(),
                 open_span: delimiter.open(),
                 close_span: delimiter.close(),
+                open_text,
+                close_text,
             });
             return;
         }
@@ -166,8 +273,8 @@ pub(super) fn preserve_with_nested(
         let path_start = source_map.byte_offset(child.path_span.start())?;
         let open = source_map.span_range(child.open_span)?;
         let close = source_map.span_range(child.close_span)?;
-        if source_map.slice(open.clone())? != "{"
-            || source_map.slice(close.clone())? != "}"
+        if source_map.slice(open.clone())? != child.open_text
+            || source_map.slice(close.clone())? != child.close_text
             || open.end > close.start
         {
             return Err(Error::MarkerDelimiter);
@@ -178,12 +285,7 @@ pub(super) fn preserve_with_nested(
             indentation: line_indentation(source, path_start, options.indentation),
             line_ending: options.line_ending,
         };
-        let body = match child.kind {
-            MacroKind::Select => select::select_at_depth(body_source, child_options, depth + 1)?,
-            MacroKind::SelectLoop => {
-                select::select_loop_at_depth(body_source, child_options, depth + 1)?
-            }
-        };
+        let body = format_at_depth(child.kind, body_source, child_options, depth + 1)?;
         if body.text() != body_source {
             replacements.push((body_range, body.into_string()));
         }
@@ -240,6 +342,103 @@ pub(super) fn value_block(
     )
 }
 
+pub(super) fn items(
+    items: &[Item],
+    fragment_source: &str,
+    fragment_start: usize,
+    source_map: &SourceMap<'_>,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    let marker_prefix = marker_prefix(fragment_source)?;
+    let mut shield = Shield {
+        source_map,
+        marker_prefix: marker_prefix.clone(),
+        nested: Vec::new(),
+        had_skip: false,
+        error: None,
+    };
+    let mut shielded = items.to_vec();
+    for item in &mut shielded {
+        shield.visit_item_mut(item);
+    }
+    if let Some(error) = shield.error {
+        return Err(error);
+    }
+    if shield.nested.is_empty() {
+        if shield.had_skip {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        }
+        return pretty::items(items, fragment_source).map_err(Error::from);
+    }
+    if depth >= RECURSION_LIMIT {
+        return Err(Error::RecursionLimit);
+    }
+
+    let shielded_source = shield_source(fragment_source, fragment_start, &shield.nested)?;
+    if shield.had_skip {
+        let Some(restored) = restore(
+            &shielded_source,
+            &marker_prefix,
+            &shield.nested,
+            depth,
+            RestoreStyle::Items,
+            true,
+        )?
+        else {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        };
+        syn::parse_file(&restored).map_err(Error::Output)?;
+        return Ok(ProtectedFragment::preserved_with_nested_formatting(
+            restored,
+        ));
+    }
+    let formatted = pretty::items(&shielded, &shielded_source)?;
+    if formatted.disposition() == Disposition::PreservedForTrivia {
+        let Some(restored) = restore(
+            &shielded_source,
+            &marker_prefix,
+            &shield.nested,
+            depth,
+            RestoreStyle::Items,
+            true,
+        )?
+        else {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        };
+        syn::parse_file(&restored).map_err(Error::Output)?;
+        return Ok(ProtectedFragment::preserved_with_nested_formatting(
+            restored,
+        ));
+    }
+    let Some(restored) = restore(
+        formatted.text(),
+        &marker_prefix,
+        &shield.nested,
+        depth,
+        RestoreStyle::Items,
+        false,
+    )?
+    else {
+        let Some(restored) = restore(
+            &shielded_source,
+            &marker_prefix,
+            &shield.nested,
+            depth,
+            RestoreStyle::Items,
+            true,
+        )?
+        else {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        };
+        syn::parse_file(&restored).map_err(Error::Output)?;
+        return Ok(ProtectedFragment::preserved_with_nested_formatting(
+            restored,
+        ));
+    };
+    syn::parse_file(&restored).map_err(Error::Output)?;
+    Ok(ProtectedFragment::formatted(restored))
+}
+
 fn format_expression(
     expression: &Expr,
     fragment_source: &str,
@@ -253,6 +452,7 @@ fn format_expression(
         source_map,
         marker_prefix: marker_prefix.clone(),
         nested: Vec::new(),
+        had_skip: false,
         error: None,
     };
     let mut shielded = expression.clone();
@@ -261,6 +461,9 @@ fn format_expression(
         return Err(error);
     }
     if shield.nested.is_empty() {
+        if shield.had_skip {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        }
         return match style {
             Style::Expression => pretty::expression(expression, fragment_source),
             Style::ValueBlock => pretty::value_block(expression, fragment_source),
@@ -277,12 +480,15 @@ fn format_expression(
     }
     let shielded_source = shield_source(fragment_source, expression_range.start, &shield.nested)?;
 
-    let formatted = match style {
-        Style::Expression => pretty::expression(&shielded, &shielded_source)?,
-        Style::ValueBlock => pretty::value_block(&shielded, &shielded_source)?,
-    };
-    if formatted.disposition() == Disposition::PreservedForTrivia {
-        let Some(restored) = restore(&shielded_source, &marker_prefix, &shield.nested, depth)?
+    if shield.had_skip {
+        let Some(restored) = restore(
+            &shielded_source,
+            &marker_prefix,
+            &shield.nested,
+            depth,
+            RestoreStyle::Expression,
+            true,
+        )?
         else {
             return Ok(ProtectedFragment::preserved(fragment_source));
         };
@@ -291,8 +497,52 @@ fn format_expression(
             restored,
         ));
     }
-    let Some(restored) = restore(formatted.text(), &marker_prefix, &shield.nested, depth)? else {
-        return Ok(ProtectedFragment::preserved(fragment_source));
+
+    let formatted = match style {
+        Style::Expression => pretty::expression(&shielded, &shielded_source)?,
+        Style::ValueBlock => pretty::value_block(&shielded, &shielded_source)?,
+    };
+    if formatted.disposition() == Disposition::PreservedForTrivia {
+        let Some(restored) = restore(
+            &shielded_source,
+            &marker_prefix,
+            &shield.nested,
+            depth,
+            RestoreStyle::Expression,
+            true,
+        )?
+        else {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        };
+        syn::parse_str::<Expr>(&restored).map_err(Error::Output)?;
+        return Ok(ProtectedFragment::preserved_with_nested_formatting(
+            restored,
+        ));
+    }
+    let Some(restored) = restore(
+        formatted.text(),
+        &marker_prefix,
+        &shield.nested,
+        depth,
+        RestoreStyle::Expression,
+        false,
+    )?
+    else {
+        let Some(restored) = restore(
+            &shielded_source,
+            &marker_prefix,
+            &shield.nested,
+            depth,
+            RestoreStyle::Expression,
+            true,
+        )?
+        else {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        };
+        syn::parse_str::<Expr>(&restored).map_err(Error::Output)?;
+        return Ok(ProtectedFragment::preserved_with_nested_formatting(
+            restored,
+        ));
     };
     syn::parse_str::<Expr>(&restored).map_err(Error::Output)?;
     Ok(ProtectedFragment::formatted(restored))
@@ -352,13 +602,23 @@ fn restore(
     marker_prefix: &str,
     nested: &[NestedMacro],
     depth: usize,
+    style: RestoreStyle,
+    allow_preserved: bool,
 ) -> Result<Option<String>, Error> {
-    let expression = syn::parse_str::<Expr>(formatted).map_err(Error::Output)?;
     let mut collector = MarkerCollector {
         prefix: marker_prefix,
         markers: Vec::new(),
     };
-    collector.visit_expr(&expression);
+    match style {
+        RestoreStyle::Expression => {
+            let expression = syn::parse_str::<Expr>(formatted).map_err(Error::Output)?;
+            collector.visit_expr(&expression);
+        }
+        RestoreStyle::Items => {
+            let file = syn::parse_file(formatted).map_err(Error::Output)?;
+            collector.visit_file(&file);
+        }
+    }
     if collector.markers.len() != nested.len()
         || collector
             .markers
@@ -370,21 +630,17 @@ fn restore(
     }
 
     let source_map = SourceMap::new(formatted);
+    let line_ending = dominant_line_ending(formatted);
     let mut replacements = Vec::with_capacity(nested.len());
     for (marker, nested) in collector.markers.iter().zip(nested) {
         let range = marker_range(&source_map, marker)?;
         let indentation = line_indentation(formatted, range.start, 0);
         let options = Options {
             indentation,
-            line_ending: LineEnding::Lf,
+            line_ending,
         };
-        let body = match nested.kind {
-            MacroKind::Select => select::select_at_depth(&nested.body, options, depth + 1)?,
-            MacroKind::SelectLoop => {
-                select::select_loop_at_depth(&nested.body, options, depth + 1)?
-            }
-        };
-        if body.disposition() != Disposition::Formatted {
+        let body = format_at_depth(nested.kind, &nested.body, options, depth + 1)?;
+        if body.disposition() != Disposition::Formatted && !allow_preserved {
             return Ok(None);
         }
         let replacement = format!("{}{}{}", nested.prefix, body.text(), nested.suffix);
@@ -396,6 +652,16 @@ fn restore(
         output.replace_range(range, &replacement);
     }
     Ok(Some(output))
+}
+
+fn dominant_line_ending(source: &str) -> LineEnding {
+    let crlf = source.match_indices("\r\n").count();
+    let lf = source.bytes().filter(|byte| *byte == b'\n').count();
+    if crlf > lf.saturating_sub(crlf) {
+        LineEnding::Crlf
+    } else {
+        LineEnding::Lf
+    }
 }
 
 fn marker_range(source_map: &SourceMap<'_>, marker: &Marker) -> Result<Range<usize>, Error> {

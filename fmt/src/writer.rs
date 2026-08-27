@@ -22,6 +22,16 @@ impl<'a> Writer<'a> {
         }
     }
 
+    pub(crate) const fn new_inline(indentation: usize, line_ending: &'a str) -> Self {
+        Self {
+            output: String::new(),
+            line_ending,
+            indentation,
+            column: indentation,
+            at_line_start: false,
+        }
+    }
+
     pub(crate) fn push(&mut self, text: &str) {
         for (index, line) in text.split('\n').enumerate() {
             if index != 0 {
@@ -106,5 +116,15 @@ mod tests {
         let writer = Writer::new(88, "\n");
         assert!(writer.fits("x"));
         assert!(!writer.fits("xy"));
+    }
+
+    #[test]
+    fn starts_inline_then_uses_configured_indentation() {
+        let mut writer = Writer::new_inline(4, "\n");
+        writer.push("first");
+        writer.newline();
+        writer.push("second");
+
+        assert_eq!(writer.finish(), "first\n    second");
     }
 }

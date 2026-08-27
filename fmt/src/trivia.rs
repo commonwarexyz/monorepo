@@ -11,6 +11,7 @@ enum TokenKey {
     Ident(String),
     Punct(char),
     Literal(String),
+    Doc(String),
 }
 
 #[derive(Clone)]
@@ -30,6 +31,7 @@ struct Comment {
 pub(crate) struct LineComments {
     tokens: Vec<Token>,
     comments: Vec<Comment>,
+    allow_source_docs: bool,
 }
 
 pub(crate) struct ShellComment {
@@ -39,7 +41,7 @@ pub(crate) struct ShellComment {
 
 pub(crate) fn shell_comments(source: &str, range: Range<usize>) -> Option<Vec<ShellComment>> {
     let mut comments = Vec::new();
-    parse_gap(source, range, None, None, &mut comments)?;
+    parse_gap(source, range, None, None, false, &mut comments)?;
     Some(
         comments
             .into_iter()
@@ -53,16 +55,36 @@ pub(crate) fn shell_comments(source: &str, range: Range<usize>) -> Option<Vec<Sh
 
 impl LineComments {
     pub(crate) fn prepare(source: &str) -> Option<Self> {
+        Self::prepare_with_policy(source, false)
+    }
+
+    pub(crate) fn prepare_allowing_docs(source: &str) -> Option<Self> {
+        Self::prepare_with_policy(source, true)
+    }
+
+    fn prepare_with_policy(source: &str, allow_source_docs: bool) -> Option<Self> {
         let stream = source.parse::<TokenStream>().ok()?;
         let source_map = SourceMap::new(source);
         let mut tokens = Vec::new();
         let mut literal_ranges = Vec::new();
         flatten(stream, &source_map, &mut tokens, &mut literal_ranges)?;
+        let doc_ranges = source_doc_ranges(source, &literal_ranges);
+        if allow_source_docs {
+            tokens.retain(|token| {
+                matches!(token.key, TokenKey::Doc(_))
+                    || !doc_ranges
+                        .iter()
+                        .any(|doc| token.range.start < doc.end && doc.start < token.range.end)
+            });
+        }
         if literal_ranges.iter().any(|range| {
+            if allow_source_docs && doc_ranges.contains(range) {
+                return false;
+            }
             source_map
                 .slice(range.clone())
                 .is_ok_and(|literal| literal.contains('\n') || literal.contains('\r'))
-        }) || has_source_spelled_doc_comment(source, &literal_ranges)
+        }) || (!allow_source_docs && has_source_spelled_doc_comment(source, &literal_ranges))
         {
             return None;
         }
@@ -81,6 +103,7 @@ impl LineComments {
                 cursor..token.range.start,
                 right.checked_sub(1),
                 Some(right),
+                allow_source_docs,
                 &mut comments,
             )?;
             cursor = token.range.end;
@@ -90,16 +113,21 @@ impl LineComments {
             cursor..source.len(),
             tokens.len().checked_sub(1),
             None,
+            allow_source_docs,
             &mut comments,
         )?;
         if comments.is_empty() {
             return None;
         }
-        Some(Self { tokens, comments })
+        Some(Self {
+            tokens,
+            comments,
+            allow_source_docs,
+        })
     }
 
     pub(crate) fn restore(&self, formatted: &str) -> Option<String> {
-        let formatted_plan = token_plan(formatted)?;
+        let formatted_plan = token_plan(formatted, self.allow_source_docs)?;
         let mapping = token_mapping(&self.tokens, &formatted_plan)?;
         let mut replacements = Vec::new();
         let mut expected_comments = Vec::with_capacity(self.comments.len());
@@ -162,7 +190,7 @@ impl LineComments {
         for (range, replacement) in replacements.into_iter().rev() {
             output.replace_range(range, &replacement);
         }
-        let restored = Self::prepare(&output)?;
+        let restored = Self::prepare_with_policy(&output, self.allow_source_docs)?;
         if restored.comments != expected_comments
             || restored
                 .tokens
@@ -176,11 +204,21 @@ impl LineComments {
     }
 }
 
-fn token_plan(source: &str) -> Option<Vec<Token>> {
+fn token_plan(source: &str, allow_source_docs: bool) -> Option<Vec<Token>> {
     let stream = source.parse::<TokenStream>().ok()?;
     let source_map = SourceMap::new(source);
     let mut tokens = Vec::new();
-    flatten(stream, &source_map, &mut tokens, &mut Vec::new())?;
+    let mut literal_ranges = Vec::new();
+    flatten(stream, &source_map, &mut tokens, &mut literal_ranges)?;
+    if allow_source_docs {
+        let doc_ranges = source_doc_ranges(source, &literal_ranges);
+        tokens.retain(|token| {
+            matches!(token.key, TokenKey::Doc(_))
+                || !doc_ranges
+                    .iter()
+                    .any(|doc| token.range.start < doc.end && doc.start < token.range.end)
+        });
+    }
     Some(tokens)
 }
 
@@ -218,8 +256,17 @@ fn flatten(
             }),
             TokenTree::Literal(literal) => {
                 let range = source.span_range(literal.span()).ok()?;
+                let text = source.slice(range.clone()).ok()?;
                 tokens.push(Token {
-                    key: TokenKey::Literal(source.slice(range.clone()).ok()?.to_owned()),
+                    key: if text.starts_with("///")
+                        || text.starts_with("//!")
+                        || text.starts_with("/**")
+                        || text.starts_with("/*!")
+                    {
+                        TokenKey::Doc(literal.to_string())
+                    } else {
+                        TokenKey::Literal(text.to_owned())
+                    },
                     range: range.clone(),
                 });
                 literal_ranges.push(range);
@@ -243,6 +290,7 @@ fn parse_gap(
     range: Range<usize>,
     left: Option<usize>,
     right: Option<usize>,
+    allow_source_docs: bool,
     comments: &mut Vec<Comment>,
 ) -> Option<()> {
     let mut offset = range.start;
@@ -251,6 +299,22 @@ fn parse_gap(
         let character = remaining.chars().next()?;
         if character.is_whitespace() {
             offset += character.len_utf8();
+            continue;
+        }
+        if allow_source_docs && (remaining.starts_with("///") || remaining.starts_with("//!")) {
+            let newline = remaining
+                .find('\n')
+                .map(|relative| offset + relative)
+                .unwrap_or(range.end);
+            offset = newline.saturating_add(usize::from(newline < range.end));
+            continue;
+        }
+        if allow_source_docs && (remaining.starts_with("/**") || remaining.starts_with("/*!")) {
+            let end = remaining.find("*/")? + offset + 2;
+            if end > range.end {
+                return None;
+            }
+            offset = end;
             continue;
         }
         if !remaining.starts_with("//")
@@ -427,7 +491,7 @@ fn enclosing_indentation(source: &str, tokens: &[Token], position: usize) -> Str
                     delimiters.pop();
                 }
             }
-            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) => {}
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc(_) => {}
         }
     }
     delimiters.last().map_or_else(String::new, |(_, offset)| {
@@ -448,7 +512,7 @@ fn has_enclosing_delimiter(tokens: &[Token], position: usize) -> bool {
                     delimiters.pop();
                 }
             }
-            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) => {}
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc(_) => {}
         }
     }
     !delimiters.is_empty()
@@ -505,4 +569,38 @@ fn has_source_spelled_doc_comment(source: &str, literal_ranges: &[Range<usize>])
         offset += source[offset..].chars().next().map_or(1, char::len_utf8);
     }
     false
+}
+
+fn source_doc_ranges(source: &str, literal_ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    literal_ranges
+        .iter()
+        .filter(|range| {
+            source.get((*range).clone()).is_some_and(|text| {
+                text.starts_with("///")
+                    || text.starts_with("//!")
+                    || text.starts_with("/**")
+                    || text.starts_with("/*!")
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restores_line_comment_beside_source_doc_comment() {
+        let source = "// keep item comment\n/// Run one selection.\nfn run(){marker! {}}";
+        let comments = LineComments::prepare_allowing_docs(source)
+            .expect("ordinary comment should be recoverable beside docs");
+        let formatted = "/// Run one selection.\nfn run() {\n    marker! {}\n}";
+        let restored = comments
+            .restore(formatted)
+            .expect("ordinary comment should restore beside docs");
+
+        assert_eq!(restored.matches("// keep item comment").count(), 1);
+        assert_eq!(restored.matches("/// Run one selection.").count(), 1);
+    }
 }
