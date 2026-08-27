@@ -13,8 +13,8 @@
 //!   pending, further wakes write nothing.
 //! - The loop calls [`Waker::park_idle`] when it is fully idle, sleeping in
 //!   futex wait on the packed state word.
-//! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before blocking in
-//!   `submit_and_wait` and is woken through `eventfd` readiness while armed.
+//! - The loop uses [`Waker::wait_eventfd`] around `submit_and_wait` and is
+//!   woken through `eventfd` readiness while armed.
 //! - Wake CQEs are acknowledged with [`Waker::acknowledge`].
 //!
 //! Both wait paths follow a lock-free arm-and-recheck handshake: the loop
@@ -93,7 +93,8 @@ const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_SIG
 /// Mask covering just the current wait target bits.
 const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 
-/// RAII guard returned by [`Waker::arm`] for a `submit_and_wait` blocking section.
+/// RAII guard used by [`Waker::wait_eventfd`] around a `submit_and_wait`
+/// blocking section.
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
 /// wake if producers publish new work or the final handle disconnects.
@@ -174,7 +175,7 @@ struct WakerInner {
 ///
 /// - Wake out of band via [`Waker::wake`] (the production wake path)
 /// - Park in the fully-idle path via [`Waker::park_idle`]
-/// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
+/// - Arm a `submit_and_wait` blocking section via [`Waker::wait_eventfd`]
 /// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
 /// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
 ///
@@ -343,6 +344,18 @@ impl Waker {
         ArmGuard {
             waker: self,
             wake_latched,
+        }
+    }
+
+    /// Run a blocking callback while the eventfd wake path is armed.
+    ///
+    /// If a wake is already latched, the callback is skipped. The arm guard
+    /// remains live across the callback so every wait bit is cleared if the
+    /// callback returns or unwinds.
+    pub fn wait_eventfd(&self, callback: impl FnOnce()) {
+        let arm = self.arm();
+        if !arm.wake_latched() {
+            callback();
         }
     }
 
@@ -741,6 +754,28 @@ pub mod tests {
         assert!(arm.wake_latched());
         drop(arm);
 
+        assert_eq!(state_bits(&waker), 0);
+    }
+
+    #[test]
+    fn test_wait_eventfd_callback_panic_clears_wait_state() {
+        let waker = Waker::new().expect("eventfd creation should succeed");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            waker.wait_eventfd(|| {
+                assert_eq!(state_bits(&waker), WAITING_ON_EVENTFD_BIT);
+                panic!("callback panic");
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(state_bits(&waker), 0);
+
+        let mut second_epoch_ran = false;
+        waker.wait_eventfd(|| {
+            assert_eq!(state_bits(&waker), WAITING_ON_EVENTFD_BIT);
+            second_epoch_ran = true;
+        });
+        assert!(second_epoch_ran);
         assert_eq!(state_bits(&waker), 0);
     }
 

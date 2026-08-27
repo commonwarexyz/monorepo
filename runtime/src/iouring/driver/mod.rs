@@ -221,17 +221,17 @@ impl IoUringLoop {
         max_request_timeout: Duration,
         registry: &mut impl Register,
     ) -> Result<(IoUring, Handle, Self), std::io::Error> {
-        let size = validate_ring_config(&cfg, max_request_timeout) as usize;
+        let size = validate_ring_config(&cfg, max_request_timeout);
 
         // Ask the kernel to construct the ring before allocating the waiter
         // table whose capacity is proportional to the effective ring size.
-        let ring = new_ring(&cfg)?;
+        let ring = new_ring(size)?;
         let pending_operations = PendingOperations::new(registry);
         let waker = Waker::new().expect("unable to create wake eventfd");
         let timeout_wheel =
             TimeoutWheel::new(max_request_timeout, cfg.timeout_wheel_tick, Instant::now());
         let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.signalled());
-        let handle = Handle::new(size, waker.clone());
+        let handle = Handle::new(size as usize, waker.clone());
 
         Ok((
             ring,
@@ -414,11 +414,10 @@ impl IoUringLoop {
 
         // Otherwise, arm the eventfd-backed blocking path and block only if no
         // out-of-band wake (e.g. a task wake) is latched.
-        let arm = self.waker.arm();
-        if !arm.wake_latched() {
+        self.waker.wait_eventfd(|| {
             self.submit_and_wait(ring, 1, deadline)
                 .expect("unable to submit to ring");
-        }
+        });
     }
 
     /// Build and push the SQE for a request in the waiter table.
@@ -872,14 +871,12 @@ impl IoUringLoop {
             // mailbox and must be able to interrupt this wait (an unarmed
             // wake only latches the state word without writing the eventfd).
             // When a wake is already latched, skip blocking and let the next
-            // iteration process the mailbox. The guard's drop consumes the
+            // iteration process the mailbox. Ending the wait consumes the
             // latch either way.
-            let arm = self.waker.arm();
-            if !arm.wake_latched() {
+            self.waker.wait_eventfd(|| {
                 self.submit_and_wait(ring, 1, timeout)
                     .expect("unable to submit to ring");
-            }
-            drop(arm);
+            });
         }
 
         handle.with(|ops| {
@@ -943,7 +940,7 @@ impl IoUringLoop {
 }
 
 /// Build and configure an `io_uring` instance.
-pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
+pub(crate) fn new_ring(size: u32) -> Result<IoUring, std::io::Error> {
     // Every ring is created and submitted by one worker thread. SINGLE_ISSUER
     // records that invariant for the kernel, while DEFER_TASKRUN processes
     // completions only during io_uring_enter calls with GETEVENTS. Every turn,
@@ -953,7 +950,7 @@ pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
     IoUring::builder()
         .setup_single_issuer()
         .setup_defer_taskrun()
-        .build(validated_ring_size(cfg.size))
+        .build(size)
 }
 
 /// Owned half of the io_uring driver: the ring plus the loop state that
@@ -1194,9 +1191,10 @@ mod tests {
             ..Default::default()
         };
         let mut registry = Registry::default();
-        let (_ring, handle, _ioloop) =
+        let (mut ring, handle, _ioloop) =
             IoUringLoop::new(cfg, Duration::from_secs(60), &mut registry)
                 .expect("io_uring creation should succeed");
+        assert_eq!(ring.submission().capacity(), 128);
         handle.with(|ops| assert_eq!(ops.waiters.free_len(), 128));
     }
 
@@ -4431,7 +4429,8 @@ mod tests {
     fn test_required_ring_flags_construct() {
         // The runtime cannot operate without single-issuer and deferred
         // task-run mode, so every RingConfig must exercise both flags.
-        let ring = new_ring(&RingConfig::default()).expect("required ring flags should construct");
+        let ring =
+            new_ring(RingConfig::default().size).expect("required ring flags should construct");
         drop(ring);
     }
 }
