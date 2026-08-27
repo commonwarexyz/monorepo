@@ -73,32 +73,28 @@ enum PreflightMode<B> {
     },
 }
 
-/// Index boundaries and recovery work proven safe to apply together.
-struct Validated<A, B> {
-    /// Terminal entry at each validated logical boundary.
-    boundaries: BTreeMap<u64, Option<A>>,
-    /// Mutations permitted after sibling storage validates these boundaries.
-    mode: PreflightMode<B>,
-}
-
-/// Non-mutating recovery evidence bound to the context and configuration that produced it.
+/// Non-mutating recovery evidence and authorized work bound to the storage that produced it.
 pub(crate) struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
     context: E,
     cfg: Config,
-    validated: Validated<A, E::Blob>,
+
+    /// Terminal entry at each validated logical boundary.
+    boundaries: BTreeMap<u64, Option<A>>,
+
+    /// Mutations permitted after sibling storage validates these boundaries.
+    mode: PreflightMode<E::Blob>,
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
     /// Terminal entries captured at each validated boundary.
     pub(crate) const fn boundaries(&self) -> &BTreeMap<u64, Option<A>> {
-        &self.validated.boundaries
+        &self.boundaries
     }
 
     /// Apply the preflighted recovery work and open the journal writer.
     pub(crate) async fn finish(self) -> Result<Journal<E, A>, Error> {
-        let Validated { mode, .. } = self.validated;
         Ok(Journal(Box::new(
-            Inner::init(self.context, self.cfg, Some(mode)).await?,
+            Inner::init(self.context, self.cfg, Some(self.mode)).await?,
         )))
     }
 }
@@ -143,12 +139,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
     /// Prove each validation floor and capture its terminal entry without mutating storage.
     async fn preflight_floors(
-        context: &E,
-        cfg: &Config,
+        context: E,
+        cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
-    ) -> Result<Validated<A, E::Blob>, Error> {
-        let stored = Self::stored(context, cfg).await?;
-        let page_size = Self::page_size(cfg);
+    ) -> Result<RecoveryPreflight<E, A>, Error> {
+        let stored = Self::stored(&context, &cfg).await?;
+        let page_size = Self::page_size(&cfg);
         let mut recoverable_lengths = BTreeMap::new();
         let mut boundaries = BTreeMap::new();
 
@@ -194,7 +190,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             boundaries.insert(section, Some(entry));
         }
 
-        Ok(Validated {
+        Ok(RecoveryPreflight {
+            context,
+            cfg,
             boundaries,
             mode: PreflightMode::Floors(recoverable_lengths),
         })
@@ -202,11 +200,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
     /// Prove every checkpoint-covered index boundary without mutating damaged storage.
     async fn preflight_restore(
-        context: &E,
-        cfg: &Config,
+        context: E,
+        cfg: Config,
         section: u64,
         size: u64,
-    ) -> Result<Validated<A, E::Blob>, Error> {
+    ) -> Result<RecoveryPreflight<E, A>, Error> {
         // The checkpoint can only identify a boundary between fixed-size items.
         if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::Corruption(format!(
@@ -215,14 +213,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         }
 
         // A non-empty current checkpoint requires its section blob to exist.
-        let stored = Self::stored(context, cfg).await?;
+        let stored = Self::stored(&context, &cfg).await?;
         if size > 0 && !stored.contains_key(&section) {
             return Err(Error::Corruption(format!(
                 "section {section} has a checkpoint but no blob"
             )));
         }
 
-        let page_size = Self::page_size(cfg);
+        let page_size = Self::page_size(&cfg);
         let current_physical = Writer::<E::Blob>::physical_len_for_logical_prefix(size, page_size)?;
         let mut boundaries = BTreeMap::new();
         let mut current = None;
@@ -309,7 +307,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             .filter(|(candidate, _)| **candidate > section)
             .map(|(_, name)| name.clone())
             .collect();
-        Ok(Validated {
+        Ok(RecoveryPreflight {
+            context,
+            cfg,
             boundaries,
             mode: PreflightMode::Restore { current, discard },
         })
@@ -628,12 +628,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
     ) -> Result<RecoveryPreflight<E, A>, Error> {
-        let validated = Inner::preflight_floors(&context, &cfg, minimum_items).await?;
-        Ok(RecoveryPreflight {
-            context,
-            cfg,
-            validated,
-        })
+        Inner::preflight_floors(context, cfg, minimum_items).await
     }
 
     /// Prove every checkpoint-covered index byte without mutating damage.
@@ -643,12 +638,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         section: u64,
         size: u64,
     ) -> Result<RecoveryPreflight<E, A>, Error> {
-        let validated = Inner::preflight_restore(&context, &cfg, section, size).await?;
-        Ok(RecoveryPreflight {
-            context,
-            cfg,
-            validated,
-        })
+        Inner::preflight_restore(context, cfg, section, size).await
     }
 
     /// Append a new item to the journal in the given section.
