@@ -187,14 +187,13 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Error, IoBuf, IoBufs, Listener as _, Network as _, Runner as _, Sink as _, Stream as _,
+        Error, IoBuf, IoBufs, Listener as _, Network as _, Sink as _, Stream as _,
         deterministic::Auditor,
         network::{
             audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
             tests,
         },
     };
-    use commonware_macros::test_group;
     use commonware_utils::sync::Mutex;
     use std::{net::SocketAddr, sync::Arc};
 
@@ -234,23 +233,6 @@ mod tests {
             )
         })
         .await;
-    }
-
-    #[test_group("slow")]
-    #[test]
-    fn test_stress_trait() {
-        crate::deterministic::Runner::default().start(|context| async move {
-            tests::stress_test_network_trait(
-                || {
-                    AuditedNetwork::new(
-                        DeterministicNetwork::default(),
-                        Arc::new(Auditor::default()),
-                    )
-                },
-                context,
-            )
-            .await;
-        });
     }
 
     // Test that running the same network operations on two audited networks

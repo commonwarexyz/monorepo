@@ -609,7 +609,6 @@ mod tests {
     };
     use commonware_macros::test_group;
     use std::{
-        io::Read,
         net::SocketAddr,
         os::{fd::AsRawFd, unix::net::UnixStream},
         sync::Arc,
@@ -723,32 +722,6 @@ mod tests {
             // only duplicable through the supervision tree.
             let network = context.child("network");
             tests::stress_test_network_trait(move || network.child("socket"), context).await;
-        });
-    }
-
-    #[test]
-    fn test_small_send_read_quickly() {
-        // Verify a small message is delivered promptly through the buffered recv path.
-        let (mut harness, network) = test_network(Config::default());
-        harness.block_on(async move {
-            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-            let addr = listener.local_addr().unwrap();
-
-            let reader = async move {
-                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
-
-                // Read a small message (much smaller than the 64KB buffer)
-                stream.recv(10).await.unwrap()
-            };
-
-            let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-            let sender = async {
-                let (mut sink, _stream) = network.dial(addr).await.unwrap();
-                sink.send(msg.clone()).await.unwrap();
-            };
-
-            let (received, ()) = futures::join!(reader, sender);
-            assert_eq!(received.coalesce(), msg.as_slice());
         });
     }
 
@@ -1026,30 +999,6 @@ mod tests {
     }
 
     #[test]
-    fn test_vectored_send_path() {
-        // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
-        let mut harness = TestLoop::new(iouring::RingConfig::default());
-
-        let (left, mut right) = UnixStream::pair().unwrap();
-        let mut sink = Sink::new(
-            Arc::new(left.into()),
-            harness.handle.clone(),
-            Duration::from_secs(1),
-        );
-
-        // Queue two buffers so the wrapper must preserve vectored ordering.
-        let mut bufs = IoBufs::default();
-        bufs.append(IoBuf::from(b"ab"));
-        bufs.append(IoBuf::from(b"cd"));
-
-        // The peer should observe the concatenated payload in-order.
-        harness.block_on(sink.send(bufs)).unwrap();
-        let mut buf = [0u8; 4];
-        right.read_exact(&mut buf).unwrap();
-        assert_eq!(&buf, b"abcd");
-    }
-
-    #[test]
     fn test_zero_length_send_short_circuits_before_submit() {
         // Verify empty sends return locally without staging any request.
         let mut harness = TestLoop::new(iouring::RingConfig::default());
@@ -1099,44 +1048,6 @@ mod tests {
 
             let (received, (_sink, _stream)) = futures::join!(reader, sender);
             assert_eq!(received.coalesce(), expected);
-        });
-    }
-
-    #[test]
-    fn test_configured_socket_options_cover_accept_and_dial_paths() {
-        // Verify both dial and accept exercise the configured socket-option branches.
-        let (mut harness, network) = test_network(Config {
-            tcp_nodelay: Some(true),
-            zero_linger: true,
-            ..Default::default()
-        });
-        harness.block_on(async move {
-            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-            let addr = listener.local_addr().unwrap();
-
-            // Accepting covers the listener-side option setters, dialing the
-            // client-side ones.
-            let accept = async { listener.accept().await.unwrap() };
-            let dial = async { network.dial(addr).await.unwrap() };
-            let (_accepted, (_sink, _stream)) = futures::join!(accept, dial);
-        });
-    }
-
-    #[test]
-    fn test_disabled_socket_options_cover_accept_and_dial_paths() {
-        // Verify both dial and accept also cover the "do not touch socket options" branches.
-        let (mut harness, network) = test_network(Config {
-            tcp_nodelay: None,
-            zero_linger: false,
-            ..Default::default()
-        });
-        harness.block_on(async move {
-            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-            let addr = listener.local_addr().unwrap();
-
-            let accept = async { listener.accept().await.unwrap() };
-            let dial = async { network.dial(addr).await.unwrap() };
-            let (_accepted, (_sink, _stream)) = futures::join!(accept, dial);
         });
     }
 

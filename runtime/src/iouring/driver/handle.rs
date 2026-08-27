@@ -387,6 +387,7 @@ enum CapacityState {
 /// Successful variants carry the observer waker cloned before the transition
 /// consumed either a direct free slot or a reserved grant. The caller can then
 /// publish the waiter and retain the observer without a second external clone.
+#[cfg_attr(test, derive(Debug, Eq, PartialEq))]
 enum CapacityAdmission {
     /// Admit directly from an unreserved authoritative free slot.
     Direct,
@@ -394,30 +395,6 @@ enum CapacityAdmission {
     Granted,
     /// Keep or create a FIFO registration and wait for a grant.
     Queued,
-}
-
-/// Payload-free admission result used by capacity state-machine tests.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CapacityAdmissionKind {
-    /// The poll admitted directly from a free slot.
-    Direct,
-    /// The poll consumed a reserved grant.
-    Granted,
-    /// The poll remains registered in the FIFO.
-    Queued,
-}
-
-#[cfg(test)]
-impl CapacityAdmission {
-    /// Return the payload-free result for state-machine assertions.
-    const fn kind(&self) -> CapacityAdmissionKind {
-        match self {
-            Self::Direct => CapacityAdmissionKind::Direct,
-            Self::Granted => CapacityAdmissionKind::Granted,
-            Self::Queued => CapacityAdmissionKind::Queued,
-        }
-    }
 }
 
 impl CapacityWaiters {
@@ -1793,7 +1770,7 @@ mod tests {
         registration: &mut Option<CapacityId>,
         free_len: usize,
         waker: &Waker,
-    ) -> CapacityAdmissionKind {
+    ) -> CapacityAdmission {
         poll_capacity_with_deadline(capacity, registration, free_len, None, waker)
     }
 
@@ -1803,7 +1780,7 @@ mod tests {
         free_len: usize,
         deadline: Option<Instant>,
         waker: &Waker,
-    ) -> CapacityAdmissionKind {
+    ) -> CapacityAdmission {
         let mut actions = Vec::new();
         let mut incoming = Some(waker.clone());
         let admission = capacity.poll(
@@ -1815,7 +1792,7 @@ mod tests {
         );
         actions.extend(incoming.map(WakerAction::Drop));
         wake_batch(actions);
-        admission.kind()
+        admission
     }
 
     fn reconcile_capacity(capacity: &mut CapacityWaiters, free_len: usize) {
@@ -1851,11 +1828,11 @@ mod tests {
 
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[0], 0, &wakers[0]),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[1], 0, &wakers[1]),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         reconcile_capacity(&mut capacity, 1);
         assert_eq!(capacity.reserved(), 1);
@@ -1864,12 +1841,12 @@ mod tests {
         // joins behind the remaining queued waiter instead of taking it.
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[2], 1, &wakers[2]),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         assert_eq!(capacity.queued(), 2);
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[0], 1, &wakers[0]),
-            CapacityAdmissionKind::Granted
+            CapacityAdmission::Granted
         );
 
         // Simulate insertion consuming the free waiter, then two terminal
@@ -1877,12 +1854,12 @@ mod tests {
         reconcile_capacity(&mut capacity, 1);
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[1], 1, &wakers[1]),
-            CapacityAdmissionKind::Granted
+            CapacityAdmission::Granted
         );
         reconcile_capacity(&mut capacity, 1);
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[2], 1, &wakers[2]),
-            CapacityAdmissionKind::Granted
+            CapacityAdmission::Granted
         );
         assert_eq!(*log.lock(), vec![0, 1, 2]);
         assert_eq!(capacity.registered(), 0);
@@ -1900,7 +1877,7 @@ mod tests {
         for (registration, waker) in registrations.iter_mut().zip(&wakers) {
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 0, waker),
-                CapacityAdmissionKind::Queued
+                CapacityAdmission::Queued
             );
         }
 
@@ -1926,7 +1903,7 @@ mod tests {
                 Some(now + Duration::from_millis(10)),
                 &wakers[0],
             ),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         assert_eq!(
             poll_capacity_with_deadline(
@@ -1936,11 +1913,11 @@ mod tests {
                 Some(now + Duration::from_millis(20)),
                 &wakers[1],
             ),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[2], 0, &wakers[2],),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
 
         reconcile_capacity(&mut capacity, 1);
@@ -1976,12 +1953,12 @@ mod tests {
                 Some(now + Duration::from_millis(20)),
                 &wakers[1],
             ),
-            CapacityAdmissionKind::Granted
+            CapacityAdmission::Granted
         );
         reconcile_capacity(&mut capacity, 1);
         assert_eq!(
             poll_capacity(&mut capacity, &mut registrations[2], 1, &wakers[2]),
-            CapacityAdmissionKind::Granted
+            CapacityAdmission::Granted
         );
         assert_eq!(*log.lock(), vec![0, 1, 2]);
         assert_eq!(capacity.registered(), 0);
@@ -2001,7 +1978,7 @@ mod tests {
                 Some(now + Duration::from_secs(1)),
                 &waker,
             ),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
 
         for offset in 0..256 {
@@ -2014,7 +1991,7 @@ mod tests {
                     Some(now + Duration::from_secs(2) + Duration::from_millis(offset)),
                     &waker,
                 ),
-                CapacityAdmissionKind::Queued
+                CapacityAdmission::Queued
             );
             cancel_capacity(&mut capacity, churn.unwrap(), 0);
         }
@@ -2092,11 +2069,11 @@ mod tests {
         let mut second = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut first, 0, &first_waker),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         assert_eq!(
             poll_capacity(&mut capacity, &mut second, 0, &second_waker),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
 
         reconcile_capacity(&mut capacity, 1);
@@ -2107,7 +2084,7 @@ mod tests {
         assert_eq!(capacity.registered(), 1);
         assert_eq!(
             poll_capacity(&mut capacity, &mut second, 1, &second_waker),
-            CapacityAdmissionKind::Granted
+            CapacityAdmission::Granted
         );
     }
 
@@ -2122,7 +2099,7 @@ mod tests {
         for (registration, waker) in registrations.iter_mut().zip(&wakers) {
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 0, waker),
-                CapacityAdmissionKind::Queued
+                CapacityAdmission::Queued
             );
         }
 
@@ -2144,7 +2121,7 @@ mod tests {
         let mut old = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut old, 0, &old_waker),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         let stale = old.unwrap();
         cancel_capacity(&mut capacity, stale, 0);
@@ -2152,7 +2129,7 @@ mod tests {
         let mut new = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut new, 0, &new_waker),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         let current = new.unwrap();
         assert_eq!(stale.index, current.index);
@@ -2179,11 +2156,11 @@ mod tests {
         let mut registration = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut registration, 0, &old_waker),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         assert_eq!(
             poll_capacity(&mut capacity, &mut registration, 0, &new_waker),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         assert_eq!(capacity.queued(), 1);
         reconcile_capacity(&mut capacity, 1);
@@ -2206,13 +2183,13 @@ mod tests {
         let mut registration = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut registration, 0, &waker),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         let clones = clone_count.load(Ordering::Acquire);
 
         assert_eq!(
             poll_capacity(&mut capacity, &mut registration, 0, &waker),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         // Polling clones before entering the affine Ops borrow. The arena
         // recognizes the equivalent waker and defers that clone's drop rather
@@ -2238,7 +2215,7 @@ mod tests {
         for (registration, waker) in registrations.iter_mut().zip(&wakers) {
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 0, waker),
-                CapacityAdmissionKind::Queued
+                CapacityAdmission::Queued
             );
         }
         let mut grant_actions = Vec::new();
@@ -2279,7 +2256,7 @@ mod tests {
         let mut replacement = None;
         assert_eq!(
             poll_capacity(&mut capacity, &mut replacement, 0, &wakers[0]),
-            CapacityAdmissionKind::Queued
+            CapacityAdmission::Queued
         );
         let replacement = replacement.unwrap();
         assert_eq!(replacement.index, stale.index);
@@ -2298,7 +2275,7 @@ mod tests {
         for registration in &mut registrations {
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 0, &waker),
-                CapacityAdmissionKind::Queued
+                CapacityAdmission::Queued
             );
         }
 
@@ -2306,7 +2283,7 @@ mod tests {
             reconcile_capacity(&mut capacity, 1);
             assert_eq!(
                 poll_capacity(&mut capacity, registration, 1, &waker),
-                CapacityAdmissionKind::Granted
+                CapacityAdmission::Granted
             );
         }
         assert_eq!(count.0.load(Ordering::Acquire), WAITERS);

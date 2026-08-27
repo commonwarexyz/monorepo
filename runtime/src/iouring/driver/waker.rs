@@ -706,15 +706,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_wake_without_idle_wait_latches_signal() {
-        // Verify a notification without an idle wait remains sticky until the
-        // next arm-and-clear cycle.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        waker.wake();
-        assert_eq!(state_bits(&waker), WAKE_SIGNALLED_BIT);
-    }
-
-    #[test]
     fn test_wake_before_park_idle_skips_sleep() {
         // Verify an out-of-band wake latched before idle arming makes the next
         // idle park return immediately instead of sleeping.
@@ -740,20 +731,6 @@ pub mod tests {
         assert!(!waker.futex_wait(WAITING_ON_FUTEX_BIT));
 
         waker.clear_wait();
-        assert_eq!(state_bits(&waker), 0);
-    }
-
-    #[test]
-    fn test_arm_after_sticky_wake_skips_blocking() {
-        // Verify a wake latched before arming makes the next blocking section
-        // skip the normal idle-based blocking decision.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-
-        waker.wake();
-        let arm = waker.arm();
-        assert!(arm.wake_latched());
-        drop(arm);
-
         assert_eq!(state_bits(&waker), 0);
     }
 
@@ -786,6 +763,7 @@ pub mod tests {
         let waker = Waker::new().expect("eventfd creation should succeed");
 
         waker.wake();
+        assert_eq!(state_bits(&waker), WAKE_SIGNALLED_BIT);
         let arm = waker.arm();
         assert!(arm.wake_latched());
         drop(arm);
@@ -794,6 +772,7 @@ pub mod tests {
         assert_eq!(eventfd_count(&waker), 0);
 
         waker.wake();
+        assert_eq!(state_bits(&waker), WAKE_SIGNALLED_BIT);
         let arm = waker.arm();
         assert!(arm.wake_latched());
         drop(arm);

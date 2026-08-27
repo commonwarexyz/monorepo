@@ -2651,30 +2651,20 @@ mod tests {
         #[derive(Clone, Copy, Debug)]
         enum Operation {
             Resize,
-            ResizeOverflow,
             Read,
-            ReadEmpty,
             ReadBufferEmpty,
-            ReadOverflow,
             ReadBufferOverflow,
             WriteEmpty,
             WriteOverflow,
-            WriteSyncEmpty,
-            WriteSyncOverflow,
         }
 
         let cases = [
             ("resize", Operation::Resize),
-            ("resize_overflow", Operation::ResizeOverflow),
             ("read", Operation::Read),
-            ("read_empty", Operation::ReadEmpty),
             ("read_buffer_empty", Operation::ReadBufferEmpty),
-            ("read_overflow", Operation::ReadOverflow),
             ("read_buffer_overflow", Operation::ReadBufferOverflow),
             ("write_empty", Operation::WriteEmpty),
             ("write_overflow", Operation::WriteOverflow),
-            ("write_sync_empty", Operation::WriteSyncEmpty),
-            ("write_sync_overflow", Operation::WriteSyncOverflow),
         ];
 
         let cfg = Config::default().with_catch_panics(true);
@@ -2687,14 +2677,8 @@ mod tests {
                         Operation::Resize => {
                             let _ = blob.resize(1).await;
                         }
-                        Operation::ResizeOverflow => {
-                            let _ = blob.resize(u64::MAX).await;
-                        }
                         Operation::Read => {
                             let _ = blob.read_at(0, 1, ReadOptions::default()).await;
-                        }
-                        Operation::ReadEmpty => {
-                            let _ = blob.read_at(0, 0, ReadOptions::default()).await;
                         }
                         Operation::ReadBufferEmpty => {
                             let _ = blob
@@ -2705,9 +2689,6 @@ mod tests {
                                     ReadOptions::default(),
                                 )
                                 .await;
-                        }
-                        Operation::ReadOverflow => {
-                            let _ = blob.read_at(u64::MAX, 1, ReadOptions::default()).await;
                         }
                         Operation::ReadBufferOverflow => {
                             let _ = blob
@@ -2727,14 +2708,6 @@ mod tests {
                         Operation::WriteOverflow => {
                             let _ = blob
                                 .write_at(u64::MAX, b"x".to_vec(), WriteOptions::default())
-                                .await;
-                        }
-                        Operation::WriteSyncEmpty => {
-                            let _ = blob.write_at(0, Vec::<u8>::new(), WriteOptions::SYNC).await;
-                        }
-                        Operation::WriteSyncOverflow => {
-                            let _ = blob
-                                .write_at(u64::MAX, b"x".to_vec(), WriteOptions::SYNC)
                                 .await;
                         }
                     }

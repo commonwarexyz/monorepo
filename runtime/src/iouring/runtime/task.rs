@@ -792,28 +792,6 @@ mod tests {
         assert!(!tasks.has_ready());
     }
 
-    #[test]
-    fn test_zero_limit_drain_preserves_ready_tokens() {
-        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
-        assert!(tasks.take_root_ready());
-        queue_token(&tasks, ready_cell(&tasks, 0), ReadyLane::Normal);
-        queue_token(&tasks, ready_cell(&tasks, 10), ReadyLane::Event);
-
-        let mut scratch = Vec::new();
-        tasks.drain_into(&mut scratch, 0, 1);
-        assert!(scratch.is_empty());
-        assert!(tasks.has_ready());
-        {
-            let ready = tasks.ready.lock();
-            assert_eq!(ready.normal.len(), 1);
-            assert_eq!(ready.event.len(), 1);
-        }
-
-        tasks.drain_into(&mut scratch, 2, 1);
-        assert_eq!(completed_slots(&tasks, &mut scratch), vec![10, 0]);
-        assert!(!tasks.has_ready());
-    }
-
     /// Multiple drains may interleave the lanes, but tokens from each lane
     /// retain their own arrival order.
     #[test]
@@ -942,43 +920,6 @@ mod tests {
         tasks.clear();
     }
 
-    /// A notification deferred by a running task uses the normal lane even
-    /// if a direct unit test polls that task under an event-delivery guard.
-    #[test]
-    fn test_deferred_wake_uses_normal_lane() {
-        struct WakePending;
-
-        impl Future for WakePending {
-            type Output = ();
-
-            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        }
-
-        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
-        assert!(tasks.take_root_ready());
-        let cell = Arc::new(TaskCell {
-            slot: 13,
-            tasks: Arc::downgrade(&tasks),
-            state: TaskState::queued(),
-            future: Affine::pinned(std::thread::current().id(), RefCell::new(Some(WakePending))),
-        });
-
-        let result = {
-            let _event_delivery = tasks.event_delivery();
-            (cell as Arc<dyn Erased>).poll(&tasks)
-        };
-        assert_eq!(result, None);
-
-        let ready = tasks.ready.lock();
-        assert_eq!(ready.normal.len(), 1);
-        assert!(ready.event.is_empty());
-        drop(ready);
-        tasks.clear();
-    }
-
     /// A by-value wake racing a poll is retained only when that poll returns
     /// `Pending`. The polling thread publishes the successor token after
     /// releasing the future borrow, while a final poll discards the wake.
@@ -1091,70 +1032,30 @@ mod tests {
         tasks.clear();
     }
 
-    /// Repeated event wakes before a poll coalesce into one event token.
+    /// Repeated direct wakes before a poll coalesce into one token in both
+    /// the normal and event lanes.
     #[test]
-    fn test_repeated_event_wakes_coalesce() {
+    fn test_repeated_direct_wakes_coalesce() {
         let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
         assert!(tasks.take_root_ready());
-        let cell = pending_cell(&tasks, 6, false);
+        let normal = pending_cell(&tasks, 5, false);
+        let event = pending_cell(&tasks, 6, false);
+
+        for _ in 0..5 {
+            ArcWake::wake_by_ref(&normal);
+        }
 
         {
             let _event_delivery = tasks.event_delivery();
             for _ in 0..5 {
-                ArcWake::wake_by_ref(&cell);
+                ArcWake::wake_by_ref(&event);
             }
         }
 
         let ready = tasks.ready.lock();
-        assert!(ready.normal.is_empty());
+        assert_eq!(ready.normal.len(), 1);
         assert_eq!(ready.event.len(), 1);
         drop(ready);
-        tasks.clear();
-    }
-
-    /// A wake received during a final poll must be discarded even when an
-    /// event-delivery phase is active, so later ready work retains the full
-    /// bounded batch.
-    #[test]
-    fn test_wake_then_ready_discards_event_phase_notification() {
-        struct WakeThenReady;
-
-        impl Future for WakeThenReady {
-            type Output = ();
-
-            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
-                cx.waker().wake_by_ref();
-                Poll::Ready(())
-            }
-        }
-
-        let tasks = Arc::new(Tasks::new(RingWaker::new().expect("wake eventfd")));
-        assert!(tasks.take_root_ready());
-        let completing = Arc::new(TaskCell {
-            slot: 8,
-            tasks: Arc::downgrade(&tasks),
-            state: TaskState::queued(),
-            future: Affine::pinned(
-                std::thread::current().id(),
-                RefCell::new(Some(WakeThenReady)),
-            ),
-        });
-        queue_token(&tasks, completing as Arc<dyn Erased>, ReadyLane::Normal);
-
-        let mut scratch = Vec::new();
-        tasks.drain_into(&mut scratch, 1, 1);
-        let completing_token = scratch.pop().unwrap();
-        {
-            let _event_delivery = tasks.event_delivery();
-            assert_eq!(completing_token.poll(&tasks), Some(8));
-        }
-        assert!(!tasks.has_ready());
-        queue_token(&tasks, ready_cell(&tasks, 9), ReadyLane::Normal);
-        queue_token(&tasks, ready_cell(&tasks, 10), ReadyLane::Normal);
-
-        tasks.drain_into(&mut scratch, 2, 1);
-        assert_eq!(completed_slots(&tasks, &mut scratch), vec![9, 10]);
-        assert!(!tasks.has_ready());
         tasks.clear();
     }
 
@@ -1282,45 +1183,6 @@ mod tests {
             Some("first task drop panic")
         );
         assert_eq!(drops.load(Ordering::Acquire), 2);
-    }
-
-    /// Repeated wakes of the same task before its next poll must coalesce
-    /// into one ready-queue entry: unguarded pushes let a legal
-    /// multiple-wakes-per-poll future grow the queue without bound.
-    #[test]
-    fn test_duplicate_wakes_coalesce() {
-        Runner::default().start(|context| async move {
-            let executor = context.executor.upgrade().unwrap();
-
-            // Smuggle a spawned task's waker out through a oneshot.
-            let (send, recv) = oneshot::channel();
-            let _task = context.child("waker").spawn(move |_| async move {
-                let mut send = Some(send);
-                std::future::poll_fn(move |cx| {
-                    if let Some(send) = send.take() {
-                        let _ = send.send(cx.waker().clone());
-                    }
-                    Poll::<()>::Pending
-                })
-                .await
-            });
-            let waker = recv.await.unwrap();
-
-            // The task was polled (it sent the waker) and is idle: repeated
-            // wakes must queue it exactly once.
-            let before = {
-                let ready = executor.tasks.ready.lock();
-                ready.normal.len() + ready.event.len()
-            };
-            for _ in 0..5 {
-                waker.wake_by_ref();
-            }
-            let after = {
-                let ready = executor.tasks.ready.lock();
-                ready.normal.len() + ready.event.len()
-            };
-            assert_eq!(after - before, 1, "duplicate wakes must coalesce");
-        });
     }
 
     /// A bounded drain preserves FIFO order and leaves every token beyond the

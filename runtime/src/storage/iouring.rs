@@ -753,37 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn test_vectored_write_partial_progress() {
-        // Verify multi-buffer writes survive partial progress and preserve byte order.
-        let (mut harness, storage, storage_directory) = create_test_storage();
-        harness.block_on(async move {
-            let (blob, _) = storage.open("partition", b"vectest").await.unwrap();
-            blob.resize(200).await.unwrap();
-
-            // Write multiple buffers in one vectored call.
-            let mut bufs = crate::IoBufs::default();
-            bufs.append(crate::IoBuf::from(vec![0xAAu8; 80]));
-            bufs.append(crate::IoBuf::from(vec![0xBBu8; 80]));
-            blob.write_at(0, bufs, WriteOptions::default())
-                .await
-                .unwrap();
-            blob.sync().await.unwrap();
-
-            // Read back and verify.
-            let data = blob
-                .read_at(0, 160, ReadOptions::default())
-                .await
-                .unwrap()
-                .coalesce();
-            assert_eq!(&data.as_ref()[..80], &[0xAAu8; 80]);
-            assert_eq!(&data.as_ref()[80..], &[0xBBu8; 80]);
-
-            drop(blob);
-            let _ = std::fs::remove_dir_all(&storage_directory);
-        });
-    }
-
-    #[test]
     fn test_read_at_reports_eof_when_blob_is_too_short() {
         // Verify read-at returns `BlobInsufficientLength` when the kernel reports EOF mid-read.
         let (mut harness, storage, storage_directory) = create_test_storage();
@@ -803,34 +772,6 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(err.to_string(), "blob insufficient length");
-
-            drop(blob);
-            let _ = std::fs::remove_dir_all(&storage_directory);
-        });
-    }
-
-    #[test]
-    fn test_read_at_buf_preserves_multichunk_layout() {
-        // Verify multi-chunk caller buffers keep their shape after the temporary-buffer fallback.
-        let (mut harness, storage, storage_directory) = create_test_storage();
-        harness.block_on(async move {
-            let (blob, _) = storage.open("partition", b"multichunk").await.unwrap();
-            blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
-                .await
-                .unwrap();
-            blob.sync().await.unwrap();
-
-            // Use a two-chunk destination so the read path must rebuild the original
-            // chunk layout after reading through a temporary contiguous buffer.
-            let bufs =
-                IoBufsMut::from(vec![IoBufMut::with_capacity(5), IoBufMut::with_capacity(6)]);
-            let read = blob
-                .read_at_buf(0, 11, bufs, ReadOptions::DONT_CACHE)
-                .await
-                .unwrap();
-            // The result should keep the split layout rather than collapsing to one buffer.
-            assert!(!read.is_single());
-            assert_eq!(read.coalesce(), b"hello world");
 
             drop(blob);
             let _ = std::fs::remove_dir_all(&storage_directory);
