@@ -157,9 +157,11 @@ const fn combinations_for_security(security: usize) -> usize {
 
 /// Largest supported number of parallel combinations per round.
 ///
-/// A round's collapse workspace holds about `1.5 * 3^m` points, so this bounds
-/// what a round can allocate; in practice [`SLOT_BUDGET`] binds first.
-const MAX_WIDTH: u32 = 11;
+/// Set to where the sampler runs out rather than to a performance judgement,
+/// so that [`SLOT_BUDGET`] is what decides the width: `3^13` is the largest
+/// power of three a drawn `u32` word can carry, and one id per word is the
+/// least the packing can do. [`SLOT_BUDGET`] binds well before this.
+const MAX_WIDTH: u32 = 13;
 
 /// Largest bucket-slot footprint a round should ask for, in bytes.
 ///
@@ -169,20 +171,26 @@ const MAX_WIDTH: u32 = 11;
 /// for a deeper level of the memory hierarchy on every point, and its workspace
 /// grows threefold per step, per thread.
 ///
-/// Sixteen MiB admits width 11, which is the one step that changes the round
-/// count at 128-bit security: `ceil(81/11) = 8` passes rather than the nine
-/// every narrower width needs. It is worth 9% at a million points here, and
-/// nothing at all below the size where the cost model stops choosing it — a
-/// hundred-thousand-point batch still plans nine rounds of width nine, because
-/// the combine a width-11 round pays for outgrows the pass it saves. Folding
-/// is what brings width 11 inside a budget this size at all: unfolded its slots
-/// would be 17 MB rather than 8.5 MB.
+/// Only two widths change the round count at 128-bit security, and this admits
+/// both: width 11 gives `ceil(81/11) = 8` passes rather than nine, and width 12
+/// gives seven. Measured here, the first is worth 9% at a million points and
+/// the second 8% at three million — 19.3x to 20.8x against per-point checking.
+/// Folding is what brings them inside a budget this size: width 12's slots are
+/// 25 MB folded against 51 MB unfolded.
+///
+/// A wider round is not free, which is why the budget is not simply the largest
+/// width the sampler supports. Each step triples the slot array the accumulator
+/// touches at random, and triples the per-thread workspace with it, while the
+/// combine it pays for grows as `3^m` against the single pass it saves. The
+/// cost model weighs that per batch, so a smaller batch declines the width a
+/// larger one takes: at a hundred thousand points it still plans nine rounds of
+/// width nine, and only past a million does width 12 start to pay.
 ///
 /// This is the constant most worth re-measuring on a new machine. It trades
 /// against the last level of cache that holds the slot array, so a machine with
 /// a smaller one wants it lower; the width it admits is a performance choice
 /// only, and every width is equally sound.
-const SLOT_BUDGET: usize = 16 << 20;
+const SLOT_BUDGET: usize = 32 << 20;
 
 /// Approximate cost of one [`G1::in_subgroup`] check, in units of one
 /// batch-affine point addition.
@@ -1351,6 +1359,8 @@ impl<'a, R: CryptoRng> Trits<'a, R> {
             9 => draw!(19683, 2),
             10 => draw!(59049, 2),
             11 => draw!(177147, 1),
+            12 => draw!(531441, 1),
+            13 => draw!(1594323, 1),
             _ => unreachable!("width is at most MAX_WIDTH"),
         }
         ids
