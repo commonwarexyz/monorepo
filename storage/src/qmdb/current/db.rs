@@ -663,7 +663,9 @@ where
 
         // `any.rewind` rewinds the log and patches the committed bitmap (truncate + restore active
         // bits + set the rewound tail's CommitFloor). Live pre-rewind batches must be dropped by
-        // the caller; reads through them now return inconsistent data.
+        // the caller. The batch-chain gate refuses their reads once the database leaves their
+        // chain, but a rewind back onto one of their ancestor states does not, and their bitmap
+        // overlays were built on the later committed bitmap.
         self.any = self.any.rewind(size).await?;
 
         // Rebuild the grafted tree and canonical root from the rewound `any` state.

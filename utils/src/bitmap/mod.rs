@@ -1034,11 +1034,8 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 ///
 /// `len` and the current chunk are read from the bitmap once and reused (the chunk until
 /// iteration crosses into the next one), so the bitmap's contents must not change for the
-/// iterator's lifetime. Owned bitmaps (`BitMap`, `Prunable`) guarantee this through the
-/// immutable borrow. A `Readable` whose reads go through interior mutability (e.g. a
-/// lock-guarded shared bitmap) instead requires the caller to prevent concurrent mutation
-/// across the whole iteration, for example by constructing the iterator from a held read
-/// guard rather than a bare shared reference.
+/// iterator's lifetime. A `Readable` whose reads go through interior mutability must not be
+/// mutated for the duration of the iteration.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
     /// Cached `bitmap.len()` at iterator construction. For layered bitmaps, `len()`

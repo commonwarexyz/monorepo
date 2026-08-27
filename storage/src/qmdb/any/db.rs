@@ -632,12 +632,7 @@ where
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below
         // rewind_size flip back to active in the loop below. `rewind_size >= bitmap.pruned_bits()`
         // is enforced upstream: directly via the `bounds.start` check above, or via
-        // `current::Db::rewind`'s explicit `pruned_bits` precondition. The debug_assert catches
-        // regressions.
-        assert!(
-            self.bitmap.pruned_bits() <= rewind_size,
-            "bitmap pruned boundary exceeded journal retained start",
-        );
+        // `current::Db::rewind`'s explicit `pruned_bits` precondition. `truncate` asserts it.
         self.bitmap.truncate(rewind_size);
 
         for undo in undos {

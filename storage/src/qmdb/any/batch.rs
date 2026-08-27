@@ -43,11 +43,11 @@ type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
 /// One contiguous chunk of floor-raise candidates paired with their resolved operations.
 type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
-/// Floor-raise candidates prefetched from the committed prefix of the raise's candidate
-/// source, with their resolved operations. The candidate sequence depends only on the base
-/// floor and that source, so a staged merkleize reads it before its serial bookkeeping
-/// runs. `finish` drains this buffer, then resumes the live scan at `next_scan`, producing
-/// exactly the sequence the live scan alone would have.
+/// Floor-raise candidates prefetched from the committed prefix of the bitmap the raise scans,
+/// with their resolved operations. The candidate sequence depends only on the base floor and
+/// that bitmap, so a staged merkleize reads it before its serial bookkeeping runs. `finish`
+/// drains this buffer, then resumes the live scan at `next_scan`, producing exactly the
+/// sequence the live scan alone would have.
 pub(crate) struct PrefetchedCandidates<F: Family, U: update::Update>
 where
     Operation<F, U>: Codec,
