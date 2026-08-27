@@ -847,36 +847,6 @@ fn test_granted_admission_clone_panic_preserves_reservation_for_retry() {
 }
 
 #[test]
-fn test_pending_orphan_with_queued_successor_keeps_actions_inline() {
-    let handle = Handle::new(1, RingWaker::new().unwrap());
-    let blocker = handle.with(|ops| {
-        ops.waiters
-            .insert(recv_request(), futures::task::noop_waker())
-    });
-    let mut successor = Op::new(&handle, recv_request());
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    assert!(Pin::new(&mut successor).poll(&mut cx).is_pending());
-
-    let actions = handle.with(|ops| {
-        assert_eq!(ops.capacity.queued(), 1);
-        let mut actions = CapacityActions::new();
-        wind_down_orphan(ops, blocker, &mut actions);
-
-        assert_eq!(actions.inline_len, 1);
-        assert!(actions.overflow.is_empty());
-        assert_eq!(actions.overflow.capacity(), 0);
-        assert_eq!(ops.capacity.queued(), 1);
-        assert_eq!(ops.capacity.reserved(), 0);
-        assert!(ops.pending_cancels.is_empty());
-        assert!(ops.released_deadlines.is_empty());
-        actions
-    });
-    wake_batch(actions);
-    drop(successor);
-}
-
-#[test]
 fn test_queued_ticket_admission_fails_after_close() {
     let handle = Handle::new(1, RingWaker::new().unwrap());
     let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();

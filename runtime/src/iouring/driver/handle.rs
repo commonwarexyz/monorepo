@@ -191,11 +191,10 @@ pub(super) enum WakerAction {
 
 /// Append-only destination for detached capacity waker actions.
 ///
-/// The driver uses its reusable action vector. Future poll and drop paths keep
-/// the ordinary one or two actions inline and allocate only when adversarial
-/// callbacks force a larger recovery batch.
+/// The driver uses its reusable action vector. Future poll and drop paths use
+/// a fixed batch for the one or two actions produced by a single transition.
 pub(super) trait CapacityActionSink {
-    /// Ensure room for actions that must be recorded after a state transition.
+    /// Ensure room before the state transition that will produce actions.
     fn reserve(&mut self, additional: usize);
 
     /// Append one action whose callback must run after owner state is released.
@@ -214,16 +213,13 @@ impl CapacityActionSink for Vec<WakerAction> {
 
 /// Deferred actions produced by one capacity transition.
 ///
-/// Ordinary admission, cancellation, and grant paths produce at most two
-/// actions, so they remain allocation-free. The overflow vector keeps the
-/// sink general for batched teardown paths.
+/// A single admission, cancellation, grant, poll, or orphan transition
+/// produces at most two actions. Batched loop paths use a vector directly.
 pub(super) struct CapacityActions {
-    /// Allocation-free storage for the ordinary action count.
+    /// Fixed storage for the transition's actions.
     inline: [Option<WakerAction>; 2],
     /// Number of initialized entries at the start of `inline`.
     inline_len: usize,
-    /// Actions beyond the ordinary two-action bound.
-    overflow: Vec<WakerAction>,
 }
 
 impl CapacityActions {
@@ -232,38 +228,31 @@ impl CapacityActions {
         Self {
             inline: [None, None],
             inline_len: 0,
-            overflow: Vec::new(),
         }
     }
 }
 
 impl CapacityActionSink for CapacityActions {
     fn reserve(&mut self, additional: usize) {
-        let inline_available = self.inline.len() - self.inline_len;
-        self.overflow
-            .reserve(additional.saturating_sub(inline_available));
+        assert!(
+            additional <= self.inline.len() - self.inline_len,
+            "capacity action batch exceeded fixed storage"
+        );
     }
 
     fn push(&mut self, action: WakerAction) {
         self.reserve(1);
-        if self.inline_len < self.inline.len() {
-            self.inline[self.inline_len] = Some(action);
-            self.inline_len += 1;
-        } else {
-            self.overflow.push(action);
-        }
+        self.inline[self.inline_len] = Some(action);
+        self.inline_len += 1;
     }
 }
 
 impl IntoIterator for CapacityActions {
     type Item = WakerAction;
-    type IntoIter = std::iter::Chain<
-        std::iter::Flatten<std::array::IntoIter<Option<WakerAction>, 2>>,
-        std::vec::IntoIter<WakerAction>,
-    >;
+    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<WakerAction>, 2>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.inline.into_iter().flatten().chain(self.overflow)
+        self.inline.into_iter().flatten()
     }
 }
 
@@ -1225,11 +1214,11 @@ fn poll_admission<T>(
         .deadline();
     let outcome = handle.with(|ops| {
         if ops.closed {
+            actions.reserve(1 + usize::from(registration.slot.is_some()));
             if let Some(slot) = registration.slot.take() {
                 ops.capacity
                     .cancel(slot, ops.waiters.free_len(), &mut actions);
             }
-            actions.reserve(1);
             actions.push(WakerAction::Drop(
                 incoming_waker
                     .take()
@@ -1238,11 +1227,11 @@ fn poll_admission<T>(
             return Admission::Closed;
         }
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            actions.reserve(1 + usize::from(registration.slot.is_some()));
             if let Some(slot) = registration.slot.take() {
                 ops.capacity
                     .cancel(slot, ops.waiters.free_len(), &mut actions);
             }
-            actions.reserve(1);
             actions.push(WakerAction::Drop(
                 incoming_waker
                     .take()
@@ -1294,9 +1283,9 @@ fn poll_op_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Po
     }
 
     let mut incoming = Some(cx.waker().clone());
-    let (output, detached) = handle.with(|ops| ops.waiters.poll_take_deferred(id, &mut incoming));
     let mut actions = CapacityActions::new();
     actions.reserve(2);
+    let (output, detached) = handle.with(|ops| ops.waiters.poll_take_deferred(id, &mut incoming));
     for waker in detached.into_iter().chain(incoming) {
         actions.push(WakerAction::Drop(waker));
     }
@@ -1313,10 +1302,10 @@ fn poll_ticket_completion(handle: &Handle, id: CompletionId, cx: &mut Context<'_
     }
 
     let mut incoming = Some(cx.waker().clone());
-    let (output, detached) =
-        handle.with(|ops| ops.completions.poll_take_deferred(id, &mut incoming));
     let mut actions = CapacityActions::new();
     actions.reserve(2);
+    let (output, detached) =
+        handle.with(|ops| ops.completions.poll_take_deferred(id, &mut incoming));
     for waker in detached.into_iter().chain(incoming) {
         actions.push(WakerAction::Drop(waker));
     }
