@@ -5,7 +5,7 @@ use super::{
     request,
     spinner::Spinner,
     timeout::{self, Tick, TimeoutWheel},
-    waiter::{CompletionId, CompletionOutcome, StageOutcome, WaiterId},
+    waiter::{TicketId, CqeOutcome, StageOutcome, WaiterId},
     waker::{WAKE_USER_DATA, RingWaker},
 };
 use crate::{
@@ -109,7 +109,7 @@ impl Drop for PendingOperations {
 /// ```text
 /// owner runtime thread
 /// +-- DriverState: shutdown, metrics, timeouts, idle/wake, scratch
-/// `-- DriverHandle -> Ops (thread-affine): waiters, completions, queues, capacity
+/// `-- DriverHandle -> Ops (thread-affine): waiters, tickets, queues, capacity
 /// foreign-thread drops -> DriverHandle orphan mailbox -> owner loop
 /// ```
 ///
@@ -124,7 +124,7 @@ struct DriverState {
     shutdown_timeout: Option<Duration>,
     /// Number of logical requests retained by the driver. Internal SQEs (the
     /// wake poll and async cancels) are not counted. Tracked waiters and Ready
-    /// detached ticket completions count once each.
+    /// detached ticket outputs count once each.
     /// This is updated in the main loop and at shutdown drain exit, so it may
     /// temporarily vary from the exact retained-operation count between update
     /// points.
@@ -206,7 +206,7 @@ impl DriverState {
                 handle::Orphan::Waiter(id) => {
                     handle::wind_down_orphan(ops, id, &mut self.pending_waker_actions);
                 }
-                handle::Orphan::Completion(id) => {
+                handle::Orphan::Ticket(id) => {
                     handle::wind_down_ticket(ops, id, &mut self.pending_waker_actions);
                 }
                 handle::Orphan::Capacity(slot) => ops.capacity.cancel(
@@ -369,9 +369,9 @@ impl DriverState {
             StageOutcome::Freed => self.notify_capacity(ops),
             StageOutcome::Ticket {
                 waiter_id,
-                completion_id,
+                ticket_id,
                 output,
-            } => self.complete_ticket(ops, waiter_id, completion_id, output, None),
+            } => self.complete_ticket(ops, waiter_id, ticket_id, output, None),
             StageOutcome::Submit(sqe) => {
                 // SAFETY:
                 // - All resources are stored in the waiter slab until CQE processing, so
@@ -542,33 +542,33 @@ impl DriverState {
         }
 
         match ops.waiters.on_completion(user_data, cqe.result()) {
-            CompletionOutcome::Cancel => {
+            CqeOutcome::Cancel => {
                 // Async-cancel CQEs are handled entirely inside `Waiters`. They do
                 // not directly complete or requeue a logical request here.
             }
-            CompletionOutcome::Requeue(waiter_id) => {
+            CqeOutcome::Requeue(waiter_id) => {
                 // Request needs another SQE. Add it back to the backlog.
                 ops.backlog.push_back(waiter_id);
             }
-            CompletionOutcome::Ready { waker, target_tick } => {
+            CqeOutcome::Ready { waker, target_tick } => {
                 if let Some(tick) = target_tick {
                     self.timeout_wheel.remove(tick);
                 }
                 self.pending_waker_actions
                     .extend(waker.map(WakerAction::Wake));
             }
-            CompletionOutcome::Freed { target_tick } => {
+            CqeOutcome::Freed { target_tick } => {
                 if let Some(tick) = target_tick {
                     self.timeout_wheel.remove(tick);
                 }
                 self.notify_capacity(ops);
             }
-            CompletionOutcome::Ticket {
+            CqeOutcome::Ticket {
                 waiter_id,
-                completion_id,
+                ticket_id,
                 output,
                 target_tick,
-            } => self.complete_ticket(ops, waiter_id, completion_id, output, target_tick),
+            } => self.complete_ticket(ops, waiter_id, ticket_id, output, target_tick),
         }
     }
 
@@ -582,15 +582,15 @@ impl DriverState {
         &mut self,
         ops: &mut Ops,
         waiter_id: WaiterId,
-        completion_id: CompletionId,
-        output: request::Output,
+        ticket_id: TicketId,
+        output: request::RequestOutput,
         target_tick: Option<Tick>,
     ) {
-        // Publish Ready while the completion still links to this waiter. The
+        // Publish Ready while the ticket entry still links to this waiter. The
         // ticket can then observe its output independently of waiter reuse.
         let waker = ops
-            .completions
-            .publish_ready(completion_id, waiter_id, output);
+            .tickets
+            .publish_ready(ticket_id, waiter_id, output);
 
         // Remove active timeout accounting after publication, while the
         // generation-stamped waiter identity is still current.
@@ -598,8 +598,8 @@ impl DriverState {
             self.timeout_wheel.remove(tick);
         }
 
-        // Recycle the waiter only after the completion arena owns the output.
-        ops.waiters.finish_ticket(waiter_id, completion_id);
+        // Recycle the waiter only after the ticket arena owns the output.
+        ops.waiters.finish_ticket(waiter_id, ticket_id);
 
         // Queue the ticket callback ahead of capacity callbacks to preserve
         // callback order, without executing it under the Ops borrow.
@@ -684,7 +684,7 @@ impl DriverState {
     ///
     /// Keeps draining CQEs until all progressing waiters finish. Ready results
     /// retained by escaped tickets hold no kernel resources or waiter slots and
-    /// remain in the completion arena until their ticket is polled or dropped.
+    /// remain in the ticket arena until their ticket is polled or dropped.
     ///
     /// If `shutdown_timeout` is `None`, this waits until all waiters complete
     /// or are cancelled by their own deadlines. If `shutdown_timeout` is

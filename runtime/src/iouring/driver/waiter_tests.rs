@@ -100,25 +100,25 @@ fn remove_waiter(waiters: &mut Waiters, waiter_id: WaiterId) -> Lifecycle {
 }
 
 fn insert_ticket(
-    completions: &mut TicketCompletions,
+    tickets: &mut TicketArena,
     waiters: &mut Waiters,
     request: Request,
-) -> (CompletionId, WaiterId) {
-    completions.insert_pending(noop_waker(), |completion_id| {
-        waiters.insert_ticket(request, completion_id)
+) -> (TicketId, WaiterId) {
+    tickets.insert_pending(noop_waker(), |ticket_id| {
+        waiters.insert_ticket(request, ticket_id)
     })
 }
 
 #[test]
 fn test_ticket_output_survives_waiter_reuse() {
     let mut waiters = Waiters::new(1);
-    let mut completions = TicketCompletions::new();
-    let (completion_id, waiter_id) =
-        insert_ticket(&mut completions, &mut waiters, make_sync_request());
+    let mut tickets = TicketArena::new();
+    let (ticket_id, waiter_id) =
+        insert_ticket(&mut tickets, &mut waiters, make_sync_request());
     assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-    let CompletionOutcome::Ticket {
+    let CqeOutcome::Ticket {
         waiter_id: completed_waiter,
-        completion_id: completed_completion,
+        ticket_id: completed_completion,
         output,
         target_tick: None,
     } = waiters.on_completion(waiter_id.user_data(), 0)
@@ -126,49 +126,49 @@ fn test_ticket_output_survives_waiter_reuse() {
         panic!("sync ticket did not produce detached output");
     };
 
-    let _ = completions.publish_ready(completed_completion, completed_waiter, output);
+    let _ = tickets.publish_ready(completed_completion, completed_waiter, output);
     waiters.finish_ticket(completed_waiter, completed_completion);
     assert_eq!(waiters.len(), 0);
-    assert_eq!(completions.ready(), 1);
+    assert_eq!(tickets.ready(), 1);
 
     // Reuse the only waiter before consuming the first ticket. The Ready
-    // output remains addressed solely by its independent completion ID.
+    // output remains addressed solely by its independent ticket ID.
     let (second_completion, second_waiter) =
-        insert_ticket(&mut completions, &mut waiters, make_sync_request());
+        insert_ticket(&mut tickets, &mut waiters, make_sync_request());
     assert_eq!(second_waiter.index(), waiter_id.index());
     assert_ne!(second_waiter, waiter_id);
-    assert_ne!(second_completion, completion_id);
+    assert_ne!(second_completion, ticket_id);
     assert!(matches!(
-        completions.poll_take(completion_id, &noop_waker()),
-        Some(Output::Sync(Ok(())))
+        tickets.poll_take(ticket_id, &noop_waker()),
+        Some(RequestOutput::Sync(Ok(())))
     ));
 
     assert!(matches!(
-        completions.mark_orphaned(second_completion),
-        CompletionDropOutcome::Pending { waiter_id, .. } if waiter_id == second_waiter
+        tickets.mark_orphaned(second_completion),
+        TicketDropOutcome::Pending { waiter_id, .. } if waiter_id == second_waiter
     ));
     let _ = remove_waiter(&mut waiters, second_waiter);
 }
 
 #[test]
-fn test_completion_slot_reuses_after_ticket_drop() {
+fn test_ticket_slot_reuses_after_ticket_drop() {
     let mut waiters = Waiters::new(1);
-    let mut completions = TicketCompletions::new();
-    let (first, first_waiter) = insert_ticket(&mut completions, &mut waiters, make_sync_request());
+    let mut tickets = TicketArena::new();
+    let (first, first_waiter) = insert_ticket(&mut tickets, &mut waiters, make_sync_request());
     assert!(matches!(
-        completions.mark_orphaned(first),
-        CompletionDropOutcome::Pending { waiter_id, .. } if waiter_id == first_waiter
+        tickets.mark_orphaned(first),
+        TicketDropOutcome::Pending { waiter_id, .. } if waiter_id == first_waiter
     ));
     let _ = remove_waiter(&mut waiters, first_waiter);
 
     let (reused, reused_waiter) =
-        insert_ticket(&mut completions, &mut waiters, make_sync_request());
+        insert_ticket(&mut tickets, &mut waiters, make_sync_request());
     assert_eq!(reused, first);
-    assert_eq!(completions.arena_len(), 1);
+    assert_eq!(tickets.arena_len(), 1);
 
     assert!(matches!(
-        completions.mark_orphaned(reused),
-        CompletionDropOutcome::Pending { waiter_id, .. } if waiter_id == reused_waiter
+        tickets.mark_orphaned(reused),
+        TicketDropOutcome::Pending { waiter_id, .. } if waiter_id == reused_waiter
     ));
     let _ = remove_waiter(&mut waiters, reused_waiter);
 }
@@ -176,25 +176,25 @@ fn test_completion_slot_reuses_after_ticket_drop() {
 #[test]
 fn test_ticket_local_timeout_publishes_then_recycles_waiter() {
     let mut waiters = Waiters::new(1);
-    let mut completions = TicketCompletions::new();
-    let (completion_id, waiter_id) =
-        insert_ticket(&mut completions, &mut waiters, make_recv_request());
+    let mut tickets = TicketArena::new();
+    let (ticket_id, waiter_id) =
+        insert_ticket(&mut tickets, &mut waiters, make_recv_request());
     assert!(waiters.expire(waiter_id));
     let StageOutcome::Ticket {
         waiter_id: completed_waiter,
-        completion_id: completed_completion,
+        ticket_id: completed_completion,
         output,
     } = waiters.stage(waiter_id)
     else {
         panic!("locally timed out ticket did not produce detached output");
     };
     assert_eq!(completed_waiter, waiter_id);
-    assert_eq!(completed_completion, completion_id);
+    assert_eq!(completed_completion, ticket_id);
 
-    let _ = completions.publish_ready(completed_completion, completed_waiter, output);
+    let _ = tickets.publish_ready(completed_completion, completed_waiter, output);
     waiters.finish_ticket(completed_waiter, completed_completion);
     assert!(waiters.is_empty());
-    let Some(Output::Recv(Err(error))) = completions.poll_take(completion_id, &noop_waker()) else {
+    let Some(RequestOutput::Recv(Err(error))) = tickets.poll_take(ticket_id, &noop_waker()) else {
         panic!("locally timed out ticket did not retain recv failure");
     };
     let (_, error) = *error;
@@ -202,15 +202,15 @@ fn test_ticket_local_timeout_publishes_then_recycles_waiter() {
 }
 
 #[test]
-fn test_pending_sync_ticket_drop_detaches_through_completion_id() {
+fn test_pending_sync_ticket_drop_detaches_through_ticket_id() {
     let mut waiters = Waiters::new(1);
-    let mut completions = TicketCompletions::new();
-    let (completion_id, waiter_id) =
-        insert_ticket(&mut completions, &mut waiters, make_sync_request());
+    let mut tickets = TicketArena::new();
+    let (ticket_id, waiter_id) =
+        insert_ticket(&mut tickets, &mut waiters, make_sync_request());
     assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
     assert!(matches!(
-        completions.mark_orphaned(completion_id),
-        CompletionDropOutcome::Pending {
+        tickets.mark_orphaned(ticket_id),
+        TicketDropOutcome::Pending {
             waiter_id: pending_waiter,
             ..
         } if pending_waiter == waiter_id
@@ -219,12 +219,12 @@ fn test_pending_sync_ticket_drop_detaches_through_completion_id() {
         mark_orphaned(&mut waiters, waiter_id),
         DropOutcome::Detached
     ));
-    assert_eq!(completions.ready(), 0);
+    assert_eq!(tickets.ready(), 0);
     assert_eq!(waiters.pending(), 1);
 
     assert!(matches!(
         waiters.on_completion(waiter_id.user_data(), 0),
-        CompletionOutcome::Freed { .. }
+        CqeOutcome::Freed { .. }
     ));
     assert!(waiters.is_empty());
 }
@@ -280,7 +280,7 @@ fn test_waiters_lifecycle_and_slot_reuse() {
     assert!(matches!(waiters.stage(id1), StageOutcome::Submit(_)));
     assert!(matches!(
         waiters.on_completion(id1.user_data(), 0),
-        CompletionOutcome::Ready {
+        CqeOutcome::Ready {
             target_tick: Some(9),
             ..
         }
@@ -289,7 +289,7 @@ fn test_waiters_lifecycle_and_slot_reuse() {
     assert_eq!(waiters.pending(), 1);
     assert!(matches!(
         waiters.poll_take(id1, &noop_waker()),
-        Some(Output::Sync(Ok(())))
+        Some(RequestOutput::Sync(Ok(())))
     ));
     assert_eq!(waiters.len(), 1);
 
@@ -331,13 +331,13 @@ fn test_waiters_expire_paths() {
     // Cancel CQE does not complete the waiter.
     assert!(matches!(
         waiters.on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED),
-        CompletionOutcome::Cancel
+        CqeOutcome::Cancel
     ));
 
     // Op CQE completes the waiter.
     assert!(matches!(
         waiters.on_completion(waiter_id.user_data(), 0),
-        CompletionOutcome::Ready {
+        CqeOutcome::Ready {
             target_tick: None,
             ..
         }
@@ -349,7 +349,7 @@ fn test_waiters_expire_paths() {
     // Late cancel CQE for the already-completed waiter should be ignored.
     assert!(matches!(
         waiters.on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED),
-        CompletionOutcome::Cancel
+        CqeOutcome::Cancel
     ));
     let missing_op_cqe = catch_unwind(AssertUnwindSafe(|| {
         let _ = waiters.on_completion(0, 1);
@@ -368,7 +368,7 @@ fn test_waiters_stale_cancel_after_slot_reuse() {
     // new waiter that reuses the same index with a new generation and
     // stage it.
     // Action: feed the old generation's cancel user_data with ECANCELED.
-    // Expected: CompletionOutcome::Cancel, and the new waiter keeps its
+    // Expected: CqeOutcome::Cancel, and the new waiter keeps its
     // identity, active state, and in-flight marker.
     let mut waiters = Waiters::new(1);
 
@@ -377,7 +377,7 @@ fn test_waiters_stale_cancel_after_slot_reuse() {
     assert!(matches!(waiters.stage(old), StageOutcome::Submit(_)));
     assert!(matches!(
         waiters.on_completion(old.user_data(), 0),
-        CompletionOutcome::Ready { .. }
+        CqeOutcome::Ready { .. }
     ));
     assert!(waiters.poll_take(old, &noop_waker()).is_some());
     assert!(waiters.is_empty());
@@ -392,7 +392,7 @@ fn test_waiters_stale_cancel_after_slot_reuse() {
     // nothing about the new waiter.
     assert!(matches!(
         waiters.on_completion(old.cancel_user_data(), -libc::ECANCELED),
-        CompletionOutcome::Cancel
+        CqeOutcome::Cancel
     ));
     assert!(matches!(
         waiter_state(&waiters, new),
@@ -415,7 +415,7 @@ fn test_waiters_track_in_flight_state() {
 
     assert!(matches!(
         waiters.on_completion(waiter_id.user_data(), 0),
-        CompletionOutcome::Ready { .. }
+        CqeOutcome::Ready { .. }
     ));
     assert!(!waiters.is_in_flight(waiter_id));
 }
@@ -532,7 +532,7 @@ fn test_waiters_orphan_dropped_ops_after_nonterminal_completion() {
         ));
 
         match waiters.on_completion(waiter_id.user_data(), result) {
-            CompletionOutcome::Freed {
+            CqeOutcome::Freed {
                 // Cancellation transitioned the waiter, so deadline
                 // tracking was already released.
                 target_tick: None,
@@ -562,7 +562,7 @@ fn test_waiters_detach_write_and_sync_on_drop() {
     // The terminal CQE frees the slot without parking a result.
     assert!(matches!(
         waiters.on_completion(waiter_id.user_data(), 0),
-        CompletionOutcome::Freed { .. }
+        CqeOutcome::Freed { .. }
     ));
     assert!(waiters.is_empty());
 }
@@ -579,7 +579,7 @@ fn test_waiters_requeue_partial_detached_write() {
 
     assert!(matches!(
         waiters.on_completion(waiter_id.user_data(), 2),
-        CompletionOutcome::Requeue(id) if id == waiter_id
+        CqeOutcome::Requeue(id) if id == waiter_id
     ));
     assert!(!waiters.is_in_flight(waiter_id));
     assert_eq!(waiters.pending(), 1);
@@ -587,7 +587,7 @@ fn test_waiters_requeue_partial_detached_write() {
     assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
     assert!(matches!(
         waiters.on_completion(waiter_id.user_data(), 3),
-        CompletionOutcome::Freed { .. }
+        CqeOutcome::Freed { .. }
     ));
     assert!(waiters.is_empty());
 }
@@ -601,7 +601,7 @@ fn test_waiters_drop_after_completion_frees_slot() {
     assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
     assert!(matches!(
         waiters.on_completion(waiter_id.user_data(), 0),
-        CompletionOutcome::Ready { .. }
+        CqeOutcome::Ready { .. }
     ));
     assert_eq!(waiters.pending(), 0);
     assert_eq!(waiters.len(), 1);
@@ -679,7 +679,7 @@ fn test_waiters_accept_expected_cancel_cqe_results() {
 
         assert!(matches!(
             waiters.on_completion(waiter_id.cancel_user_data(), result),
-            CompletionOutcome::Cancel
+            CqeOutcome::Cancel
         ));
         let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
         assert!(matches!(state, WaiterState::CancelRequested { .. }));
@@ -697,7 +697,7 @@ fn test_waiters_tolerate_unexpected_negative_cancel_result() {
 
     assert!(matches!(
         waiters.on_completion(waiter_id.cancel_user_data(), -libc::EPERM),
-        CompletionOutcome::Cancel
+        CqeOutcome::Cancel
     ));
     let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
     assert!(matches!(state, WaiterState::CancelRequested { .. }));
@@ -727,7 +727,7 @@ fn test_waiters_expire_rejects_parked_results() {
     assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
     assert!(matches!(
         waiters.on_completion(waiter_id.user_data(), 0),
-        CompletionOutcome::Ready { .. }
+        CqeOutcome::Ready { .. }
     ));
     assert!(!waiters.expire(waiter_id));
     assert!(waiters.poll_take(waiter_id, &noop_waker()).is_some());
@@ -773,7 +773,7 @@ fn test_waiters_cancel_for_shutdown_skips_parked_results() {
     assert!(matches!(waiters.stage(parked), StageOutcome::Submit(_)));
     assert!(matches!(
         waiters.on_completion(parked.user_data(), 0),
-        CompletionOutcome::Ready { .. }
+        CqeOutcome::Ready { .. }
     ));
 
     let in_flight = insert(&mut waiters, make_sync_request(), Some(2));

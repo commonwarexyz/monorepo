@@ -548,7 +548,7 @@ fn test_capacity_wait_counts_toward_accept_deadline() {
     ));
     handle.with(|ops| {
         assert_eq!(ops.capacity.registered(), 0);
-        assert!(ops.completions.is_empty());
+        assert!(ops.tickets.is_empty());
     });
 }
 
@@ -581,7 +581,7 @@ fn test_pending_operations_aggregates_across_drivers() {
     .unwrap();
 
     // Admit a sync whose ticket is never awaited. Its terminal result
-    // parks in driver A's completion arena after a socket fd fails fsync.
+    // parks in driver A's ticket arena after a socket fd fails fsync.
     let (socket, _peer) = UnixStream::pair().unwrap();
     // SAFETY: `into_raw_fd` transfers ownership of the socket fd into
     // `File`.
@@ -718,7 +718,7 @@ fn test_ticket_metric_counts_pending_and_ready_once() {
     )
     .unwrap();
 
-    // Pending completion entries mirror a live waiter and count once.
+    // Pending ticket entries mirror a live waiter and count once.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut accept_admission = Box::pin(handle.start_accept(
         Arc::new(OwnedFd::from(listener)),
@@ -733,7 +733,7 @@ fn test_ticket_metric_counts_pending_and_ready_once() {
     assert_eq!(gauge.get(), 1);
     handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 1);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.operation_count(), 1);
     });
 
@@ -747,7 +747,7 @@ fn test_ticket_metric_counts_pending_and_ready_once() {
     driver.turn();
     assert_eq!(gauge.get(), 0);
 
-    // A Ready completion has no waiter and still contributes one until
+    // A Ready ticket entry has no waiter and still contributes one until
     // its ticket is consumed.
     let (left, _right) = UnixStream::pair().unwrap();
     // SAFETY: `left` is a valid owned fd and is transferred into `File`.
@@ -766,7 +766,7 @@ fn test_ticket_metric_counts_pending_and_ready_once() {
     assert_eq!(gauge.get(), 1);
     handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 1);
+        assert_eq!(ops.tickets.ready(), 1);
         assert_eq!(ops.operation_count(), 1);
     });
 
@@ -989,10 +989,10 @@ fn test_off_thread_drop_transfers_granted_capacity_slot() {
 }
 
 /// Park a completed sync ticket's terminal result in its independent
-/// completion entry while retaining the ticket.
+/// ticket entry while retaining the ticket.
 ///
 /// fsync on a socket-backed file fails fast, so the terminal error parks
-/// in the completion entry while the returned ticket is held.
+/// in the ticket entry while the returned ticket is held.
 fn park_sync_ticket(harness: &mut TestLoop, handle: &DriverHandle) -> SyncTicket {
     let (left, _right) = UnixStream::pair().unwrap();
     // SAFETY: `left` is a valid owned fd and is transferred into `File`.
@@ -1012,13 +1012,13 @@ fn park_sync_ticket(harness: &mut TestLoop, handle: &DriverHandle) -> SyncTicket
     }
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0, "terminal ticket retained a waiter");
-        assert_eq!(ops.completions.ready(), 1);
+        assert_eq!(ops.tickets.ready(), 1);
         assert_eq!(ops.operation_count(), 1);
     });
     ticket
 }
 
-/// Admit and stage an accept that has no peer, leaving its completion
+/// Admit and stage an accept that has no peer, leaving its ticket
 /// entry Pending and its waiter in flight.
 fn pending_accept_ticket(harness: &mut TestLoop, handle: &DriverHandle) -> AcceptTicket {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1028,7 +1028,7 @@ fn pending_accept_ticket(harness: &mut TestLoop, handle: &DriverHandle) -> Accep
     harness.driver().turn();
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 1);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.operation_count(), 1);
     });
     ticket
@@ -1090,7 +1090,7 @@ fn test_ready_ticket_poll_does_not_double_release_capacity() {
     }
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 1);
+        assert_eq!(ops.tickets.ready(), 1);
         assert_eq!(ops.operation_count(), 1);
         assert_eq!(ops.capacity.registered(), 1);
         assert_eq!(ops.capacity.queued(), 0);
@@ -1125,7 +1125,7 @@ fn test_ready_ticket_poll_does_not_double_release_capacity() {
     assert_eq!(third_count.0.load(Ordering::Acquire), 0);
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.capacity.registered(), 2);
         assert_eq!(ops.capacity.queued(), 1);
         assert_eq!(ops.capacity.reserved(), 1);
@@ -1136,7 +1136,7 @@ fn test_ready_ticket_poll_does_not_double_release_capacity() {
     assert!(second.as_mut().poll(&mut cx).is_pending());
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 1);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.operation_count(), 1);
         assert_eq!(ops.capacity.registered(), 1);
         assert_eq!(ops.capacity.queued(), 1);
@@ -1205,7 +1205,7 @@ fn test_ready_ticket_drop_does_not_double_release_capacity() {
     ));
     assert!(third.as_mut().poll(&mut third_cx).is_pending());
     harness.handle.with(|ops| {
-        assert_eq!(ops.completions.ready(), 1);
+        assert_eq!(ops.tickets.ready(), 1);
         assert_eq!(ops.capacity.registered(), 2);
         assert_eq!(ops.capacity.queued(), 1);
         assert_eq!(ops.capacity.reserved(), 1);
@@ -1214,8 +1214,8 @@ fn test_ready_ticket_drop_does_not_double_release_capacity() {
     drop(ticket);
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 0);
-        assert_eq!(ops.completions.arena_len(), 1);
+        assert_eq!(ops.tickets.ready(), 0);
+        assert_eq!(ops.tickets.arena_len(), 1);
         assert_eq!(ops.operation_count(), 0);
         assert_eq!(ops.capacity.registered(), 2);
         assert_eq!(ops.capacity.queued(), 1);
@@ -1255,7 +1255,7 @@ fn test_ready_ticket_foreign_drop_preserves_reused_waiter() {
     assert!(poll_once(&harness, &mut second).is_pending());
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 1);
-        assert_eq!(ops.completions.ready(), 1);
+        assert_eq!(ops.tickets.ready(), 1);
     });
 
     std::thread::scope(|scope| {
@@ -1264,7 +1264,7 @@ fn test_ready_ticket_foreign_drop_preserves_reused_waiter() {
     harness.driver().turn();
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 1, "Ready drop touched reused waiter");
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.operation_count(), 1);
     });
 
@@ -1294,12 +1294,12 @@ fn test_pending_accept_owner_drop_cancels_and_reuses_waiter() {
     }
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.operation_count(), 0);
     });
 
     // The next accept reuses the freed waiter and retains the exact fd
-    // and peer address through its independent completion entry.
+    // and peer address through its independent ticket entry.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let local_addr = listener.local_addr().unwrap();
     let mut reused = harness.block_on(handle.start_accept(
@@ -1338,7 +1338,7 @@ fn test_pending_accept_foreign_drop_cancels() {
     }
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.operation_count(), 0);
     });
 }
@@ -1373,8 +1373,8 @@ fn test_pending_sync_foreign_drop_detaches_until_terminal_completion() {
     assert!(waiting.as_mut().poll(&mut count_cx).is_pending());
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 1);
-        assert_eq!(ops.completions.ready(), 0);
-        assert_eq!(ops.completions.arena_len(), 1);
+        assert_eq!(ops.tickets.ready(), 0);
+        assert_eq!(ops.tickets.arena_len(), 1);
         assert_eq!(ops.capacity.registered(), 1);
         assert_eq!(ops.operation_count(), 1);
     });
@@ -1384,7 +1384,7 @@ fn test_pending_sync_foreign_drop_detaches_until_terminal_completion() {
     });
 
     // Process the foreign mailbox before staging so the detach transition
-    // is directly observable. Completion state is gone, but sync orphan
+    // is directly observable. Ticket state is gone, but sync orphan
     // policy retains the waiter without a cancel SQE or premature
     // capacity release.
     {
@@ -1395,7 +1395,7 @@ fn test_pending_sync_foreign_drop_detaches_until_terminal_completion() {
     }
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 1);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.operation_count(), 1);
         assert!(ops.pending_cancels.is_empty());
         assert_eq!(ops.capacity.registered(), 1);
@@ -1412,7 +1412,7 @@ fn test_pending_sync_foreign_drop_detaches_until_terminal_completion() {
     }
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.operation_count(), 0);
         assert_eq!(ops.capacity.registered(), 1);
         assert_eq!(ops.capacity.queued(), 0);
@@ -1449,7 +1449,7 @@ fn test_accept_ticket_timeout_releases_deadline_before_poll() {
     assert_eq!(harness.driver().state.timeout_wheel.next_deadline(), None);
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 1);
+        assert_eq!(ops.tickets.ready(), 1);
     });
     assert!(matches!(harness.block_on(ticket), Err(Error::Timeout)));
 }
@@ -1702,14 +1702,14 @@ fn test_pending_ticket_waker_drop_panics_after_sync_detach_commit() {
         let mut cx = Context::from_waker(&waker);
         assert!(Pin::new(&mut ticket).poll(&mut cx).is_pending());
     }
-    // The completion entry owns a clone. Forget the test's original so
-    // only owner-side completion removal exercises the panicking drop.
+    // The ticket entry owns a clone. Forget the test's original so only
+    // owner-side ticket removal exercises the panicking drop.
     std::mem::forget(waker);
 
     let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(ticket)));
     assert!(dropped.is_err());
     harness.handle.with(|ops| {
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
         assert_eq!(ops.waiters.len(), 1);
         assert_eq!(ops.operation_count(), 1);
         assert!(ops.pending_cancels.is_empty());
@@ -1717,7 +1717,7 @@ fn test_pending_ticket_waker_drop_panics_after_sync_detach_commit() {
 
     // The sync was already detached before RawWaker destruction ran.
     // Its terminal CQE therefore frees the waiter without addressing the
-    // removed completion entry or producing a second panic.
+    // removed ticket entry or producing a second panic.
     let start = Instant::now();
     while harness.pending() != 0 {
         assert!(start.elapsed() < Duration::from_secs(5));
@@ -1749,7 +1749,7 @@ fn test_panicking_ticket_waker_leaves_committed_completion() {
     assert!(Pin::new(&mut ticket).poll(&mut cx).is_pending());
 
     // Register a capacity waiter after the panicking ticket waker. Its
-    // grant is committed when ticket completion frees the only waiter,
+    // grant is committed when the ticket result frees the only waiter,
     // before callbacks run.
     let (waiting_left, _waiting_right) = UnixStream::pair().unwrap();
     let mut waiting = Box::pin(handle.recv(
@@ -1779,19 +1779,19 @@ fn test_panicking_ticket_waker_leaves_committed_completion() {
     assert!(panic.is_err());
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 1);
+        assert_eq!(ops.tickets.ready(), 1);
         assert_eq!(ops.capacity.registered(), 1);
         assert_eq!(ops.capacity.queued(), 0);
         assert_eq!(ops.capacity.reserved(), 1);
     });
 
-    // Drop observes Ready by CompletionId. It must not touch the recycled
+    // Drop observes Ready by TicketId. It must not touch the recycled
     // waiter or panic while unwinding from the callback.
     let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(ticket)));
     assert!(dropped.is_ok());
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
     });
     drop(waiting);
 }
@@ -2115,11 +2115,11 @@ fn test_ready_ticket_survives_driver_close() {
     harness.shutdown();
 
     // The ring is gone, but the ticket's DriverHandle keeps the userspace-only
-    // Ready completion alive and directly consumable.
+    // Ready ticket entry alive and directly consumable.
     assert!(harness.block_on(ticket).is_err());
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
     });
 }
 
@@ -2223,8 +2223,8 @@ fn test_closed_driver_fails_admission() {
     assert!(matches!(result, Err(Error::Closed)));
     harness.handle.with(|ops| {
         assert_eq!(ops.waiters.len(), 0);
-        assert_eq!(ops.completions.ready(), 0);
-        assert_eq!(ops.completions.arena_len(), 0);
+        assert_eq!(ops.tickets.ready(), 0);
+        assert_eq!(ops.tickets.arena_len(), 0);
         assert_eq!(ops.operation_count(), 0);
     });
 }
@@ -2697,7 +2697,7 @@ fn test_cancel_staging_skips_op_retired_by_original_completion() {
         driver.state.cancel_all(ops);
         assert_eq!(ops.pending_cancels.front(), Some(&waiter_id));
 
-        let CompletionOutcome::Ready { waker, target_tick } =
+        let CqeOutcome::Ready { waker, target_tick } =
             ops.waiters.on_completion(waiter_id.user_data(), 0)
         else {
             panic!("original completion did not retire cancelled recv");

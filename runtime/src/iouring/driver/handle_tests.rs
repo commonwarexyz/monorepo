@@ -224,18 +224,18 @@ fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
         waiter: Cell::new(Some(target)),
     };
     let reentrant = reentrant_orphan_waker(&state);
-    let (completion_id, ticket_waiter) = handle.with(|ops| {
+    let (ticket_id, ticket_waiter) = handle.with(|ops| {
         let mut incoming = Some(reentrant.clone());
-        let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
-        completions.insert_pending_deferred(&mut incoming, |completion_id| {
-            waiters.insert_ticket(recv_request(), completion_id)
+        let (tickets, waiters) = (&mut ops.tickets, &mut ops.waiters);
+        tickets.insert_pending_deferred(&mut incoming, |ticket_id| {
+            waiters.insert_ticket(recv_request(), ticket_id)
         })
     });
 
     let noop = futures::task::noop_waker();
     let mut cx = Context::from_waker(&noop);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_ticket_completion(&handle, completion_id, &mut cx)
+        poll_ticket_entry(&handle, ticket_id, &mut cx)
     }));
     assert!(matches!(result, Ok(Poll::Pending)));
     assert!(state.waiter.get().is_none());
@@ -248,7 +248,7 @@ fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
 
     drop(Ticket {
         handle: handle.clone(),
-        state: TicketState::Waiting(completion_id),
+        state: TicketState::Waiting(ticket_id),
     });
     handle.with(|ops| {
         assert!(matches!(
@@ -256,7 +256,7 @@ fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
             StageOutcome::Freed
         ));
         assert!(ops.waiters.is_empty());
-        assert!(ops.completions.is_empty());
+        assert!(ops.tickets.is_empty());
     });
 }
 
@@ -293,33 +293,33 @@ fn test_pending_op_clone_panic_preserves_observer() {
 fn test_pending_ticket_clone_panic_preserves_observer() {
     let handle = DriverHandle::new(1, RingWaker::new().unwrap());
     let noop = futures::task::noop_waker();
-    let (completion_id, waiter_id) = handle.with(|ops| {
+    let (ticket_id, waiter_id) = handle.with(|ops| {
         let mut incoming = Some(noop.clone());
-        let (completions, waiters) = (&mut ops.completions, &mut ops.waiters);
-        completions.insert_pending_deferred(&mut incoming, |completion_id| {
-            waiters.insert_ticket(recv_request(), completion_id)
+        let (tickets, waiters) = (&mut ops.tickets, &mut ops.waiters);
+        tickets.insert_pending_deferred(&mut incoming, |ticket_id| {
+            waiters.insert_ticket(recv_request(), ticket_id)
         })
     });
 
     let panicking = panic_clone_waker();
     let mut panic_cx = Context::from_waker(&panicking);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_ticket_completion(&handle, completion_id, &mut panic_cx)
+        poll_ticket_entry(&handle, ticket_id, &mut panic_cx)
     }));
     assert!(result.is_err());
     let mut noop_cx = Context::from_waker(&noop);
-    assert!(poll_ticket_completion(&handle, completion_id, &mut noop_cx).is_pending());
+    assert!(poll_ticket_entry(&handle, ticket_id, &mut noop_cx).is_pending());
 
     drop(Ticket {
         handle: handle.clone(),
-        state: TicketState::Waiting(completion_id),
+        state: TicketState::Waiting(ticket_id),
     });
     handle.with(|ops| {
         assert!(matches!(
             ops.waiters.stage(waiter_id),
             StageOutcome::Freed
         ));
-        assert!(ops.completions.is_empty());
+        assert!(ops.tickets.is_empty());
     });
 }
 

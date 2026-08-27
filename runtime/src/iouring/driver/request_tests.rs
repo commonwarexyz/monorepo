@@ -45,51 +45,51 @@ fn make_write_request(cache: Cache, state: WriteAtState) -> WriteAtRequest {
     }
 }
 
-fn unwrap_send(output: Output) -> Result<(), Error> {
+fn unwrap_send(output: RequestOutput) -> Result<(), Error> {
     match output {
-        Output::Send(result) => result.map_err(|e| *e),
+        RequestOutput::Send(result) => result.map_err(|e| *e),
         _ => panic!("expected send output"),
     }
 }
 
-fn unwrap_recv(output: Output) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
+fn unwrap_recv(output: RequestOutput) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
     match output {
-        Output::Recv(result) => result.map_err(|e| *e),
+        RequestOutput::Recv(result) => result.map_err(|e| *e),
         _ => panic!("expected recv output"),
     }
 }
 
-fn unwrap_accept(output: Output) -> Result<(OwnedFd, SocketAddr), Error> {
+fn unwrap_accept(output: RequestOutput) -> Result<(OwnedFd, SocketAddr), Error> {
     match output {
-        Output::Accept(result) => result.map_err(|e| *e),
+        RequestOutput::Accept(result) => result.map_err(|e| *e),
         _ => panic!("expected accept output"),
     }
 }
 
-fn unwrap_connect(output: Output) -> Result<(), Error> {
+fn unwrap_connect(output: RequestOutput) -> Result<(), Error> {
     match output {
-        Output::Connect(result) => result.map_err(|e| *e),
+        RequestOutput::Connect(result) => result.map_err(|e| *e),
         _ => panic!("expected connect output"),
     }
 }
 
-fn unwrap_read_at(output: Output) -> Result<IoBufMut, (IoBufMut, Error)> {
+fn unwrap_read_at(output: RequestOutput) -> Result<IoBufMut, (IoBufMut, Error)> {
     match output {
-        Output::ReadAt(result) => result.map_err(|e| *e),
+        RequestOutput::ReadAt(result) => result.map_err(|e| *e),
         _ => panic!("expected read-at output"),
     }
 }
 
-fn unwrap_write_at(output: Output) -> Result<(), Error> {
+fn unwrap_write_at(output: RequestOutput) -> Result<(), Error> {
     match output {
-        Output::WriteAt(result) => result.map_err(|e| *e),
+        RequestOutput::WriteAt(result) => result.map_err(|e| *e),
         _ => panic!("expected write-at output"),
     }
 }
 
-fn unwrap_sync(output: Output) -> Result<(), Error> {
+fn unwrap_sync(output: RequestOutput) -> Result<(), Error> {
     match output {
-        Output::Sync(result) => result.map_err(|e| *e),
+        RequestOutput::Sync(result) => result.map_err(|e| *e),
         _ => panic!("expected sync output"),
     }
 }

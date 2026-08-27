@@ -2,7 +2,7 @@
 //!
 //! Callers submit logical operations through the driver, which constructs a
 //! [Request] that owns all resources (buffers, FDs, progress cursors) needed
-//! to build follow-up SQEs and produce a typed [Output].
+//! to build follow-up SQEs and produce a typed [RequestOutput].
 //!
 //! ## Request policy
 //!
@@ -207,7 +207,7 @@ impl WriteBuffers {
 /// Each variant owns all buffers and FDs needed by the kernel plus progress
 /// cursors. The loop calls [build_sqe](Self::build_sqe) to produce the next
 /// SQE and [on_cqe](Self::on_cqe) to evaluate completions and produce the
-/// terminal [Output]. [interrupt](Self::interrupt) and [fail](Self::fail)
+/// terminal [RequestOutput]. [interrupt](Self::interrupt) and [fail](Self::fail)
 /// resolve requests the kernel never completed.
 pub(super) enum Request {
     /// Sends the full remaining payload over a socket.
@@ -241,7 +241,7 @@ pub(super) enum Request {
 /// terminal output is published. Error payloads are boxed because [enum@Error]
 /// is large and errors are cold. Success-path moves should not pay for
 /// error-variant width.
-pub(super) enum Output {
+pub(super) enum RequestOutput {
     /// Send completion without a retained payload.
     Send(Result<(), Box<Error>>),
     /// Receive completion that returns the buffer on success or failure.
@@ -400,42 +400,42 @@ impl Request {
 
     /// Evaluate a CQE result against this request's progress and state.
     ///
-    /// Returns the terminal [Output] when the request completed (buffers move
+    /// Returns the terminal [RequestOutput] when the request completed (buffers move
     /// out of the request, leaving an empty shell for the caller to drop in
     /// place), or `None` when another SQE is needed.
-    pub fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Output> {
+    pub fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<RequestOutput> {
         match self {
             Self::Send(s) => s
                 .on_cqe(state, result)
-                .map(|r| Output::Send(r.map_err(Box::new))),
+                .map(|r| RequestOutput::Send(r.map_err(Box::new))),
             Self::Recv(r) => {
                 let result = r.on_cqe(state, result)?;
                 let buf = std::mem::take(&mut r.buf);
-                Some(Output::Recv(match result {
+                Some(RequestOutput::Recv(match result {
                     Ok(read) => Ok((buf, read)),
                     Err(err) => Err(Box::new((buf, err))),
                 }))
             }
             Self::Accept(a) => a
                 .on_cqe(state, result)
-                .map(|r| Output::Accept(r.map_err(Box::new))),
+                .map(|r| RequestOutput::Accept(r.map_err(Box::new))),
             Self::Connect(c) => c
                 .on_cqe(state, result)
-                .map(|r| Output::Connect(r.map_err(Box::new))),
+                .map(|r| RequestOutput::Connect(r.map_err(Box::new))),
             Self::ReadAt(r) => {
                 let result = r.on_cqe(state, result)?;
                 let buf = std::mem::take(&mut r.buf);
-                Some(Output::ReadAt(match result {
+                Some(RequestOutput::ReadAt(match result {
                     Ok(()) => Ok(buf),
                     Err(err) => Err(Box::new((buf, err))),
                 }))
             }
             Self::WriteAt(w) => w
                 .on_cqe(state, result)
-                .map(|r| Output::WriteAt(r.map_err(Box::new))),
+                .map(|r| RequestOutput::WriteAt(r.map_err(Box::new))),
             Self::Sync(s) => s
                 .on_cqe(state, result)
-                .map(|r| Output::Sync(r.map_err(Box::new))),
+                .map(|r| RequestOutput::Sync(r.map_err(Box::new))),
         }
     }
 
@@ -444,36 +444,36 @@ impl Request {
     ///
     /// Every kind resolves to its staging failure, and syncs report
     /// [Error::Closed] because a sync that never ran must not report success.
-    pub fn fail(self) -> Output {
+    pub fn fail(self) -> RequestOutput {
         match self {
-            Self::Send(_) => Output::Send(Err(Box::new(Error::SendFailed))),
-            Self::Recv(r) => Output::Recv(Err(Box::new((r.buf, Error::RecvFailed)))),
-            Self::Accept(_) => Output::Accept(Err(Box::new(Error::ConnectionFailed))),
-            Self::Connect(_) => Output::Connect(Err(Box::new(Error::ConnectionFailed))),
-            Self::ReadAt(r) => Output::ReadAt(Err(Box::new((r.buf, Error::ReadFailed)))),
-            Self::WriteAt(_) => Output::WriteAt(Err(Box::new(Error::WriteFailed))),
-            Self::Sync(_) => Output::Sync(Err(Box::new(Error::Closed))),
+            Self::Send(_) => RequestOutput::Send(Err(Box::new(Error::SendFailed))),
+            Self::Recv(r) => RequestOutput::Recv(Err(Box::new((r.buf, Error::RecvFailed)))),
+            Self::Accept(_) => RequestOutput::Accept(Err(Box::new(Error::ConnectionFailed))),
+            Self::Connect(_) => RequestOutput::Connect(Err(Box::new(Error::ConnectionFailed))),
+            Self::ReadAt(r) => RequestOutput::ReadAt(Err(Box::new((r.buf, Error::ReadFailed)))),
+            Self::WriteAt(_) => RequestOutput::WriteAt(Err(Box::new(Error::WriteFailed))),
+            Self::Sync(_) => RequestOutput::Sync(Err(Box::new(Error::Closed))),
         }
     }
 
     /// Resolve a request the loop is retiring before completion (a deadline
     /// expiry surfaces [Error::Timeout], a shutdown [Error::Closed]), moving
     /// any owned buffer out of the request.
-    pub fn interrupt(&mut self, error: Error) -> Output {
+    pub fn interrupt(&mut self, error: Error) -> RequestOutput {
         match self {
-            Self::Send(_) => Output::Send(Err(Box::new(error))),
-            Self::Recv(r) => Output::Recv(Err(Box::new((std::mem::take(&mut r.buf), error)))),
-            Self::Accept(_) => Output::Accept(Err(Box::new(error))),
-            Self::Connect(_) => Output::Connect(Err(Box::new(error))),
-            Self::ReadAt(r) => Output::ReadAt(Err(Box::new((std::mem::take(&mut r.buf), error)))),
-            Self::WriteAt(_) => Output::WriteAt(Err(Box::new(error))),
-            Self::Sync(_) => Output::Sync(Err(Box::new(error))),
+            Self::Send(_) => RequestOutput::Send(Err(Box::new(error))),
+            Self::Recv(r) => RequestOutput::Recv(Err(Box::new((std::mem::take(&mut r.buf), error)))),
+            Self::Accept(_) => RequestOutput::Accept(Err(Box::new(error))),
+            Self::Connect(_) => RequestOutput::Connect(Err(Box::new(error))),
+            Self::ReadAt(r) => RequestOutput::ReadAt(Err(Box::new((std::mem::take(&mut r.buf), error)))),
+            Self::WriteAt(_) => RequestOutput::WriteAt(Err(Box::new(error))),
+            Self::Sync(_) => RequestOutput::Sync(Err(Box::new(error))),
         }
     }
 
     /// Return a timeout result, moving any owned buffer out of the request.
     /// Used when a deadline expires before the current SQE could complete.
-    pub fn timeout(&mut self) -> Output {
+    pub fn timeout(&mut self) -> RequestOutput {
         self.interrupt(Error::Timeout)
     }
 }

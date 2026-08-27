@@ -72,7 +72,7 @@
 //! 2. Advances userspace deadlines
 //! 3. Builds and submits SQEs for requests admitted into the backlog by op futures
 //! 4. Handles partial progress and retryable errors by requeuing requests
-//! 5. Commits terminal output to its waiter or detached completion entry
+//! 5. Commits terminal output to its waiter or detached ticket entry
 //! 6. Recycles terminal ticket waiters, then wakes ticket and capacity tasks
 //!
 //! ## Request Flow
@@ -80,18 +80,18 @@
 //! ```text
 //! Data path:
 //!   Op future poll -> Driver (slab insert + backlog FIFO) -> SQE -> io_uring
-//!   Op future poll <- parked Output in slot <- Driver <- CQE <- io_uring
+//!   Op future poll <- parked RequestOutput in slot <- Driver <- CQE <- io_uring
 //!
 //! Detached ticket path:
-//!   Ticket admission -> Completion::Pending { waiter_id, waker }
-//!                    -> Waiter { owner: CompletionId, request }
+//!   Ticket admission -> TicketEntryState::Pending { waiter_id, waker }
+//!                    -> Waiter { owner: TicketId, request }
 //!                    -> SQE -> io_uring -> CQE
-//!   CQE -> Completion::Ready(Output) -> timeout removal -> recycle WaiterId
-//!       -> ticket wake -> Ticket poll(CompletionId) -> Output
+//!   CQE -> TicketEntryState::Ready(RequestOutput) -> timeout removal -> recycle WaiterId
+//!       -> ticket wake -> Ticket poll(TicketId) -> RequestOutput
 //!
 //! Detached ticket drop:
-//!   CompletionId -> Pending(waiter_id) -> Accept cancel or Sync detach
-//!                -> Ready(Output)      -> drop Output, no waiter access
+//!   TicketId -> Pending(waiter_id) -> Accept cancel or Sync detach
+//!                -> Ready(RequestOutput)      -> drop RequestOutput, no waiter access
 //!
 //! Wake paths (cross-thread task wakes only):
 //!   Foreign thread --futex wake--> packed wake state --> Driver
@@ -114,9 +114,9 @@
 //! its SQEs. The flat `Waiters` store owns all kernel-referenced request resources
 //! (buffers, FDs, and progress state) until terminal completion. Ordinary op outputs
 //! remain in that slot until their future takes them. Detached accept and sync tickets
-//! hold only a completion ID after admission. Their separate `TicketCompletions` arena
+//! hold only a ticket ID after admission. Their separate `TicketArena`
 //! stores `Pending { waiter_id, waker }` while the kernel request is active and
-//! `Ready(Output)` after it is terminal. Publishing Ready, removing timeout accounting,
+//! `Ready(RequestOutput)` after it is terminal. Publishing Ready, removing timeout accounting,
 //! and recycling the waiter all happen before ticket or capacity wakers run.
 //!
 //! ## Timeout Handling
@@ -167,7 +167,7 @@
 //! 3. If `shutdown_timeout` is configured, it is a cancellation grace measured from
 //!    drain entry. Every request still outstanding when the grace expires is cancelled,
 //!    then the drain waits for the kernel to retire it (buffers stay owned until then)
-//! 4. Ready results owned by escaped tickets survive the drain in the completion arena:
+//! 4. Ready results owned by escaped tickets survive the drain in the ticket arena:
 //!    they hold no kernel resources or waiter slots and are reclaimed when polled or dropped
 //!
 //! ## Liveness Model
