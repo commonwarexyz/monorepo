@@ -111,7 +111,6 @@ use std::{
     convert::Infallible,
     env,
     future::Future,
-    mem::take,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
@@ -1095,27 +1094,21 @@ impl crate::Runner for Runner {
         // not justify.
         let stashed = shared.worker_panic.lock().take();
 
-        // Join dedicated worker threads: the tree abort cascaded to their
-        // roots, so each worker winds down once it observes the abort.
-        // Workers can spawn workers, so drain until the registry stays
-        // empty, then close it: later dedicated spawns racing from foreign
-        // threads must not create threads nobody joins. Panics are resumed
-        // only after every thread has been joined.
+        // Close the registry and take every dedicated worker atomically.
+        // `spawn_worker` holds this same mutex across its open check, thread
+        // creation, and handle registration. A racing spawn is therefore in
+        // this batch or observes the closed registry without starting a
+        // thread. Panics are resumed only after every captured thread has
+        // been joined.
         let mut worker_panic = None;
-        loop {
-            let batch = {
-                let mut workers = shared.workers.lock();
-                let list = workers.as_mut().expect("worker registry already closed");
-                if list.is_empty() {
-                    *workers = None;
-                    break;
-                }
-                take(list)
-            };
-            for worker in batch {
-                if let Err(payload) = worker.join() {
-                    retain_first_panic(&mut worker_panic, payload);
-                }
+        let workers = shared
+            .workers
+            .lock()
+            .take()
+            .expect("worker registry already closed");
+        for worker in workers {
+            if let Err(payload) = worker.join() {
+                retain_first_panic(&mut worker_panic, payload);
             }
         }
 
@@ -3209,11 +3202,11 @@ mod tests {
         let shared = shared_recv.recv().unwrap();
         returning_recv.recv().unwrap();
 
-        // Once the registry is empty, the main root has closed its panic
+        // Once the registry is closed, the main root has closed its panic
         // receiver and moved the dedicated worker into the final join batch.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let joining = shared.workers.lock().as_ref().is_some_and(Vec::is_empty);
+            let joining = shared.workers.lock().is_none();
             if joining {
                 break;
             }
@@ -3228,6 +3221,92 @@ mod tests {
         let result = runtime.join().expect("runtime thread should join");
         let payload = result.expect_err("nested panic should unwind start");
         assert_eq!(payload.downcast_ref::<u64>(), Some(&PAYLOAD));
+    }
+
+    /// Registry closure linearizes racing dedicated spawns. Workers started
+    /// before closure are captured and joined, while a spawn after closure
+    /// resolves closed without invoking its body.
+    #[test]
+    fn test_worker_spawn_races_registry_close() {
+        let anchor_release = Arc::new(std::sync::Barrier::new(2));
+        let before_started = Arc::new(std::sync::Barrier::new(2));
+        let before_release = Arc::new(std::sync::Barrier::new(2));
+        let before_ran = Arc::new(AtomicBool::new(false));
+        let after_ran = Arc::new(AtomicBool::new(false));
+        let (shared_send, shared_recv) = std::sync::mpsc::channel();
+        let (contexts_send, contexts_recv) = std::sync::mpsc::channel();
+        let (return_send, return_recv) = std::sync::mpsc::channel();
+
+        let anchor_release_worker = Arc::clone(&anchor_release);
+        let runtime = std::thread::spawn(move || {
+            Runner::default().start(move |context| async move {
+                let executor = context.executor.upgrade().unwrap();
+                shared_send.send(Arc::clone(&executor.shared)).unwrap();
+
+                let _anchor =
+                    context
+                        .child("anchor")
+                        .dedicated()
+                        .spawn(move |context| async move {
+                            // Fresh trees keep these contexts admissible after the
+                            // runtime root aborts, allowing the registry state to
+                            // decide each spawn in this targeted race test.
+                            let mut before = context.child("before");
+                            before.tree = Tree::root();
+                            let mut after = context.child("after");
+                            after.tree = Tree::root();
+                            contexts_send.send((before, after)).unwrap();
+                            anchor_release_worker.wait();
+                        });
+
+                return_recv.recv().unwrap();
+            });
+        });
+
+        let shared = shared_recv.recv().unwrap();
+        let (before, after) = contexts_recv.recv().unwrap();
+
+        let before_started_worker = Arc::clone(&before_started);
+        let before_release_worker = Arc::clone(&before_release);
+        let before_ran_worker = Arc::clone(&before_ran);
+        let _before_handle = before.dedicated().spawn(move |_| async move {
+            before_ran_worker.store(true, Ordering::Release);
+            before_started_worker.wait();
+            before_release_worker.wait();
+        });
+        before_started.wait();
+        assert!(before_ran.load(Ordering::Acquire));
+
+        // Let the root return while both registered workers remain blocked.
+        // Observing `None` proves closure captured the complete pre-close
+        // batch before attempting any join.
+        return_send.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if shared.workers.lock().is_none() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not close worker registry"
+            );
+            std::thread::yield_now();
+        }
+        assert!(!runtime.is_finished(), "captured workers were not joined");
+
+        let after_ran_worker = Arc::clone(&after_ran);
+        let after_handle = after.dedicated().spawn(move |_| async move {
+            after_ran_worker.store(true, Ordering::Release);
+        });
+        assert!(matches!(
+            futures::executor::block_on(after_handle),
+            Err(Error::Closed)
+        ));
+        assert!(!after_ran.load(Ordering::Acquire));
+
+        before_release.wait();
+        anchor_release.wait();
+        runtime.join().expect("runtime thread should join");
     }
 
     /// A worker panic already observed by an opportunistic reap happened
