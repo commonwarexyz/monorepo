@@ -96,7 +96,7 @@ mod tests {
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{NZU16, NZU32, NZUsize, probability, sync::Mutex};
+    use commonware_utils::{NZU16, NZU32, NZUsize, non_empty, probability, sync::Mutex};
     use futures::FutureExt;
     use rand_core::CryptoRng;
     use std::{
@@ -147,8 +147,9 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
-            .expect("notarization requires a quorum of votes");
+        let certificate =
+            Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
+                .expect("notarization requires a quorum of votes");
         (votes, certificate)
     }
 
@@ -165,8 +166,9 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
-            .expect("finalization requires a quorum of votes");
+        let certificate =
+            Finalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
+                .expect("finalization requires a quorum of votes");
         (votes, certificate)
     }
 
@@ -180,8 +182,9 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
-        let certificate = Nullification::from_nullifies(&schemes[0], &votes, &Sequential)
-            .expect("nullification requires a quorum of votes");
+        let certificate =
+            Nullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
+                .expect("nullification requires a quorum of votes");
         (votes, certificate)
     }
 
@@ -3401,8 +3404,9 @@ mod tests {
                     }
                 }
             };
-            let nullification = Nullification::from_nullifies(&schemes[0], &[nullify], &Sequential)
-                .expect("one signer forms quorum");
+            let nullification =
+                Nullification::from_nullifies(&schemes[0], non_empty![&nullify], &Sequential)
+                    .expect("one signer forms quorum");
 
             // The nullification exits view 1. A mid-term view requires its
             // immediate parent, so view 2 can never propose. The voter skips to

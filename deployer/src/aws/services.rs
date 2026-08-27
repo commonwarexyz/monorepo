@@ -658,6 +658,36 @@ fn image_download_block(images: &[(&'static str, String)]) -> String {
     cmd
 }
 
+/// Returns a command that disables automatic APT upgrades and waits for active package operations.
+pub(crate) const fn disable_automatic_apt_upgrades_cmd() -> &'static str {
+    r#"set -e
+sudo timeout 10m cloud-init status --wait
+sudo systemctl mask --now apt-daily.timer apt-daily-upgrade.timer
+sudo tee /etc/apt/apt.conf.d/99-disable-periodic.conf >/dev/null <<'EOF'
+APT::Periodic::Enable "0";
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+
+# Let active package operations finish instead of interrupting them.
+sudo timeout 10m sh -c '
+while
+    ! systemctl show --property=ActiveState --value apt-daily.service | grep -Eq "^(inactive|failed)$" ||
+    ! systemctl show --property=ActiveState --value apt-daily-upgrade.service | grep -Eq "^(inactive|failed)$" ||
+    fuser -s /var/lib/apt/daily_lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+    sleep 1
+done
+'
+
+for timer in apt-daily.timer apt-daily-upgrade.timer; do
+    [ "$(systemctl is-enabled "$timer" 2>/dev/null || true)" = masked ]
+done
+for setting in Enable Update-Package-Lists Unattended-Upgrade; do
+    [ "$(apt-config shell VALUE "APT::Periodic::$setting/i")" = "VALUE='0'" ]
+done
+"#
+}
+
 /// Phase 1: Download files from S3 on monitoring instance
 pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
     let mut cmd = format!(
@@ -1337,6 +1367,59 @@ mod tests {
             images: binary_images()
                 .map(|image| (image, format!("image-url-{image}")))
                 .collect(),
+        }
+    }
+
+    #[test]
+    fn test_disables_automatic_apt_upgrades() {
+        let cmd = disable_automatic_apt_upgrades_cmd();
+        let positions = [
+            "cloud-init status --wait",
+            "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer",
+            "99-disable-periodic.conf",
+            "systemctl show --property=ActiveState --value apt-daily.service",
+            "systemctl is-enabled",
+            "apt-config shell",
+        ]
+        .map(|step| cmd.find(step).unwrap());
+        assert!(positions.is_sorted());
+        for setting in ["Enable", "Update-Package-Lists", "Unattended-Upgrade"] {
+            assert!(cmd.contains(&format!("APT::Periodic::{setting} \"0\";")));
+        }
+        assert!(cmd.contains("fuser -s /var/lib/apt/daily_lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock"));
+        assert!(!cmd.contains("fuser -k"));
+        for service in [
+            "apt-daily",
+            "apt-daily.service",
+            "apt-daily-upgrade",
+            "apt-daily-upgrade.service",
+        ] {
+            assert!(!cmd.lines().any(|line| {
+                let mut args = line.split_whitespace();
+                args.any(|arg| arg == "systemctl")
+                    && args.any(|arg| arg == "stop")
+                    && args.any(|arg| arg == service)
+            }));
+        }
+    }
+
+    #[test]
+    fn test_cloud_init_wait_requires_clean_completion() {
+        let mut lines = disable_automatic_apt_upgrades_cmd().lines();
+        let errexit = lines.next().unwrap();
+        assert_eq!(errexit, "set -e");
+        let wait_suffix = lines
+            .next()
+            .unwrap()
+            .strip_prefix("sudo timeout 10m cloud-init status --wait")
+            .unwrap();
+        for (code, accepted) in [(0, true), (1, false), (2, false), (124, false)] {
+            let wait = format!("sh -c 'exit {code}'{wait_suffix}");
+            let status = std::process::Command::new("sh")
+                .args(["-c", &format!("{errexit}\n{wait}\ntrue")])
+                .status()
+                .unwrap();
+            assert_eq!(status.success(), accepted);
         }
     }
 

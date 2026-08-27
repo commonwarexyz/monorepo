@@ -1194,6 +1194,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
             let deploy = format!("{:.1}s", start.elapsed().as_secs_f64());
 
+            ssh_execute(private_key, &ip, disable_automatic_apt_upgrades_cmd()).await?;
             let download_start = Instant::now();
             if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling, nvme) {
                 ssh_execute(private_key, &ip, &apt_cmd).await?;
@@ -1247,6 +1248,12 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             .await?;
             let deploy = format!("{:.1}s", start.elapsed().as_secs_f64());
 
+            ssh_execute(
+                private_key,
+                &monitoring_ip,
+                disable_automatic_apt_upgrades_cmd(),
+            )
+            .await?;
             let download_start = Instant::now();
             ssh_execute(
                 private_key,
