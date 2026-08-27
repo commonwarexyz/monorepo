@@ -177,10 +177,7 @@ pub mod tests {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{
-        NZU64,
-        bitmap::{Prunable as BitMap, Readable as _},
-    };
+    use commonware_utils::{NZU64, bitmap::Prunable as BitMap};
     use core::future::Future;
     use rand::Rng;
 

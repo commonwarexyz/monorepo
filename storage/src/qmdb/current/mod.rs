@@ -326,12 +326,9 @@ use crate::{
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
     merkle::{self, Location, full::Config as MerkleConfig},
-    qmdb::{
-        any::{
-            self, Config as AnyConfig,
-            operation::{Operation, Update},
-        },
-        bitmap::Shared,
+    qmdb::any::{
+        self, Config as AnyConfig,
+        operation::{Operation, Update},
     },
     translator::Translator,
 };
@@ -444,7 +441,6 @@ where
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     // Initialize the underlying `any` database. It takes sole ownership of the bitmap and
     // populates it during index rebuild.
@@ -452,7 +448,7 @@ where
 
     // Rebuild the grafted tree and canonical root from the initialized `any` state.
     let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
-        any.bitmap.as_ref(),
+        &any.bitmap,
         &pinned_nodes,
         &any.log.merkle,
         any.inactivity_floor_loc,
@@ -504,6 +500,7 @@ pub mod tests {
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
+            current::batch::BitmapBatch,
             store::tests::{TestKey, TestValue},
             verify_proof,
         },
@@ -3547,7 +3544,7 @@ pub mod tests {
     }
 
     /// A live batch (built off the committed state) must remain readable and applicable after
-    /// [`Db::prune`] advances the shared bitmap's pruning boundary. Pruning only discards
+    /// [`Db::prune`] advances the committed bitmap's pruning boundary. Pruning only discards
     /// chunks for inactive bits (below the inactivity floor); the batch's own chain and
     /// overlays operate at or above the floor, so no reads should land in the pruned region.
     #[test_traced("INFO")]
@@ -3588,7 +3585,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Prune with c still alive. This advances pruned_chunks on the shared bitmap.
+            // Prune with c still alive. This advances pruned_chunks on the committed bitmap.
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
 
@@ -3608,11 +3605,10 @@ pub mod tests {
     /// Regression: extending a batch after it has been applied (building a child off the
     /// just-applied parent) must produce correct data.
     ///
-    /// With the shared-bitmap `RwLock` design, applying `A` mutates the committed bitmap in
-    /// place; reads through `A`'s chain after apply fall through to the committed bitmap (which
-    /// now reflects `A`'s state), and `A`'s own overlays applied on top are consistent with
-    /// committed. So `A.new_batch()` followed by merkleize + apply is the right-by-construction
-    /// case, and this test locks it in.
+    /// Applying `A` mutates the committed bitmap in place; reads through `A`'s chain after
+    /// apply resolve `A`'s own overlays over the committed bitmap (which now reflects `A`'s
+    /// state), and the two agree. So `A.new_batch()` followed by merkleize + apply is the
+    /// right-by-construction case, and this test locks it in.
     #[test_traced("INFO")]
     fn test_current_extend_applied_batch() {
         let executor = deterministic::Runner::default();
@@ -3634,15 +3630,18 @@ pub mod tests {
                 .unwrap();
             let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
 
-            // Build B off A after A was applied. B's chain walks through A's layer and falls
-            // through to the committed bitmap (now post-A). B's merkleize must read consistent
-            // state from both sources.
+            // Build B off A after A was applied. Merkleizing B trims A's now-committed layer, so
+            // B's chain is its own layer directly over the committed bitmap (now post-A).
             let b = a
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
+            assert!(matches!(
+                &b.bitmap,
+                BitmapBatch::Layer(layer) if matches!(layer.parent, BitmapBatch::Base)
+            ));
             let (db, _) = db.apply_batch(b).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -3666,11 +3665,11 @@ pub mod tests {
     }
 
     /// Build a child batch from a still-live parent whose apply was followed by a prune, then
-    /// merkleize and apply the child. The parent's `BitmapBatch` chain terminates in the shared
+    /// merkleize and apply the child. The parent's `BitmapBatch` chain terminates in the
     /// committed bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the
-    /// child is constructed via `parent.new_batch()`, the internal `trim_committed` call must
-    /// observe the advanced boundary and produce a correct child chain; merkleize and apply must
-    /// then produce correct state for keys at and beyond the advanced floor.
+    /// child is merkleized, the internal `trim_committed` call must observe the advanced
+    /// boundary and produce a correct child chain; merkleize and apply must then produce
+    /// correct state for keys at and beyond the advanced floor.
     #[test_traced("INFO")]
     fn test_current_live_batch_child_after_prune() {
         let executor = deterministic::Runner::default();
@@ -3701,13 +3700,13 @@ pub mod tests {
             let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // Prune while `a` is still live. Mutates the shared bitmap's pruning boundary in place.
+            // Prune while `a` is still live. Mutates the committed bitmap's pruning boundary in
+            // place.
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
 
-            // Extend `a` into `b` AFTER the prune. Building `b` off `a` triggers
-            // `trim_committed` on `a`'s chain, which must correctly see the advanced pruning
-            // boundary on the shared bitmap.
+            // Extend `a` into `b` AFTER the prune. Merkleizing `b` trims `a`'s chain against
+            // the committed bitmap, which must correctly see the advanced pruning boundary.
             let b = a
                 .new_batch::<Sha256>()
                 .write(key(300), Some(val(300)))
@@ -4145,7 +4144,7 @@ pub mod tests {
 
             // Setup sanity: the committed bitmap spans at least two chunks.
             assert!(
-                Readable::<N>::len(db.any.bitmap.as_ref()) > CHUNK_SIZE_BITS,
+                Readable::<N>::len(&db.any.bitmap) > CHUNK_SIZE_BITS,
                 "setup must cross a chunk boundary",
             );
 
@@ -4177,10 +4176,11 @@ pub mod tests {
 
             // Snapshot every chunk in the speculative `BitmapBatch` chain (read through child).
             let speculative_chunks: Vec<[u8; N]> = {
-                let len = Readable::<N>::len(&child.bitmap);
+                let bitmap = child.bitmap.over(&db.any.bitmap);
+                let len = Readable::<N>::len(&bitmap);
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
-                    .map(|idx| Readable::<N>::get_chunk(&child.bitmap, idx))
+                    .map(|idx| Readable::<N>::get_chunk(&bitmap, idx))
                     .collect()
             };
             // Setup sanity: speculative state spans at least two chunks.
@@ -4191,10 +4191,10 @@ pub mod tests {
             // `batch.canonical_root` is no longer valid against the post-apply state.
             let (db, _) = db.apply_batch(child).await.unwrap();
             let committed_chunks: Vec<[u8; N]> = {
-                let len = Readable::<N>::len(db.any.bitmap.as_ref());
+                let len = Readable::<N>::len(&db.any.bitmap);
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
-                    .map(|idx| Readable::<N>::get_chunk(db.any.bitmap.as_ref(), idx))
+                    .map(|idx| Readable::<N>::get_chunk(&db.any.bitmap, idx))
                     .collect()
             };
 

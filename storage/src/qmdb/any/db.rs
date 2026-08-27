@@ -12,7 +12,7 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, batch_chain::Commitment, bitmap::Shared, delete_known_loc, metrics::Metrics,
+        Error, batch_chain::Commitment, delete_known_loc, metrics::Metrics,
         operation::Floored as _, update_known_loc,
     },
 };
@@ -110,7 +110,7 @@ pub struct Db<
     /// - `bitmap[i] == 0` implies location `i` is inactive (false negatives are forbidden).
     /// - CommitFloor: only the current `last_commit_loc` carries bit = 1; earlier commits
     ///   are 0.
-    pub(crate) bitmap: Arc<Shared<N>>,
+    pub(crate) bitmap: bitmap::Prunable<N>,
 
     /// Metrics for this database.
     pub(crate) metrics: Metrics<E>,
@@ -416,7 +416,7 @@ where
     /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Skips the
     /// inactivity-floor check.
     pub(crate) fn prune_bitmap(&mut self, prune_loc: Location<F>) {
-        self.bitmap.write().prune_to_bit(*prune_loc);
+        self.bitmap.prune_to_bit(*prune_loc);
     }
 
     /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
@@ -634,44 +634,41 @@ where
         // is enforced upstream: directly via the `bounds.start` check above, or via
         // `current::Db::rewind`'s explicit `pruned_bits` precondition. The debug_assert catches
         // regressions.
-        {
-            let mut bitmap = self.bitmap.write();
-            assert!(
-                bitmap.pruned_bits() <= rewind_size,
-                "bitmap pruned boundary exceeded journal retained start",
-            );
-            bitmap.truncate(rewind_size);
+        assert!(
+            self.bitmap.pruned_bits() <= rewind_size,
+            "bitmap pruned boundary exceeded journal retained start",
+        );
+        self.bitmap.truncate(rewind_size);
 
-            for undo in undos {
-                match undo {
-                    IndexUndo::Replace {
-                        key,
-                        old_loc,
-                        new_loc,
-                    } => {
-                        if new_loc < rewind_size {
-                            bitmap.set_bit(*new_loc, true);
-                        }
-                        update_known_loc(&mut self.index, &key, old_loc, new_loc);
+        for undo in undos {
+            match undo {
+                IndexUndo::Replace {
+                    key,
+                    old_loc,
+                    new_loc,
+                } => {
+                    if new_loc < rewind_size {
+                        self.bitmap.set_bit(*new_loc, true);
                     }
-                    IndexUndo::Remove { key, old_loc } => {
-                        delete_known_loc(&mut self.index, &key, old_loc)
+                    update_known_loc(&mut self.index, &key, old_loc, new_loc);
+                }
+                IndexUndo::Remove { key, old_loc } => {
+                    delete_known_loc(&mut self.index, &key, old_loc)
+                }
+                IndexUndo::Insert { key, new_loc } => {
+                    if new_loc < rewind_size {
+                        self.bitmap.set_bit(*new_loc, true);
                     }
-                    IndexUndo::Insert { key, new_loc } => {
-                        if new_loc < rewind_size {
-                            bitmap.set_bit(*new_loc, true);
-                        }
-                        self.index.insert(&key, new_loc);
-                    }
+                    self.index.insert(&key, new_loc);
                 }
             }
-
-            // The rewound tail's preceding op (validated above) is the new `last_commit_loc`.
-            // Set its bit to 1 to match the CommitFloor convention; previous intermediate
-            // commits in the truncated range stay at 0 from `truncate`. `rewind_size > 0` is
-            // guaranteed by the early-return at the top of this function.
-            bitmap.set_bit(rewind_size - 1, true);
         }
+
+        // The rewound tail's preceding op (validated above) is the new `last_commit_loc`.
+        // Set its bit to 1 to match the CommitFloor convention; previous intermediate
+        // commits in the truncated range stay at 0 from `truncate`. `rewind_size > 0` is
+        // guaranteed by the early-return at the top of this function.
+        self.bitmap.set_bit(rewind_size - 1, true);
 
         self.active_keys = self
             .active_keys
@@ -689,7 +686,7 @@ where
         Ok(self)
     }
 
-    /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
+    /// Returns a [Db] initialized from `log`. `bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
     /// from grafted metadata). `init_concurrency` is the index-build concurrency
     /// (see [crate::qmdb::IndexBuild::Concurrency]).
@@ -703,7 +700,7 @@ where
         context: E,
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
-        shared_bitmap: Option<Arc<Shared<N>>>,
+        bitmap: Option<bitmap::Prunable<N>>,
         init_concurrency: <I as crate::qmdb::IndexBuild<F>>::Concurrency,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
@@ -743,30 +740,27 @@ where
 
             // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
             // [pruned_bits, bounds.start) correspond to pruned operations and remain 0.
-            let bitmap = shared_bitmap.unwrap_or_else(|| {
+            let mut bitmap = bitmap.unwrap_or_else(|| {
                 let pruned_chunks =
                     (bounds.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
-                let bm = bitmap::Prunable::<N>::new_with_pruned_chunks(pruned_chunks)
-                    .expect("pruned chunk count fits in u64 bits");
-                Arc::new(Shared::new(bm))
+                bitmap::Prunable::<N>::new_with_pruned_chunks(pruned_chunks)
+                    .expect("pruned chunk count fits in u64 bits")
             });
 
+            // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
+            // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
+            assert!(
+                bitmap.pruned_bits() <= *inactivity_floor_loc,
+                "bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
+                bitmap.pruned_bits(),
+                *inactivity_floor_loc,
+            );
+
             // Extend the bitmap up to the inactivity floor (zero-fill), then append the replayed
-            // suffix, all under a single lock acquisition.
-            {
-                let mut guard = bitmap.write();
-                // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
-                // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
-                assert!(
-                    guard.pruned_bits() <= *inactivity_floor_loc,
-                    "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
-                    guard.pruned_bits(),
-                    *inactivity_floor_loc,
-                );
-                guard.extend_to(*inactivity_floor_loc);
-                for is_active in activity.iter() {
-                    guard.push(is_active);
-                }
+            // suffix.
+            bitmap.extend_to(*inactivity_floor_loc);
+            for is_active in activity.iter() {
+                bitmap.push(is_active);
             }
 
             (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
@@ -776,7 +770,7 @@ where
         let log = Arc::into_inner(log).expect("index build retained a log reference");
 
         // The bitmap must have exactly one bit per retained log location.
-        if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size() {
+        if bitmap.len() != log.size() {
             return Err(crate::qmdb::Error::DataCorrupted(
                 "bitmap length diverged from log size during init",
             ));

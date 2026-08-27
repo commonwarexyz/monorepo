@@ -120,10 +120,7 @@ pub mod test {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{
-        NZU64,
-        bitmap::{Prunable as BitMap, Readable as _},
-    };
+    use commonware_utils::{NZU64, bitmap::Prunable as BitMap};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest =

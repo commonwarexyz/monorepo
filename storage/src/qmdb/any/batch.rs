@@ -16,7 +16,7 @@ use crate::{
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
         },
         batch_chain::{self, Bounds, Commitment, OnChain},
-        bitmap::Shared,
+        bitmap::fill_from,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -666,16 +666,16 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
     }
 }
 
-/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` under a single bitmap
-/// read guard, returning the next `floor`.
+/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)`, returning the next
+/// `floor`.
 fn fill_candidates<F: Family, const N: usize>(
-    bitmap: &Shared<N>,
+    bitmap: &bitmap::Prunable<N>,
     floor: Location<F>,
     tip: u64,
     limit: usize,
     out: &mut Vec<Location<F>>,
 ) -> Location<F> {
-    Location::new(bitmap.fill_candidates(*floor, tip, limit, out))
+    Location::new(fill_from(bitmap, *floor, tip, limit, out))
 }
 
 /// Resolve `loc` to an op within the in-memory ancestor region
@@ -1668,7 +1668,7 @@ where
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
         // the resolution job runs.
-        let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
+        let committed_tip = db.bitmap.len();
         let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
         let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
         let raw: Vec<u64> = locs.iter().map(|loc| **loc).collect();
@@ -2814,82 +2814,78 @@ where
         // Apply journal (handles its own partial ancestor skipping).
         self.log = self.log.apply_batch(&batch.journal_batch).await?;
 
-        // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
-        {
-            let mut bitmap = self.bitmap.write();
-            bitmap.extend_to(*batch.bounds.tip.size);
+        self.bitmap.extend_to(*batch.bounds.tip.size);
 
-            if batch.ancestor_diffs.is_empty() {
-                // Fast path: no ancestors to merge, no fixups to look up.
-                for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.index,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
-                }
-            } else {
-                // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
-                // and pending (still to be applied; merged with the child).
-                let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
-                let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
-                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                    if batch.bounds.ancestors[i].state.size <= db_size {
-                        applied.push(ancestor_diff.as_slice());
-                    } else {
-                        pending.push(ancestor_diff.as_slice());
-                    }
-                }
-                let mut resolver = DiffCursors::new(applied);
-                if batch.ancestor_base_locs.is_empty() {
-                    let merge = DiffMerge::new(
-                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                    );
-                    for (key, entry) in merge {
-                        let old = resolver
-                            .resolve(key)
-                            .map(DiffEntry::loc)
-                            .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
-                    }
+        if batch.ancestor_diffs.is_empty() {
+            // Fast path: no ancestors to merge, no fixups to look up.
+            for (key, entry) in batch.diff.iter() {
+                apply_diff(
+                    &mut self.index,
+                    &mut self.bitmap,
+                    key,
+                    entry,
+                    entry.base_old_loc(),
+                );
+            }
+        } else {
+            // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
+            // and pending (still to be applied; merged with the child).
+            let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
+            let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
+            for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+                if batch.bounds.ancestors[i].state.size <= db_size {
+                    applied.push(ancestor_diff.as_slice());
                 } else {
-                    let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
-                    let merge = DiffMerge::new(
-                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                    );
-                    for (key, entry) in merge {
-                        let old = resolver.resolve(key).map_or_else(
-                            || {
-                                while ancestor_base_locs
-                                    .peek()
-                                    .is_some_and(|(candidate, _)| candidate < key)
-                                {
-                                    ancestor_base_locs.next();
-                                }
-                                if ancestor_base_locs
-                                    .peek()
-                                    .is_some_and(|(candidate, _)| candidate == key)
-                                {
-                                    ancestor_base_locs.next().expect("peeked entry exists").1
-                                } else {
-                                    entry.base_old_loc()
-                                }
-                            },
-                            DiffEntry::loc,
-                        );
-                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
-                    }
+                    pending.push(ancestor_diff.as_slice());
                 }
             }
-
-            // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
-            // set the new; earlier ancestor commits between them are already 0 from
-            // `extend_to`.
-            bitmap.set_bit(*self.last_commit_loc, false);
-            bitmap.set_bit(*batch.bounds.tip.size - 1, true);
+            let mut resolver = DiffCursors::new(applied);
+            if batch.ancestor_base_locs.is_empty() {
+                let merge = DiffMerge::new(
+                    iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
+                );
+                for (key, entry) in merge {
+                    let old = resolver
+                        .resolve(key)
+                        .map(DiffEntry::loc)
+                        .unwrap_or_else(|| entry.base_old_loc());
+                    apply_diff(&mut self.index, &mut self.bitmap, key, entry, old);
+                }
+            } else {
+                let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
+                let merge = DiffMerge::new(
+                    iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
+                );
+                for (key, entry) in merge {
+                    let old = resolver.resolve(key).map_or_else(
+                        || {
+                            while ancestor_base_locs
+                                .peek()
+                                .is_some_and(|(candidate, _)| candidate < key)
+                            {
+                                ancestor_base_locs.next();
+                            }
+                            if ancestor_base_locs
+                                .peek()
+                                .is_some_and(|(candidate, _)| candidate == key)
+                            {
+                                ancestor_base_locs.next().expect("peeked entry exists").1
+                            } else {
+                                entry.base_old_loc()
+                            }
+                        },
+                        DiffEntry::loc,
+                    );
+                    apply_diff(&mut self.index, &mut self.bitmap, key, entry, old);
+                }
+            }
         }
+
+        // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
+        // set the new; earlier ancestor commits between them are already 0 from
+        // `extend_to`.
+        self.bitmap.set_bit(*self.last_commit_loc, false);
+        self.bitmap.set_bit(*batch.bounds.tip.size - 1, true);
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
@@ -3120,7 +3116,7 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::test_rng;
+    use commonware_utils::{bitmap::Readable as _, test_rng};
     use rand::RngExt as _;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
@@ -3133,13 +3129,13 @@ mod tests {
         StagedLoc::Committed(loc(n))
     }
 
-    fn shared_with<F>(build: F) -> Shared<BITMAP_CHUNK_BYTES>
+    fn bitmap_with<F>(build: F) -> bitmap::Prunable<BITMAP_CHUNK_BYTES>
     where
         F: FnOnce(&mut bitmap::Prunable<BITMAP_CHUNK_BYTES>),
     {
         let mut bm = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::new();
         build(&mut bm);
-        Shared::new(bm)
+        bm
     }
 
     /// [`DiffCursors`] must resolve exactly like per-key `lookup_sorted` over the same diffs
@@ -3277,15 +3273,15 @@ mod tests {
     /// `[floor, tip)`. `bitmap_fill_candidates_matches_oracle` proves the production batch
     /// fill produces this exact sequence.
     fn next_candidate<F: Family, const N: usize>(
-        bitmap: &Shared<N>,
+        bitmap: &bitmap::Prunable<N>,
         floor: Location<F>,
         tip: u64,
     ) -> Option<Location<F>> {
         let floor = *floor;
-        let bitmap_len = bitmap::Readable::<N>::len(bitmap);
+        let bitmap_len = bitmap.len();
         let committed_end = bitmap_len.min(tip);
         if floor < committed_end
-            && let Some(idx) = bitmap.next_one_from(floor)
+            && let Some(idx) = bitmap.ones_iter_from(floor).next()
             && idx < committed_end
         {
             return Some(Location::new(idx));
@@ -3406,13 +3402,13 @@ mod tests {
 
     #[test]
     fn bitmap_scan_empty() {
-        let bitmap = shared_with(|_| {});
+        let bitmap = bitmap_with(|_| {});
         assert_eq!(next_candidate(&bitmap, loc(0), 0), None);
     }
 
     #[test]
     fn bitmap_scan_uncommitted_tail() {
-        let bitmap = shared_with(|_| {});
+        let bitmap = bitmap_with(|_| {});
         assert_eq!(next_candidate(&bitmap, loc(0), 3), Some(loc(0)));
         assert_eq!(next_candidate(&bitmap, loc(1), 3), Some(loc(1)));
         assert_eq!(next_candidate(&bitmap, loc(2), 3), Some(loc(2)));
@@ -3421,7 +3417,7 @@ mod tests {
 
     #[test]
     fn bitmap_scan_committed_region() {
-        let bitmap = shared_with(|bm| {
+        let bitmap = bitmap_with(|bm| {
             bm.extend_to(10);
             bm.set_bit(*loc(3), true);
             bm.set_bit(*loc(7), true);
@@ -3436,7 +3432,7 @@ mod tests {
 
     #[test]
     fn bitmap_scan_transitions_into_tail() {
-        let bitmap = shared_with(|bm| {
+        let bitmap = bitmap_with(|bm| {
             bm.extend_to(5);
             bm.set_bit(*loc(2), true);
         });
@@ -3449,7 +3445,7 @@ mod tests {
 
     #[test]
     fn bitmap_scan_after_prune() {
-        let bitmap = shared_with(|bm| {
+        let bitmap = bitmap_with(|bm| {
             bm.extend_to(BITMAP_CHUNK_BITS * 3);
             bm.set_bit(*loc(BITMAP_CHUNK_BITS * 2 + 5), true);
             bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
@@ -3467,7 +3463,7 @@ mod tests {
 
     #[test]
     fn bitmap_scan_after_truncate() {
-        let bitmap = shared_with(|bm| {
+        let bitmap = bitmap_with(|bm| {
             bm.extend_to(BITMAP_CHUNK_BITS * 2);
             bm.set_bit(*loc(BITMAP_CHUNK_BITS + 3), true);
             bm.truncate(BITMAP_CHUNK_BITS);
@@ -3485,11 +3481,11 @@ mod tests {
     /// and truncated bitmaps, every batch limit, and tips below the bitmap length.
     #[test]
     fn bitmap_fill_candidates_matches_oracle() {
-        let shapes: Vec<(&str, Shared<BITMAP_CHUNK_BYTES>)> = vec![
-            ("empty", shared_with(|_| {})),
+        let shapes: Vec<(&str, bitmap::Prunable<BITMAP_CHUNK_BYTES>)> = vec![
+            ("empty", bitmap_with(|_| {})),
             (
                 "committed_bits",
-                shared_with(|bm| {
+                bitmap_with(|bm| {
                     bm.extend_to(10);
                     bm.set_bit(3, true);
                     bm.set_bit(7, true);
@@ -3497,14 +3493,14 @@ mod tests {
             ),
             (
                 "transition_into_tail",
-                shared_with(|bm| {
+                bitmap_with(|bm| {
                     bm.extend_to(5);
                     bm.set_bit(2, true);
                 }),
             ),
             (
                 "pruned",
-                shared_with(|bm| {
+                bitmap_with(|bm| {
                     bm.extend_to(BITMAP_CHUNK_BITS * 3);
                     bm.set_bit(BITMAP_CHUNK_BITS * 2 + 5, true);
                     bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
@@ -3512,7 +3508,7 @@ mod tests {
             ),
             (
                 "truncated",
-                shared_with(|bm| {
+                bitmap_with(|bm| {
                     bm.extend_to(BITMAP_CHUNK_BITS * 2);
                     bm.set_bit(BITMAP_CHUNK_BITS + 3, true);
                     bm.truncate(BITMAP_CHUNK_BITS);
