@@ -568,6 +568,18 @@ where
     }
 }
 
+/// Compute the authenticated root of a newly initialized compact db without opening storage.
+///
+/// The initial commit never carries metadata, so this root always represents `Commit(None, 0)`.
+pub fn initial_root<F, O, H>() -> H::Digest
+where
+    F: Family,
+    O: Variant<F> + EncodeShared,
+    H: Hasher,
+{
+    qmdb::single_operation_root::<F, H>(&O::commit_op(None, Location::new(0)))
+}
+
 impl<F, E, O, H, C, S> Source for Db<F, E, O, H, C, S>
 where
     F: Family,
