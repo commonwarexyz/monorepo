@@ -1,4 +1,6 @@
-use commonware_runtime::{Blob as _, ReadOptions, Storage as _, WriteOptions, deterministic};
+use commonware_runtime::{
+    Blob as _, ReadOptions, Runner as _, Storage as _, WriteOptions, deterministic,
+};
 
 const CHECKSUM_RECORD_SIZE: u64 = 12;
 
@@ -17,7 +19,8 @@ pub(crate) async fn corrupt_page(
     let offset = page * physical_page_size;
     let (blob, size) = context.open(partition, &blob.to_be_bytes()).await.unwrap();
     assert!(
-        offset < size - physical_page_size,
+        size.checked_sub(physical_page_size)
+            .is_some_and(|remaining| offset < remaining),
         "corruption target must be an interior page"
     );
     let byte = blob
@@ -33,4 +36,12 @@ pub(crate) async fn corrupt_page(
     .await
     .unwrap();
     blob.sync().await.unwrap();
+}
+
+#[test]
+#[should_panic(expected = "corruption target must be an interior page")]
+fn test_corrupt_page_rejects_short_blob() {
+    deterministic::Runner::default().start(|context| async move {
+        corrupt_page(&context, "short-blob", 0, 0, 64).await;
+    });
 }

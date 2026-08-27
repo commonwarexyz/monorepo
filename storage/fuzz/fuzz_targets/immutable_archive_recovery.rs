@@ -176,7 +176,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         archive = archive.sync().await.expect("baseline sync failed");
 
         // Candidate puts and their sync run under one partial-write policy. Any mutating error ends
-        // the phase immediately; recovery is always performed with faults disabled.
+        // the phase immediately. Recovery is always performed with faults disabled.
         let rate = Probability::new(u64::from(phase_input.rate % 100) + 1, 100).unwrap();
         let (failure_rate, sync_rate) = match phase_input.fault {
             FaultKind::Write => (rate, None),

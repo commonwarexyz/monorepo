@@ -47,6 +47,8 @@ pub enum Error {
     ReplayInterrupted,
     #[error("replay failed")]
     ReplayFailed,
+    #[error("section must be replayed before append: {0}")]
+    ReplayRequired(u64),
     #[error("size overflow")]
     SizeOverflow,
     #[error("missing blob: {0}")]

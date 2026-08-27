@@ -96,7 +96,7 @@ fn fuzz(input: FuzzInput) {
         assert_recovers(&storage, V1_NAME, input.blob_version, &canonical_v1).await;
 
         // A pre-V1 writer could leave only a prefix of its 8-byte prelude. A complete prelude is
-        // still a valid V0 blob; every shorter prefix is treated as a new blob and recreated V1.
+        // still a valid V0 blob. Every shorter prefix is treated as a new blob and recreated V1.
         let canonical_v0 = v0_header(input.blob_version);
         let retained = usize::from(input.retained_prefix) % (canonical_v0.len() + 1);
         storage.set_raw_blob(PARTITION, V0_NAME, canonical_v0[..retained].to_vec());

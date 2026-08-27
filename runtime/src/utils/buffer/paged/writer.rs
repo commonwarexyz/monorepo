@@ -1021,7 +1021,7 @@ impl<B: Blob> Writer<B> {
     /// The boolean is true only when every physical byte belongs to a valid page in that prefix.
     /// It is false when the scan stops at a short or invalid page, at a partial physical page, or
     /// before a later physical page. When `capture` is set, bytes from its logical range are copied
-    /// as valid pages are scanned; callers must check that the returned prefix covers the range
+    /// as valid pages are scanned. Callers must check that the returned prefix covers the range
     /// before using them. `buffer_size` bounds each read with the same one-page minimum as replay.
     pub async fn recoverable_prefix_len_from_blob(
         blob: &B,

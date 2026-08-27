@@ -1134,7 +1134,7 @@ mod tests {
             let cfg = test_config(&context, "marker-covered-interior", NZU64!(4));
 
             // Publish a boundary covering both values. The terminal value remains the floor's
-            // cross-journal proof; the earlier value must not be revisited during startup.
+            // cross-journal proof. The earlier value must not be revisited during startup.
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();

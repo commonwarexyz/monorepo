@@ -243,7 +243,7 @@ fn valid_page_len(page: &[u8]) -> Option<usize> {
 
 /// Return whether any currently retained complete page lost bytes from the originally
 /// authenticated logical prefix. Truncation and deletion are recoverable and therefore do not
-/// count; neither do writes confined to page padding, an inactive footer slot, or an extension.
+/// count. Writes confined to page padding, an inactive footer slot, or an extension do not count.
 async fn has_invalid_authenticated_index_page(
     context: &deterministic::Context,
     authenticated: &BTreeMap<u64, AuthenticatedIndex>,
@@ -314,11 +314,12 @@ async fn exercise_readable_entries(
                     panic!("entry {section}:{position} produced an unexpected index error: {err:?}")
                 }
             };
-            let (offset, size) = entry.value_location();
+
             // This section's original bytes were externally mutated, and a CRC-valid index
-            // rewrite can forge any value range. Exercise the read for bounded-error coverage;
-            // sections with preserved provenance and independently appended sentinels retain the
+            // rewrite can forge any value range. Exercise the read for bounded-error coverage.
+            // Sections with preserved provenance and independently appended sentinels retain the
             // identity oracles.
+            let (offset, size) = entry.value_location();
             let _ = oversized.get_value(section, offset, size).await;
             position += 1;
         }

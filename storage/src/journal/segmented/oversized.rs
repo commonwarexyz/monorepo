@@ -51,6 +51,12 @@
 //! size, and everything after it is removed. Committed damage the checkpoint covers
 //! fails init rather than being repaired, and value checksums below the checkpoint are
 //! still verified lazily at read.
+//!
+//! Tracked recovery maintains a per-section committed item count for owners that must validate
+//! every newly recovered value. The covered index/value prefix is proven before repair, replay
+//! verifies values above it in order, and the first invalid value truncates the rest of that
+//! section. Marker publication follows successful joint index/value syncs and may conservatively
+//! trail them by one sync request.
 
 use super::{
     fixed::{
@@ -58,12 +64,17 @@ use super::{
     },
     glob::{Config as GlobConfig, Glob},
 };
-use crate::{Context, journal::Error};
+use crate::{
+    Context, SyncCompletion,
+    journal::{Error, durability::Barrier},
+    metadata::{Config as MetadataConfig, Metadata},
+};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{Error as RError, Handle, ReadOptions};
-use futures::future::try_join;
+use commonware_utils::sequence::U64 as SectionKey;
+use futures::{FutureExt as _, future::try_join};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     num::NonZeroUsize,
 };
 use tracing::{debug, warn};
@@ -118,6 +129,59 @@ enum Recovery<'a> {
     Infer,
 }
 
+/// Durable recovery state for a journal that validates every uncommitted value during replay.
+struct Tracking<E: Context> {
+    /// Durable committed item count for each retained section.
+    metadata: Metadata<E, SectionKey, u64>,
+
+    /// Whether a started marker sync must be observed by a later sync request.
+    marker_sync_pending: bool,
+
+    /// Joint index/value durability proofs not yet fully published as markers.
+    barriers: BTreeMap<u64, Barrier>,
+}
+
+impl<E: Context> Tracking<E> {
+    /// Stage a changed marker while preserving absence as the canonical zero boundary.
+    fn stage_marker(&mut self, section: u64, floor: u64) -> bool {
+        let key = SectionKey::new(section);
+        match self.metadata.get(&key) {
+            None if floor == 0 => false,
+            Some(stored) if *stored == floor => false,
+            _ => {
+                self.metadata.put(key, floor);
+                true
+            }
+        }
+    }
+}
+
+/// State for the one marker-aware replay performed while opening a tracked journal.
+struct Validation {
+    /// Cursor state for the section currently being replayed.
+    current_section: Option<u64>,
+    floor: u64,
+    truncated: bool,
+
+    /// First invalid position in each section, applied after replay releases the index journal.
+    rewinds: Vec<(u64, u64)>,
+
+    /// Whether replay yielded an error that makes the journal unavailable.
+    failed: bool,
+}
+
+impl Validation {
+    const fn new() -> Self {
+        Self {
+            current_section: None,
+            floor: 0,
+            truncated: false,
+            rewinds: Vec::new(),
+            failed: false,
+        }
+    }
+}
+
 /// Segmented journal for entries with oversized values.
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
@@ -131,6 +195,7 @@ enum Recovery<'a> {
 pub struct Oversized<E: Context, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
+    tracking: Option<Tracking<E>>,
 }
 
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug for Oversized<E, I, V> {
@@ -171,18 +236,53 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Self::init_inner(context, cfg, recovery).await
     }
 
-    /// Initialize while preserving at least the given item count in each section.
-    pub(crate) async fn init_with_floors(
-        context: E,
+    /// Initialize tracked recovery and return its required full replay.
+    ///
+    /// The caller must drain the replay and call [Replay::finish_tracked]. Entries below each
+    /// durable marker are retained after their cross-journal boundary is proven. Entries above it
+    /// are value-validated in order and the first invalid entry truncates its section.
+    pub(crate) async fn init_tracked(
+        context: &E,
         cfg: Config<V::Cfg>,
-        minimum_items: &BTreeMap<u64, u64>,
-    ) -> Result<Self, Error> {
-        let recovery = if minimum_items.is_empty() {
+        metadata_partition: String,
+        buffer: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<Replay<E, I, V>, Error> {
+        // Open the commit markers before the data they constrain.
+        let metadata = Metadata::init(
+            context.child("metadata"),
+            MetadataConfig {
+                partition: metadata_partition,
+                codec_config: (),
+            },
+        )
+        .await?;
+        let floors = metadata
+            .keys()
+            .map(|key| {
+                (
+                    u64::from(key),
+                    *metadata.get(key).expect("metadata key must have a value"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        // Every advertised prefix is proven before ordinary suffix repair may mutate either
+        // journal. An empty sidecar retains the legacy inferred-recovery behavior.
+        let recovery = if floors.is_empty() {
             Recovery::Infer
         } else {
-            Recovery::Floors(minimum_items)
+            Recovery::Floors(&floors)
         };
-        Self::init_inner(context, cfg, recovery).await
+        let mut journal = Self::init_inner(context.child("oversized"), cfg, recovery).await?;
+        journal.tracking = Some(Tracking {
+            metadata,
+            marker_sync_pending: false,
+            barriers: BTreeMap::new(),
+        });
+        let mut replay = journal.replay(0, 0, buffer, read_options).await?;
+        replay.validation = Some(Validation::new());
+        Ok(replay)
     }
 
     async fn init_inner(
@@ -208,7 +308,13 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             Recovery::Infer => {
                 let index = FixedJournal::init(index_context, index_cfg).await?;
                 let values = Glob::init(value_context, value_cfg).await?;
-                Self { index, values }.repair().await
+                Self {
+                    index,
+                    values,
+                    tracking: None,
+                }
+                .repair()
+                .await
             }
             Recovery::Floors(minimum_items) => {
                 let preflight =
@@ -216,7 +322,13 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 let values = Glob::init(value_context, value_cfg).await?;
                 Self::validate_value_floors(&values, &preflight).await?;
                 let index = preflight.finish().await?;
-                Self { index, values }.repair().await
+                Self {
+                    index,
+                    values,
+                    tracking: None,
+                }
+                .repair()
+                .await
             }
             Recovery::Restore {
                 section,
@@ -231,7 +343,13 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 
                 // The non-mutating preflight proved every covered cross-journal boundary.
                 // Truncate to the checkpoint durably before appends can reuse discarded ranges.
-                Self { index, values }.rewind(section, index_size).await
+                Self {
+                    index,
+                    values,
+                    tracking: None,
+                }
+                .rewind(section, index_size)
+                .await
             }
         }
     }
@@ -477,6 +595,74 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Ok((0, 0))
     }
 
+    /// Reconcile durable markers with the retained state after tracked startup recovery.
+    async fn reconcile_markers(mut self) -> Result<Self, Error> {
+        let mut tracking = self
+            .tracking
+            .take()
+            .expect("tracked replay preserves its recovery state");
+
+        let mut dirty = false;
+        for section in self.index.sections() {
+            let items = self.index.section_len(section)?;
+            dirty |= tracking.stage_marker(section, items);
+        }
+        if dirty {
+            let marker;
+            (tracking.metadata, marker) = tracking.metadata.start_sync().await?;
+            drop(marker);
+            tracking.marker_sync_pending = true;
+        }
+        self.tracking = Some(tracking);
+        Ok(self)
+    }
+
+    /// Lower tracked floors before an operation can free any bytes they authorize.
+    async fn prepare_rewind(
+        &mut self,
+        section: u64,
+        index_size: u64,
+        remove_later: bool,
+    ) -> Result<(), Error> {
+        let Some(mut tracking) = self.tracking.take() else {
+            return Ok(());
+        };
+        let items = index_size / FixedJournal::<E, I>::CHUNK_SIZE as u64;
+        let mut dirty = false;
+
+        if remove_later {
+            tracking.metadata.retain(|key, _| {
+                let keep = u64::from(key) <= section;
+                dirty |= !keep;
+                keep
+            });
+        }
+        let key = SectionKey::new(section);
+        if tracking
+            .metadata
+            .get(&key)
+            .is_some_and(|floor| *floor > items)
+        {
+            tracking.metadata.put(key, items);
+            dirty = true;
+        }
+        if dirty {
+            tracking.metadata = tracking.metadata.sync().await?;
+            tracking.marker_sync_pending = false;
+        }
+
+        if remove_later {
+            tracking
+                .barriers
+                .retain(|candidate, _| *candidate <= section);
+        }
+        if let Some(barrier) = tracking.barriers.get_mut(&section) {
+            barrier.truncate(items);
+        }
+        self.tracking = Some(tracking);
+        Ok(())
+    }
+
     /// Append entry + value.
     ///
     /// Writes value to glob first, then writes index entry with the value location.
@@ -500,6 +686,15 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let entry_with_location = entry.with_location(offset, size);
         let position;
         (self.index, position) = self.index.append(section, &entry_with_location).await?;
+
+        // The pre-append prefix is the newest boundary that a later marker may publish without
+        // first observing another joint index/value sync.
+        if let Some(tracking) = &mut self.tracking {
+            tracking
+                .barriers
+                .entry(section)
+                .or_insert_with(|| Barrier::new(position));
+        }
 
         Ok((self, position, offset, size))
     }
@@ -528,16 +723,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.values.get(section, offset, size).await
     }
 
-    /// Iterate over retained index sections.
-    pub(crate) fn sections(&self) -> impl Iterator<Item = u64> + '_ {
-        self.index.sections()
-    }
-
-    /// Return the number of index entries in `section`.
-    pub(crate) fn section_len(&self, section: u64) -> Result<u64, Error> {
-        self.index.section_len(section)
-    }
-
     /// Consumes the journal and returns an owned [Replay] reader over index entries
     /// starting from `start_position` in `start_section`.
     ///
@@ -552,18 +737,107 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<E, I, V>, Error> {
-        let index = self
-            .index
+        let Self {
+            index,
+            values,
+            tracking,
+        } = self;
+        let index = index
             .replay(start_section, start_position, buffer, read_options)
             .await?;
         Ok(Replay {
             index,
-            values: self.values,
+            values,
+            tracking,
+            validation: None,
         })
+    }
+
+    /// Start a joint data sync and publish only previously completed tracked boundaries.
+    async fn start_sync_tracked(
+        mut self,
+        sections: BTreeSet<u64>,
+    ) -> Result<(Self, Handle<()>), Error> {
+        let mut publish = sections
+            .iter()
+            .map(|&section| Ok((section, self.index.section_len(section)?)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let ((index, index_handle), (values, values_handle)) = try_join(
+            self.index.start_sync(&sections),
+            self.values.start_sync(&sections),
+        )
+        .await?;
+        self.index = index;
+        self.values = values;
+        let completion: SyncCompletion =
+            async move { try_join(index_handle, values_handle).await.map(|_| ()) }
+                .boxed()
+                .shared();
+        let mut tracking = self
+            .tracking
+            .take()
+            .expect("tracked sync preserves its recovery state");
+
+        // Bind every selected target to the new joint completion and publish only its previous
+        // proven boundary. A section with no tracked append consists entirely of startup-durable
+        // data, so its current length is already a valid boundary.
+        for (section, length) in &mut publish {
+            let barrier = tracking
+                .barriers
+                .entry(*section)
+                .or_insert_with(|| Barrier::new(*length));
+            *length = barrier.record(*length, completion.clone());
+        }
+
+        // Completed proofs remain publication debt even when the caller syncs another section.
+        for (&section, barrier) in &mut tracking.barriers {
+            if !sections.contains(&section) {
+                publish.push((section, barrier.boundary()));
+            }
+        }
+
+        let mut metadata_dirty = false;
+        for (section, floor) in publish {
+            metadata_dirty |= tracking.stage_marker(section, floor);
+        }
+        if !metadata_dirty && !tracking.marker_sync_pending {
+            self.tracking = Some(tracking);
+            return Ok((self, Handle::from_future(completion)));
+        }
+
+        let metadata;
+        (tracking.metadata, metadata) = tracking.metadata.start_sync().await?;
+        tracking.marker_sync_pending = true;
+        self.tracking = Some(tracking);
+        let handle =
+            Handle::from_future(async move { try_join(completion, metadata).await.map(|_| ()) });
+        Ok((self, handle))
     }
 
     /// Sync both journals for the given `sections`.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
+        if self.tracking.is_some() {
+            let (mut journal, handle) = self.start_sync(sections).await?;
+            handle.await?;
+
+            // A completed blocking sync makes every staged marker durable. Retain only newly
+            // completed data that still leads its published floor.
+            let tracking = journal
+                .tracking
+                .as_mut()
+                .expect("tracking mode is preserved");
+            tracking.marker_sync_pending = false;
+            let metadata = &tracking.metadata;
+            tracking.barriers.retain(|section, barrier| {
+                let published = metadata
+                    .get(&SectionKey::new(*section))
+                    .copied()
+                    .unwrap_or(0);
+                barrier.boundary() > published
+            });
+            return Ok(journal);
+        }
+
         let sections = sections.sections().collect::<Vec<_>>();
         (self.index, self.values) =
             try_join(self.index.sync(&sections), self.values.sync(&sections)).await?;
@@ -579,6 +853,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
+        if self.tracking.is_some() {
+            let sections = sections.sections().collect::<BTreeSet<_>>();
+            return self.start_sync_tracked(sections).await;
+        }
+
         let sections = sections.sections().collect::<Vec<_>>();
         let ((index, index_handle), (values, values_handle)) = try_join(
             self.index.start_sync(&sections),
@@ -597,6 +876,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 
     /// Sync all sections.
     pub async fn sync_all(mut self) -> Result<Self, Error> {
+        if self.tracking.is_some() {
+            let sections = self.index.sections().collect::<BTreeSet<_>>();
+            return self.sync(sections).await;
+        }
         (self.index, self.values) = try_join(self.index.sync_all(), self.values.sync_all()).await?;
         Ok(self)
     }
@@ -607,6 +890,23 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// - If crash after index prune but before glob: orphan data in glob (acceptable)
     /// - If crash before index prune: no change, retry works
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
+        // Remove and durably sync tracked floors before their section names can be deleted and
+        // later reused.
+        if let Some(mut tracking) = self.tracking.take() {
+            let mut removed = false;
+            tracking.metadata.retain(|key, _| {
+                let keep = u64::from(key) >= min;
+                removed |= !keep;
+                keep
+            });
+            if removed {
+                tracking.metadata = tracking.metadata.sync().await?;
+                tracking.marker_sync_pending = false;
+            }
+            tracking.barriers = tracking.barriers.split_off(&min);
+            self.tracking = Some(tracking);
+        }
+
         let index_pruned;
         (self.index, index_pruned) = self.index.prune(min).await?;
         let value_pruned;
@@ -624,6 +924,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// its later sections (newest first) before truncating `section`, and those removals
     /// carry the storage layer's removal durability.
     pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
+        self.prepare_rewind(section, index_size, true).await?;
+
         // Rewind index first (this also removes sections after `section`)
         self.index = self.index.rewind(section, index_size).await?;
 
@@ -659,6 +961,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     ///
     /// Both truncations are made durable before returning (see [Self::rewind]).
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
+        self.prepare_rewind(section, index_size, false).await?;
+
         // Rewind index first
         self.index = self.index.rewind_section(section, index_size).await?;
 
@@ -724,7 +1028,12 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     }
 
     /// Destroy all underlying storage.
-    pub async fn destroy(self) -> Result<(), Error> {
+    pub async fn destroy(mut self) -> Result<(), Error> {
+        // Remove tracked floors first so an interrupted destroy can only force conservative
+        // recovery of any pair data left behind.
+        if let Some(tracking) = self.tracking.take() {
+            tracking.metadata.destroy().await?;
+        }
         try_join(self.index.destroy(), self.values.destroy())
             .await
             .map(|_| ())
@@ -739,26 +1048,61 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 pub struct Replay<E: Context, I: Record, V: Codec> {
     index: FixedReplay<E, I>,
     values: Glob<E, V>,
+    tracking: Option<Tracking<E>>,
+    validation: Option<Validation>,
 }
 
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
-    /// Check a referenced value frame without decoding it.
-    pub(crate) async fn verify_value(
-        &self,
-        section: u64,
-        offset: u64,
-        size: u32,
-    ) -> Result<bool, Error> {
-        self.values.verify(section, offset, size).await
-    }
-
     /// Returns the next `(section, position, entry)`, or `None` once every section is
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the
     /// next section.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
-        self.index.next().await
+        loop {
+            let result = self.index.next().await?;
+            let (section, position, entry) = match result {
+                Ok(entry) => entry,
+                Err(err) => return Some(Err(err)),
+            };
+            let (tracking, validation) = (&self.tracking, &mut self.validation);
+            let Some(validation) = validation else {
+                return Some(Ok((section, position, entry)));
+            };
+
+            // Each section validates forward from its durable floor. Once one value fails, later
+            // entries in that section are outside the retained prefix and are not yielded.
+            if validation.current_section != Some(section) {
+                validation.current_section = Some(section);
+                validation.floor = tracking
+                    .as_ref()
+                    .expect("tracked replay preserves its recovery state")
+                    .metadata
+                    .get(&SectionKey::new(section))
+                    .copied()
+                    .unwrap_or(0);
+                validation.truncated = false;
+            }
+            if validation.truncated {
+                continue;
+            }
+            if position < validation.floor {
+                return Some(Ok((section, position, entry)));
+            }
+
+            let (offset, size) = entry.value_location();
+            match self.values.verify(section, offset, size).await {
+                Ok(true) => return Some(Ok((section, position, entry))),
+                Ok(false) => {
+                    validation.rewinds.push((section, position));
+                    validation.truncated = true;
+                }
+                Err(err) => {
+                    validation.failed = true;
+                    return Some(Err(err));
+                }
+            }
+        }
     }
 
     /// Returns the journal.
@@ -766,10 +1110,38 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
     /// Fails when the reader was not fully drained or yielded an error: the journal is
     /// destroyed and recovery is re-initialization.
     pub fn finish(self) -> Result<Oversized<E, I, V>, Error> {
+        if self.validation.is_some() {
+            return Err(Error::ReplayFailed);
+        }
         Ok(Oversized {
             index: self.index.finish()?,
             values: self.values,
+            tracking: self.tracking,
         })
+    }
+
+    /// Finish marker-aware startup recovery and return the tracked journal.
+    pub(crate) async fn finish_tracked(self) -> Result<Oversized<E, I, V>, Error> {
+        let Some(validation) = self.validation else {
+            return Err(Error::ReplayFailed);
+        };
+        if validation.failed {
+            return Err(Error::ReplayFailed);
+        }
+        let mut journal = Oversized {
+            index: self.index.finish()?,
+            values: self.values,
+            tracking: self.tracking,
+        };
+
+        // Apply each section's first invalid position only after replay releases the index
+        // journal, then publish the exact retained lengths as the next marker generation.
+        let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
+        for (section, items) in validation.rewinds {
+            let index_size = items.checked_mul(chunk_size).ok_or(Error::OffsetOverflow)?;
+            journal = journal.rewind_section(section, index_size).await?;
+        }
+        journal.reconcile_markers().await
     }
 }
 

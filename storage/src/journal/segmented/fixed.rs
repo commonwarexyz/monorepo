@@ -20,12 +20,13 @@
 //! All data must be assigned to a `section`. This allows pruning entire sections
 //! (and their corresponding blobs) independently.
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
+use super::manager::{
+    AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
+};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
-use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
+    Blob, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use commonware_utils::NZUsize;
@@ -117,21 +118,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
     /// Return canonical section names in numeric order without opening writers.
     async fn stored(context: &E, cfg: &Config) -> Result<BTreeMap<u64, Vec<u8>>, Error> {
-        // A missing partition represents an empty journal; every other scan error is fatal.
-        let names = match context.scan(&cfg.partition).await {
-            Ok(names) => names,
-            Err(RError::PartitionMissing(_)) => Vec::new(),
-            Err(err) => return Err(Error::Runtime(err)),
-        };
-
-        // Blob names are the big-endian section number and reject every other representation.
+        // Recovery relies on numeric section order for checkpoint coverage and reverse deletion.
         let mut stored = BTreeMap::new();
-        for name in names {
-            let hex_name = hex(&name);
-            let section = match name.as_slice().try_into() {
-                Ok(section) => u64::from_be_bytes(section),
-                Err(_) => return Err(Error::InvalidBlobName(hex_name)),
-            };
+        for name in stored_names(context, &cfg.partition).await? {
+            let section = section_from_name(&name)?;
             stored.insert(section, name);
         }
         Ok(stored)
@@ -226,7 +216,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let mut current = None;
 
         for (&candidate, name) in stored.range(..=section) {
-            // Earlier sections must be wholly valid; the current section need only cover the
+            // Earlier sections must be wholly valid. The current section need only cover the
             // checkpointed physical prefix.
             let (blob, physical_size) = context.open(&cfg.partition, name).await?;
             let is_current = candidate == section;
@@ -381,7 +371,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 "invalid journal suffix detected: truncating"
             );
             manager.rewind_section(section, valid_size).await?;
-            // Startup repair is exceptional; make it durable immediately so callers do not
+            // Startup repair is exceptional. Make it durable immediately so callers do not
             // need to track repaired sections separately.
             manager.sync(section).await?;
         }

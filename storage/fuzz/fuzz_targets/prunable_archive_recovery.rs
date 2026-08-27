@@ -110,8 +110,9 @@ fn entries(input: &FuzzInput, items_per_section: u64) -> Vec<Entry> {
             } else {
                 u64::from(id)
             };
-            let mut key = [0u8; 16];
+
             // IDs 16 apart reuse both the exact key and, in multi mode, the index.
+            let mut key = [0u8; 16];
             key[0] = id & 0x03;
             key[8] = (id >> 2) & 0x03;
             Entry {
