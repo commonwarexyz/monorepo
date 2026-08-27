@@ -68,11 +68,11 @@
 
 commonware_macros::stability_scope!(BETA {
     use cfg_if::cfg_if;
-    use core::{cmp::Ordering, fmt, num::NonZeroUsize};
+    use core::{cmp::Ordering, fmt};
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
-            use core::convert::Infallible;
+            use core::{convert::Infallible, num::NonZeroUsize};
             use futures::{
                 channel::oneshot,
                 future::{self, Either},
