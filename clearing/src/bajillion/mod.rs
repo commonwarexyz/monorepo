@@ -168,10 +168,10 @@
 //! ```
 //!
 //! [`transition::EpochContext`] is predecessor-state-root-independent, not liability-independent.
-//! This lets the same payment anchor serve while its predecessor closes; [`transition::CloseContext`]
+//! This lets the same payment anchor serve while its predecessor closes. [`transition::CloseContext`]
 //! adds the exact root and verifies the already-committed liability. The embedding must release no
 //! operator-signed receipt until that exact context has registered successfully. A
-//! [`payment::Payment`] is the linked payer send and operator receipt; a bare send is not accepted
+//! [`payment::Payment`] is the linked payer send and operator receipt. A bare send is not accepted
 //! payment evidence.
 //!
 //! Registration activates an immutable, one-shot payment context. `max_admission_delay` bounds
@@ -190,8 +190,8 @@
 //! [`transition::StateCache`]. Settlement admission sees the registered context, typed roots,
 //! terminal proof, and certificate, not the full corpus or every slice.
 //!
-//! "Deal" produces every [`transition::ProofSlice`]. Each slice is replicated to an exact quorum;
-//! a validator's "dealing" is its complete assigned subset. [`admission::seal`] rejects any other
+//! "Deal" produces every [`transition::ProofSlice`]. Each slice is replicated to an exact
+//! quorum. A validator's "dealing" is its complete assigned subset. [`admission::seal`] rejects any other
 //! subset, authenticates its slices, and returns one [`admission::Vote`] plus the owned
 //! [`admission::SealedDealing`]. The dealing must be durable before the vote is released.
 //! The exact-quorum certificate authenticates the shared [`transition::Header`]. The separate
@@ -227,9 +227,9 @@
 //! ```
 //!
 //! The [`transition::CoverageRange`] openings establish adjacency, while the three content roots
-//! and the withdrawal-output root authenticate the interval contents. `B[0]` pins the empty prefix;
-//! `B[S]` pins every vector length, boundary total, conservation total, and successor liability. This
-//! is why local ordered range guards cannot replace the `CoverageRoot`.
+//! and the withdrawal-output root authenticate the interval contents. `B[0]` pins the empty
+//! prefix. `B[S]` pins every vector length, boundary total, conservation total, and successor
+//! liability. This is why local ordered range guards cannot replace the `CoverageRoot`.
 //!
 //! ## Settle pipelined closes
 //!
@@ -308,7 +308,7 @@
 //! +---------------------------------------------------------------------------+
 //! ```
 //!
-//! A challenge is accepted through its batch's inclusive challenge deadline; FIFO finalization
+//! A challenge is accepted through its batch's inclusive challenge deadline. FIFO finalization
 //! requires `now` to be strictly later. The four proof-to-fault edges are
 //! [`challenge::Challenge::LatestAcknowledgedSend`],
 //! [`challenge::Challenge::HigherShardTip`],
@@ -493,7 +493,7 @@
 //! boundaries, strict epoch order, and independent finalized reserves. Bounded refinement tests
 //! run every settlement action class through real signed production objects and compare private
 //! state after each step. The exhaustive model still uses ideal cryptography and representative
-//! proof classes; arbitrary-cardinality and crash-consistency obligations remain with the Rust
+//! proof classes. Arbitrary-cardinality and crash-consistency obligations remain with the Rust
 //! tests, fuzz targets, and embedding.
 
 pub mod admission;

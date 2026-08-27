@@ -351,7 +351,7 @@ Rollover changes only live serving state, without changing the evidence required
 
 ## The Close Never Grows (with Payments)
 
-Every profile below uses a 100-validator committee and divides the evidence into 256 slices. Strategy-enabled prepare, deal, seal, and challenge checks share one adaptive eight-worker pool (M5 Pro); certificate and withdrawal-claim checks are scalar calling-thread measurements. The matrix varies $N$, the number of live accounts. Every account sends, the same 512 accounts receive, and each recipient uses one receive shard. The fixture therefore holds $A=N$, $B=512$, and $h=1$ while $N$ grows from 1,024 to one million.
+Every profile below uses a 100-validator committee and divides the evidence into 256 slices. Strategy-enabled prepare, deal, seal, and challenge checks share one adaptive eight-worker pool (AWS c8a.4xlarge). Certificate and withdrawal-claim checks are scalar calling-thread measurements. The matrix varies $N$, the number of live accounts. Every account sends, the same 512 accounts receive, and each recipient uses one receive shard. The fixture therefore holds $A=N$, $B=512$, and $h=1$ while $N$ grows from 1,024 to one million.
 
 No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. Every fixture send is a batch of one entry. A terminal batch with more entries adds 40 bytes per extra entry to its row and to each shard head that carries it, still independent of $T$. Each stage is measured independently. The fixture constructs the predecessor-state proof cache before measurement. Prepare builds the compact change, withdrawal-output, successor-state, and coverage roots from the owned close inputs while reusing that cache; deal derives all proof slices from the prepared close; seal checks and retains the busiest validator's dealing, verifies every distinct send and receipt signature in one randomized batch, and signs the commitment. The two withdrawal-claim proof checks reuse separately constructed fixtures between samples.
 
@@ -381,17 +381,17 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">0.571 ms</td>
-      <td style="text-align:right;">3.03 ms</td>
-      <td style="text-align:right;">26.3 ms</td>
-      <td style="text-align:right;">252 ms</td>
+      <td style="text-align:right;">0.668 ms</td>
+      <td style="text-align:right;">3.65 ms</td>
+      <td style="text-align:right;">34.3 ms</td>
+      <td style="text-align:right;">425 ms</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">deal</td>
-      <td style="text-align:right;">0.148 ms</td>
-      <td style="text-align:right;">0.371 ms</td>
-      <td style="text-align:right;">2.02 ms</td>
-      <td style="text-align:right;">28.2 ms</td>
+      <td style="text-align:right;">0.141 ms</td>
+      <td style="text-align:right;">0.325 ms</td>
+      <td style="text-align:right;">3.51 ms</td>
+      <td style="text-align:right;">32.6 ms</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
@@ -403,10 +403,10 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">2.79 ms</td>
-      <td style="text-align:right;">15.2 ms</td>
-      <td style="text-align:right;">131 ms</td>
-      <td style="text-align:right;">1.42 s</td>
+      <td style="text-align:right;">2.42 ms</td>
+      <td style="text-align:right;">12.3 ms</td>
+      <td style="text-align:right;">97.4 ms</td>
+      <td style="text-align:right;">1.07 s</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
     <tr>
@@ -425,10 +425,10 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">check certified commitment</td>
-      <td style="text-align:right;"><strong>0.471 ms</strong></td>
-      <td style="text-align:right;"><strong>0.466 ms</strong></td>
-      <td style="text-align:right;"><strong>0.462 ms</strong></td>
-      <td style="text-align:right;"><strong>0.467 ms</strong></td>
+      <td style="text-align:right;"><strong>0.667 ms</strong></td>
+      <td style="text-align:right;"><strong>0.668 ms</strong></td>
+      <td style="text-align:right;"><strong>0.667 ms</strong></td>
+      <td style="text-align:right;"><strong>0.666 ms</strong></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">Amount claim proof</td>
@@ -439,10 +439,10 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">check Amount claim proof</td>
-      <td style="text-align:right;"><strong>0.190 µs</strong></td>
-      <td style="text-align:right;"><strong>0.186 µs</strong></td>
-      <td style="text-align:right;"><strong>0.187 µs</strong></td>
-      <td style="text-align:right;"><strong>0.189 µs</strong></td>
+      <td style="text-align:right;"><strong>0.311 µs</strong></td>
+      <td style="text-align:right;"><strong>0.311 µs</strong></td>
+      <td style="text-align:right;"><strong>0.311 µs</strong></td>
+      <td style="text-align:right;"><strong>0.311 µs</strong></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">Close claim proof</td>
@@ -453,10 +453,10 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">check Close claim proof</td>
-      <td style="text-align:right;"><strong>0.188 µs</strong></td>
-      <td style="text-align:right;"><strong>0.190 µs</strong></td>
-      <td style="text-align:right;"><strong>0.188 µs</strong></td>
-      <td style="text-align:right;"><strong>0.187 µs</strong></td>
+      <td style="text-align:right;"><strong>0.311 µs</strong></td>
+      <td style="text-align:right;"><strong>0.311 µs</strong></td>
+      <td style="text-align:right;"><strong>0.311 µs</strong></td>
+      <td style="text-align:right;"><strong>0.311 µs</strong></td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
     <tr>
@@ -468,10 +468,10 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">check HigherShardTip</td>
-      <td style="text-align:right;"><strong>0.178 ms</strong></td>
-      <td style="text-align:right;"><strong>0.174 ms</strong></td>
-      <td style="text-align:right;"><strong>0.176 ms</strong></td>
-      <td style="text-align:right;"><strong>0.178 ms</strong></td>
+      <td style="text-align:right;"><strong>0.294 ms</strong></td>
+      <td style="text-align:right;"><strong>0.298 ms</strong></td>
+      <td style="text-align:right;"><strong>0.302 ms</strong></td>
+      <td style="text-align:right;"><strong>0.293 ms</strong></td>
     </tr>
   </tbody>
 </table>
@@ -494,7 +494,7 @@ Even the largest validator dealing is 31.3–32.8% smaller than the complete pro
 
 The proof-slice corpus is constant for a profile, so accepted payments only divide it. Ten million payments spread the one-million-account profile's 582,907,548 bytes to 58.3 offchain bytes per payment; a billion spread it to 0.583 offchain bytes per payment. The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap; proofs of possession were checked when the committee registered. With the 32-byte commitment and this encoding's eight-byte bitmap-length prefix, the external 100-validator certified package is 101 bytes total. If the Bajillion validators are also the settlement chain's validators, inclusion itself supplies the attestation and only the 32-byte commitment need be retained. The 128-byte $\mathsf{RootBundle}$ admission witness and terminal proof are not included in either commitment figure. Each figure likewise shrinks as $1/T$.
 
-The certified close itself queues no withdrawals. Separate one-record fixtures use $W=1$ and a 21-byte destination without adding the claims to certification. The identical $\mathsf{Amount}$ and $\mathsf{Close}$ claim proofs are 39 bytes and verify in 0.186–0.190 µs; each carries only the validator-derived destination and amount plus one $\mathsf{WithdrawalOutputRoot}$ opening. The $\mathsf{HigherShardTip}$ challenge is 663–983 bytes as lookup depth grows and verifies in 0.174–0.178 ms. It retains both signatures for its represented payment. Challenge evidence embeds the whole signed send, so representing an entry of a larger batch adds 40 bytes per sibling entry while verification stays signature-dominated: the two signatures are checked once regardless of batch size, and only the hashed send bytes grow. Clean closes submit no fraud challenge at all, so average challenge traffic is smaller still. A challenge targets a commitment whose certificate was already checked at admission, so adjudication does not verify that certificate again.
+The certified close itself queues no withdrawals. Separate one-record fixtures use $W=1$ and a 21-byte destination without adding the claims to certification. The identical $\mathsf{Amount}$ and $\mathsf{Close}$ claim proofs are 39 bytes and verify in 0.311 µs; each carries only the validator-derived destination and amount plus one $\mathsf{WithdrawalOutputRoot}$ opening. The $\mathsf{HigherShardTip}$ challenge is 663–983 bytes as lookup depth grows and verifies in 0.293–0.302 ms. It retains both signatures for its represented payment. Challenge evidence embeds the whole signed send, so representing an entry of a larger batch adds 40 bytes per sibling entry while verification stays signature-dominated: the two signatures are checked once regardless of batch size, and only the hashed send bytes grow. Adjudicating the same contradiction measures within noise of a single entry at 16 entries and under 10% slower at the 256-entry protocol bound. Clean closes submit no fraud challenge at all, so average challenge traffic is smaller still. A challenge targets a commitment whose certificate was already checked at admission, so adjudication does not verify that certificate again.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows proof-slice corpus bytes per payment for four live-account counts; the right shows the 101-byte external certified package. Every line falls as one over T.">

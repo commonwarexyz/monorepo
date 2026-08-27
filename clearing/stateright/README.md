@@ -75,7 +75,7 @@ registration.
 
 | File | Exhaustive responsibility |
 | --- | --- |
-| `certification.rs` | A four-validator, two-slice `n = 3f + 1`, `q = 2f + 1` instance. It explores the valid verifier result plus 26 distinct local failure classes on either slice, missing/incomplete/exact delivery, every exact quorum, durable retention, rejection, and same-registration retry. The failure classes abstract outcomes of the production verifier. They do not reimplement cryptography or Merkle proofs. |
+| `certification.rs` | A four-validator, two-slice `n = 3f + 1`, `q = 2f + 1` instance. It explores the valid verifier result plus 27 distinct local failure classes on either slice, missing/incomplete/exact delivery, every exact quorum, durable retention, rejection, and same-registration retry. The failure classes abstract outcomes of the production verifier. They do not reimplement cryptography or Merkle proofs. |
 | `challenge.rs` | All five settlement targets and every payer-signature, operator-signature, exact-link, and context-authentication bit combination over representative semantic endpoints. It separately checks structural validity, semantic contradiction, `NoContradiction`, and the canonical `SameSend`, `SameIndex`, and lossless `Full` receipt-fork encodings. |
 | `claims.rs` | Eight exact replay identities: two typed namespaces, two batches, and two positions. It explores every claim ordering while checking typed root identity, output value and position, destination routing, atomic mutation, reserve conservation, and independence across kind, batch, and position. |
 | `settlement.rs` | A three-account, five-candidate, three-pending-slot, bounded-time instance. It explores intake, immutable registration, deadline ties, certified admission, strict ancestry and FIFO finalization, challenge suffix cuts, clean-prefix drain, finalized reserve creation, claim routing, replay expiry, custody conservation, and terminal recovery. |
@@ -94,7 +94,7 @@ witness, and settlement ordering.
 
 The checked state counts are part of the tests so an accidental state-space reduction is visible:
 
-- 148,374 certification states, including all 26 invalid-proof profiles on either slice and every
+- 153,886 certification states, including all 27 invalid-proof profiles on either slice and every
   exact quorum and delivery ordering;
 - 15,788 challenge states, including every authentication-bit combination for every target, the
   representative one- and two-payment endpoint classes, and the batched-send entry classes (a

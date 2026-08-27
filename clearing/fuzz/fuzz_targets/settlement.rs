@@ -864,7 +864,7 @@ impl Harness {
                     .checked_add(1)
                     .expect("a registered epoch reserves a post-deadline timestamp"),
                 HardFaultReason::ExpiredRegistration {
-                    anchor: registered.context.payment().anchor().clone(),
+                    anchor: *registered.context.payment().anchor(),
                     epoch: registered.context.payment().epoch(),
                     expired_at: deadline,
                 },
@@ -2838,7 +2838,7 @@ impl Harness {
 
     fn claim_hard_fault(&mut self, account_selector: u8, mutation: u8) -> ActionOutcome {
         let (opening, selected) = self.hard_fault_opening(account_selector, mutation);
-        let canonical = mutation % 4 == 0;
+        let canonical = mutation.is_multiple_of(4);
         let expected = if self.hard_fault.is_some()
             && self.hard_fault_settlement.is_some()
             && !self.settled

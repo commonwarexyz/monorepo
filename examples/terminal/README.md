@@ -43,16 +43,21 @@ PAYMENT
    |                           | first payment for epoch:        |
    |                           | register exact context -------->|
    |                           |<------------------------- accept|
-   |                           | sign linked receipt R            |
+   |                           | sign one linked receipt per entry|
    |<--------------------------|                                 |
-   | verify S + R                                                 |
+   | verify S and every receipt                                   |
    |-- confirm (epoch, anchor, predecessor root) ---------------->|
    |<--------------------------- exact live registration or reject|
-   | atomically persist (root, pair); advance wallet-local debit  |
+   | atomically persist (root, receipts); advance wallet-local debit|
    |
-   +-- invalid R => reject without advancing wallet-local debit
+   +-- invalid or missing receipt => reject without advancing wallet-local debit
    +-- missing response => acceptance unknown; retry exact persisted S
-   +-- admitted close omits/conflicts with S + R => challenge by its deadline
+   +-- admitted close omits/conflicts with an accepted entry's pair => challenge by its deadline
+
+ A send names one or more strictly recipient-sorted entries under one signature and one
+ cumulative debit endpoint. The operator accepts or rejects the batch as a whole and
+ returns one receipt per entry, all committed in one SQLite transaction. A single payment
+ is a batch of one.
 
 DEPOSIT OR WITHDRAWAL AUTHORIZATION
 
@@ -149,6 +154,10 @@ cargo run --release -p commonware-terminal --bin terminal-operator -- \
 cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0
 ```
 
+Settlement state dies with its process, so starting the demo over requires deleting
+`terminal-operator.sqlite` and every `terminal-agent-*.sqlite` (or passing fresh `--database`
+paths) before starting the trio again.
+
 Agent identities are `0=Alice`, `1=Bob`, `2=Carol`, `3=Dave`, and `4=Eve (external)`. The first
 four are registered operator accounts. Eve demonstrates an unregistered recipient claiming an
 external payout. Run more agent processes with different identities to exercise independently
@@ -157,15 +166,20 @@ choose an explicit wallet database path.
 
 The UI supports payments, deposits, direct pending-deposit refunds with `r`, exact withdrawals,
 amountless account Close authorizations, withdrawal claims, payer-state hard-fault recovery with
-`h`, and epoch closure. A pending-deposit refund needs only the wallet account and settlement; it
-does not contact the operator. A deposit first becomes settlement custody and is then
-credited by the operator. A withdrawal is authorized against the settlement state root and
-included in an epoch close. Every sealer derives the exact destination and amount at the request's
-position under the withdrawal-output root. A finalized output is independently claimed with that
-destination, amount, and one Merkle opening. A Close stays pending and leaves the account usable
-for the rest of the epoch. Its output is the predecessor balance plus deposits and incoming credits
-minus outgoing debits. That tail may be zero, in which case the Close completes without creating
-payout work.
+`h`, and epoch closure. `p` pays the selected recipient the selected amount. `a` stages the
+selected entry into a draft batch and `b` pays every staged entry with one batched send. The
+batch is rejected or accepted as a whole, so a failed `b` retries the identical batch. A
+pending-deposit refund needs only the wallet account and settlement; it does not contact the
+operator. A deposit first becomes settlement custody and is then credited by the operator. A
+withdrawal is authorized against the settlement state root and included in an epoch close.
+Deposits and fresh withdrawal authorizations are accepted only while no payment context is
+registered: the epoch's first payment registers the context, and later requests are rejected
+until the successor epoch opens after the close finalizes. Every validator derives the exact
+destination and amount at the request's position under the withdrawal-output root. A finalized
+output is independently claimed with that destination, amount, and one Merkle opening. A Close
+stays pending and leaves the account usable for the rest of the epoch. Its output is the
+predecessor balance plus deposits and incoming credits minus outgoing debits. That tail may be
+zero, in which case the Close completes without creating payout work.
 
 Payments to an absent identity become claimable external payouts rather than recipient-sized
 settlement output. This includes Eve and a configured account removed by Close until a later
@@ -201,6 +215,6 @@ For a terminal-free walkthrough, start settlement and operator as above, then ru
 cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted
 ```
 
-The walkthrough deposits, queues a withdrawal, pays an internal and external recipient, starts an
-asynchronous close, opens the registered successor after finalization, and claims the finalized
-withdrawal and external payout.
+The walkthrough deposits, queues a withdrawal, pays an internal recipient, pays a two-recipient
+batch under one signature, pays an external recipient, starts an asynchronous close, opens the
+registered successor after finalization, and claims the finalized withdrawal and external payout.

@@ -49,7 +49,8 @@ impl CertifiedClose {
 }
 
 // These finite profiles are outcomes of the production verifier, not implementations of its
-// cryptographic and Merkle checks.
+// cryptographic and Merkle checks. `Entries` abstracts the batched-send entry rejections: a
+// non-canonical or oversized entry vector, or a terminal batch total exceeding the debit advance.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ProofFault {
     None,
@@ -70,6 +71,7 @@ enum ProofFault {
     RowEquation,
     TerminalDebit,
     OutgoingDigest,
+    Entries,
     CreditTipRoot,
     SettlementOutput,
     PayerSignature,
@@ -81,7 +83,7 @@ enum ProofFault {
     WithdrawalPosition,
 }
 
-const PROOF_FAULTS: [ProofFault; 27] = [
+const PROOF_FAULTS: [ProofFault; 28] = [
     ProofFault::None,
     ProofFault::PredecessorRole,
     ProofFault::ChangeRole,
@@ -100,6 +102,7 @@ const PROOF_FAULTS: [ProofFault; 27] = [
     ProofFault::RowEquation,
     ProofFault::TerminalDebit,
     ProofFault::OutgoingDigest,
+    ProofFault::Entries,
     ProofFault::CreditTipRoot,
     ProofFault::SettlementOutput,
     ProofFault::PayerSignature,
@@ -902,7 +905,7 @@ fn retry_replaces_only_candidate_scoped_state() {
 fn certification_checker_exhausts_every_quorum_and_proof_fault_placement() {
     let checker = CertificationModel.checker().threads(1).spawn_bfs().join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 148_374);
+    assert_eq!(checker.unique_state_count(), 153_886);
     checker.assert_properties();
 }
 

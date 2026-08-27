@@ -1413,7 +1413,7 @@ where
 
             // Equal endpoints contradict only through the signed authorization itself. Any entry
             // receipt may accompany a committed batched send, so the receipt bytes prove nothing
-            // here; a forked receipt for one entry is a receipt-fork challenge instead.
+            // here. A forked receipt for one entry is a receipt-fork challenge instead.
             let sends_differ = resolved
                 .leaf
                 .as_ref()

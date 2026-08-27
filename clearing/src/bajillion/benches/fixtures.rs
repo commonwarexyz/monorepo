@@ -194,6 +194,8 @@ pub(crate) struct ChallengeFixture {
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
     pub(crate) challenge: Challenge<VerifyingKey, Digest>,
+    payer: SigningKey,
+    challenged: VerifyingKey,
 }
 
 fn predecessor_state() -> AccountState {
@@ -691,14 +693,14 @@ pub(crate) fn batched_challenge(
         unreachable!("the challenge fixture is a higher-shard-tip challenge")
     };
     let operator = SigningKey::from_seed(OPERATOR_SEED);
-    let payer = SigningKey::from_seed(ACCOUNT_SEED_START + 1);
-    let challenged = SigningKey::from_seed(ACCOUNT_SEED_START).public_key();
+    let payer = &fixture.payer;
+    let challenged = fixture.challenged.clone();
     let mut batch = vec![Entry::new(challenged.clone(), 1).expect("benchmark entry is positive")];
     for filler in 1..entries {
         let filler = SigningKey::from_seed(FILLER_SEED_START + filler as u64).public_key();
         batch.push(Entry::new(filler, 1).expect("benchmark entry is positive"));
     }
-    let send = SignedSend::sign_next_batch(fixture.context.payment(), &payer, batch, 1)
+    let send = SignedSend::sign_next_batch(fixture.context.payment(), payer, batch, 1)
         .expect("benchmark batch signs");
     let receipt = SignedReceipt::issue_next::<Sha256, _>(
         fixture.context.payment(),
@@ -804,5 +806,7 @@ pub(crate) fn challenge_fixture(
         header,
         roots,
         challenge,
+        payer: accounts[1].private.clone(),
+        challenged: accounts[0].public.clone(),
     }
 }

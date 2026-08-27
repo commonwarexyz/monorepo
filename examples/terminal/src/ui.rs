@@ -119,6 +119,7 @@ pub(crate) async fn run<E: Network>(
 ) -> Result<()> {
     let mut terminal = TerminalSession::enter()?;
     let mut state = UiState::new();
+    state.recipient = agent.default_recipient();
     loop {
         refresh(network, operator, settlement, &agent, &mut state).await?;
         terminal

@@ -1,5 +1,7 @@
 use super::*;
-use crate::bajillion::{admission::seal, model::settlement as spec, transition::assemble_slices};
+use crate::bajillion::{
+    admission::seal, model::settlement as spec, payment::Entry, transition::assemble_slices,
+};
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
 
 const ACCOUNTS: [spec::Account; 3] = [
@@ -806,11 +808,15 @@ impl RefinementDriver {
                 }
             }
             spec::ChallengeKind::InconsistentReceiptRange => {
-                let send = SignedSend::sign_next(
+                // The witness send is a two-entry batch so a refined challenge drives one real
+                // multi-entry authorization through witness reconstruction and adjudication.
+                let send = SignedSend::sign_next_batch(
                     material.context.payment(),
                     &self.fixture.accounts[1],
-                    self.carol.public_key(),
-                    5,
+                    vec![
+                        Entry::new(self.carol.public_key(), 5).unwrap(),
+                        Entry::new(self.fixture.accounts[0].public_key(), 1).unwrap(),
+                    ],
                     0,
                 )
                 .unwrap();

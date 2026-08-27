@@ -860,8 +860,8 @@ O’Grady</a></div>
         <p>Every profile below uses a 100-validator committee and
         divides the evidence into 256 slices. Strategy-enabled prepare,
         deal, seal, and challenge checks share one adaptive eight-worker
-        pool (M5 Pro); certificate and withdrawal-claim checks are
-        scalar calling-thread measurements. The matrix varies <span
+        pool (AWS c8a.4xlarge). Certificate and withdrawal-claim checks
+        are scalar calling-thread measurements. The matrix varies <span
         class="math inline">N</span>, the number of live accounts. Every
         account sends, the same 512 accounts receive, and each recipient
         uses one receive shard. The fixture therefore holds <span
@@ -912,17 +912,17 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">prepare</td>
-              <td style="text-align:right;">0.571 ms</td>
-              <td style="text-align:right;">3.03 ms</td>
-              <td style="text-align:right;">26.3 ms</td>
-              <td style="text-align:right;">252 ms</td>
+              <td style="text-align:right;">0.668 ms</td>
+              <td style="text-align:right;">3.65 ms</td>
+              <td style="text-align:right;">34.3 ms</td>
+              <td style="text-align:right;">425 ms</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">deal</td>
-              <td style="text-align:right;">0.148 ms</td>
-              <td style="text-align:right;">0.371 ms</td>
-              <td style="text-align:right;">2.02 ms</td>
-              <td style="text-align:right;">28.2 ms</td>
+              <td style="text-align:right;">0.141 ms</td>
+              <td style="text-align:right;">0.325 ms</td>
+              <td style="text-align:right;">3.51 ms</td>
+              <td style="text-align:right;">32.6 ms</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
             <tr>
@@ -934,10 +934,10 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">seal</td>
-              <td style="text-align:right;">2.79 ms</td>
-              <td style="text-align:right;">15.2 ms</td>
-              <td style="text-align:right;">131 ms</td>
-              <td style="text-align:right;">1.42 s</td>
+              <td style="text-align:right;">2.42 ms</td>
+              <td style="text-align:right;">12.3 ms</td>
+              <td style="text-align:right;">97.4 ms</td>
+              <td style="text-align:right;">1.07 s</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
             <tr>
@@ -956,10 +956,10 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check certified commitment</td>
-              <td style="text-align:right;"><strong>0.471 ms</strong></td>
-              <td style="text-align:right;"><strong>0.466 ms</strong></td>
-              <td style="text-align:right;"><strong>0.462 ms</strong></td>
-              <td style="text-align:right;"><strong>0.467 ms</strong></td>
+              <td style="text-align:right;"><strong>0.667 ms</strong></td>
+              <td style="text-align:right;"><strong>0.668 ms</strong></td>
+              <td style="text-align:right;"><strong>0.667 ms</strong></td>
+              <td style="text-align:right;"><strong>0.666 ms</strong></td>
             </tr>
             <tr>
               <td style="padding-left:20px;">Amount claim proof</td>
@@ -970,10 +970,10 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check Amount claim proof</td>
-              <td style="text-align:right;"><strong>0.190 µs</strong></td>
-              <td style="text-align:right;"><strong>0.186 µs</strong></td>
-              <td style="text-align:right;"><strong>0.187 µs</strong></td>
-              <td style="text-align:right;"><strong>0.189 µs</strong></td>
+              <td style="text-align:right;"><strong>0.311 µs</strong></td>
+              <td style="text-align:right;"><strong>0.311 µs</strong></td>
+              <td style="text-align:right;"><strong>0.311 µs</strong></td>
+              <td style="text-align:right;"><strong>0.311 µs</strong></td>
             </tr>
             <tr>
               <td style="padding-left:20px;">Close claim proof</td>
@@ -984,10 +984,10 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check Close claim proof</td>
-              <td style="text-align:right;"><strong>0.188 µs</strong></td>
-              <td style="text-align:right;"><strong>0.190 µs</strong></td>
-              <td style="text-align:right;"><strong>0.188 µs</strong></td>
-              <td style="text-align:right;"><strong>0.187 µs</strong></td>
+              <td style="text-align:right;"><strong>0.311 µs</strong></td>
+              <td style="text-align:right;"><strong>0.311 µs</strong></td>
+              <td style="text-align:right;"><strong>0.311 µs</strong></td>
+              <td style="text-align:right;"><strong>0.311 µs</strong></td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
             <tr>
@@ -999,10 +999,10 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check HigherShardTip</td>
-              <td style="text-align:right;"><strong>0.178 ms</strong></td>
-              <td style="text-align:right;"><strong>0.174 ms</strong></td>
-              <td style="text-align:right;"><strong>0.176 ms</strong></td>
-              <td style="text-align:right;"><strong>0.178 ms</strong></td>
+              <td style="text-align:right;"><strong>0.294 ms</strong></td>
+              <td style="text-align:right;"><strong>0.298 ms</strong></td>
+              <td style="text-align:right;"><strong>0.302 ms</strong></td>
+              <td style="text-align:right;"><strong>0.293 ms</strong></td>
             </tr>
           </tbody>
         </table>
@@ -1053,21 +1053,24 @@ O’Grady</a></div>
         certification. The identical <span
         class="math inline">\mathsf{Amount}</span> and <span
         class="math inline">\mathsf{Close}</span> claim proofs are 39
-        bytes and verify in 0.186–0.190 µs; each carries only the
+        bytes and verify in 0.311 µs; each carries only the
         validator-derived destination and amount plus one <span
         class="math inline">\mathsf{WithdrawalOutputRoot}</span>
         opening. The <span
         class="math inline">\mathsf{HigherShardTip}</span> challenge is
-        663–983 bytes as lookup depth grows and verifies in 0.174–0.178
+        663–983 bytes as lookup depth grows and verifies in 0.293–0.302
         ms. It retains both signatures for its represented payment.
         Challenge evidence embeds the whole signed send, so representing
         an entry of a larger batch adds 40 bytes per sibling entry while
         verification stays signature-dominated: the two signatures are
         checked once regardless of batch size, and only the hashed send
-        bytes grow. Clean closes submit no fraud challenge at all, so
-        average challenge traffic is smaller still. A challenge targets
-        a commitment whose certificate was already checked at admission,
-        so adjudication does not verify that certificate again.</p>
+        bytes grow. Adjudicating the same contradiction measures within
+        noise of a single entry at 16 entries and under 10% slower at
+        the 256-entry protocol bound. Clean closes submit no fraud
+        challenge at all, so average challenge traffic is smaller still.
+        A challenge targets a commitment whose certificate was already
+        checked at admission, so adjudication does not verify that
+        certificate again.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows proof-slice corpus bytes per payment for four live-account counts; the right shows the 101-byte external certified package. Every line falls as one over T.">
         <div class="image-caption">
         <p>Figure 6: Each panel divides fixed per-profile bytes from the

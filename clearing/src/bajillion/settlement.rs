@@ -727,6 +727,9 @@ where
     }
 
     /// Records one finalized external deposit event exactly once.
+    ///
+    /// Repeat deposits for one account aggregate into one staged record that keeps the earliest
+    /// inclusion deadline.
     pub fn record_deposit(
         &mut self,
         now: u64,
@@ -815,7 +818,7 @@ where
     /// Queues one account withdrawal after authenticating every root that can survive a cut.
     ///
     /// An `Amount` must be independently affordable at every safety root. An amountless `Close`
-    /// requires an active account at each root; the certified close derives its epoch-tail
+    /// requires an active account at each root. The certified close derives its epoch-tail
     /// balance.
     ///
     /// `destination_is_eligible` is the asset adapter's explicit admission predicate for the

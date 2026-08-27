@@ -161,6 +161,15 @@ impl Agent {
         self.recipients.len()
     }
 
+    /// Returns the first selectable recipient that is not this wallet.
+    pub(crate) fn default_recipient(&self) -> usize {
+        let account = self.account();
+        self.recipients
+            .iter()
+            .position(|identity| identity.key != account)
+            .expect("the recipient roster is larger than one wallet")
+    }
+
     pub(crate) fn recipient_name(&self, index: usize) -> &'static str {
         self.recipients[index % self.recipients.len()].name
     }
@@ -203,6 +212,10 @@ impl Agent {
     }
 
     /// Pays every `(recipient index, amount)` entry with one batched send.
+    ///
+    /// A send this operator deterministically rejects must never be staged: the wallet retries
+    /// only the exact staged bytes, so a durably staged unacceptable send would wedge the
+    /// account.
     pub(crate) async fn pay<E: Network>(
         &mut self,
         network: &E,
@@ -211,10 +224,18 @@ impl Agent {
         entries: &[(usize, u64)],
     ) -> Result<operator_rpc::AcceptedBatchResponse> {
         let mut requested = Vec::with_capacity(entries.len());
+        let mut total = 0_u64;
         for (recipient, amount) in entries {
             let recipient = self.recipients[recipient % self.recipients.len()]
                 .key
                 .clone();
+            ensure!(
+                recipient != self.account(),
+                "self-payments are omitted from this operator"
+            );
+            total = total
+                .checked_add(*amount)
+                .context("payment total overflow")?;
             requested.push(Entry::new(recipient, *amount).context("stage payment entry")?);
         }
         requested.sort_unstable_by(|left, right| left.recipient().cmp(right.recipient()));
@@ -273,6 +294,13 @@ impl Agent {
                 ensure!(
                     quote.opening.leaf.state.active && quote.opening.leaf.state.balance > 0,
                     "payer opening is not live"
+                );
+
+                // Mid-epoch credits only grow the payer balance and debits are serialized here,
+                // so affordability at the quote holds at acceptance.
+                ensure!(
+                    quote.state.balance >= total,
+                    "payer has insufficient available balance"
                 );
                 quote
                     .opening
@@ -1202,6 +1230,70 @@ mod tests {
                 .unwrap();
             assert_eq!(accepted.acceptance.receipts[0].body().amount(), 3);
             assert_eq!(agent.receipt_count(), 2);
+            operator_server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn deterministically_rejected_sends_are_never_staged() {
+        deterministic::Runner::default().start(|context| async move {
+            let operator = Wallet::from_seed("operator", 1);
+            let payment_context =
+                PaymentContext::new(Sha256::hash(&[b"never-staged"]), 7, operator.public_key());
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: payment_quote_response(
+                            payment_context.clone(),
+                            AccountState {
+                                balance: 100,
+                                ..AccountState::default()
+                            },
+                        )
+                        .encode(),
+                    }
+                })
+                .await;
+                respond(&mut listener, |request| {
+                    assert!(matches!(request, operator_rpc::OperatorRequest::Status));
+                    rpc::Response::Success {
+                        body: settlement_status_response().encode(),
+                    }
+                })
+                .await;
+            });
+
+            // A self entry is rejected before any request or durable staging.
+            let mut agent = Agent::new(0).unwrap();
+            let error = agent
+                .pay(&context, operator_address, operator_address, &[(0, 7)])
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("self-payments"));
+            assert!(agent.pending_payment.is_none());
+
+            // An unaffordable batch total is rejected after the quote, before staging, so the
+            // wallet can immediately stage an acceptable send instead.
+            let error = agent
+                .pay(
+                    &context,
+                    operator_address,
+                    operator_address,
+                    &[(1, 60), (2, 41)],
+                )
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("insufficient available balance"));
+            assert!(agent.pending_payment.is_none());
             operator_server.await.unwrap();
         });
     }
