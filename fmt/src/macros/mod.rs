@@ -1,5 +1,6 @@
 //! Formatters for supported Commonware macro bodies.
 
+mod cfg_if;
 mod nested;
 mod select;
 mod stability;
@@ -10,6 +11,7 @@ use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MacroKind {
+    CfgIf,
     Select,
     SelectLoop,
     StabilityMod,
@@ -26,6 +28,16 @@ pub(crate) fn macro_kind(path: &Path, delimiter: &MacroDelimiter) -> Option<Macr
         .map(|segment| segment.ident.to_string())
         .collect::<Vec<_>>();
     match segments.as_slice() {
+        [name] if name == "cfg_if" && matches!(delimiter, MacroDelimiter::Brace(_)) => {
+            Some(MacroKind::CfgIf)
+        }
+        [prefix, name]
+            if prefix == "cfg_if"
+                && name == "cfg_if"
+                && matches!(delimiter, MacroDelimiter::Brace(_)) =>
+        {
+            Some(MacroKind::CfgIf)
+        }
         [name] if name == "select" && matches!(delimiter, MacroDelimiter::Brace(_)) => {
             Some(MacroKind::Select)
         }
@@ -87,6 +99,7 @@ pub(crate) fn format_at_depth(
     depth: usize,
 ) -> Result<crate::pretty::ProtectedFragment, Error> {
     match kind {
+        MacroKind::CfgIf => cfg_if::cfg_if(source, options, depth),
         MacroKind::Select => select::select_at_depth(source, options, depth),
         MacroKind::SelectLoop => select::select_loop_at_depth(source, options, depth),
         MacroKind::StabilityMod => stability::stability_mod(source),

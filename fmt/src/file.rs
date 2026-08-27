@@ -273,6 +273,20 @@ mod tests {
     }
 
     #[test]
+    fn formats_cfg_if_in_files_and_stability_scopes() {
+        let source = "cfg_if::cfg_if! { if #[cfg(test)] { const VALUE:usize=1; } else { const VALUE:usize=2; } }\nfn run() { cfg_if! { if #[cfg(test)] { let value=source(); value } else { fallback() } } }\nstability_scope!(ALPHA { cfg_if! { if #[cfg(test)] { pub struct Example{pub value:usize} } } });\n";
+        let once = format(source).expect("cfg_if macros should format");
+        let twice = format(once.text()).expect("cfg_if macros should format twice");
+
+        assert_eq!(once.formatted_macros(), 3);
+        assert_eq!(once.preserved_macros(), 0);
+        assert!(once.text().contains("const VALUE: usize = 1;"));
+        assert!(once.text().contains("let value = source();"));
+        assert!(once.text().contains("pub struct Example {"));
+        assert_eq!(once.text(), twice.text());
+    }
+
+    #[test]
     fn honors_scoped_rustfmt_skip() {
         let source = "#[rustfmt::skip]\nfn skipped() {\n    select! {value=receive()=>value}\n}\n\nfn formatted() {\n    select! {value=receive()=>value}\n}\n\nfn skipped_statement() {\n    #[rustfmt::skip]\n    select! {value=receive()=>value};\n    #[rustfmt::skip]\n    consume(select! {value=receive()=>value});\n}\n";
         let formatted = format(source).expect("unskipped macro should format");
@@ -372,7 +386,7 @@ mod tests {
 
     #[test]
     fn ignores_unsupported_paths_and_delimiters() {
-        let source = "fn example() {\n    other::select! {value=receive()=>value}\n    select!(value=receive()=>value);\n}\n";
+        let source = "fn example() {\n    other::select! {value=receive()=>value}\n    select!(value=receive()=>value);\n}\nother::cfg_if! { if #[cfg(test)] { const VALUE:usize=1; } }\ncfg_if!(if #[cfg(test)] { const VALUE:usize=1; });\n";
         let formatted = format(source).expect("file should remain valid");
 
         assert_eq!(formatted.text(), source);
