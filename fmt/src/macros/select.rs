@@ -1,6 +1,6 @@
 //! Formatters for `select!` and `select_loop!` bodies.
 
-use super::{Error, Options, nested};
+use super::{Error, MacroKind, Options, nested};
 use crate::{
     pretty::{self, Disposition, ProtectedFragment},
     source::SourceMap,
@@ -43,7 +43,7 @@ struct SelectLoopPrefix {
 
 /// Formats the delimiter contents of a `select!` invocation.
 pub fn select(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
-    select_at_depth(source, options, 0)
+    super::format_at_depth(MacroKind::Select, source, options, 0)
 }
 
 pub(super) fn select_at_depth(
@@ -80,7 +80,7 @@ pub(super) fn select_at_depth(
 
 /// Formats the delimiter contents of a `select_loop!` invocation.
 pub fn select_loop(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
-    select_loop_at_depth(source, options, 0)
+    super::format_at_depth(MacroKind::SelectLoop, source, options, 0)
 }
 
 pub(super) fn select_loop_at_depth(
@@ -1139,12 +1139,16 @@ mod tests {
     }
 
     #[test]
-    fn preserves_multiline_literal_in_select() {
-        let source = "value = receive() => r#\"first\n    second\"#";
-        let formatted = select(source, OPTIONS).expect("select should be preserved");
+    fn formats_multiline_literal_in_select_without_changing_token() {
+        let literal = "r#\"first\n    second\"#";
+        let source = format!("value=receive()=>consume({literal})");
+        let formatted = select(&source, OPTIONS).expect("select should format");
+        let twice = select(formatted.text(), OPTIONS).expect("select should format twice");
 
-        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
-        assert_eq!(formatted.text(), source);
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(formatted.text().matches(literal).count(), 1);
+        assert!(formatted.text().contains("value = receive() => consume("));
+        assert_eq!(formatted.text(), twice.text());
     }
 
     #[test]

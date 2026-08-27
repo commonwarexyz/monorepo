@@ -9138,11 +9138,13 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
+                        batcher::Message::Constructed(
+                            Vote::Nullify(nullify),
+                        ) if nullify.view() == target_view => {
                             // Successfully voted nullify after having voted notarize
                             break;
                         }
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -9274,9 +9276,9 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Nullify(nullify))
-                            if nullify.view() == target_view =>
-                        {
+                        batcher::Message::Constructed(
+                            Vote::Nullify(nullify),
+                        ) if nullify.view() == target_view => {
                             // Timeout fired and voter emitted nullify despite
                             // certification being indefinitely pending.
                             break;

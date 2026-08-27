@@ -98,6 +98,21 @@ pub(crate) fn format_at_depth(
     options: Options,
     depth: usize,
 ) -> Result<crate::pretty::ProtectedFragment, Error> {
+    if depth == 0
+        && let Some(literals) = crate::pretty::MultilineLiterals::prepare(source)
+    {
+        let formatted = format_shielded_at_depth(kind, literals.text(), options, depth)?;
+        return literals.restore(formatted).ok_or(Error::LiteralMarker);
+    }
+    format_shielded_at_depth(kind, source, options, depth)
+}
+
+fn format_shielded_at_depth(
+    kind: MacroKind,
+    source: &str,
+    options: Options,
+    depth: usize,
+) -> Result<crate::pretty::ProtectedFragment, Error> {
     match kind {
         MacroKind::CfgIf => cfg_if::cfg_if(source, options, depth),
         MacroKind::Select => select::select_at_depth(source, options, depth),
@@ -162,4 +177,7 @@ pub enum Error {
     /// A supported nested macro did not retain brace delimiters.
     #[error("nested supported macro did not have valid brace delimiters")]
     MarkerDelimiter,
+    /// A multiline literal marker could not be restored exactly once.
+    #[error("multiline literal marker mismatch")]
+    LiteralMarker,
 }

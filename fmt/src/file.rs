@@ -407,6 +407,47 @@ mod tests {
     }
 
     #[test]
+    fn formats_escaped_newline_literal_without_changing_token() {
+        let literal = "\"voter should recover after failure, \\\n+                             even when certification remains pending\"";
+        let source = format!("fn run() {{\n    select! {{ _=wait()=>panic!({literal}) }}\n}}\n");
+        let formatted = format(&source).expect("file should format");
+
+        assert_eq!(formatted.formatted_macros(), 1);
+        assert_eq!(formatted.preserved_macros(), 0);
+        assert_eq!(formatted.text().matches(literal).count(), 1);
+        assert!(formatted.text().contains("_ = wait() => panic!("));
+    }
+
+    #[test]
+    fn formats_multiline_literal_inside_opaque_nested_macro() {
+        let literal = "r#\"first\n    second\"#";
+        let source =
+            format!("fn run() {{\n    select! {{ value=receive()=>opaque!({literal}) }}\n}}\n");
+        let formatted = format(&source).expect("file should format");
+
+        assert_eq!(formatted.formatted_macros(), 1);
+        assert_eq!(formatted.preserved_macros(), 0);
+        assert_eq!(formatted.text().matches(literal).count(), 1);
+        assert!(formatted.text().contains("value = receive() => opaque!("));
+    }
+
+    #[test]
+    fn formats_multiline_byte_and_c_literals_without_changing_tokens() {
+        let byte_literal = "br#\"first\n    second\"#";
+        let c_literal = "cr#\"third\n    fourth\"#";
+        let source = format!(
+            "fn run() {{\n    select! {{ value=receive()=>consume({byte_literal},{c_literal}) }}\n}}\n"
+        );
+        let formatted = format(&source).expect("file should format");
+
+        assert_eq!(formatted.formatted_macros(), 1);
+        assert_eq!(formatted.preserved_macros(), 0);
+        assert_eq!(formatted.text().matches(byte_literal).count(), 1);
+        assert_eq!(formatted.text().matches(c_literal).count(), 1);
+        assert!(formatted.text().contains("value = receive() => consume("));
+    }
+
+    #[test]
     fn reattaches_exact_line_comments_in_crlf_file() {
         let source = "fn example() {\r\n    select! {\r\n        // na\u{ef}ve leading  \r\n        value=receive()=>{\r\n            // duplicate  \r\n            value // duplicate  \r\n        },\r\n        // trailing body  \r\n    }\r\n}\r\n";
         let formatted = format(source).expect("comments should format safely");

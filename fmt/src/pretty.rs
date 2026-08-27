@@ -3,8 +3,10 @@
 use crate::source::SourceMap;
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use quote::quote;
-use std::{ops::Range, panic::AssertUnwindSafe};
-use syn::{Attribute, Expr, File, Item, ItemFn, Meta, Pat, Stmt, parse::Parse, spanned::Spanned};
+use std::{collections::HashMap, ops::Range, panic::AssertUnwindSafe};
+use syn::{
+    Attribute, Expr, File, Item, ItemFn, Lit, Meta, Pat, Stmt, parse::Parse, spanned::Spanned,
+};
 use thiserror::Error;
 
 /// An error produced while formatting a Rust syntax fragment.
@@ -45,6 +47,115 @@ pub enum Disposition {
 pub struct ProtectedFragment {
     text: String,
     disposition: Disposition,
+}
+
+struct ShieldedLiteral {
+    range: Range<usize>,
+    placeholder: String,
+    source: String,
+}
+
+pub(crate) struct MultilineLiterals {
+    shielded: String,
+    marker_prefix: String,
+    literals: Vec<ShieldedLiteral>,
+}
+
+impl MultilineLiterals {
+    pub(crate) fn prepare(source: &str) -> Option<Self> {
+        let stream = source.parse::<TokenStream>().ok()?;
+        let source_map = SourceMap::new(source);
+        let mut ranges = Vec::new();
+        collect_literal_ranges(stream, &source_map, &mut ranges)?;
+        ranges.retain(|range| {
+            source
+                .get(range.clone())
+                .is_some_and(|literal| literal.contains('\n') || literal.contains('\r'))
+        });
+        if ranges.is_empty() {
+            return None;
+        }
+
+        let marker_prefix = (0..1_000)
+            .map(|nonce| format!("__commonware_fmt_literal_{nonce}_"))
+            .find(|prefix| !source.contains(prefix))?;
+        let mut literals = Vec::with_capacity(ranges.len());
+        for (index, range) in ranges.into_iter().enumerate() {
+            let literal = source.get(range.clone())?;
+            let marker = format!("{marker_prefix}{index}");
+            literals.push(ShieldedLiteral {
+                range,
+                placeholder: literal_placeholder(literal, &marker)?,
+                source: literal.to_owned(),
+            });
+        }
+
+        let mut shielded = source.to_owned();
+        for literal in literals.iter().rev() {
+            shielded.replace_range(literal.range.clone(), &literal.placeholder);
+        }
+        Some(Self {
+            shielded,
+            marker_prefix,
+            literals,
+        })
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.shielded
+    }
+
+    pub(crate) fn restore(self, fragment: ProtectedFragment) -> Option<ProtectedFragment> {
+        let ProtectedFragment { text, disposition } = fragment;
+        let stream = text.parse::<TokenStream>().ok()?;
+        let source_map = SourceMap::new(&text);
+        let mut ranges = Vec::new();
+        collect_literal_ranges(stream, &source_map, &mut ranges)?;
+
+        let mut matched = vec![None; self.literals.len()];
+        {
+            let placeholders = self
+                .literals
+                .iter()
+                .enumerate()
+                .map(|(index, literal)| (literal.placeholder.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            for range in ranges {
+                let literal = text.get(range.clone())?;
+                let Some(index) = placeholders.get(literal).copied() else {
+                    continue;
+                };
+                if matched[index].replace(range).is_some() {
+                    return None;
+                }
+            }
+        }
+        let mut replacements = self
+            .literals
+            .into_iter()
+            .zip(matched)
+            .map(|(literal, range)| Some((range?, literal.source)))
+            .collect::<Option<Vec<_>>>()?;
+        replacements.sort_unstable_by_key(|(range, _)| (range.start, range.end));
+        if replacements
+            .windows(2)
+            .any(|pair| pair[0].0.end > pair[1].0.start)
+        {
+            return None;
+        }
+
+        let mut restored = text;
+        for (range, source) in replacements.into_iter().rev() {
+            restored.replace_range(range, &source);
+        }
+        if restored.contains(&self.marker_prefix) || restored.parse::<TokenStream>().is_err() {
+            return None;
+        }
+        Some(ProtectedFragment {
+            text: restored,
+            disposition,
+        })
+    }
 }
 
 impl ProtectedFragment {
@@ -472,6 +583,38 @@ fn collect_token_ranges(
     Ok(())
 }
 
+fn collect_literal_ranges(
+    stream: TokenStream,
+    source: &SourceMap<'_>,
+    ranges: &mut Vec<Range<usize>>,
+) -> Option<()> {
+    for token in stream {
+        match token {
+            TokenTree::Group(group) => {
+                collect_literal_ranges(group.stream(), source, ranges)?;
+            }
+            TokenTree::Literal(literal) => ranges.push(source.span_range(literal.span()).ok()?),
+            TokenTree::Ident(_) | TokenTree::Punct(_) => {}
+        }
+    }
+    Some(())
+}
+
+fn literal_placeholder(source: &str, marker: &str) -> Option<String> {
+    match syn::parse_str::<Lit>(source).ok()? {
+        Lit::Str(literal) => Some(format!("\"{marker}\"{}", literal.suffix())),
+        Lit::ByteStr(literal) => Some(format!("b\"{marker}\"{}", literal.suffix())),
+        Lit::CStr(literal) => Some(format!("c\"{marker}\"{}", literal.suffix())),
+        Lit::Byte(_)
+        | Lit::Char(_)
+        | Lit::Int(_)
+        | Lit::Float(_)
+        | Lit::Bool(_)
+        | Lit::Verbatim(_) => None,
+        _ => None,
+    }
+}
+
 fn has_source_spelled_doc_comment(source: &str, literal_ranges: &[Range<usize>]) -> bool {
     let mut literal_ranges = literal_ranges.to_vec();
     literal_ranges.sort_unstable_by_key(|range| (range.start, range.end));
@@ -602,6 +745,34 @@ mod tests {
             formatted.text()
         );
         assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn shields_and_restores_multiline_literal_categories() {
+        let source = "call(r#\"first\n    second\"#, br#\"third\n    fourth\"#, cr#\"fifth\n    sixth\"#, \"seventh\\\n    eighth\")";
+        let literals = MultilineLiterals::prepare(source).expect("literals should be shielded");
+
+        assert!(!literals.text().contains('\n'));
+        let shielded = literals.text().to_owned();
+        let restored = literals
+            .restore(ProtectedFragment::formatted(shielded))
+            .expect("literals should restore");
+
+        assert_eq!(restored.disposition(), Disposition::Formatted);
+        assert_eq!(restored.text(), source);
+    }
+
+    #[test]
+    fn restores_multiline_literal_crlf_and_avoids_marker_collision() {
+        let source = "call(\"__commonware_fmt_literal_0_\", r#\"first\r\n    second\"#)";
+        let literals = MultilineLiterals::prepare(source).expect("literal should be shielded");
+        let shielded = literals.text().to_owned();
+
+        assert!(shielded.contains("__commonware_fmt_literal_1_0"));
+        let restored = literals
+            .restore(ProtectedFragment::formatted(shielded))
+            .expect("literal should restore");
+        assert_eq!(restored.text(), source);
     }
 
     #[test]
