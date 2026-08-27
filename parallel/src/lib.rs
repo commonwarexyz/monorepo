@@ -1075,7 +1075,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     let start = measure.then(Instant::now);
                     let result = f(self.clone());
                     if let (Some(start), Some(policy)) = (start, policy) {
-                        policy.record_spawn_job(caller, len, threads, start.elapsed());
+                        policy.record_spawn_inline(caller, len, threads, start.elapsed());
                     }
                     Either::Left(future::ready(result))
                 }

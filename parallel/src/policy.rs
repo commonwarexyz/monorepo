@@ -127,7 +127,8 @@ impl Policy {
     /// Chooses where to run a spawned job (inline on the calling task when the job is measured
     /// cheaper than the round trip of offloading it, offloaded to the pool otherwise) and whether
     /// the caller should time the run and feed the samples back via
-    /// [`record_spawn_job`](Self::record_spawn_job) and
+    /// [`record_spawn_inline`](Self::record_spawn_inline),
+    /// [`record_spawn_job`](Self::record_spawn_job), and
     /// [`record_spawn_overhead`](Self::record_spawn_overhead).
     pub(super) fn choose_spawn(
         &self,
@@ -146,8 +147,27 @@ impl Policy {
             .choose(SPAWN_INLINE_BUDGET_NS)
     }
 
-    /// Records a spawned job's own wall time, measured on the caller for inline runs and on the
-    /// worker for offloaded runs.
+    /// Records the wall time of a spawned job that ran inline on the calling task.
+    pub(super) fn record_spawn_inline(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        parallelism: usize,
+        job: Duration,
+    ) {
+        if parallelism <= 1 {
+            return;
+        }
+        let key = Key::new(caller, len, len, parallelism);
+        let job = u64::try_from(job.as_nanos()).unwrap_or(u64::MAX);
+        self.spawn_entries
+            .entry(key)
+            .or_default()
+            .inline_ns
+            .record(job);
+    }
+
+    /// Records the wall time of a spawned job that ran on a pool worker.
     pub(super) fn record_spawn_job(
         &self,
         caller: &'static Location<'static>,
@@ -407,45 +427,59 @@ impl Entry {
 
 /// Timing state for one spawn [`Key`].
 ///
-/// Since caller overlap cannot be observed, the policy inlines only when the job EWMA is no
+/// Since caller overlap cannot be observed, the policy inlines only when the job wall is no
 /// greater than both the offload round-trip overhead EWMA and [`SPAWN_INLINE_BUDGET_NS`]. The
 /// overhead is everything an offloaded run costs around the job itself (hand-off setup, queueing,
 /// worker wake, result send, task wake, and the observing poll), so a caller that waits on the
 /// result inlines whenever that is measured cheaper. A caller that polls late inflates its
 /// overhead samples with overlap slack, which biases toward inline, and the budget bounds what
 /// that bias can place on the calling task.
+///
+/// The job wall is tracked per placement: the worker-measured wall carries the penalty of
+/// migrating the job to another core, so the decision prefers the inline-measured wall once one
+/// exists, and the offload-state boundary probes inline (when the live worker wall fits the
+/// budget) so that estimate is observable from an entry seeded into offload.
 #[derive(Clone, Copy, Debug, Default)]
 struct SpawnEntry {
     // Spawn entry to result observed, minus the job's own wall time, from offloaded runs.
     overhead_ns: Estimate,
-    // The job's own wall time, fed by offload and inline runs alike.
+    // The job's own wall time on a pool worker.
     job_ns: Estimate,
+    // The job's own wall time inline on the calling task.
+    inline_ns: Estimate,
     cadence: Cadence,
 }
 
 impl SpawnEntry {
     // Decides where this call runs and whether the caller should time it. `budget` caps the job
-    // EWMA eligible for inlining.
+    // wall eligible for inlining.
     fn choose(&mut self, budget: u64) -> (SpawnExecution, bool) {
-        // Seed both estimates from an offloaded run before ever inlining.
+        // Seed both offload estimates before ever inlining.
         let (Some(overhead_ns), Some(job_ns)) = (self.overhead_ns.get(), self.job_ns.get()) else {
             self.cadence.saturate();
             return (SpawnExecution::Offload, true);
         };
 
         // Ties go to inline: equal cost for one fewer pool wake.
+        let bound = self.inline_ns.get().unwrap_or(job_ns);
         let threshold = overhead_ns.min(budget);
-        if job_ns > threshold {
-            // Offload steady state. Measured runs keep both estimates live, so the entry flips
-            // to inline on its own once the evidence clears the threshold: no inline probe is
-            // needed because an inline run measures nothing an offloaded run does not.
-            let tick = self.cadence.tick(threshold, job_ns);
+        if bound > threshold {
+            // Offload steady state. Measured runs keep the offload estimates live, and the
+            // boundary probes inline when the live worker wall fits the budget: the inline
+            // wall is only observable by inlining, so without the probe an entry seeded into
+            // offload could never learn it. Gating the probe on the live worker wall (not the
+            // stale inline estimate) lets a poisoned inline estimate recover, and a probe
+            // never stalls the calling task beyond the budget.
+            let tick = self.cadence.tick(threshold, bound);
+            if tick.boundary && job_ns < budget {
+                return (SpawnExecution::Inline, true);
+            }
             return (SpawnExecution::Offload, tick.boundary || tick.measure);
         }
 
-        // Inline steady state: the boundary hands one call back to the pool so the overhead
-        // estimate tracks the live pool.
-        let tick = self.cadence.tick(job_ns, threshold);
+        // Inline steady state: the boundary hands one call back to the pool so the offload
+        // estimates track the live pool.
+        let tick = self.cadence.tick(bound, threshold);
         if tick.boundary {
             return (SpawnExecution::Offload, true);
         }
@@ -976,8 +1010,7 @@ mod tests {
 
     #[test]
     fn spawn_keeps_offloading_a_job_bigger_than_the_overhead() {
-        // A 50us job behind a 5us round-trip overhead: inline must never fire even though the job
-        // is far under the budget, because offloading is cheaper under any polling.
+        // A 50us job behind a 5us round-trip overhead: offloading is cheaper under any polling.
         let mut entry = SpawnEntry::default();
         assert_eq!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
@@ -986,6 +1019,16 @@ mod tests {
         entry.job_ns.record(50_000);
         entry.overhead_ns.record(5_000);
 
+        // The seed leaves the entry due for a boundary, which probes inline (the worker wall
+        // fits the budget) to observe the inline wall.
+        assert_eq!(
+            entry.choose(SPAWN_INLINE_BUDGET_NS),
+            (SpawnExecution::Inline, true)
+        );
+        entry.inline_ns.record(50_000);
+
+        // The inline wall confirms the job is bigger than the overhead, so offload holds until
+        // the next (backed-off) boundary.
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
             match entry.choose(SPAWN_INLINE_BUDGET_NS) {
                 (SpawnExecution::Offload, measure) => {
@@ -997,6 +1040,32 @@ mod tests {
                 (execution, _) => panic!("expected offload, got {execution:?}"),
             }
         }
+    }
+
+    #[test]
+    fn spawn_probe_learns_the_inline_wall() {
+        // The worker-measured wall (25us, migrated to another core) exceeds the 10us overhead,
+        // so the entry seeds into offload. The boundary probe runs the job inline, the inline
+        // wall (8us) comes in under the overhead, and the entry flips: without the probe this
+        // state is unlearnable.
+        let mut entry = SpawnEntry::default();
+        assert_eq!(
+            entry.choose(SPAWN_INLINE_BUDGET_NS),
+            (SpawnExecution::Offload, true)
+        );
+        entry.job_ns.record(25_000);
+        entry.overhead_ns.record(10_000);
+
+        assert_eq!(
+            entry.choose(SPAWN_INLINE_BUDGET_NS),
+            (SpawnExecution::Inline, true)
+        );
+        entry.inline_ns.record(8_000);
+
+        assert_eq!(
+            entry.choose(SPAWN_INLINE_BUDGET_NS),
+            (SpawnExecution::Inline, false)
+        );
     }
 
     #[test]
@@ -1041,10 +1110,11 @@ mod tests {
         let mut entry = SpawnEntry::default();
         entry.job_ns.record(2_000);
         entry.overhead_ns.record(50_000);
+        entry.inline_ns.record(2_000);
 
-        // The latest sample exceeds the overhead, but the EWMA remains below it.
-        entry.job_ns.record(100_000);
-        assert_eq!(entry.job_ns.get(), Some(21_600));
+        // The latest inline sample exceeds the overhead, but the EWMA remains below it.
+        entry.inline_ns.record(100_000);
+        assert_eq!(entry.inline_ns.get(), Some(21_600));
         assert!(matches!(
             entry.choose(SPAWN_INLINE_BUDGET_NS),
             (SpawnExecution::Inline, _)
@@ -1053,17 +1123,25 @@ mod tests {
 
     #[test]
     fn spawn_recovers_after_a_transient_slow_run() {
-        // A spike revoked inline placement. Offloaded runs keep measuring the job small, so the
-        // estimates decay and inline returns without any dedicated probe.
+        // A spike poisoned the inline estimate. Boundary probes are gated on the live worker
+        // wall rather than the stale inline estimate, so probe samples blend the estimate back
+        // down and inline placement returns.
         let mut entry = SpawnEntry::default();
         entry.job_ns.record(2_000);
         entry.overhead_ns.record(50_000);
-        entry.job_ns.record(15_000_000);
+        entry.inline_ns.record(15_000_000);
 
-        let mut calls = 0;
+        let mut calls: u32 = 0;
         loop {
             match entry.choose(SPAWN_INLINE_BUDGET_NS) {
-                (SpawnExecution::Inline, _) => break,
+                (SpawnExecution::Inline, measure) => {
+                    if measure {
+                        entry.inline_ns.record(2_000);
+                    }
+                    if entry.inline_ns.get().unwrap() <= 50_000 {
+                        break;
+                    }
+                }
                 (SpawnExecution::Offload, measure) => {
                     if measure {
                         entry.job_ns.record(2_000);
@@ -1072,10 +1150,7 @@ mod tests {
                 }
             }
             calls += 1;
-            assert!(
-                calls <= 10 * RESAMPLE_INTERVAL,
-                "inline placement never recovered"
-            );
+            assert!(calls <= 100_000, "inline placement never recovered");
         }
     }
 

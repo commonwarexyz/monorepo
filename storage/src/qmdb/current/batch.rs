@@ -1394,7 +1394,10 @@ mod tests {
         let _ = futures::executor::block_on(merkleize);
         assert!(ancestor.upgrade().is_none());
 
-        // Drop the waiter while the worker is queued to prove the guard moved with it.
+        // Drop the waiter while the worker is queued to prove the guard moved with it. A fresh
+        // strategy makes this spawn the policy's seed, which always offloads (the completed
+        // first scenario could otherwise train the shared entry into an inline probe).
+        let strategy = Rayon::new(NZUsize!(2)).unwrap();
         let (a, b) = grafted_chain(&strategy, &mem);
         let ancestor = Arc::downgrade(&a);
         let release = block_strategy(&strategy, 2);
