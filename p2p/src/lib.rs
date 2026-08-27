@@ -17,20 +17,28 @@ stability_scope!(BETA {
     use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
-    use commonware_utils::{channel::mpsc, ordered::{Map, Set}};
+    use commonware_utils::{
+        channel::mpsc,
+        ordered::{Map, Set},
+    };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
+
     mod sizing;
     pub mod authenticated;
     pub mod types;
     pub mod utils;
+
     pub use types::{Address, Ingress};
+
     /// Tuple representing a message received from a given public key.
     ///
     /// This message is guaranteed to adhere to the configuration of the channel and
     /// will already be decrypted and authenticated.
     pub type Message<P> = (P, IoBuf);
+
     /// Alias for identifying communication channels.
     pub type Channel = u64;
+
     /// Enum indicating the set of recipients to send a message to.
     #[derive(Clone, Debug)]
     pub enum Recipients<P: PublicKey> {
@@ -38,10 +46,12 @@ stability_scope!(BETA {
         Some(Vec<P>),
         One(P),
     }
+
     /// Interface for sending messages to a set of recipients without rate-limiting restrictions.
     pub trait UnlimitedSender: Clone + Send + Sync + 'static {
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;
+
         /// Sends a message to a set of recipients.
         ///
         /// # Offline Recipients
@@ -66,13 +76,18 @@ stability_scope!(BETA {
             priority: bool,
         ) -> Unreliable<Feedback>;
     }
+
     /// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
     /// filtering out any that are currently rate-limited.
     pub trait LimitedSender: Clone + Send + Sync + 'static {
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;
+
         /// The type of [`CheckedSender`] returned after checking recipients.
-        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + Send where Self: 'a;
+        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + Send
+        where
+            Self: 'a;
+
         /// Checks which recipients are within their rate limit and returns a
         /// [`CheckedSender`] for sending to them.
         ///
@@ -91,12 +106,15 @@ stability_scope!(BETA {
             recipients: Recipients<Self::PublicKey>,
         ) -> Result<Self::Checked<'_>, SystemTime>;
     }
+
     /// Interface for sending messages to [`Recipients`] that are not currently rate-limited.
     pub trait CheckedSender: Send {
         /// Public key type used to identify [`Recipients`].
         type PublicKey: PublicKey;
+
         /// Returns the recipients retained by the check.
         fn recipients(&self) -> Vec<Self::PublicKey>;
+
         /// Sends a message to the pre-checked recipients.
         ///
         /// # Offline Recipients
@@ -114,12 +132,9 @@ stability_scope!(BETA {
         /// Feedback from submitting the message for delivery.
         /// [`Unreliable`] indicates that local submission may be rejected under backpressure.
         /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
-        fn send(
-            self,
-            message: impl Into<IoBufs> + Send,
-            priority: bool,
-        ) -> Unreliable<Feedback>;
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback>;
     }
+
     /// Interface for sending messages to a set of recipients.
     pub trait Sender: LimitedSender {
         /// Sends a message to a set of recipients.
@@ -150,30 +165,38 @@ stability_scope!(BETA {
             message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> Vec<Self::PublicKey> {
-            self.check(recipients)
-                .map_or_else(
-                    |_| Vec::new(),
-                    |checked_sender| {
-                        let recipients = checked_sender.recipients();
-                        let feedback = checked_sender.send(message, priority);
-                        if feedback.accepted() { recipients } else { Vec::new() }
-                    },
-                )
+            self.check(recipients).map_or_else(
+                |_| Vec::new(),
+                |checked_sender| {
+                    let recipients = checked_sender.recipients();
+                    let feedback = checked_sender.send(message, priority);
+                    if feedback.accepted() {
+                        recipients
+                    } else {
+                        Vec::new()
+                    }
+                },
+            )
         }
     }
+
     // Blanket implementation of `Sender` for all `LimitedSender`s.
     impl<S: LimitedSender> Sender for S {}
+
     /// Interface for receiving messages from arbitrary recipients.
     pub trait Receiver: Debug + Send + 'static {
         /// Error that can occur when receiving a message.
         type Error: Debug + StdError + Send + Sync;
+
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;
+
         /// Receive a message from an arbitrary recipient.
         fn recv(
             &mut self,
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
+
     /// Notification sent to subscribers when a peer set changes.
     #[derive(Clone, Debug)]
     pub struct PeerSetUpdate<P: PublicKey> {
@@ -184,8 +207,10 @@ stability_scope!(BETA {
         /// Union of primary and secondary peers across all tracked peer sets.
         pub all: TrackedPeers<P>,
     }
+
     /// Alias for the subscription type returned by [`Provider::subscribe`].
     pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
+
     /// Primary and secondary peers provided together to [`Manager::track`].
     ///
     /// The same public key may appear in both `primary` and `secondary`. [`Manager::track`]
@@ -197,28 +222,34 @@ stability_scope!(BETA {
         /// Peers eligible for secondary-only policies.
         pub secondary: Set<P>,
     }
+
     impl<P: PublicKey> TrackedPeers<P> {
         pub const fn new(primary: Set<P>, secondary: Set<P>) -> Self {
             Self { primary, secondary }
         }
+
         pub fn primary(primary: Set<P>) -> Self {
             Self::new(primary, Set::default())
         }
+
         /// Returns the deduplicated union of primary and secondary peers.
         pub fn union(self) -> Set<P> {
             Set::from_iter_dedup(self.primary.into_iter().chain(self.secondary))
         }
     }
+
     impl<P: PublicKey> From<Set<P>> for TrackedPeers<P> {
         fn from(primary: Set<P>) -> Self {
             Self::primary(primary)
         }
     }
+
     impl<P: PublicKey> Default for TrackedPeers<P> {
         fn default() -> Self {
             Self::new(Set::default(), Set::default())
         }
     }
+
     /// Primary and secondary peers provided together to [`AddressableManager::track`].
     ///
     /// The same public key may appear in both maps. [`AddressableManager::track`]
@@ -230,28 +261,34 @@ stability_scope!(BETA {
         /// Addresses for peers eligible for secondary-only policies.
         pub secondary: Map<P, Address>,
     }
+
     impl<P: PublicKey> AddressableTrackedPeers<P> {
         pub const fn new(primary: Map<P, Address>, secondary: Map<P, Address>) -> Self {
             Self { primary, secondary }
         }
+
         pub fn primary(primary: Map<P, Address>) -> Self {
             Self::new(primary, Map::default())
         }
     }
+
     impl<P: PublicKey> From<Map<P, Address>> for AddressableTrackedPeers<P> {
         fn from(primary: Map<P, Address>) -> Self {
             Self::primary(primary)
         }
     }
+
     /// Interface for reading peer set information.
     pub trait Provider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
+
         /// Fetch the primary and secondary peers tracked at the given ID.
         fn peer_set(
             &mut self,
             id: u64,
         ) -> impl Future<Output = Option<TrackedPeers<Self::PublicKey>>> + Send;
+
         /// Subscribe to notifications when new peer sets are added.
         ///
         /// Returns a receiver of [`PeerSetUpdate`] notifications. Each update's
@@ -262,6 +299,7 @@ stability_scope!(BETA {
             &mut self,
         ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
     }
+
     /// Interface for managing peer set membership (where peer addresses are not known).
     pub trait Manager: Provider {
         /// Track a primary and secondary peer set with the given ID.
@@ -292,6 +330,7 @@ stability_scope!(BETA {
         where
             R: Into<TrackedPeers<Self::PublicKey>> + Send;
     }
+
     /// Interface for managing peer set membership (where peer addresses are known).
     pub trait AddressableManager: Provider {
         /// Track a primary peer set and secondary peers with the given ID.
@@ -322,6 +361,7 @@ stability_scope!(BETA {
         fn track<R>(&mut self, id: u64, peers: R) -> Feedback
         where
             R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send;
+
         /// Update addresses for multiple peers without creating a new peer set.
         ///
         /// For each primary or secondary peer with a changed address:
@@ -330,10 +370,12 @@ stability_scope!(BETA {
         /// - Future connections will use the new address
         fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Feedback;
     }
+
     /// Interface for blocking other peers.
     pub trait Blocker: Clone + Send + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
+
         /// Block a peer, disconnecting them if currently connected and preventing future connections.
         fn block(&mut self, peer: Self::PublicKey) -> Feedback;
     }

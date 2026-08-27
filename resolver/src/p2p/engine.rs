@@ -167,15 +167,23 @@ where
             self.context,
             on_start => {
                 // Update metrics
-                let _ = self.metrics.fetch_pending.try_set(self.fetcher.len_pending());
+                let _ = self
+                    .metrics
+                    .fetch_pending
+                    .try_set(self.fetcher.len_pending());
                 let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
-                let _ = self.metrics.peers_blocked.try_set(self.fetcher.len_blocked());
+                let _ = self
+                    .metrics
+                    .peers_blocked
+                    .try_set(self.fetcher.len_blocked());
                 let _ = self.metrics.serve_processing.try_set(self.serves.len());
+
                 // Get retry timeout (if any)
                 let deadline_pending = match self.fetcher.get_pending_deadline() {
                     Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                     None => Either::Right(future::pending()),
                 };
+
                 // Get requester timeout (if any)
                 let deadline_active = match self.fetcher.get_active_deadline() {
                     Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
@@ -224,11 +232,18 @@ where
             } => {
                 match msg {
                     Message::Fetch(keys) => {
-                        for FetchKey { key, subscribers, metadata: targets } in keys {
+                        for FetchKey {
+                            key,
+                            subscribers,
+                            metadata: targets,
+                        } in keys
+                        {
                             trace!(?key, "mailbox: fetch");
+
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
                             self.subscribers.insert(key.clone(), subscribers);
+
                             // Update targets
                             match targets {
                                 Some(targets) => {
@@ -241,13 +256,13 @@ where
                                 }
                                 None => self.fetcher.clear_targets(&key),
                             }
+
                             // Only start new fetch if not already in progress
                             if is_new {
-                                self.inflight
-                                    .insert(
-                                        key.clone(),
-                                        self.metrics.fetch_duration.timer(self.context.as_ref()),
-                                    );
+                                self.inflight.insert(
+                                    key.clone(),
+                                    self.metrics.fetch_duration.timer(self.context.as_ref()),
+                                );
                                 self.fetcher.add_ready(key);
                             } else {
                                 trace!(?key, "updated targets for existing fetch");
@@ -256,7 +271,9 @@ where
                     }
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
-                        self.subscribers.retain(|key, subscriber| predicate(key, subscriber));
+
+                        self.subscribers
+                            .retain(|key, subscriber| predicate(key, subscriber));
                         let subscribers = &self.subscribers;
                         self.fetcher.retain(|key| subscribers.contains(key));
                         let count = self.inflight.retain(|key| subscribers.contains(key)) as u64;
@@ -269,7 +286,13 @@ where
             _ = deadline_pending => {},
             // Handle completed server requests
             serve = self.serves.next_completed() => {
-                let Serve { timer, peer, id, result } = serve;
+                let Serve {
+                    timer,
+                    peer,
+                    id,
+                    result,
+                } = serve;
+
                 // Metrics and logs
                 match result {
                     Ok(_) => {
@@ -281,6 +304,7 @@ where
                         self.metrics.serve.inc(Status::Failure);
                     }
                 }
+
                 // Send response to peer
                 self.handle_serve(&mut sender, peer, id, result, self.priority_responses);
             },
@@ -294,20 +318,17 @@ where
                         return;
                     }
                 };
+
                 match msg {
-                    Ok(msg) => {
-                        match msg.payload {
-                            wire::Payload::Request(key) => {
-                                self.handle_network_request(peer, msg.id, key)
-                            }
-                            wire::Payload::Response(response) => {
-                                self.handle_network_response(peer, msg.id, response)
-                            }
-                            wire::Payload::Error => {
-                                self.handle_network_error_response(peer, msg.id)
-                            }
+                    Ok(msg) => match msg.payload {
+                        wire::Payload::Request(key) => {
+                            self.handle_network_request(peer, msg.id, key)
                         }
-                    }
+                        wire::Payload::Response(response) => {
+                            self.handle_network_response(peer, msg.id, response)
+                        }
+                        wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
+                    },
                     Err(err) => {
                         trace!(?err, ?peer, "decode failed");
                     }

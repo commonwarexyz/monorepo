@@ -440,7 +440,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
                     }
-                    Message::Verify { context, payload, response } => {
+                    Message::Verify {
+                        context,
+                        payload,
+                        response,
+                    } => {
                         if let Some(observer) = &self.verify_observer {
                             observer(context.clone(), payload);
                         }
@@ -451,10 +455,17 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             let verified = self.verify(context, payload, contents.clone()).await;
                             response.send_lossy(verified);
                         } else {
-                            waiters.entry(payload).or_default().push((context, response));
+                            waiters
+                                .entry(payload)
+                                .or_default()
+                                .push((context, response));
                         }
                     }
-                    Message::Certify { round, payload, response } => {
+                    Message::Certify {
+                        round,
+                        payload,
+                        response,
+                    } => {
                         let contents = self.seen.get(&payload).cloned().unwrap_or_default();
                         if let Some(certified) = self.certify(round, payload, contents).await {
                             response.send_lossy(certified);
@@ -474,6 +485,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
             Some((digest, contents)) = self.broadcast.recv() else break => {
                 // Record digest for future use
                 self.seen.insert(digest, contents.clone());
+
                 // Check if we have a waiter
                 if let Some(waiters) = waiters.remove(&digest) {
                     for (context, sender) in waiters {

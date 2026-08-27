@@ -6,11 +6,14 @@ cfg_if::cfg_if! {
     } else {
         #[allow(dead_code, unused_imports, unused_macros)]
         mod common;
+
         #[allow(dead_code, unused_imports, unused_macros)]
         mod merkleize;
+
         #[allow(dead_code, unused_imports, unused_macros)]
         mod merkleize_gungraun;
         use merkleize_gungraun::qmdb_merkleize;
+
         gungraun::main!(
             config = gungraun::LibraryBenchmarkConfig::default().tool(
                 gungraun::Callgrind::with_args(["--collect-atstart=no", "--cache-sim=yes"])

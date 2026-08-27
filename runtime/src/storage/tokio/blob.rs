@@ -200,6 +200,7 @@ impl Blob {
                     let _ = &cache;
                     let attempted_dont_cache = false;
                     assert!(flags.is_none(), "flags are only supported on Linux");
+
                     // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
                     // `io_slices` points to valid readable buffers held alive for this syscall.
                     let ret = unsafe {

@@ -185,7 +185,10 @@ where
                 error!("mailbox receiver failed");
                 break;
             } => match msg {
-                Message::Broadcast { recipients, message } => {
+                Message::Broadcast {
+                    recipients,
+                    message,
+                } => {
                     trace!("mailbox: broadcast");
                     self.handle_broadcast(&mut sender, recipients, message);
                 }
@@ -208,6 +211,7 @@ where
                         break;
                     }
                 };
+
                 // Decode the message
                 let msg = match msg {
                     Ok(msg) => msg,
@@ -217,6 +221,7 @@ where
                         continue;
                     }
                 };
+
                 trace!(?peer, "network");
                 self.metrics.peer.get_or_create_by(&peer).inc();
                 self.handle_network(peer, msg);

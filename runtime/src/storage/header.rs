@@ -5,23 +5,34 @@ use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
     use crate::{Buf, BufMut};
-    use commonware_codec::{
-        DecodeExt, Encode, FixedSize, Read as CodecRead, Write as CodecWrite,
-    };
+    use commonware_codec::{DecodeExt, Encode, FixedSize, Read as CodecRead, Write as CodecWrite};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
     use std::ops::RangeInclusive;
     use tracing::warn;
+
     /// Errors that can occur when validating a blob header.
     #[derive(Debug)]
     pub(crate) enum HeaderError {
-        InvalidMagic { found: [u8; 4] },
-        UnsupportedRuntimeVersion { expected: u16, found: u16 },
-        VersionMismatch { expected: RangeInclusive<u16>, found: u16 },
+        InvalidMagic {
+            found: [u8; 4],
+        },
+        UnsupportedRuntimeVersion {
+            expected: u16,
+            found: u16,
+        },
+        VersionMismatch {
+            expected: RangeInclusive<u16>,
+            found: u16,
+        },
         InvalidChecksum,
         InvalidPadding,
-        Truncated { required_len: u64, raw_len: u64 },
+        Truncated {
+            required_len: u64,
+            raw_len: u64,
+        },
     }
+
     impl HeaderError {
         /// Returns true if this parse failure could be the signature of a creation interrupted
         /// before the header became durable, making the blob a candidate for
@@ -40,53 +51,45 @@ stability_scope!(BETA {
                     | Self::Truncated { .. }
             )
         }
+
         /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
         pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
             match self {
-                Self::InvalidMagic { found } => {
-                    crate::Error::BlobCorrupt(
-                        partition.into(),
-                        hex(name),
-                        format!("invalid magic: found {found:?}"),
-                    )
-                }
-                Self::UnsupportedRuntimeVersion { expected, found } => {
-                    crate::Error::BlobCorrupt(
-                        partition.into(),
-                        hex(name),
-                        format!("unsupported runtime version: expected {expected}, found {found}"),
-                    )
-                }
+                Self::InvalidMagic { found } => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    format!("invalid magic: found {found:?}"),
+                ),
+                Self::UnsupportedRuntimeVersion { expected, found } => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    format!("unsupported runtime version: expected {expected}, found {found}"),
+                ),
                 Self::VersionMismatch { expected, found } => {
-                    crate::Error::BlobVersionMismatch {
-                        expected,
-                        found,
-                    }
+                    crate::Error::BlobVersionMismatch { expected, found }
                 }
-                Self::InvalidChecksum => {
-                    crate::Error::BlobCorrupt(
-                        partition.into(),
-                        hex(name),
-                        "invalid header checksum".into(),
-                    )
-                }
-                Self::InvalidPadding => {
-                    crate::Error::BlobCorrupt(
-                        partition.into(),
-                        hex(name),
-                        "invalid header padding".into(),
-                    )
-                }
-                Self::Truncated { required_len, raw_len } => {
-                    crate::Error::BlobCorrupt(
-                        partition.into(),
-                        hex(name),
-                        format!("truncated header: required length {required_len}, raw length {raw_len}"),
-                    )
-                }
+                Self::InvalidChecksum => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    "invalid header checksum".into(),
+                ),
+                Self::InvalidPadding => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    "invalid header padding".into(),
+                ),
+                Self::Truncated {
+                    required_len,
+                    raw_len,
+                } => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    format!("truncated header: required length {required_len}, raw length {raw_len}"),
+                ),
             }
         }
     }
+
     /// Version of a [crate::Blob]'s on-disk header layout.
     ///
     /// This versions the runtime's on-disk container (where data begins), not the blob's
@@ -102,6 +105,7 @@ stability_scope!(BETA {
         /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
         V1,
     }
+
     impl Layout {
         /// The runtime version recorded in a header of this layout.
         pub(crate) const fn runtime_version(self) -> u16 {
@@ -110,6 +114,7 @@ stability_scope!(BETA {
                 Self::V1 => 1,
             }
         }
+
         /// The magic bytes recorded in a header of this layout: a fixed 3-byte brand (`CWI`,
         /// "is this file ours?") followed by a 1-byte layout tag ("which container layout?").
         ///
@@ -124,6 +129,7 @@ stability_scope!(BETA {
                 Self::V1 => *b"CWIK",
             }
         }
+
         /// The layout recorded by a header with the given magic bytes, if supported.
         pub(crate) const fn from_magic(magic: &[u8; 4]) -> Option<Self> {
             match magic {
@@ -132,6 +138,7 @@ stability_scope!(BETA {
                 _ => None,
             }
         }
+
         /// The offset where blob data begins under this layout. Not stored on disk (the
         /// layout's magic implies it): a [Layout::V0] header is the bare prelude, while a
         /// [Layout::V1] header region occupies exactly one 4096-byte page.
@@ -145,6 +152,7 @@ stability_scope!(BETA {
                 Self::V1 => 4096,
             }
         }
+
         /// Validates the header region past the prelude for this layout, which must be
         /// fully present: a [Layout::V0] region is the prelude alone, while a [Layout::V1]
         /// region extends to a CRC over the prelude and zero reserved padding out to the
@@ -181,6 +189,7 @@ stability_scope!(BETA {
                 }
             }
         }
+
         /// Returns true if a blob's raw contents are consistent with the creation of a
         /// blob with this layout that was interrupted before its header became durable.
         ///
@@ -216,12 +225,11 @@ stability_scope!(BETA {
                     if raw[head.len()..].iter().any(|&byte| byte != 0) {
                         return false;
                     }
+
                     // The written prefix ends after the last nonzero byte (trailing zeros
                     // are indistinguishable from unwritten bytes).
-                    let written = head
-                        .iter()
-                        .rposition(|&byte| byte != 0)
-                        .map_or(0, |i| i + 1);
+                    let written = head.iter().rposition(|&byte| byte != 0).map_or(0, |i| i + 1);
+
                     let mut canonical = [0u8; Header::PARSE_LEN];
                     canonical[..4].copy_from_slice(&self.magic());
                     canonical[4..6].copy_from_slice(&self.runtime_version().to_be_bytes());
@@ -245,6 +253,7 @@ stability_scope!(BETA {
             }
         }
     }
+
     /// Fixed-size header prelude at the start of each [crate::Blob].
     ///
     /// On-disk layout (big-endian). The prelude is 8 bytes and a V1 header extends it:
@@ -271,20 +280,26 @@ stability_scope!(BETA {
         runtime_version: u16,
         pub(crate) blob_version: u16,
     }
+
     impl Header {
         /// Size of the header prelude in bytes.
         pub(crate) const PRELUDE_SIZE: usize = 8;
+
         /// Size of the V1 header extension in bytes (CRC32 over the prelude).
         pub(crate) const EXTENSION_SIZE: usize = 4;
+
         /// Number of leading bytes needed to parse any header: the prelude plus the V1
         /// extension.
         pub(crate) const PARSE_LEN: usize = Self::PRELUDE_SIZE + Self::EXTENSION_SIZE;
+
         /// Length of magic bytes.
         pub(crate) const MAGIC_LENGTH: usize = 4;
+
         /// Returns true if a blob is missing a valid header (new or corrupted).
         pub(crate) const fn missing(raw_len: u64) -> bool {
             raw_len < Self::PRELUDE_SIZE as u64
         }
+
         /// Number of leading bytes [resolve] needs for a blob of raw on-disk length
         /// `raw_len`: the full header region, capped by the file itself.
         pub(crate) const fn resolve_len(raw_len: u64) -> usize {
@@ -294,6 +309,7 @@ stability_scope!(BETA {
                 Layout::V1.data_offset() as usize
             }
         }
+
         /// Creates the header region for a new blob using the latest version from the range and
         /// the latest header layout. Returns (encoded header region, blob version); the data
         /// offset is the region's length.
@@ -317,6 +333,7 @@ stability_scope!(BETA {
             region.resize(layout.data_offset() as usize, 0);
             (region, blob_version)
         }
+
         /// Parses and validates a blob's header from its leading bytes, returning the blob's
         /// logical size, blob version, and data offset.
         ///
@@ -331,6 +348,7 @@ stability_scope!(BETA {
                 .expect("header decode should never fail for correct size input");
             let layout = header.validate()?;
             layout.validate_region(raw, raw_len)?;
+
             // The blob version is checked only once the region is intact, so every earlier
             // error still describes a header that may merely be incompletely written.
             if !versions.contains(&header.blob_version) {
@@ -339,9 +357,11 @@ stability_scope!(BETA {
                     found: header.blob_version,
                 });
             }
+
             let data_offset = layout.data_offset();
             Ok((raw_len - data_offset, header.blob_version, data_offset))
         }
+
         /// Validates the magic bytes and runtime version, returning the layout the magic
         /// identifies.
         ///
@@ -351,9 +371,7 @@ stability_scope!(BETA {
         /// of parsing as a different layout.
         pub(crate) const fn validate(&self) -> Result<Layout, HeaderError> {
             let Some(layout) = Layout::from_magic(&self.magic) else {
-                return Err(HeaderError::InvalidMagic {
-                    found: self.magic,
-                });
+                return Err(HeaderError::InvalidMagic { found: self.magic });
             };
             let runtime_version = layout.runtime_version();
             if self.runtime_version != runtime_version {
@@ -365,9 +383,11 @@ stability_scope!(BETA {
             Ok(layout)
         }
     }
+
     impl FixedSize for Header {
         const SIZE: usize = Self::PRELUDE_SIZE;
     }
+
     impl CodecWrite for Header {
         fn write(&self, buf: &mut impl BufMut) {
             buf.put_slice(&self.magic);
@@ -375,12 +395,10 @@ stability_scope!(BETA {
             buf.put_u16(self.blob_version);
         }
     }
+
     impl CodecRead for Header {
         type Cfg = ();
-        fn read_cfg(
-            buf: &mut impl Buf,
-            _cfg: &Self::Cfg,
-        ) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             if buf.remaining() < Self::PRELUDE_SIZE {
                 return Err(commonware_codec::Error::EndOfBuffer);
             }
@@ -395,6 +413,7 @@ stability_scope!(BETA {
             })
         }
     }
+
     /// Resolves a blob's header from its leading bytes.
     ///
     /// Returns `Some((logical_size, blob_version, data_offset))` for a valid header and
@@ -415,18 +434,22 @@ stability_scope!(BETA {
             raw.len() >= Header::resolve_len(raw_len),
             "caller must provide enough bytes to resolve the header region"
         );
+
         // Too short to hold any header: treat as new.
         if Header::missing(raw_len) {
             return Ok(None);
         }
+
         let err = match Header::parse(raw, raw_len, versions) {
             Ok(resolved) => return Ok(Some(resolved)),
             Err(err) => err,
         };
+
         // Heal a V1 creation interrupted before its header became durable: the failure
         // must be one a torn write can produce, and the contents must match the canonical
         // creation prefix. Files longer than the creation region hold data and never heal.
-        if raw_len <= Layout::V1.data_offset() && err.may_be_torn_creation()
+        if raw_len <= Layout::V1.data_offset()
+            && err.may_be_torn_creation()
             && Layout::V1.interrupted_creation(raw)
         {
             warn!(
@@ -436,6 +459,7 @@ stability_scope!(BETA {
             );
             return Ok(None);
         }
+
         Err(err.into_error(partition, name))
     }
 });

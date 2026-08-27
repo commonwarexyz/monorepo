@@ -54,22 +54,30 @@ stability_scope!(BETA {
     pub use governor::Quota;
     use iobuf::PoolError;
     use std::{
-        future::Future, io::Error as IoError, net::SocketAddr, num::NonZeroUsize, sync::Arc,
+        future::Future,
+        io::Error as IoError,
+        net::SocketAddr,
+        num::NonZeroUsize,
+        sync::Arc,
         time::{Duration, SystemTime},
     };
     pub(crate) use telemetry::metrics::{METRICS_PREFIX, child_label, prefixed_name};
     use thiserror::Error;
+
     pub mod iobuf;
     pub use iobuf::{
         BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache,
-        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut, cache_line_size,
-        page_size,
+        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut, cache_line_size, page_size,
     };
+
     pub mod utils;
     pub use utils::*;
+
     pub mod telemetry;
+
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
     pub enum Error {
@@ -118,7 +126,10 @@ stability_scope!(BETA {
         #[error("blob corrupt: {0}/{1} reason: {2}")]
         BlobCorrupt(String, String, String),
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
-        BlobVersionMismatch { expected: std::ops::RangeInclusive<u16>, found: u16 },
+        BlobVersionMismatch {
+            expected: std::ops::RangeInclusive<u16>,
+            found: u16,
+        },
         #[error("invalid or missing checksum")]
         InvalidChecksum,
         #[error("offset overflow")]
@@ -128,16 +139,19 @@ stability_scope!(BETA {
         #[error("buffer pool: {0}")]
         Pool(#[from] PoolError),
     }
+
     impl From<IoError> for Error {
         fn from(err: IoError) -> Self {
             Self::Io(Arc::new(err))
         }
     }
+
     /// Interface that any task scheduler must implement to start
     /// running tasks.
     pub trait Runner {
         /// Context defines the environment available to tasks.
         type Context;
+
         /// Start running a root task.
         ///
         /// When this function returns, all spawned tasks will be canceled. If clean
@@ -148,6 +162,7 @@ stability_scope!(BETA {
             F: FnOnce(Self::Context) -> Fut,
             Fut: Future;
     }
+
     /// The full identity of a [`Supervisor`] handle.
     #[derive(Clone, Debug, Default)]
     pub struct Name {
@@ -156,10 +171,12 @@ stability_scope!(BETA {
         /// Attributes attached via [`Supervisor::with_attribute`].
         pub attributes: Vec<(String, String)>,
     }
+
     /// Interface to track task hierarchy and identity.
     pub trait Supervisor: Send + Sync + 'static {
         /// Return the current label prefix and attributes.
         fn name(&self) -> Name;
+
         /// Create a named child context with a new supervision-tree node.
         ///
         /// This appends `label` to the current metric prefix and creates a
@@ -171,6 +188,7 @@ stability_scope!(BETA {
         /// `[a-zA-Z0-9_]`. Runtime-reserved metric prefixes must not be used.
         #[must_use]
         fn child(&self, label: &'static str) -> Self;
+
         /// Add a key-value attribute to this context's identity.
         ///
         /// Attributes are attached to metrics registered in this context and
@@ -238,6 +256,7 @@ stability_scope!(BETA {
         #[must_use]
         fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self;
     }
+
     /// Interface that any task scheduler must implement to spawn tasks.
     pub trait Spawner: Supervisor {
         /// Return a [`Spawner`] that schedules the next task onto the runtime's shared executor.
@@ -250,6 +269,7 @@ stability_scope!(BETA {
         /// The shared executor with `blocking == false` is the default spawn mode.
         #[must_use]
         fn shared(self, blocking: bool) -> Self;
+
         /// Return a [`Spawner`] that runs the next task on a dedicated thread when the runtime supports it.
         ///
         /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
@@ -258,6 +278,7 @@ stability_scope!(BETA {
         /// This is not the default behavior. See [`Spawner::shared`] for more information.
         #[must_use]
         fn dedicated(self) -> Self;
+
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
@@ -298,6 +319,7 @@ stability_scope!(BETA {
             F: FnOnce(Self) -> Fut + Send + 'static,
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static;
+
         /// Signals the runtime to stop execution and waits for all outstanding tasks
         /// to perform any required cleanup and exit.
         ///
@@ -322,6 +344,7 @@ stability_scope!(BETA {
             value: i32,
             timeout: Option<Duration>,
         ) -> impl Future<Output = Result<(), Error>> + Send;
+
         /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
         /// any task.
         ///
@@ -330,6 +353,7 @@ stability_scope!(BETA {
         /// first [Spawner::stop] call.
         fn stopped(&self) -> signal::Signal;
     }
+
     /// Interface that runtimes implement to provide parallel execution strategies.
     pub trait Strategizer: Spawner {
         /// Returns a new [Rayon] strategy with the requested parallelism.
@@ -342,6 +366,7 @@ stability_scope!(BETA {
         /// Panics if the runtime cannot initialize the strategy's backing Rayon thread pool.
         fn strategy(&self, parallelism: NonZeroUsize) -> Rayon;
     }
+
     /// Interface to register and encode metrics.
     pub trait Metrics: Supervisor {
         /// Register a metric with the runtime.
@@ -366,9 +391,11 @@ stability_scope!(BETA {
             help: H,
             metric: M,
         ) -> telemetry::metrics::Registered<M>;
+
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
     }
+
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
     ///
     /// This is a convenience type alias for creating single-entity rate limiters.
@@ -379,6 +406,7 @@ stability_scope!(BETA {
         C,
         governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
     >;
+
     /// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
     ///
     /// This is a convenience type alias for creating per-peer rate limiters
@@ -391,23 +419,28 @@ stability_scope!(BETA {
         C,
         governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
     >;
+
     /// Interface that any task scheduler must implement to provide
     /// time-based operations.
     ///
     /// It is necessary to mock time to provide deterministic execution
     /// of arbitrary tasks.
-    pub trait Clock: governor::clock::Clock<
-            Instant = SystemTime,
-        > + governor::clock::ReasonablyRealtime + Send + Sync + 'static {
+    pub trait Clock:
+        governor::clock::Clock<Instant = SystemTime>
+        + governor::clock::ReasonablyRealtime
+        + Send
+        + Sync
+        + 'static
+    {
         /// Returns the current time.
         fn current(&self) -> SystemTime;
+
         /// Sleep for the given duration.
         fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+
         /// Sleep until the given deadline.
-        fn sleep_until(
-            &self,
-            deadline: SystemTime,
-        ) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+
         /// Await a future with a timeout, returning `Error::Timeout` if it expires.
         ///
         /// # Examples
@@ -445,12 +478,16 @@ stability_scope!(BETA {
             }
         }
     }
+
     /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
     pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
+
     /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
     pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
+
     /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
     pub type ListenerOf<N> = <N as crate::Network>::Listener;
+
     /// Interface that any runtime must implement to create
     /// network connections.
     pub trait Network: Send + Sync + 'static {
@@ -458,17 +495,20 @@ stability_scope!(BETA {
         /// Accepting a connection returns a [Sink] and [Stream] which are defined
         /// by the [Listener] and used to send and receive data over the connection.
         type Listener: Listener;
+
         /// Bind to the given socket address.
         fn bind(
             &self,
             socket: SocketAddr,
         ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
+
         /// Dial the given socket address.
         fn dial(
             &self,
             socket: SocketAddr,
         ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
     }
+
     /// Interface for DNS resolution.
     pub trait Resolver: Send + Sync + 'static {
         /// Resolve a hostname to IP addresses.
@@ -479,6 +519,7 @@ stability_scope!(BETA {
             host: &str,
         ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
     }
+
     /// Interface that any runtime must implement to handle
     /// incoming network connections.
     pub trait Listener: Sync + Send + 'static {
@@ -488,15 +529,16 @@ stability_scope!(BETA {
         /// The type of [Stream] that's returned when accepting a connection.
         /// This is used to receive data from the remote connection.
         type Stream: Stream;
+
         /// Accept an incoming connection.
         fn accept(
             &mut self,
-        ) -> impl Future<
-            Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>,
-        > + Send;
+        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+
         /// Returns the local address of the listener.
         fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
     }
+
     /// Interface that any runtime must implement to send
     /// messages over a network connection.
     pub trait Sink: Sync + Send + 'static {
@@ -515,6 +557,7 @@ stability_scope!(BETA {
             bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
+
     /// Interface that any runtime must implement to receive
     /// messages over a network connection.
     pub trait Stream: Sync + Send + 'static {
@@ -531,6 +574,7 @@ stability_scope!(BETA {
         /// Dropping the future (e.g. via `select!`) also poisons the stream, since
         /// partially read data may be lost.
         fn recv(&mut self, len: usize) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+
         /// Peek at buffered data without consuming.
         ///
         /// Returns up to `max_len` bytes from the internal buffer, or an empty slice
@@ -540,6 +584,7 @@ stability_scope!(BETA {
         /// or paying the cost of async.
         fn peek(&self, max_len: usize) -> &[u8];
     }
+
     /// Interface to interact with storage.
     ///
     /// To support storage implementations that enable concurrent reads and
@@ -562,6 +607,7 @@ stability_scope!(BETA {
     pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
+
         /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
         /// in the versions range. The blob version is omitted from the return value.
         fn open(
@@ -571,15 +617,12 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
             async move {
                 let (blob, size, _) = self
-                    .open_versioned(
-                        partition,
-                        name,
-                        DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
-                    )
+                    .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
                     .await?;
                 Ok((blob, size))
             }
         }
+
         /// Open an existing blob in a given partition or create a new one, returning
         /// the blob and its length.
         ///
@@ -607,6 +650,7 @@ stability_scope!(BETA {
             name: &[u8],
             versions: std::ops::RangeInclusive<u16>,
         ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
+
         /// Remove a blob from a given partition.
         ///
         /// If no `name` is provided, the entire partition is removed.
@@ -630,17 +674,18 @@ stability_scope!(BETA {
             partition: &str,
             name: Option<&[u8]>,
         ) -> impl Future<Output = Result<(), Error>> + Send;
+
         /// Return all blobs in a given partition.
-        fn scan(
-            &self,
-            partition: &str,
-        ) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+        fn scan(&self, partition: &str)
+        -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
+
     /// Options that alter one [`Blob::read_at`] or [`Blob::read_at_buf`] operation.
     ///
     /// [`ReadOptions::default`] applies no options.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct ReadOptions(u8);
+
     impl ReadOptions {
         /// Advise that data brought in by this read need not remain in the OS page cache.
         ///
@@ -648,68 +693,82 @@ stability_scope!(BETA {
         /// do not expect to read it again soon. Implementations may ignore it, and it
         /// does not guarantee that the range is absent from the OS page cache.
         pub const DONT_CACHE: Self = Self(1 << 0);
+
         /// Return whether all of `options` are set.
         #[must_use]
         pub const fn contains(self, options: Self) -> bool {
             self.0 & options.0 == options.0
         }
+
         /// Return these options with `options` cleared.
         #[must_use]
         pub const fn without(self, options: Self) -> Self {
             Self(self.0 & !options.0)
         }
     }
+
     impl std::ops::BitOr for ReadOptions {
         type Output = Self;
+
         fn bitor(self, rhs: Self) -> Self::Output {
             Self(self.0 | rhs.0)
         }
     }
+
     impl std::ops::BitOrAssign for ReadOptions {
         fn bitor_assign(&mut self, rhs: Self) {
             self.0 |= rhs.0;
         }
     }
+
     /// Options that alter one [`Blob::write_at`] operation.
     ///
     /// [`WriteOptions::default`] applies no options.
     /// Combine options with `|`, such as `WriteOptions::SYNC | WriteOptions::DONT_CACHE`.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct WriteOptions(u8);
+
     impl WriteOptions {
         /// Durably persist the submitted bytes before returning.
         ///
         /// This is not a durability barrier for earlier writes without
         /// [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
         pub const SYNC: Self = Self(1 << 0);
+
         /// Advise that the submitted bytes need not remain in the OS page cache.
         ///
         /// This is a best-effort performance hint for callers that maintain their own cache.
         /// Implementations may ignore it. It does not change visibility or durability, or
         /// guarantee that the range is absent from the OS page cache.
         pub const DONT_CACHE: Self = Self(1 << 1);
+
         /// Return whether all of `options` are set.
         #[must_use]
         pub const fn contains(self, options: Self) -> bool {
             self.0 & options.0 == options.0
         }
+
         /// Return these options with `options` cleared.
         #[must_use]
         pub const fn without(self, options: Self) -> Self {
             Self(self.0 & !options.0)
         }
     }
+
     impl std::ops::BitOr for WriteOptions {
         type Output = Self;
+
         fn bitor(self, rhs: Self) -> Self::Output {
             Self(self.0 | rhs.0)
         }
     }
+
     impl std::ops::BitOrAssign for WriteOptions {
         fn bitor_assign(&mut self, rhs: Self) {
             self.0 |= rhs.0;
         }
     }
+
     /// Interface to read and write to a blob.
     ///
     /// To support blob implementations that enable concurrent reads and
@@ -740,6 +799,7 @@ stability_scope!(BETA {
             bufs: impl Into<IoBufsMut> + Send,
             options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
         /// Read exactly `len` bytes at `offset`.
         ///
         /// To reuse a buffer(s), use [`Blob::read_at_buf`].
@@ -749,6 +809,7 @@ stability_scope!(BETA {
             len: usize,
             options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
         /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
         /// The buffers are treated as one logical byte sequence in chunk order.
@@ -758,23 +819,28 @@ stability_scope!(BETA {
             bufs: impl Into<IoBufs> + Send,
             options: WriteOptions,
         ) -> impl Future<Output = Result<(), Error>> + Send;
+
         /// Resize the blob to the given length.
         ///
         /// If the length is greater than the current length, the blob is extended with zeros.
         /// If the length is less than the current length, the blob is resized.
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
+
         /// Ensure all pending data is durably persisted.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+
         /// Request that all pending data is durably persisted.
         ///
         /// Awaiting this future waits until the sync has started. Awaiting the returned
         /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
+
     /// Interface that any runtime must implement to provide buffer pools.
     pub trait BufferPooler: Send + Sync + 'static {
         /// Returns the network [BufferPool].
         fn network_buffer_pool(&self) -> &BufferPool;
+
         /// Returns the storage [BufferPool].
         fn storage_buffer_pool(&self) -> &BufferPool;
     }
@@ -810,6 +876,7 @@ stability_scope!(BETA, cfg(feature = "external") {
             F: Future<Output = T> + Send + 'a,
             T: Send + 'a;
     }
+
     /// Extension trait that makes it more ergonomic to use [Pacer].
     ///
     /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
@@ -829,10 +896,8 @@ stability_scope!(BETA, cfg(feature = "external") {
             pacer.pace(latency, self)
         }
     }
-    impl<F> FutureExt for F
-    where
-        F: Future + Send,
-    {}
+
+    impl<F> FutureExt for F where F: Future + Send {}
 });
 
 #[cfg(test)]

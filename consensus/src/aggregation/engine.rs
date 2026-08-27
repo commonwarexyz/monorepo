@@ -272,8 +272,10 @@ impl<
             self.context,
             on_start => {
                 let _ = self.metrics.tip.try_set(self.tip.get());
+
                 // Propose a new digest if we are processing less than the window
                 let next = self.next();
+
                 // Underflow safe: next >= self.tip is guaranteed by next()
                 if next.delta_from(self.tip).unwrap() < self.window {
                     trace!(%next, "requesting new digest");
@@ -285,6 +287,7 @@ impl<
                     self.get_digest(next);
                     continue;
                 }
+
                 // Get the rebroadcast deadline for the next height
                 let rebroadcast = match self.rebroadcast_deadlines.peek() {
                     Some((_, &deadline)) => Either::Left(self.context.sleep_until(deadline)),
@@ -303,9 +306,13 @@ impl<
                 debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                 assert!(epoch >= self.epoch);
                 self.epoch = epoch;
+
                 // Update the tip manager
-                let scheme = self.scheme(self.epoch).expect("current epoch scheme must exist");
+                let scheme = self
+                    .scheme(self.epoch)
+                    .expect("current epoch scheme must exist");
                 self.safe_tip.reconcile(scheme.participants());
+
                 // Update data structures by purging old epochs
                 let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
                 self.pending
@@ -318,11 +325,17 @@ impl<
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
                     });
+
                 continue;
             },
+
             // Sign a new ack
             request = self.digest_requests.next_completed() => {
-                let DigestRequest { height, result, timer } = request;
+                let DigestRequest {
+                    height,
+                    result,
+                    timer,
+                } = request;
                 match result {
                     Err(err) => {
                         warn!(?err, %height, "automaton returned error");
@@ -334,6 +347,7 @@ impl<
                     }
                 }
             },
+
             // Handle incoming acks
             msg = receiver.recv() => {
                 // Error handling
@@ -352,6 +366,7 @@ impl<
                         continue;
                     }
                 };
+
                 // Update the tip manager
                 if self.safe_tip.update(sender.clone(), tip).is_some() {
                     // Fast-forward our tip if needed
@@ -360,6 +375,7 @@ impl<
                         self = self.fast_forward_tip(safe_tip).await;
                     }
                 }
+
                 // Validate that we need to process the ack
                 if let Err(err) = self.validate_ack(&ack, &sender) {
                     if err.blockable() {
@@ -373,7 +389,8 @@ impl<
                         debug!(?sender, ?err, "ack validate failed");
                     }
                     continue;
-                }
+                };
+
                 // Handle the ack
                 let accepted;
                 (self, accepted) = self.handle_ack(&ack).await;
@@ -381,10 +398,12 @@ impl<
                     guard.set(Status::Failure);
                     continue;
                 }
+
                 // Update the metrics
                 debug!(?sender, epoch = %ack.epoch, height = %ack.item.height, "ack");
                 guard.set(Status::Success);
             },
+
             // Rebroadcast
             _ = rebroadcast => {
                 // Get the next height to rebroadcast

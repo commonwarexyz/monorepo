@@ -412,22 +412,30 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::{
             future::AtomicWaker,
-            sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicUsize, Ordering}},
+            sync::{
+                Arc, Mutex, MutexGuard,
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+            },
         };
+
         fn register_waker(waker: &AtomicWaker, task: &std::task::Waker) {
             waker.register_by_ref(task);
         }
+
         fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
             mutex.lock().unwrap()
         }
+
         struct ReadyState<T> {
             published: VecDeque<T>,
             reserved: usize,
         }
+
         struct Ready<T> {
             state: Mutex<ReadyState<T>>,
             capacity: usize,
         }
+
         impl<T> Ready<T> {
             fn new(capacity: usize) -> Self {
                 Self {
@@ -438,9 +446,11 @@ cfg_if::cfg_if! {
                     capacity,
                 }
             }
+
             const fn capacity(&self) -> usize {
                 self.capacity
             }
+
             fn push(&self, message: T) -> Result<(), T> {
                 {
                     let mut state = lock(&self.state);
@@ -449,12 +459,15 @@ cfg_if::cfg_if! {
                     }
                     state.reserved += 1;
                 }
+
                 loom::thread::yield_now();
+
                 let mut state = lock(&self.state);
                 state.reserved -= 1;
                 state.published.push_back(message);
                 Ok(())
             }
+
             fn pop(&self) -> Option<T> {
                 loop {
                     let mut state = lock(&self.state);
@@ -473,28 +486,38 @@ cfg_if::cfg_if! {
         use crossbeam_queue::ArrayQueue;
         use futures_util::task::AtomicWaker;
         use parking_lot::{Mutex, MutexGuard};
-        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+
         fn register_waker(waker: &AtomicWaker, task: &std::task::Waker) {
             waker.register(task);
         }
+
         fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
             mutex.lock()
         }
+
         struct Ready<T> {
             queue: ArrayQueue<T>,
         }
+
         impl<T> Ready<T> {
             fn new(capacity: usize) -> Self {
                 Self {
                     queue: ArrayQueue::new(capacity),
                 }
             }
+
             fn capacity(&self) -> usize {
                 self.queue.capacity()
             }
+
             fn push(&self, message: T) -> Result<(), T> {
                 self.queue.push(message)
             }
+
             fn pop(&self) -> Option<T> {
                 self.queue.pop()
             }

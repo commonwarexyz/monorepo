@@ -8,25 +8,25 @@
 commonware_macros::stability_scope!(BETA {
     use commonware_actor::Feedback;
     use commonware_codec::Codec;
+
     pub mod buffered;
+
     /// Broadcaster is the interface responsible for attempting replication of messages across a network.
     pub trait Broadcaster: Clone + Send + 'static {
         /// The type of recipients that can receive messages.
         type Recipients;
+
         /// Message is the type of data that can be broadcasted.
         ///
         /// It must implement the Codec trait so that it can be:
         /// - serialized upon broadcast
         /// - deserialized upon reception
         type Message: Codec + Clone + Send + 'static;
+
         /// Attempt to broadcast a message to the associated recipients.
         ///
         /// Feedback indicates whether the local broadcast request was accepted for processing. It
         /// does not indicate whether recipients received the message.
-        fn broadcast(
-            &self,
-            recipients: Self::Recipients,
-            message: Self::Message,
-        ) -> Feedback;
+        fn broadcast(&self, recipients: Self::Recipients, message: Self::Message) -> Feedback;
     }
 });

@@ -183,6 +183,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                     self.queue.shuffle(self.context.as_mut());
                     next_query_at = dialable.next_query_at;
                 }
+
                 // Set next deadline.
                 dial_deadline = if self.queue.is_empty() {
                     let min = now + self.dial_frequency;
@@ -191,6 +192,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                 } else {
                     now + self.dial_frequency
                 };
+
                 // Pop through peers until we can reserve and dial one.
                 while let Some(peer) = self.queue.pop() {
                     if let Some(reservation) = tracker.dial(peer).await {

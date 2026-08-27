@@ -128,6 +128,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                     if self.routes.contains_key(&subchannel) {
                         continue;
                     }
+
                     // Otherwise, create a new subchannel and send the receiver to the caller.
                     let (tx, rx) = mpsc::channel(self.mailbox_size);
                     self.routes.insert(subchannel, tx);
@@ -149,6 +150,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                         continue;
                     }
                 };
+
                 // Get the route for the subchannel.
                 let Some(sender) = self.routes.get_mut(&subchannel) else {
                     // Attempt to use the backup channel if available.
@@ -157,10 +159,12 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                     {
                         debug!(?subchannel, ?e, "failed to send message to backup channel");
                     }
+
                     // Drops the message if the subchannel is not found or the backup
                     // channel was not used.
                     continue;
                 };
+
                 // Send the message to the subchannel using non-blocking try_send
                 // to avoid head-of-line blocking when one subchannel is slow.
                 if let Err(e) = sender.try_send((pk, bytes)) {

@@ -267,6 +267,7 @@ commonware_macros::stability_scope!(ALPHA {
         use crate::algebra::test_suites;
         use arbitrary::{Arbitrary, Unstructured};
         use commonware_codec::Encode as _;
+
         #[derive(Debug, Arbitrary)]
         pub enum Plan {
             FCodec(F),
@@ -274,6 +275,7 @@ commonware_macros::stability_scope!(ALPHA {
             FuzzField,
             FuzzSpace,
         }
+
         impl Plan {
             pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
                 match self {
@@ -293,6 +295,7 @@ commonware_macros::stability_scope!(ALPHA {
                 Ok(())
             }
         }
+
         #[test]
         fn test_fuzz() {
             use commonware_invariants::minifuzz;

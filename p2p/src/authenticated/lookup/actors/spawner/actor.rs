@@ -76,56 +76,60 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, Si: Sink, St: Stre
                 break;
             } => {
                 match msg {
-                    Message::Spawn { peer, connection, reservation } => {
+                    Message::Spawn {
+                        peer,
+                        connection,
+                        reservation,
+                    } => {
                         // Clone required variables
                         let sent_messages = self.sent_messages.clone();
                         let received_messages = self.received_messages.clone();
                         let rate_limited = self.rate_limited.clone();
                         let tracker = tracker.clone();
                         let router = router.clone();
+
                         // Spawn peer
-                        self.context
-                            .child("peer")
-                            .spawn(move |context| async move {
-                                // Create peer
-                                debug!(?peer, "peer started");
-                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                                    context,
-                                    peer::Config {
-                                        ping_frequency: self.ping_frequency,
-                                        sent_messages,
-                                        received_messages,
-                                        rate_limited,
-                                        mailbox_size: self.mailbox_size,
-                                        send_batch_size: self.send_batch_size,
-                                    },
-                                );
-                                // Register peer with tracker before making it routable.
-                                if !tracker.connect(peer.clone(), peer_mailbox).accepted() {
-                                    debug!(?peer, "tracker shut down during peer setup");
-                                    drop(reservation);
-                                    return;
-                                }
-                                // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await
-                                else {
-                                    debug!(?peer, "router shut down during peer setup");
-                                    drop(reservation);
-                                    return;
-                                };
-                                // Run peer
-                                let result = peer_actor
-                                    .run(peer.clone(), connection, channels)
-                                    .await;
-                                // Let the router know the peer has exited
-                                match result {
-                                    Ok(()) => debug!(?peer, "peer shutdown gracefully"),
-                                    Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
-                                }
-                                let _ = router.release(peer);
-                                // Release the reservation
-                                drop(reservation)
-                            });
+                        self.context.child("peer").spawn(move |context| async move {
+                            // Create peer
+                            debug!(?peer, "peer started");
+                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                                context,
+                                peer::Config {
+                                    ping_frequency: self.ping_frequency,
+                                    sent_messages,
+                                    received_messages,
+                                    rate_limited,
+                                    mailbox_size: self.mailbox_size,
+                                    send_batch_size: self.send_batch_size,
+                                },
+                            );
+
+                            // Register peer with tracker before making it routable.
+                            if !tracker.connect(peer.clone(), peer_mailbox).accepted() {
+                                debug!(?peer, "tracker shut down during peer setup");
+                                drop(reservation);
+                                return;
+                            }
+
+                            // Register peer with the router (may fail during shutdown)
+                            let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                debug!(?peer, "router shut down during peer setup");
+                                drop(reservation);
+                                return;
+                            };
+
+                            // Run peer
+                            let result = peer_actor.run(peer.clone(), connection, channels).await;
+
+                            // Let the router know the peer has exited
+                            match result {
+                                Ok(()) => debug!(?peer, "peer shutdown gracefully"),
+                                Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
+                            }
+                            let _ = router.release(peer);
+                            // Release the reservation
+                            drop(reservation)
+                        });
                     }
                 }
             },

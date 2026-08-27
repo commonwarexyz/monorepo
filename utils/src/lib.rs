@@ -12,16 +12,20 @@ commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
+
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, vec::Vec};
     use bytes::{BufMut, BytesMut};
     use core::time::Duration;
     pub mod faults;
     pub use faults::{Faults, N3f1, N5f1};
+
     pub mod sequence;
     pub use sequence::{Array, Span};
+
     pub mod hostname;
     pub use hostname::Hostname;
+
     pub mod bitmap;
     pub mod cache;
     pub mod iter;
@@ -29,15 +33,16 @@ commonware_macros::stability_scope!(BETA {
     pub mod probability;
     pub use probability::Probability;
     pub mod range;
+
     use bytes::Buf;
-    use commonware_codec::{
-        EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
-    };
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt};
+
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///
     /// Equal to `floor(2^64 / phi)`. Because it is odd, multiplication by it
     /// is a bijection modulo `2^64`.
     pub const GOLDEN_RATIO: u64 = 0x9e37_79b9_7f4a_7c15;
+
     /// Represents a participant/validator index within a consensus committee.
     ///
     /// Participant indices are used to identify validators in attestations,
@@ -46,11 +51,13 @@ commonware_macros::stability_scope!(BETA {
     #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
     pub struct Participant(u32);
+
     impl Participant {
         /// Creates a new participant from a u32 index.
         pub const fn new(index: u32) -> Self {
             Self(index)
         }
+
         /// Creates a new participant from a usize index.
         ///
         /// # Panics
@@ -59,45 +66,55 @@ commonware_macros::stability_scope!(BETA {
         pub fn from_usize(index: usize) -> Self {
             Self(u32::try_from(index).expect("participant index exceeds u32::MAX"))
         }
+
         /// Returns the underlying u32 index.
         pub const fn get(self) -> u32 {
             self.0
         }
     }
+
     impl From<Participant> for usize {
         fn from(p: Participant) -> Self {
             p.0 as Self
         }
     }
+
     impl core::fmt::Display for Participant {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             write!(f, "{}", self.0)
         }
     }
+
     impl Read for Participant {
         type Cfg = ();
+
         fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
             let value: u32 = UInt::read(buf)?.into();
             Ok(Self(value))
         }
     }
+
     impl Write for Participant {
         fn write(&self, buf: &mut impl bytes::BufMut) {
             UInt(self.0).write(buf);
         }
     }
+
     impl EncodeSize for Participant {
         fn encode_size(&self) -> usize {
             UInt(self.0).encode_size()
         }
     }
+
     /// A type that can be constructed from an iterator, possibly failing.
     pub trait TryFromIterator<T>: Sized {
         /// The error type returned when construction fails.
         type Error;
+
         /// Attempts to construct `Self` from an iterator.
         fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, Self::Error>;
     }
+
     /// Extension trait for iterators that provides fallible collection.
     pub trait TryCollect: Iterator + Sized {
         /// Attempts to collect elements into a collection that may fail.
@@ -105,9 +122,12 @@ commonware_macros::stability_scope!(BETA {
             C::try_from_iter(self)
         }
     }
+
     impl<I: Iterator> TryCollect for I {}
+
     /// Alias for boxed errors that are `Send` and `Sync`.
     pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
+
     /// Computes the union of two byte slices.
     pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
         let mut union = Vec::with_capacity(a.len() + b.len());
@@ -115,20 +135,21 @@ commonware_macros::stability_scope!(BETA {
         union.extend_from_slice(b);
         union
     }
+
     /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
     ///
     /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
     pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
         use commonware_codec::EncodeSize;
         let len_prefix = namespace.len();
-        let mut buf = BytesMut::with_capacity(
-            len_prefix.encode_size() + namespace.len() + msg.len(),
-        );
+        let mut buf =
+            BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
         len_prefix.write(&mut buf);
         BufMut::put_slice(&mut buf, namespace);
         BufMut::put_slice(&mut buf, msg);
         buf.into()
     }
+
     /// Compute the modulo of bytes interpreted as a big-endian integer.
     ///
     /// This function is used to select a random entry from an array when the bytes are a random seed.
@@ -138,32 +159,43 @@ commonware_macros::stability_scope!(BETA {
     /// Panics if `n` is zero.
     pub fn modulo(bytes: &[u8], n: u64) -> u64 {
         assert_ne!(n, 0, "modulus must be non-zero");
+
         let n = n as u128;
         let mut result = 0u128;
         for &byte in bytes {
             result = (result << 8) | (byte as u128);
             result %= n;
         }
+
         // Result is either 0 or modulo `n`, so we can safely cast to u64
         result as u64
     }
+
     /// A wrapper around `Duration` that guarantees the duration is non-zero.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct NonZeroDuration(Duration);
+
     impl NonZeroDuration {
         /// Creates a `NonZeroDuration` if the given duration is non-zero.
         pub fn new(duration: Duration) -> Option<Self> {
-            if duration == Duration::ZERO { None } else { Some(Self(duration)) }
+            if duration == Duration::ZERO {
+                None
+            } else {
+                Some(Self(duration))
+            }
         }
+
         /// Creates a `NonZeroDuration` from the given duration, panicking if it's zero.
         pub fn new_panic(duration: Duration) -> Self {
             Self::new(duration).expect("duration must be non-zero")
         }
+
         /// Returns the wrapped `Duration`.
         pub const fn get(self) -> Duration {
             self.0
         }
     }
+
     impl From<NonZeroDuration> for Duration {
         fn from(nz_duration: NonZeroDuration) -> Self {
             nz_duration.0
@@ -173,20 +205,27 @@ commonware_macros::stability_scope!(BETA {
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod rng;
     pub use rng::sys_rng;
+
     pub mod acknowledgement;
     pub use acknowledgement::Acknowledgement;
+
     pub mod net;
     pub use net::IpAddrExt;
+
     pub mod time;
     pub use time::{DurationExt, SystemTimeExt};
+
     pub mod rational;
     pub use rational::BigRationalExt;
+
     mod priority_set;
     pub use priority_set::PrioritySet;
+
     pub mod channel;
     pub mod concurrency;
     pub mod futures;
     pub mod sync;
+
     pub mod thread_local;
     pub use thread_local::Cached;
 });

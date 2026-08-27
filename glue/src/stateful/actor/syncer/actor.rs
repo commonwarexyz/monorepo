@@ -146,67 +146,65 @@ where
             on_stopped => {
                 debug!("syncer received stop signal, shutting down");
             },
-            result = &mut state_sync_task => {
-                match result {
-                    Ok((databases, anchor)) => {
-                        Self::publish_artifact(
-                            &mut self.artifact,
-                            &mut self.sync_complete,
-                            databases,
-                            anchor,
-                        );
-                        state_sync_task = None.into();
-                        // A tip update enqueued after the coordinator's final drain has no
-                        // receiver left to record it or release its observation barrier.
-                        // Dropping the sender frees the ring buffer, so the observer of any
-                        // queued update retries and receives the artifact.
-                        tip_updates_tx = None;
-                    }
-                    Err(err) => {
-                        panic!("state sync task failed: {err:?}");
-                    }
+            result = &mut state_sync_task => match result {
+                Ok((databases, anchor)) => {
+                    Self::publish_artifact(
+                        &mut self.artifact,
+                        &mut self.sync_complete,
+                        databases,
+                        anchor,
+                    );
+                    state_sync_task = None.into();
+
+                    // A tip update enqueued after the coordinator's final drain has no
+                    // receiver left to record it or release its observation barrier.
+                    // Dropping the sender frees the ring buffer, so the observer of any
+                    // queued update retries and receives the artifact.
+                    tip_updates_tx = None;
+                }
+                Err(err) => {
+                    panic!("state sync task failed: {err:?}");
                 }
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down syncer");
                 break;
-            } => {
-                match message {
-                    Message::UpdateTargets { update, response } => {
-                        if let Some(artifact) = self.artifact.clone() {
-                            response.send_lossy(Some(artifact));
-                            continue;
-                        }
-                        // If sync had already completed, the state-sync branch above would
-                        // have published `self.artifact` before this mailbox branch ran.
-                        let tip_updates = tip_updates_tx
-                            .as_mut()
-                            .expect("ring sender lives until the artifact is published");
-                        if tip_updates.send(update).await.is_err() {
-                            // Tuple sync closes the live tip-update receiver as soon as the
-                            // coordinator converges, before the database tasks have necessarily
-                            // finished. Treat that close as "wait for the in-flight sync task to
-                            // publish its artifact", not as a hard failure.
-                            match (&mut state_sync_task).await {
-                                Ok((databases, anchor)) => {
-                                    Self::publish_artifact(
-                                        &mut self.artifact,
-                                        &mut self.sync_complete,
-                                        databases,
-                                        anchor,
-                                    );
-                                    state_sync_task = None.into();
-                                }
-                                Err(err) => {
-                                    panic!("state sync task failed: {err:?}");
-                                }
-                            }
-                            tip_updates_tx = None;
-                            response.send_lossy(self.artifact.clone());
-                            continue;
-                        }
-                        response.send_lossy(None);
+            } => match message {
+                Message::UpdateTargets { update, response } => {
+                    if let Some(artifact) = self.artifact.clone() {
+                        response.send_lossy(Some(artifact));
+                        continue;
                     }
+
+                    // If sync had already completed, the state-sync branch above would
+                    // have published `self.artifact` before this mailbox branch ran.
+                    let tip_updates = tip_updates_tx
+                        .as_mut()
+                        .expect("ring sender lives until the artifact is published");
+                    if tip_updates.send(update).await.is_err() {
+                        // Tuple sync closes the live tip-update receiver as soon as the
+                        // coordinator converges, before the database tasks have necessarily
+                        // finished. Treat that close as "wait for the in-flight sync task to
+                        // publish its artifact", not as a hard failure.
+                        match (&mut state_sync_task).await {
+                            Ok((databases, anchor)) => {
+                                Self::publish_artifact(
+                                    &mut self.artifact,
+                                    &mut self.sync_complete,
+                                    databases,
+                                    anchor,
+                                );
+                                state_sync_task = None.into();
+                            }
+                            Err(err) => {
+                                panic!("state sync task failed: {err:?}");
+                            }
+                        }
+                        tip_updates_tx = None;
+                        response.send_lossy(self.artifact.clone());
+                        continue;
+                    }
+                    response.send_lossy(None);
                 }
             },
         }

@@ -220,6 +220,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
                     }
                 };
                 debug!(?address, "accepted incoming connection");
+
                 // Check whether the IP is private
                 let ip = address.ip();
                 if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
@@ -227,12 +228,14 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
                     debug!(?address, "rejecting private address");
                     continue;
                 }
+
                 // Check whether the IP is registered
                 if !self.bypass_ip_check && !self.registered_ips.contains(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting unregistered address");
                     continue;
                 }
+
                 // Cleanup the rate limiters periodically
                 if accepted > CLEANUP_INTERVAL {
                     ip_rate_limiter.retain_recent();
@@ -240,6 +243,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
                     accepted = 0;
                 }
                 accepted += 1;
+
                 // Check whether the IP (and subnet) exceeds its rate limit
                 let ip_limited = if ip_rate_limiter.check_key(&ip).is_err() {
                     self.handshakes_ip_rate_limited.inc();
@@ -256,39 +260,35 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
                 } else {
                     false
                 };
+
                 // We wait to check whether the handshake is permitted until after updating both the ip
                 // and subnet rate limiters
                 if ip_limited || subnet_limited {
                     continue;
                 }
+
                 // Check whether there are too many ongoing handshakes
                 let Some(reservation) = self.handshake_limiter.try_acquire() else {
                     self.handshakes_concurrent_rate_limited.inc();
                     debug!(?address, "maximum concurrent handshakes reached");
                     continue;
                 };
+
                 // Spawn a new handshaker to upgrade connection
-                self.context
-                    .child("handshaker")
-                    .spawn({
-                        let stream_cfg = self.stream_cfg.clone();
-                        let tracker = tracker.clone();
-                        let supervisor = supervisor.clone();
-                        move |context| async move {
-                            Self::handshake(
-                                    context,
-                                    address,
-                                    stream_cfg,
-                                    sink,
-                                    stream,
-                                    tracker,
-                                    supervisor,
-                                )
-                                .await;
-                            // Once the handshake attempt is complete, release the reservation
-                            drop(reservation);
-                        }
-                    });
+                self.context.child("handshaker").spawn({
+                    let stream_cfg = self.stream_cfg.clone();
+                    let tracker = tracker.clone();
+                    let supervisor = supervisor.clone();
+                    move |context| async move {
+                        Self::handshake(
+                            context, address, stream_cfg, sink, stream, tracker, supervisor,
+                        )
+                        .await;
+
+                        // Once the handshake attempt is complete, release the reservation
+                        drop(reservation);
+                    }
+                });
             },
         }
     }
