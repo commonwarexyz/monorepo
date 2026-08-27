@@ -15,11 +15,10 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates, fill_candidates},
             operation::{Operation, update},
         },
         batch_chain::{Bounds, OnChain},
-        bitmap::fill_from,
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
@@ -129,21 +128,6 @@ impl<const N: usize> ChunkOverlay<N> {
     pub(crate) const fn complete_chunks(&self) -> usize {
         (self.len / Self::CHUNK_BITS) as usize
     }
-}
-
-/// Bitmap-accelerated floor scan over a layered [`BitmapView`]. Fills `out` with up to
-/// `limit` floor-raise candidates in `[floor, tip)`, returning the next `floor`. Skips
-/// locations where the layered bitmap bit is unset (including locations superseded by
-/// uncommitted ancestors), avoiding I/O reads for inactive operations. Produces the same
-/// sequence as repeatedly calling the `next_candidate` test oracle over the chain.
-pub(crate) fn fill_candidates<F: Graftable, const N: usize>(
-    bitmap: &BitmapView<'_, N>,
-    floor: Location<F>,
-    tip: u64,
-    limit: usize,
-    out: &mut Vec<Location<F>>,
-) -> Location<F> {
-    Location::new(fill_from(bitmap, *floor, tip, limit, out))
 }
 
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
@@ -298,9 +282,9 @@ where
 /// is not an immutable snapshot.
 ///
 /// Internally, the batch's bitmap chain terminates in the DB's committed bitmap
-/// (`BitmapBatch::Base`); a child's merkleize reads the chain over that bitmap. The committed
-/// bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch),
-/// [`Db::prune`](super::db::Db::prune), and [`Db::rewind`](super::db::Db::rewind) update the DB.
+/// (`BitmapBatch::Base`). The committed bitmap evolves in place as
+/// [`Db::apply_batch`](super::db::Db::apply_batch), [`Db::prune`](super::db::Db::prune), and
+/// [`Db::rewind`](super::db::Db::rewind) update the DB.
 ///
 /// Reads through this batch's chain, constructing child batches from it, and applying it later are
 /// only semantically correct while its ancestor chain is still the committed prefix of the DB. In
@@ -513,15 +497,14 @@ where
         } = self;
 
         let db_any = inner.on_chain(&db.any)?;
-        let bitmap_parent = bitmap_parent.trim_committed(&db.any.bitmap);
-        let parent_view = bitmap_parent.over(&db.any.bitmap);
+        let bitmap_parent = bitmap_parent.over(&db.any.bitmap).trim_committed();
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same source the floor
         // raise scans below), clamped to the committed prefix inside the helper.
         let (inner, staged_updates, prefetched) = inner
             .resolve_updates_prefetched(updates, upserts, db_any, |floor, tip, limit, out| {
-                fill_candidates(&parent_view, floor, tip, limit, out)
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
             })
             .await?;
         let inner = inner
@@ -530,11 +513,11 @@ where
                 metadata,
                 staged_updates,
                 Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&parent_view, floor, tip, limit, out),
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
         let current_db = inner.bounds().on_chain(db, db.any.commitment())?;
-        compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, current_db, &grafted_parent, bitmap_parent).await
     }
 }
 
@@ -583,19 +566,18 @@ where
             bitmap_parent,
         } = self;
         let db_any = inner.on_chain(&db.any)?;
-        let bitmap_parent = bitmap_parent.trim_committed(&db.any.bitmap);
-        let parent_view = bitmap_parent.over(&db.any.bitmap);
+        let bitmap_parent = bitmap_parent.over(&db.any.bitmap).trim_committed();
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let inner = inner
             .merkleize_with_floor_scan(
                 db_any,
                 metadata,
                 staged_updates,
-                |floor, tip, limit, out| fill_candidates(&parent_view, floor, tip, limit, out),
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
         let current_db = inner.bounds().on_chain(db, db.any.commitment())?;
-        compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, current_db, &grafted_parent, bitmap_parent).await
     }
 }
 
@@ -631,8 +613,7 @@ where
             bitmap_parent,
         } = self;
         let db_any = inner.on_chain(&db.any)?;
-        let bitmap_parent = bitmap_parent.trim_committed(&db.any.bitmap);
-        let parent_view = bitmap_parent.over(&db.any.bitmap);
+        let bitmap_parent = bitmap_parent.over(&db.any.bitmap).trim_committed();
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
             .merkleize_with_floor_scan(
@@ -640,11 +621,11 @@ where
                 metadata,
                 StagedUpdates::<F, update::Unordered<K, V>>::new(),
                 None,
-                |floor, tip, limit, out| fill_candidates(&parent_view, floor, tip, limit, out),
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
         let current_db = inner.bounds().on_chain(db, db.any.commitment())?;
-        compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, current_db, &grafted_parent, bitmap_parent).await
     }
 }
 
@@ -680,19 +661,18 @@ where
             bitmap_parent,
         } = self;
         let db_any = inner.on_chain(&db.any)?;
-        let bitmap_parent = bitmap_parent.trim_committed(&db.any.bitmap);
-        let parent_view = bitmap_parent.over(&db.any.bitmap);
+        let bitmap_parent = bitmap_parent.over(&db.any.bitmap).trim_committed();
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
             .merkleize_with_floor_scan(
                 db_any,
                 metadata,
                 StagedUpdates::<F, update::Ordered<K, V>>::new(),
-                |floor, tip, limit, out| fill_candidates(&parent_view, floor, tip, limit, out),
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
         let current_db = inner.bounds().on_chain(db, db.any.commitment())?;
-        compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, current_db, &grafted_parent, bitmap_parent).await
     }
 }
 
@@ -810,7 +790,7 @@ async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
     current_db: OnChain<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
-    bitmap_parent: &BitmapBatch<N>,
+    bitmap_parent: BitmapView<'_, N>,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
 where
     F: Graftable,
@@ -826,9 +806,8 @@ where
     let batch_base = *inner.bounds.tip.size - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
-    let parent_view = bitmap_parent.over(&current_db.any.bitmap);
     let overlay = build_chunk_overlay::<F, U, _, N>(
-        &parent_view,
+        &bitmap_parent,
         batch_len,
         batch_base,
         &inner.diff,
@@ -854,7 +833,7 @@ where
     let graftable_overlay = grafting::graftable_chunks::<F>(*overlay_ops_leaves, grafting_height)
         .min(new_complete_chunks as u64) as usize;
     let graftable_parent = *grafted_parent.leaves() as usize;
-    let pruned_chunks = parent_view.pruned_chunks();
+    let pruned_chunks = bitmap_parent.pruned_chunks();
     assert!(
         pruned_chunks <= graftable_parent
             && graftable_parent <= graftable_overlay
@@ -880,7 +859,7 @@ where
         let chunk = overlay
             .get(idx)
             .copied()
-            .unwrap_or_else(|| parent_view.get_chunk(idx));
+            .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
         (idx, chunk)
     });
 
@@ -908,11 +887,15 @@ where
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
     // compute_db_root sees newly completed chunks. Using bitmap_parent alone would miss chunks
     // that transitioned from partial to complete in this batch.
-    let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
-        parent: bitmap_parent.clone(),
+    let BitmapView {
+        chain: parent,
+        committed,
+    } = bitmap_parent;
+    let bitmap = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+        parent,
         overlay: Arc::new(overlay),
-    }));
-    let bitmap_view = bitmap_batch.over(&current_db.any.bitmap);
+    }))
+    .over(committed);
 
     // Compute canonical root. The grafted batch alone cannot resolve committed nodes,
     // so layer it over the committed grafted MMR.
@@ -928,9 +911,9 @@ where
     // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
     // coexist; this branch only handles partial. The pending chunk (when present) is read
     // from the bitmap inside `compute_db_root` via `pending_chunk()`.
-    let partial = partial_chunk::<_, N>(&bitmap_view);
+    let partial = partial_chunk::<_, N>(&bitmap);
     let canonical_root = compute_db_root::<F, H, _, _, N>(
-        &bitmap_view,
+        &bitmap,
         &grafted_storage,
         overlay_ops_leaves,
         partial,
@@ -942,7 +925,7 @@ where
     Ok(Arc::new(MerkleizedBatch {
         inner,
         grafted: grafted_batch,
-        bitmap: bitmap_batch,
+        bitmap: bitmap.chain,
         canonical_root,
     }))
 }
@@ -972,50 +955,50 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
 
 impl<const N: usize> BitmapBatch<N> {
     /// View this chain over `committed`, the database bitmap its `Base` stands for.
-    pub(crate) const fn over<'a>(
-        &'a self,
-        committed: &'a bitmap::Prunable<N>,
-    ) -> BitmapView<'a, N> {
+    pub(crate) const fn over(self, committed: &bitmap::Prunable<N>) -> BitmapView<'_, N> {
         BitmapView {
             chain: self,
             committed,
         }
     }
-
-    /// Return a chain equivalent to `self` with any `Layer` whose overlay is now fully committed
-    /// replaced by `Base`. Since `apply_batch` commits contiguous prefixes, committed `Layer`s
-    /// are always at the bottom of the chain.
-    fn trim_committed(&self, committed: &bitmap::Prunable<N>) -> Self {
-        let committed = committed.len();
-        let mut kept = Vec::new();
-        let mut current = self;
-        while let Self::Layer(layer) = current {
-            if layer.overlay.len <= committed {
-                break;
-            }
-            kept.push(Arc::clone(&layer.overlay));
-            current = &layer.parent;
-        }
-        let mut result = Self::Base;
-        for overlay in kept.into_iter().rev() {
-            result = Self::Layer(Arc::new(BitmapBatchLayer {
-                parent: result,
-                overlay,
-            }));
-        }
-        result
-    }
 }
 
 /// A [`BitmapBatch`] chain read over the committed bitmap it was built on.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct BitmapView<'a, const N: usize> {
-    chain: &'a BitmapBatch<N>,
+    chain: BitmapBatch<N>,
     committed: &'a bitmap::Prunable<N>,
 }
 
 impl<const N: usize> BitmapView<'_, N> {
     const CHUNK_SIZE_BITS: u64 = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+
+    /// Drop every `Layer` whose overlay the committed bitmap already contains. Since
+    /// `apply_batch` commits contiguous prefixes, committed `Layer`s are always at the bottom of
+    /// the chain.
+    fn trim_committed(self) -> Self {
+        let committed_len = self.committed.len();
+        let mut kept = Vec::new();
+        let mut current = &self.chain;
+        while let BitmapBatch::Layer(layer) = current {
+            if layer.overlay.len <= committed_len {
+                break;
+            }
+            kept.push(Arc::clone(&layer.overlay));
+            current = &layer.parent;
+        }
+        let mut chain = BitmapBatch::Base;
+        for overlay in kept.into_iter().rev() {
+            chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+                parent: chain,
+                overlay,
+            }));
+        }
+        Self {
+            chain,
+            committed: self.committed,
+        }
+    }
 }
 
 impl<const N: usize> bitmap::Readable<N> for BitmapView<'_, N> {
@@ -1026,7 +1009,7 @@ impl<const N: usize> bitmap::Readable<N> for BitmapView<'_, N> {
     fn get_chunk(&self, idx: usize) -> [u8; N] {
         // Walk the layer chain. Each layer's overlay either holds the chunk (return it) or
         // doesn't (descend).
-        let mut current = self.chain;
+        let mut current = &self.chain;
         loop {
             match current {
                 BitmapBatch::Base => return *self.committed.get_chunk(idx),
@@ -1060,7 +1043,7 @@ impl<const N: usize> bitmap::Readable<N> for BitmapView<'_, N> {
     }
 
     fn len(&self) -> u64 {
-        match self.chain {
+        match &self.chain {
             BitmapBatch::Base => self.committed.len(),
             BitmapBatch::Layer(layer) => layer.overlay.len,
         }
@@ -1738,7 +1721,7 @@ mod tests {
             parent: BitmapBatch::Base,
             overlay: Arc::new(overlay1),
         }));
-        let chain1_view = chain1.over(&base);
+        let chain1_view = chain1.clone().over(&base);
         let mut overlay2 = ChunkOverlay::new(&chain1_view, 14, 2);
         overlay2.clear_bit(&chain1_view, 6);
         overlay2.clear_bit(&chain1_view, 9);
@@ -1816,7 +1799,7 @@ mod tests {
             parent: BitmapBatch::Base,
             overlay: Arc::new(overlay1),
         }));
-        let chain1_view = chain1.over(&base);
+        let chain1_view = chain1.clone().over(&base);
 
         // Layer 2 (materialized against the layer-1 view, as `build_chunk_overlay` does)
         // clears bits 6 and 9, and appends bits 12..14 (only 13 set).
@@ -1825,7 +1808,7 @@ mod tests {
         overlay2.clear_bit(&chain1_view, 9);
         overlay2.set_bit(&chain1_view, 13);
         let chain2 = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
-            parent: chain1.clone(),
+            parent: chain1,
             overlay: Arc::new(overlay2),
         }));
         let chain2_view = chain2.over(&base);
@@ -1886,7 +1869,7 @@ mod tests {
     fn make_chain(committed: &Bm, overlay_lens: &[u64]) -> BitmapBatch<N> {
         let mut chain = BitmapBatch::Base;
         for &len in overlay_lens {
-            let overlay = Arc::new(ChunkOverlay::new(&chain.over(committed), len, 0));
+            let overlay = Arc::new(ChunkOverlay::new(&chain.clone().over(committed), len, 0));
             chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
                 parent: chain,
                 overlay,
@@ -1917,8 +1900,8 @@ mod tests {
     #[test]
     fn trim_committed_already_base() {
         let committed = make_bitmap(&[true; 64]);
-        let result = BitmapBatch::<N>::Base.trim_committed(&committed);
-        assert!(matches!(result, BitmapBatch::Base));
+        let result = BitmapBatch::<N>::Base.over(&committed).trim_committed();
+        assert!(matches!(result.chain, BitmapBatch::Base));
     }
 
     /// Every layer has been absorbed by prior applies -- the loop breaks on the first iteration
@@ -1931,8 +1914,8 @@ mod tests {
         // committed.
         let committed = make_bitmap(&[true; 64]);
         let chain = make_chain(&committed, &[32]);
-        let result = chain.trim_committed(&committed);
-        assert!(matches!(result, BitmapBatch::Base));
+        let result = chain.over(&committed).trim_committed();
+        assert!(matches!(result.chain, BitmapBatch::Base));
     }
 
     /// Every layer is still speculative -- the loop walks all the way to `Base` without
@@ -1944,8 +1927,8 @@ mod tests {
         // `committed.len() == 32`; both overlays have `len > 32`, so neither is committed.
         let committed = make_bitmap(&[true; 32]);
         let chain = make_chain(&committed, &[64, 96]);
-        let result = chain.trim_committed(&committed);
-        assert_eq!(chain_overlays(&result), vec![64, 96]);
+        let result = chain.over(&committed).trim_committed();
+        assert_eq!(chain_overlays(&result.chain), vec![64, 96]);
     }
 
     /// Exactly one layer is uncommitted (the newest) on top of a committed prefix -- the
@@ -1957,8 +1940,8 @@ mod tests {
         // `committed.len() == 64`; committed layer (`overlay.len == 64`) + uncommitted (`96`).
         let committed = make_bitmap(&[true; 64]);
         let chain = make_chain(&committed, &[64, 96]);
-        let result = chain.trim_committed(&committed);
-        assert_eq!(chain_overlays(&result), vec![96]);
+        let result = chain.over(&committed).trim_committed();
+        assert_eq!(chain_overlays(&result.chain), vec![96]);
     }
 
     /// Two or more uncommitted layers on top of a committed prefix -- exercises the loop's
@@ -1969,7 +1952,7 @@ mod tests {
         // `committed.len() == 64`; committed layer (64), then two uncommitted (96, 128).
         let committed = make_bitmap(&[true; 64]);
         let chain = make_chain(&committed, &[64, 96, 128]);
-        let result = chain.trim_committed(&committed);
-        assert_eq!(chain_overlays(&result), vec![96, 128]);
+        let result = chain.over(&committed).trim_committed();
+        assert_eq!(chain_overlays(&result.chain), vec![96, 128]);
     }
 }

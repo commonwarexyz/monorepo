@@ -16,7 +16,6 @@ use crate::{
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
         },
         batch_chain::{self, Bounds, Commitment, OnChain},
-        bitmap::fill_from,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -667,15 +666,45 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
 }
 
 /// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)`, returning the next
-/// `floor`.
-fn fill_candidates<F: Family, const N: usize>(
-    bitmap: &bitmap::Prunable<N>,
+/// `floor`: set bits in `[floor, min(len, tip))` ascending via one `ones_iter_from`, then
+/// locations in `[max(floor, len), tip)` sequentially.
+pub(crate) fn fill_candidates<F: Family, B: bitmap::Readable<N>, const N: usize>(
+    bitmap: &B,
     floor: Location<F>,
     tip: u64,
     limit: usize,
     out: &mut Vec<Location<F>>,
 ) -> Location<F> {
-    Location::new(fill_from(bitmap, *floor, tip, limit, out))
+    let bitmap_len = bitmap.len();
+    let committed_end = bitmap_len.min(tip);
+
+    let mut scan = *floor;
+    if scan < committed_end {
+        let mut ones = bitmap.ones_iter_from(scan);
+        while out.len() < limit {
+            match ones.next() {
+                Some(idx) if idx < committed_end => {
+                    out.push(Location::new(idx));
+                    scan = idx + 1;
+                }
+                _ => break,
+            }
+        }
+    }
+    while out.len() < limit {
+        let candidate = scan.max(bitmap_len);
+        if candidate >= tip {
+            // Advance only through the span the ones scan verified clear. When `tip < len`
+            // (a layered bitmap scanned with a committed-boundary tip), bits in
+            // `[committed_end, len)` were never examined and a later call with a larger
+            // `tip` must still see them.
+            scan = scan.max(committed_end);
+            break;
+        }
+        out.push(Location::new(candidate));
+        scan = candidate + 1;
+    }
+    Location::new(scan)
 }
 
 /// Resolve `loc` to an op within the in-memory ancestor region
@@ -3119,7 +3148,8 @@ mod tests {
     use commonware_utils::{bitmap::Readable as _, test_rng};
     use rand::RngExt as _;
 
-    const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+    type Bm = bitmap::Prunable<BITMAP_CHUNK_BYTES>;
+    const BITMAP_CHUNK_BITS: u64 = Bm::CHUNK_SIZE_BITS;
 
     fn loc(n: u64) -> Location<mmr::Family> {
         Location::new(n)
@@ -3127,15 +3157,6 @@ mod tests {
 
     fn committed(n: u64) -> StagedLoc<mmr::Family> {
         StagedLoc::Committed(loc(n))
-    }
-
-    fn bitmap_with<F>(build: F) -> bitmap::Prunable<BITMAP_CHUNK_BYTES>
-    where
-        F: FnOnce(&mut bitmap::Prunable<BITMAP_CHUNK_BYTES>),
-    {
-        let mut bm = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::new();
-        build(&mut bm);
-        bm
     }
 
     /// [`DiffCursors`] must resolve exactly like per-key `lookup_sorted` over the same diffs
@@ -3402,13 +3423,13 @@ mod tests {
 
     #[test]
     fn bitmap_scan_empty() {
-        let bitmap = bitmap_with(|_| {});
+        let bitmap = Bm::new();
         assert_eq!(next_candidate(&bitmap, loc(0), 0), None);
     }
 
     #[test]
     fn bitmap_scan_uncommitted_tail() {
-        let bitmap = bitmap_with(|_| {});
+        let bitmap = Bm::new();
         assert_eq!(next_candidate(&bitmap, loc(0), 3), Some(loc(0)));
         assert_eq!(next_candidate(&bitmap, loc(1), 3), Some(loc(1)));
         assert_eq!(next_candidate(&bitmap, loc(2), 3), Some(loc(2)));
@@ -3417,11 +3438,10 @@ mod tests {
 
     #[test]
     fn bitmap_scan_committed_region() {
-        let bitmap = bitmap_with(|bm| {
-            bm.extend_to(10);
-            bm.set_bit(*loc(3), true);
-            bm.set_bit(*loc(7), true);
-        });
+        let mut bitmap = Bm::new();
+        bitmap.extend_to(10);
+        bitmap.set_bit(*loc(3), true);
+        bitmap.set_bit(*loc(7), true);
 
         assert_eq!(next_candidate(&bitmap, loc(0), 10), Some(loc(3)));
         assert_eq!(next_candidate(&bitmap, loc(4), 10), Some(loc(7)));
@@ -3432,10 +3452,9 @@ mod tests {
 
     #[test]
     fn bitmap_scan_transitions_into_tail() {
-        let bitmap = bitmap_with(|bm| {
-            bm.extend_to(5);
-            bm.set_bit(*loc(2), true);
-        });
+        let mut bitmap = Bm::new();
+        bitmap.extend_to(5);
+        bitmap.set_bit(*loc(2), true);
 
         assert_eq!(next_candidate(&bitmap, loc(0), 8), Some(loc(2)));
         assert_eq!(next_candidate(&bitmap, loc(3), 8), Some(loc(5)));
@@ -3445,11 +3464,10 @@ mod tests {
 
     #[test]
     fn bitmap_scan_after_prune() {
-        let bitmap = bitmap_with(|bm| {
-            bm.extend_to(BITMAP_CHUNK_BITS * 3);
-            bm.set_bit(*loc(BITMAP_CHUNK_BITS * 2 + 5), true);
-            bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
-        });
+        let mut bitmap = Bm::new();
+        bitmap.extend_to(BITMAP_CHUNK_BITS * 3);
+        bitmap.set_bit(*loc(BITMAP_CHUNK_BITS * 2 + 5), true);
+        bitmap.prune_to_bit(BITMAP_CHUNK_BITS * 2);
 
         assert_eq!(
             commonware_utils::bitmap::Readable::pruned_chunks(&bitmap),
@@ -3463,11 +3481,10 @@ mod tests {
 
     #[test]
     fn bitmap_scan_after_truncate() {
-        let bitmap = bitmap_with(|bm| {
-            bm.extend_to(BITMAP_CHUNK_BITS * 2);
-            bm.set_bit(*loc(BITMAP_CHUNK_BITS + 3), true);
-            bm.truncate(BITMAP_CHUNK_BITS);
-        });
+        let mut bitmap = Bm::new();
+        bitmap.extend_to(BITMAP_CHUNK_BITS * 2);
+        bitmap.set_bit(*loc(BITMAP_CHUNK_BITS + 3), true);
+        bitmap.truncate(BITMAP_CHUNK_BITS);
 
         assert_eq!(
             commonware_utils::bitmap::Readable::<BITMAP_CHUNK_BYTES>::len(&bitmap),
@@ -3481,39 +3498,27 @@ mod tests {
     /// and truncated bitmaps, every batch limit, and tips below the bitmap length.
     #[test]
     fn bitmap_fill_candidates_matches_oracle() {
-        let shapes: Vec<(&str, bitmap::Prunable<BITMAP_CHUNK_BYTES>)> = vec![
-            ("empty", bitmap_with(|_| {})),
-            (
-                "committed_bits",
-                bitmap_with(|bm| {
-                    bm.extend_to(10);
-                    bm.set_bit(3, true);
-                    bm.set_bit(7, true);
-                }),
-            ),
-            (
-                "transition_into_tail",
-                bitmap_with(|bm| {
-                    bm.extend_to(5);
-                    bm.set_bit(2, true);
-                }),
-            ),
-            (
-                "pruned",
-                bitmap_with(|bm| {
-                    bm.extend_to(BITMAP_CHUNK_BITS * 3);
-                    bm.set_bit(BITMAP_CHUNK_BITS * 2 + 5, true);
-                    bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
-                }),
-            ),
-            (
-                "truncated",
-                bitmap_with(|bm| {
-                    bm.extend_to(BITMAP_CHUNK_BITS * 2);
-                    bm.set_bit(BITMAP_CHUNK_BITS + 3, true);
-                    bm.truncate(BITMAP_CHUNK_BITS);
-                }),
-            ),
+        let mut committed_bits = Bm::new();
+        committed_bits.extend_to(10);
+        committed_bits.set_bit(3, true);
+        committed_bits.set_bit(7, true);
+        let mut transition_into_tail = Bm::new();
+        transition_into_tail.extend_to(5);
+        transition_into_tail.set_bit(2, true);
+        let mut pruned = Bm::new();
+        pruned.extend_to(BITMAP_CHUNK_BITS * 3);
+        pruned.set_bit(BITMAP_CHUNK_BITS * 2 + 5, true);
+        pruned.prune_to_bit(BITMAP_CHUNK_BITS * 2);
+        let mut truncated = Bm::new();
+        truncated.extend_to(BITMAP_CHUNK_BITS * 2);
+        truncated.set_bit(BITMAP_CHUNK_BITS + 3, true);
+        truncated.truncate(BITMAP_CHUNK_BITS);
+        let shapes = [
+            ("empty", Bm::new()),
+            ("committed_bits", committed_bits),
+            ("transition_into_tail", transition_into_tail),
+            ("pruned", pruned),
+            ("truncated", truncated),
         ];
 
         for (name, bitmap) in shapes {

@@ -4176,7 +4176,7 @@ pub mod tests {
 
             // Snapshot every chunk in the speculative `BitmapBatch` chain (read through child).
             let speculative_chunks: Vec<[u8; N]> = {
-                let bitmap = child.bitmap.over(&db.any.bitmap);
+                let bitmap = child.bitmap.clone().over(&db.any.bitmap);
                 let len = Readable::<N>::len(&bitmap);
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
