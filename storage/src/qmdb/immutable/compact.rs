@@ -11,48 +11,41 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::collections::BTreeMap;
 
-/// The immutable compact variant: batches set keys.
-#[derive(Clone)]
-pub struct Set<K, V>(PhantomData<(K, V)>);
+impl<F: Family, K: Key, V: ValueEncoding> db::sealed::Sealed for Operation<F, K, V> {}
 
-impl<K, V> db::sealed::Sealed for Set<K, V> {}
-
-impl<F: Family, K: Key, V: ValueEncoding> db::Variant<F> for Set<K, V> {
-    type Op = Operation<F, K, V>;
+impl<F: Family, K: Key, V: ValueEncoding> db::Variant<F> for Operation<F, K, V> {
     type Metadata = V::Value;
     type Mutations = BTreeMap<K, V::Value>;
     const NAME: &'static str = "immutable";
 
-    fn commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self::Op {
-        Operation::Commit(metadata, inactivity_floor_loc)
+    fn commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self {
+        Self::Commit(metadata, inactivity_floor_loc)
     }
 
-    fn into_commit(op: Self::Op) -> Option<(Option<V::Value>, Location<F>)> {
-        match op {
-            Operation::Commit(metadata, inactivity_floor_loc) => {
-                Some((metadata, inactivity_floor_loc))
-            }
-            Operation::Set(..) => None,
+    fn into_commit(self) -> Option<(Option<V::Value>, Location<F>)> {
+        match self {
+            Self::Commit(metadata, inactivity_floor_loc) => Some((metadata, inactivity_floor_loc)),
+            Self::Set(..) => None,
         }
     }
 
-    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self::Op> {
+    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self> {
         mutations
             .into_iter()
-            .map(|(key, value)| Operation::Set(key, value))
+            .map(|(key, value)| Self::Set(key, value))
     }
 }
 
 /// An immutable compact db.
-pub type Db<F, E, K, V, H, C, S> = db::Db<F, E, Set<K, V>, H, C, S>;
+pub type Db<F, E, K, V, H, C, S> = db::Db<F, E, Operation<F, K, V>, H, C, S>;
 
 /// A speculative batch for an immutable compact db.
-pub type UnmerkleizedBatch<F, H, K, V, S> = db::UnmerkleizedBatch<F, H, Set<K, V>, S>;
+pub type UnmerkleizedBatch<F, H, K, V, S> = db::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>;
 
 /// A speculative batch for an immutable compact db whose root digest has been computed.
-pub type MerkleizedBatch<F, D, K, V, S> = db::MerkleizedBatch<F, D, Set<K, V>, S>;
+pub type MerkleizedBatch<F, D, K, V, S> = db::MerkleizedBatch<F, D, Operation<F, K, V>, S>;
 
 impl<F, H, K, V, S> UnmerkleizedBatch<F, H, K, V, S>
 where
@@ -73,7 +66,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::Location,
+        merkle::{Location, mmr},
         qmdb::{
             any::value::FixedEncoding,
             compact::db::tests::{TestBatch, TestVariant, compact_db_tests, open_db},
@@ -83,7 +76,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
-    type TestVariantMarker = Set<Digest, FixedEncoding<Digest>>;
+    type TestVariantMarker = Operation<mmr::Family, Digest, FixedEncoding<Digest>>;
 
     impl TestVariant for TestVariantMarker {
         fn value(seed: u64) -> Digest {

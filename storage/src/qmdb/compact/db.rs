@@ -1,8 +1,8 @@
 //! A compact authenticated db that discards historical operations, retaining only a witness
 //! for each applied batch.
 //!
-//! One implementation serves the keyless and immutable variants. A [`Variant`] supplies the
-//! operation type, how a batch accumulates mutations, and how commit operations are built and
+//! One implementation serves the keyless and immutable variants. The operation type implements
+//! [`Variant`]: how a batch accumulates mutations and how commit operations are built and
 //! read; [`crate::qmdb::keyless`] and [`crate::qmdb::immutable`] fix it through type aliases
 //! and add the variant-specific batch mutator (`append` / `set`).
 //!
@@ -41,7 +41,7 @@ use crate::{
         sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
 };
-use commonware_codec::{Encode, EncodeShared, Read};
+use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -52,16 +52,12 @@ pub(in crate::qmdb) mod sealed {
     pub trait Sealed {}
 }
 
-/// One compact db variant: its operation type, how a batch accumulates mutations, and how
-/// commit operations are built and read.
+/// An operation type a compact db is built over: how its commit operations are built and read,
+/// and how a batch accumulates the operations before its commit.
 ///
-/// Implemented by a marker type per variant. [`Db`] only builds and reads commit operations and
-/// turns a batch's mutations into operations; everything else about the operation type is
-/// opaque to it.
-pub trait Variant<F: Family>: sealed::Sealed + Clone + Send + Sync + 'static {
-    /// The operation type the root is computed over.
-    type Op: Clone + Send + Sync + Floored<F> + 'static;
-
+/// [`Db`] only builds and reads commit operations and turns a batch's mutations into operations;
+/// everything else about the operation type is opaque to it.
+pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + Clone + Send + Sync + 'static {
     /// The commit metadata type.
     type Metadata: Clone + Send + Sync + 'static;
 
@@ -72,14 +68,14 @@ pub trait Variant<F: Family>: sealed::Sealed + Clone + Send + Sync + 'static {
     const NAME: &'static str;
 
     /// Build a commit operation.
-    fn commit_op(metadata: Option<Self::Metadata>, inactivity_floor_loc: Location<F>) -> Self::Op;
+    fn commit_op(metadata: Option<Self::Metadata>, inactivity_floor_loc: Location<F>) -> Self;
 
     /// Split a commit operation into its metadata and inactivity floor, or `None` for any
     /// other operation.
-    fn into_commit(op: Self::Op) -> Option<(Option<Self::Metadata>, Location<F>)>;
+    fn into_commit(self) -> Option<(Option<Self::Metadata>, Location<F>)>;
 
     /// Turn a batch's mutations into operations, in application order.
-    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self::Op> + Send;
+    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self> + Send;
 }
 
 /// A compact authenticated db that discards historical operations, retaining only a witness
@@ -106,7 +102,7 @@ where
     E: Context,
     O: Variant<F>,
     H: Hasher,
-    O::Op: EncodeShared + Read<Cfg = C>,
+    O: EncodeShared + Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -223,7 +219,7 @@ where
     ) -> Arc<MerkleizedBatch<F, H::Digest, O, S>>
     where
         E: Context,
-        O::Op: EncodeShared,
+        O: EncodeShared,
     {
         let live_ancestors: Vec<_> =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
@@ -277,7 +273,7 @@ where
     O: Variant<F>,
     H: Hasher,
     S: Strategy,
-    O::Op: EncodeShared + Read<Cfg = C>,
+    O: EncodeShared + Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
     fn encode_commit_op(
@@ -307,7 +303,7 @@ where
         commit_codec_config: C,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
-        last_commit_op: O::Op,
+        last_commit_op: O,
     ) -> Result<Self, Error<F>> {
         let Some((last_commit_metadata, inactivity_floor_loc)) = O::into_commit(last_commit_op)
         else {
@@ -343,7 +339,7 @@ where
         commit_codec_config: C,
     ) -> Result<Self, Error<F>> {
         // Bootstrap: append an initial Commit(None, 0) on first open.
-        let (witness, last_commit_op) = witness::Store::init::<O::Op>(
+        let (witness, last_commit_op) = witness::Store::init::<O>(
             journal,
             strategy,
             &commit_codec_config,
@@ -533,7 +529,7 @@ where
         let last_commit_op;
         (self.witness, last_commit_op) = self
             .witness
-            .rewind::<O::Op>(target, &self.commit_codec_config)
+            .rewind::<O>(target, &self.commit_codec_config)
             .await?;
         let Some((last_commit_metadata, inactivity_floor_loc)) = O::into_commit(last_commit_op)
         else {
@@ -578,13 +574,13 @@ where
     E: Context,
     O: Variant<F>,
     H: Hasher,
-    O::Op: EncodeShared + Read<Cfg = C>,
+    O: EncodeShared + Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Family = F;
     type Digest = H::Digest;
-    type Op = O::Op;
+    type Op = O;
     type Error = qmdb::Error<F>;
 
     async fn serve(
@@ -621,11 +617,7 @@ pub(crate) mod tests {
 
     /// A compact db variant under test: its values and mutations derive from a seed.
     pub(crate) trait TestVariant:
-        Variant<
-            mmr::Family,
-            Op: EncodeShared + Read<Cfg = ()>,
-            Metadata: PartialEq + std::fmt::Debug,
-        >
+        Variant<mmr::Family, Metadata: PartialEq + std::fmt::Debug> + EncodeShared + Read<Cfg = ()>
     {
         /// The value (and commit metadata) for `seed`.
         fn value(seed: u64) -> Self::Metadata;

@@ -103,7 +103,7 @@ pub mod sync;
 pub mod variable;
 
 pub use compact::{
-    Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch, Set,
+    Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;

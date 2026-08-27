@@ -11,46 +11,38 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use std::marker::PhantomData;
 
-/// The keyless compact variant: batches append values.
-#[derive(Clone)]
-pub struct Append<V>(PhantomData<V>);
+impl<F: Family, V: ValueEncoding> db::sealed::Sealed for Operation<F, V> {}
 
-impl<V> db::sealed::Sealed for Append<V> {}
-
-impl<F: Family, V: ValueEncoding> db::Variant<F> for Append<V> {
-    type Op = Operation<F, V>;
+impl<F: Family, V: ValueEncoding> db::Variant<F> for Operation<F, V> {
     type Metadata = V::Value;
     type Mutations = Vec<V::Value>;
     const NAME: &'static str = "keyless";
 
-    fn commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self::Op {
-        Operation::Commit(metadata, inactivity_floor_loc)
+    fn commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self {
+        Self::Commit(metadata, inactivity_floor_loc)
     }
 
-    fn into_commit(op: Self::Op) -> Option<(Option<V::Value>, Location<F>)> {
-        match op {
-            Operation::Commit(metadata, inactivity_floor_loc) => {
-                Some((metadata, inactivity_floor_loc))
-            }
-            Operation::Append(_) => None,
+    fn into_commit(self) -> Option<(Option<V::Value>, Location<F>)> {
+        match self {
+            Self::Commit(metadata, inactivity_floor_loc) => Some((metadata, inactivity_floor_loc)),
+            Self::Append(_) => None,
         }
     }
 
-    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self::Op> {
-        mutations.into_iter().map(Operation::Append)
+    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self> {
+        mutations.into_iter().map(Self::Append)
     }
 }
 
 /// A keyless compact db.
-pub type Db<F, E, V, H, C, S> = db::Db<F, E, Append<V>, H, C, S>;
+pub type Db<F, E, V, H, C, S> = db::Db<F, E, Operation<F, V>, H, C, S>;
 
 /// A speculative batch for a keyless compact db.
-pub type UnmerkleizedBatch<F, H, V, S> = db::UnmerkleizedBatch<F, H, Append<V>, S>;
+pub type UnmerkleizedBatch<F, H, V, S> = db::UnmerkleizedBatch<F, H, Operation<F, V>, S>;
 
 /// A speculative batch for a keyless compact db whose root digest has been computed.
-pub type MerkleizedBatch<F, D, V, S> = db::MerkleizedBatch<F, D, Append<V>, S>;
+pub type MerkleizedBatch<F, D, V, S> = db::MerkleizedBatch<F, D, Operation<F, V>, S>;
 
 impl<F, H, V, S> UnmerkleizedBatch<F, H, V, S>
 where
@@ -70,7 +62,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::Location,
+        merkle::{Location, mmr},
         qmdb::{
             any::value::FixedEncoding,
             compact::db::tests::{TestBatch, TestVariant, compact_db_tests, open_db},
@@ -80,7 +72,7 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::sequence::U64;
 
-    type TestVariantMarker = Append<FixedEncoding<U64>>;
+    type TestVariantMarker = Operation<mmr::Family, FixedEncoding<U64>>;
 
     impl TestVariant for TestVariantMarker {
         fn value(seed: u64) -> U64 {

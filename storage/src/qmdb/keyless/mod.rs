@@ -69,7 +69,7 @@ mod operation;
 pub(crate) mod sync;
 pub mod variable;
 pub use compact::{
-    Append, Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
+    Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;

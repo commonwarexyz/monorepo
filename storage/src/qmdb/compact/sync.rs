@@ -23,12 +23,12 @@ where
     O: db::Variant<F>,
     H: Hasher,
     S: Strategy,
-    O::Op: EncodeShared + Read<Cfg = C>,
+    O: EncodeShared + Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
     type Family = F;
-    type Op = O::Op;
-    type Journal = Memory<F, E, O::Op>;
+    type Op = O;
+    type Journal = Memory<F, E, O>;
     type Config = Config<C, S>;
     type Digest = H::Digest;
     type Context = E;
@@ -46,7 +46,7 @@ where
     ) -> Result<Self, Error<F>> {
         let last_commit_loc = range.start();
         let (start, ops) = log.into_parts();
-        let (Ok([op]), true) = (<[O::Op; 1]>::try_from(ops), start == last_commit_loc) else {
+        let (Ok([op]), true) = (<[O; 1]>::try_from(ops), start == last_commit_loc) else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
 
