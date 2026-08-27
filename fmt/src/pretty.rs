@@ -37,6 +37,8 @@ pub enum Disposition {
     Formatted,
     /// Exact source was retained because formatting could lose trivia.
     PreservedForTrivia,
+    /// The enclosing source was retained while supported nested macros changed.
+    PreservedWithNestedFormatting,
 }
 
 /// A formatted fragment or an exact source-preserving fallback.
@@ -57,6 +59,13 @@ impl ProtectedFragment {
         Self {
             text: source.to_owned(),
             disposition: Disposition::PreservedForTrivia,
+        }
+    }
+
+    pub(crate) const fn preserved_with_nested_formatting(text: String) -> Self {
+        Self {
+            text,
+            disposition: Disposition::PreservedWithNestedFormatting,
         }
     }
 
@@ -95,6 +104,28 @@ pub fn expression(expression: &Expr, source: &str) -> Result<ProtectedFragment, 
             return Err(Error::WrapperShape);
         };
         if initializer.diverge.is_some() {
+            return Err(Error::WrapperShape);
+        }
+        extract_dedented(&formatted, initializer.expr.span())
+    })
+}
+
+pub(crate) fn value_block(expression: &Expr, source: &str) -> Result<ProtectedFragment, Error> {
+    format_or_preserve(source, || {
+        let wrapper = parse_wrapper(quote! {
+            fn __commonware_fmt() {
+                let __commonware_fmt_value = { #expression };
+            }
+        })?;
+        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
+        let function = sole_function(&reparsed)?;
+        let [Stmt::Local(local)] = function.block.stmts.as_slice() else {
+            return Err(Error::WrapperShape);
+        };
+        let Some(initializer) = &local.init else {
+            return Err(Error::WrapperShape);
+        };
+        if initializer.diverge.is_some() || !matches!(&*initializer.expr, Expr::Block(_)) {
             return Err(Error::WrapperShape);
         }
         extract_dedented(&formatted, initializer.expr.span())

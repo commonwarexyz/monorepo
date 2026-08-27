@@ -1,6 +1,6 @@
 //! Formatters for `select!` and `select_loop!` bodies.
 
-use super::{Error, Options};
+use super::{Error, Options, nested};
 use crate::{
     pretty::{self, Disposition, ProtectedFragment},
     source::SourceMap,
@@ -19,6 +19,7 @@ struct BranchLayout {
     divergence: Option<String>,
     body: String,
     body_is_block: bool,
+    wrapped_body: Option<String>,
 }
 
 struct LifecycleLayout {
@@ -28,15 +29,23 @@ struct LifecycleLayout {
 
 /// Formats the delimiter contents of a `select!` invocation.
 pub fn select(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
+    select_at_depth(source, options, 0)
+}
+
+pub(super) fn select_at_depth(
+    source: &str,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<SelectInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
     if select_has_structural_trivia(source, &source_map, &input)? {
-        return Ok(ProtectedFragment::preserved(source));
+        return preserve_select(source, &source_map, &input, options, depth);
     }
     let mut branches = Vec::with_capacity(input.branches.len());
     for branch in &input.branches {
-        let Some(branch) = format_select_branch(&source_map, branch)? else {
-            return Ok(ProtectedFragment::preserved(source));
+        let Some(branch) = format_select_branch(source, &source_map, branch, depth)? else {
+            return preserve_select(source, &source_map, &input, options, depth);
         };
         branches.push(branch);
     }
@@ -53,26 +62,42 @@ pub fn select(source: &str, options: Options) -> Result<ProtectedFragment, Error
 
 /// Formats the delimiter contents of a `select_loop!` invocation.
 pub fn select_loop(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
+    select_loop_at_depth(source, options, 0)
+}
+
+pub(super) fn select_loop_at_depth(
+    source: &str,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<SelectLoopInput>(source).map_err(Error::Parse)?;
     input.validate().map_err(Error::Validate)?;
     let source_map = SourceMap::new(source);
     if select_loop_has_structural_trivia(source, &source_map, &input)? {
-        return Ok(ProtectedFragment::preserved(source));
+        return preserve_select_loop(source, &source_map, &input, options, depth);
     }
-    let Some(context) = format_expression(&source_map, &input.context)? else {
-        return Ok(ProtectedFragment::preserved(source));
+    let Some(context) = format_expression(source, &source_map, &input.context, depth)? else {
+        return preserve_select_loop(source, &source_map, &input, options, depth);
     };
     let on_start = match &input.on_start {
         Some(lifecycle) => {
-            let Some(lifecycle) = format_lifecycle(&source_map, lifecycle)? else {
-                return Ok(ProtectedFragment::preserved(source));
+            let Some(lifecycle) = format_lifecycle(source, &source_map, lifecycle, depth)? else {
+                return preserve_select_loop(source, &source_map, &input, options, depth);
             };
             Some(lifecycle)
         }
         None => None,
     };
 
-    render_select_loop(source, options, &input, &source_map, context, on_start)
+    render_select_loop(
+        source,
+        options,
+        &input,
+        &source_map,
+        context,
+        on_start,
+        depth,
+    )
 }
 
 fn render_select_loop(
@@ -82,21 +107,22 @@ fn render_select_loop(
     source_map: &SourceMap<'_>,
     context: String,
     on_start: Option<LifecycleLayout>,
+    depth: usize,
 ) -> Result<ProtectedFragment, Error> {
-    let Some(on_stopped) = format_lifecycle(source_map, &input.on_stopped)? else {
-        return Ok(ProtectedFragment::preserved(source));
+    let Some(on_stopped) = format_lifecycle(source, source_map, &input.on_stopped, depth)? else {
+        return preserve_select_loop(source, source_map, input, options, depth);
     };
     let mut branches = Vec::with_capacity(input.branches.len());
     for branch in &input.branches {
-        let Some(branch) = format_select_loop_branch(source_map, branch)? else {
-            return Ok(ProtectedFragment::preserved(source));
+        let Some(branch) = format_select_loop_branch(source, source_map, branch, depth)? else {
+            return preserve_select_loop(source, source_map, input, options, depth);
         };
         branches.push(branch);
     }
     let on_end = match &input.on_end {
         Some(lifecycle) => {
-            let Some(lifecycle) = format_lifecycle(source_map, lifecycle)? else {
-                return Ok(ProtectedFragment::preserved(source));
+            let Some(lifecycle) = format_lifecycle(source, source_map, lifecycle, depth)? else {
+                return preserve_select_loop(source, source_map, input, options, depth);
             };
             Some(lifecycle)
         }
@@ -127,23 +153,30 @@ fn render_select_loop(
 }
 
 fn format_select_branch(
+    source: &str,
     source_map: &SourceMap<'_>,
     branch: &SelectBranch,
+    depth: usize,
 ) -> Result<Option<BranchLayout>, Error> {
     format_branch(
+        source,
         source_map,
         &branch.pattern,
         &branch.future,
         None,
         &branch.body,
+        depth,
     )
 }
 
 fn format_select_loop_branch(
+    source: &str,
     source_map: &SourceMap<'_>,
     branch: &SelectLoopBranch,
+    depth: usize,
 ) -> Result<Option<BranchLayout>, Error> {
     format_branch(
+        source,
         source_map,
         &branch.pattern,
         &branch.future,
@@ -152,27 +185,39 @@ fn format_select_loop_branch(
             .as_ref()
             .map(|else_clause| &else_clause.expression),
         &branch.body,
+        depth,
     )
 }
 
 fn format_branch(
+    source: &str,
     source_map: &SourceMap<'_>,
     pattern: &syn::Pat,
     future: &Expr,
     divergence: Option<&Expr>,
-    body: &Expr,
+    body_expression: &Expr,
+    depth: usize,
 ) -> Result<Option<BranchLayout>, Error> {
-    let body_is_block = matches!(body, Expr::Block(_));
+    let body_is_block = matches!(body_expression, Expr::Block(_));
     let pattern_source = spanned_source(source_map, pattern)?;
     let future_source = spanned_source(source_map, future)?;
-    let body_source = spanned_source(source_map, body)?;
+    let body_source = spanned_source(source_map, body_expression)?;
     let pattern = pretty::pattern(pattern, pattern_source)?;
-    let future = pretty::expression(future, future_source)?;
-    let body = pretty::expression(body, body_source)?;
+    let future = nested::expression(future, future_source, source, source_map, depth)?;
+    let body = nested::expression(body_expression, body_source, source, source_map, depth)?;
+    let wrapped_body = if body_is_block || body.disposition() != Disposition::Formatted {
+        None
+    } else {
+        let wrapped = nested::value_block(body_expression, body_source, source, source_map, depth)?;
+        if wrapped.disposition() != Disposition::Formatted {
+            return Ok(None);
+        }
+        Some(wrapped.into_string())
+    };
     let divergence = divergence
         .map(|expression| {
             let expression_source = spanned_source(source_map, expression)?;
-            pretty::expression(expression, expression_source).map_err(Error::from)
+            nested::expression(expression, expression_source, source, source_map, depth)
         })
         .transpose()?;
     if [&pattern, &future, &body].into_iter().any(is_immovable)
@@ -187,14 +232,18 @@ fn format_branch(
         divergence: divergence.map(ProtectedFragment::into_string),
         body: body.into_string(),
         body_is_block,
+        wrapped_body,
     }))
 }
 
 fn format_lifecycle(
+    source: &str,
     source_map: &SourceMap<'_>,
     lifecycle: &SelectLoopLifecycle,
+    depth: usize,
 ) -> Result<Option<LifecycleLayout>, Error> {
-    let Some(expression) = format_expression(source_map, &lifecycle.expression)? else {
+    let Some(expression) = format_expression(source, source_map, &lifecycle.expression, depth)?
+    else {
         return Ok(None);
     };
     Ok(Some(LifecycleLayout {
@@ -204,11 +253,13 @@ fn format_lifecycle(
 }
 
 fn format_expression(
+    source: &str,
     source_map: &SourceMap<'_>,
     expression: &Expr,
+    depth: usize,
 ) -> Result<Option<String>, Error> {
     let expression_source = spanned_source(source_map, expression)?;
-    let expression = pretty::expression(expression, expression_source)?;
+    let expression = nested::expression(expression, expression_source, source, source_map, depth)?;
     if is_immovable(&expression) {
         return Ok(None);
     }
@@ -221,8 +272,47 @@ fn spanned_source<'a>(source_map: &SourceMap<'a>, value: &impl Spanned) -> Resul
 }
 
 fn is_immovable(fragment: &ProtectedFragment) -> bool {
-    fragment.disposition() == Disposition::PreservedForTrivia
+    fragment.disposition() != Disposition::Formatted
         && (fragment.text().contains('\n') || fragment.text().contains('\r'))
+}
+
+fn preserve_select(
+    source: &str,
+    source_map: &SourceMap<'_>,
+    input: &SelectInput,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    let expressions = input
+        .branches
+        .iter()
+        .flat_map(|branch| [&branch.future, &branch.body])
+        .collect::<Vec<_>>();
+    nested::preserve_with_nested(source, source_map, &expressions, options, depth)
+}
+
+fn preserve_select_loop(
+    source: &str,
+    source_map: &SourceMap<'_>,
+    input: &SelectLoopInput,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    let mut expressions = vec![&input.context, &input.on_stopped.expression];
+    if let Some(on_start) = &input.on_start {
+        expressions.push(&on_start.expression);
+    }
+    for branch in &input.branches {
+        expressions.push(&branch.future);
+        if let Some(else_clause) = &branch.else_clause {
+            expressions.push(&else_clause.expression);
+        }
+        expressions.push(&branch.body);
+    }
+    if let Some(on_end) = &input.on_end {
+        expressions.push(&on_end.expression);
+    }
+    nested::preserve_with_nested(source, source_map, &expressions, options, depth)
 }
 
 fn select_has_structural_trivia(
@@ -322,8 +412,12 @@ fn write_branch(writer: &mut Writer<'_>, branch: &BranchLayout) {
     write_branch_head(writer, branch);
     if branch.body_is_block {
         write_block_body(writer, &branch.body);
+    } else if let Some(wrapped_body) = &branch.wrapped_body {
+        write_block_body(writer, wrapped_body);
     } else {
-        write_value_body(writer, &branch.body);
+        writer.push(" => ");
+        writer.push(&branch.body);
+        writer.push(",");
     }
 }
 
@@ -384,40 +478,6 @@ fn write_block_body(writer: &mut Writer<'_>, body: &str) {
     }
     writer.push(body);
     writer.push(",");
-}
-
-fn write_value_body(writer: &mut Writer<'_>, body: &str) {
-    let inline = format!(" => {body},");
-    if !body.contains('\n') && writer.fits(&inline) {
-        writer.push(&inline);
-        return;
-    }
-
-    let mut started_new_line = false;
-    if !body.contains('\n') {
-        let compact_block = format!("=> {{ {body} }},");
-        writer.newline();
-        started_new_line = true;
-        if writer.fits(&compact_block) {
-            writer.push(&compact_block);
-            return;
-        }
-    }
-
-    if !started_new_line && writer.fits(" => {") {
-        writer.push(" => {");
-    } else {
-        if !started_new_line {
-            writer.newline();
-        }
-        writer.push("=> {");
-    }
-    writer.newline();
-    writer.indented(|writer| {
-        writer.push(body);
-        writer.newline();
-    });
-    writer.push("},");
 }
 
 fn write_expression_entry(writer: &mut Writer<'_>, keyword: Option<&str>, expression: &str) {
@@ -579,6 +639,41 @@ mod tests {
     }
 
     #[test]
+    fn formats_nested_select_inside_preserved_shell() {
+        let source = "\n    // Keep the outer shell.\n    outer = receive_outer() => select! {inner=receive_inner()=>inner},\n";
+        let once = select(source, OPTIONS)
+            .expect("nested select should format inside preserved shell")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("nested select should format twice")
+            .into_string();
+
+        assert!(once.contains("// Keep the outer shell."));
+        assert!(
+            once.contains("select! {\n        inner = receive_inner() => inner,\n    }"),
+            "{once}"
+        );
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn uses_parent_indentation_for_first_line_nested_macro() {
+        let options = Options {
+            indentation: 8,
+            line_ending: LineEnding::Lf,
+        };
+        let source =
+            "/* keep seam */ outer=receive_outer()=>select! {inner=receive_inner()=>inner}";
+        let formatted = select(source, options).expect("nested select should format safely");
+
+        assert!(
+            formatted
+                .text()
+                .contains("select! {\n            inner = receive_inner() => inner,\n        }")
+        );
+    }
+
+    #[test]
     fn formats_shell_around_single_line_protected_fragment() {
         let source = "value=receive()=>call(/* keep exactly */ value)";
         let formatted = select(source, OPTIONS).expect("select should format safely");
@@ -632,6 +727,80 @@ mod tests {
             .into_string();
 
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn recursively_formats_nested_select() {
+        let source = "outer=receive_outer()=>select! {inner=receive_inner()=>inner}";
+        let once = select(source, OPTIONS)
+            .expect("nested select should format")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("nested select should format twice")
+            .into_string();
+
+        assert!(
+            once.contains("select! {\n            inner = receive_inner() => inner,\n        }")
+        );
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn recursively_formats_nested_select_loop() {
+        let source = "outer=receive_outer()=>select_loop! {context,on_stopped=>shutdown(),inner=receive_inner()=>inner}";
+        let once = select(source, OPTIONS)
+            .expect("nested select loop should format")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("nested select loop should format twice")
+            .into_string();
+
+        assert!(once.contains("select_loop! {\n            context,"));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn recursively_formats_sibling_nested_selects_with_marker_collision() {
+        let source = "outer=receive_outer()=>{let __commonware_fmt_nested_0_0=0;let first=select! {value=receive_first()=>value};let second=select! {value=receive_second()=>value};(first,second,__commonware_fmt_nested_0_0)}";
+        let once = select(source, OPTIONS)
+            .expect("sibling selects should format")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("sibling selects should format twice")
+            .into_string();
+
+        assert_eq!(once.matches("value = receive_").count(), 2);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn bounds_nested_select_recursion() {
+        let mut body = "value".to_owned();
+        for depth in 0..34 {
+            body = format!("select! {{value_{depth}=receive_{depth}()=>{body}}}");
+        }
+        let source = format!("outer=receive_outer()=>{body}");
+
+        assert!(matches!(
+            select(&source, OPTIONS),
+            Err(Error::RecursionLimit)
+        ));
+    }
+
+    #[test]
+    fn bounds_preserved_nested_select_recursion() {
+        let mut body = "value".to_owned();
+        for depth in 0..34 {
+            body = format!(
+                "select! {{\n// keep shell {depth}\nvalue_{depth}=receive_{depth}()=>{body}\n}}"
+            );
+        }
+        let source = format!("/* keep outer shell */ outer=receive_outer()=>{body}");
+
+        assert!(matches!(
+            select(&source, OPTIONS),
+            Err(Error::RecursionLimit)
+        ));
     }
 
     #[test]
