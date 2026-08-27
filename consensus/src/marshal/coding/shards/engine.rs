@@ -305,6 +305,8 @@ where
     proposed: bool,
 }
 
+/// Lifecycle records keyed by the complete commitment, including its coding
+/// root and configuration.
 type CommitmentRecords<B, C, H, P> = BTreeMap<Commitment<B, C, H>, CommitmentRecord<B, C, H, P>>;
 
 /// The current lifecycle status of a commitment.

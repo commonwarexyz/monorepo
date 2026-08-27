@@ -305,9 +305,9 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
 /// Pairs the inner block's codec config with the [`Commitment`] that the
-/// decoded block must match. The [`Read`] impl rejects any block whose
-/// recoded form would not produce `expected` without performing the full
-/// re-encoding.
+/// decoded block must match. The [`Read`] impl re-encodes the block and
+/// rejects it unless its block digest, coding configuration, and coding root match
+/// `expected`.
 pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
@@ -347,6 +347,8 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             ));
         }
 
+        // Recompute the coding root so the returned block satisfies the exact
+        // commitment requested by the caller.
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
@@ -710,6 +712,7 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
+        // Build an expected commitment that differs only in its coding root.
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let commitment = coded.commitment();
@@ -722,6 +725,8 @@ mod test {
             commitment.config(),
         ));
 
+        // Decoding must reject bytes that do not satisfy the exact expected
+        // commitment.
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             coded.encode(),
             &CodedBlockCfg {

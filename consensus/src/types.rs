@@ -920,7 +920,10 @@ commonware_macros::stability_scope!(ALPHA {
         };
         use rand_core::CryptoRng;
 
-        /// The maximum encoded size of any digest field in a [`Commitment`].
+        /// The fixed wire width reserved for each digest field in a [`Commitment`].
+        ///
+        /// A concrete width keeps the representation independent of `B`, `C`, and `H`;
+        /// stable Rust cannot use their associated sizes in the backing array length.
         pub const COMMITMENT_DIGEST_SIZE: usize = 32;
 
         /// The encoded size of a [`Commitment`].
@@ -1005,6 +1008,7 @@ commonware_macros::stability_scope!(ALPHA {
                     .expect("Commitment fields are validated on construction")
             }
 
+            /// Validates a typed digest field and its canonical zero padding.
             fn validate_field<T: ReadExt + FixedSize>(
                 bytes: &[u8],
                 offset: usize,
@@ -1023,6 +1027,7 @@ commonware_macros::stability_scope!(ALPHA {
                 Ok(())
             }
 
+            /// Ensures each typed digest fits its fixed-width wire field.
             const fn assert_layout() {
                 assert!(
                     B::Digest::SIZE <= COMMITMENT_DIGEST_SIZE,
@@ -2383,12 +2388,14 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
 
+        type TestCommitment = Commitment<TestBlock<Sha256Digest>, ReedSolomon<Sha256>, Sha256>;
+
         commonware_conformance::conformance_tests! {
             CodecConformance<Epoch>,
             CodecConformance<Height>,
             CodecConformance<View>,
             CodecConformance<Round>,
-            CodecConformance<Commitment<TestBlock<Sha256Digest>, ReedSolomon<Sha256>, Sha256>>,
+            CodecConformance<TestCommitment>,
         }
     }
 }
