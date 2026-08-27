@@ -107,10 +107,6 @@ commonware_macros::stability_scope!(BETA {
 
     impl<S> Manual<S> {
         /// Creates a strategy wrapper for manually partitioned work.
-        ///
-        /// Unlike [`Strategy::manual`], this wraps `strategy` as-is: an adaptive strategy keeps
-        /// its policy, spawn placement included. Use [`Strategy::manual`] to disable adaptive
-        /// decisions.
         pub const fn new(strategy: S, parallelism: NonZeroUsize) -> Self {
             Self {
                 strategy,
