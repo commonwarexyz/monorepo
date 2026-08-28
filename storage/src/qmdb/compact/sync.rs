@@ -1,6 +1,6 @@
 //! [`crate::qmdb::sync::Database`] for the compact db.
 
-use super::{Config, db};
+use super::{Config, Db, Variant};
 use crate::{
     Context,
     journal::contiguous::variable,
@@ -16,11 +16,11 @@ use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use core::num::NonZeroU64;
 
-impl<F, E, O, H, C, S> sync::Database for db::Db<F, E, O, H, C, S>
+impl<F, E, O, H, C, S> sync::Database for Db<F, E, O, H, C, S>
 where
     F: Family,
     E: Context,
-    O: db::Variant<F>,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
     O: EncodeShared + Read<Cfg = C>,
@@ -46,9 +46,12 @@ where
     ) -> Result<Self, Error<F>> {
         let last_commit_loc = range.start();
         let (start, ops) = log.into_parts();
-        let (Ok([op]), true) = (<[O; 1]>::try_from(ops), start == last_commit_loc) else {
+        let Ok([op]) = <[O; 1]>::try_from(ops) else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
+        if start != last_commit_loc {
+            return Err(Error::UnexpectedData(last_commit_loc));
+        }
 
         let journal = variable::Journal::init(context.child("witness"), config.witness).await?;
         Self::init_from_sync(

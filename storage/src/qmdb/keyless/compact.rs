@@ -1,20 +1,20 @@
-//! The keyless compact db: a [`db::Db`] whose batches append values.
+//! The keyless compact db: a [`compact::Db`] whose batches append values.
 //!
-//! See [`crate::qmdb::compact::db`] for the shared implementation. Commits carry an inactivity
+//! See [`crate::qmdb::compact`] for the shared implementation. Commits carry an inactivity
 //! floor for wire-format compatibility with [`crate::qmdb::keyless::Keyless`].
 
 use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, compact::db},
+    qmdb::{any::value::ValueEncoding, compact},
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 
-impl<F: Family, V: ValueEncoding> db::sealed::Sealed for Operation<F, V> {}
+impl<F: Family, V: ValueEncoding> compact::sealed::Sealed for Operation<F, V> {}
 
-impl<F: Family, V: ValueEncoding> db::Variant<F> for Operation<F, V> {
+impl<F: Family, V: ValueEncoding> compact::Variant<F> for Operation<F, V> {
     type Metadata = V::Value;
     type Mutations = Vec<V::Value>;
     const NAME: &'static str = "keyless";
@@ -36,13 +36,13 @@ impl<F: Family, V: ValueEncoding> db::Variant<F> for Operation<F, V> {
 }
 
 /// A keyless compact db.
-pub type Db<F, E, V, H, C, S> = db::Db<F, E, Operation<F, V>, H, C, S>;
+pub type Db<F, E, V, H, C, S> = compact::Db<F, E, Operation<F, V>, H, C, S>;
 
 /// A speculative batch for a keyless compact db.
-pub type UnmerkleizedBatch<F, H, V, S> = db::UnmerkleizedBatch<F, H, Operation<F, V>, S>;
+pub type UnmerkleizedBatch<F, H, V, S> = compact::UnmerkleizedBatch<F, H, Operation<F, V>, S>;
 
 /// A speculative batch for a keyless compact db whose root digest has been computed.
-pub type MerkleizedBatch<F, D, V, S> = db::MerkleizedBatch<F, D, Operation<F, V>, S>;
+pub type MerkleizedBatch<F, D, V, S> = compact::MerkleizedBatch<F, D, Operation<F, V>, S>;
 
 impl<F, H, V, S> UnmerkleizedBatch<F, H, V, S>
 where
@@ -72,9 +72,9 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::sequence::U64;
 
-    type TestVariantMarker = Operation<mmr::Family, FixedEncoding<U64>>;
+    type TestOperation = Operation<mmr::Family, FixedEncoding<U64>>;
 
-    impl TestVariant for TestVariantMarker {
+    impl TestVariant for TestOperation {
         fn value(seed: u64) -> U64 {
             U64::new(seed)
         }
@@ -84,15 +84,14 @@ mod tests {
         }
     }
 
-    compact_db_tests!(TestVariantMarker);
+    compact_db_tests!(TestOperation);
 
     /// Appends are ordered: the same values in a different order give a different root.
     #[test_traced("INFO")]
     fn test_compact_append_order_is_significant() {
         deterministic::Runner::default().start(|context| async move {
             let forward =
-                open_db::<TestVariantMarker>(context.child("forward"), "compact-append-forward")
-                    .await;
+                open_db::<TestOperation>(context.child("forward"), "compact-append-forward").await;
             let floor = forward.inactivity_floor_loc();
             let batch = forward
                 .new_batch()
@@ -104,8 +103,7 @@ mod tests {
             assert_eq!(range, Location::new(1)..Location::new(4));
 
             let reverse =
-                open_db::<TestVariantMarker>(context.child("reverse"), "compact-append-reverse")
-                    .await;
+                open_db::<TestOperation>(context.child("reverse"), "compact-append-reverse").await;
             let batch = reverse
                 .new_batch()
                 .append(U64::new(2))

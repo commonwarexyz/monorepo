@@ -29,9 +29,7 @@
 //! snapshot rebuilding here; all historical in-memory state is discarded whenever a batch is
 //! applied.
 
-pub use super::variant::Variant;
-pub(in crate::qmdb) use super::variant::sealed;
-use super::{Config, batch as compact_batch, witness};
+use super::{Config, Variant, batch as compact_batch, witness};
 use crate::{
     Context,
     journal::contiguous::variable,
@@ -43,11 +41,13 @@ use crate::{
     },
 };
 use commonware_codec::{EncodeShared, Read};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use std::sync::{Arc, Weak};
+
+type MerkleizedParent<F, H, O, S> = Arc<MerkleizedBatch<F, DigestOf<H>, O, S>>;
 
 /// A compact authenticated db that discards historical operations, retaining only a witness
 /// for each applied batch.
@@ -83,7 +83,6 @@ where
 }
 
 /// A speculative batch for a compact db.
-#[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, O, S: Strategy>
 where
     F: Family,
@@ -92,7 +91,7 @@ where
 {
     merkle_batch: compact_merkle::UnmerkleizedBatch<F, H::Digest, S>,
     pub(in crate::qmdb) mutations: O::Mutations,
-    parent: Option<Arc<MerkleizedBatch<F, H::Digest, O, S>>>,
+    parent: Option<MerkleizedParent<F, H, O, S>>,
     base: Commitment<F, H::Digest>,
 }
 
@@ -2258,7 +2257,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_noop_commit_after_commit<O: TestVariant>() {
+    pub(crate) fn test_compact_noop_sync_after_sync<O: TestVariant>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-noop-after-commit").await;
 
@@ -2281,7 +2280,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_noop_commit_after_reopen<O: TestVariant>() {
+    pub(crate) fn test_compact_noop_sync_after_reopen<O: TestVariant>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-noop-after-reopen";
 
@@ -2312,7 +2311,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_noop_commit_after_rewind<O: TestVariant>() {
+    pub(crate) fn test_compact_noop_sync_after_rewind<O: TestVariant>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-noop-after-rewind").await;
 
@@ -2469,9 +2468,9 @@ pub(crate) mod tests {
                 test_compact_rewind_multiple_commits,
                 test_compact_prune_then_rewind,
                 test_compact_rewind_preserves_pre_advance_batch,
-                test_compact_noop_commit_after_commit,
-                test_compact_noop_commit_after_reopen,
-                test_compact_noop_commit_after_rewind,
+                test_compact_noop_sync_after_sync,
+                test_compact_noop_sync_after_reopen,
+                test_compact_noop_sync_after_rewind,
                 test_compact_rewind_makes_post_advance_batch_stale,
                 test_compact_floor_beyond_size,
                 test_compact_ancestor_floor_beyond_size

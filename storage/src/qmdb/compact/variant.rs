@@ -12,7 +12,7 @@ pub(in crate::qmdb) mod sealed {
 /// An operation type a compact db is built over: how its commit operations are built and read,
 /// and how a batch accumulates the operations before its commit.
 ///
-/// [`Db`](super::db::Db) only builds and reads commit operations and turns a batch's mutations
+/// [`Db`](super::Db) only builds and reads commit operations and turns a batch's mutations
 /// into operations; everything else about the operation type is opaque to it.
 pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + Clone + Send + Sync + 'static {
     /// The commit metadata type.

@@ -1,21 +1,21 @@
-//! The immutable compact db: a [`db::Db`] whose batches set keys.
+//! The immutable compact db: a [`compact::Db`] whose batches set keys.
 //!
-//! See [`crate::qmdb::compact::db`] for the shared implementation. Commits carry an inactivity
+//! See [`crate::qmdb::compact`] for the shared implementation. Commits carry an inactivity
 //! floor for wire-format compatibility with [`crate::qmdb::immutable::Immutable`].
 
 use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, compact::db, operation::Key},
+    qmdb::{any::value::ValueEncoding, compact, operation::Key},
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use std::collections::BTreeMap;
 
-impl<F: Family, K: Key, V: ValueEncoding> db::sealed::Sealed for Operation<F, K, V> {}
+impl<F: Family, K: Key, V: ValueEncoding> compact::sealed::Sealed for Operation<F, K, V> {}
 
-impl<F: Family, K: Key, V: ValueEncoding> db::Variant<F> for Operation<F, K, V> {
+impl<F: Family, K: Key, V: ValueEncoding> compact::Variant<F> for Operation<F, K, V> {
     type Metadata = V::Value;
     type Mutations = BTreeMap<K, V::Value>;
     const NAME: &'static str = "immutable";
@@ -39,13 +39,13 @@ impl<F: Family, K: Key, V: ValueEncoding> db::Variant<F> for Operation<F, K, V> 
 }
 
 /// An immutable compact db.
-pub type Db<F, E, K, V, H, C, S> = db::Db<F, E, Operation<F, K, V>, H, C, S>;
+pub type Db<F, E, K, V, H, C, S> = compact::Db<F, E, Operation<F, K, V>, H, C, S>;
 
 /// A speculative batch for an immutable compact db.
-pub type UnmerkleizedBatch<F, H, K, V, S> = db::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>;
+pub type UnmerkleizedBatch<F, H, K, V, S> = compact::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>;
 
 /// A speculative batch for an immutable compact db whose root digest has been computed.
-pub type MerkleizedBatch<F, D, K, V, S> = db::MerkleizedBatch<F, D, Operation<F, K, V>, S>;
+pub type MerkleizedBatch<F, D, K, V, S> = compact::MerkleizedBatch<F, D, Operation<F, K, V>, S>;
 
 impl<F, H, K, V, S> UnmerkleizedBatch<F, H, K, V, S>
 where
@@ -76,9 +76,9 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
-    type TestVariantMarker = Operation<mmr::Family, Digest, FixedEncoding<Digest>>;
+    type TestOperation = Operation<mmr::Family, Digest, FixedEncoding<Digest>>;
 
-    impl TestVariant for TestVariantMarker {
+    impl TestVariant for TestOperation {
         fn value(seed: u64) -> Digest {
             Sha256::hash(&[&seed.to_le_bytes()])
         }
@@ -88,7 +88,7 @@ mod tests {
         }
     }
 
-    compact_db_tests!(TestVariantMarker);
+    compact_db_tests!(TestOperation);
 
     /// Setting a key twice in one batch keeps the later value and emits one operation.
     #[test_traced("INFO")]
@@ -97,8 +97,7 @@ mod tests {
             let key = Sha256::hash(&[b"key"]);
             let (first, last) = (Sha256::fill(1), Sha256::fill(2));
 
-            let twice =
-                open_db::<TestVariantMarker>(context.child("twice"), "compact-set-twice").await;
+            let twice = open_db::<TestOperation>(context.child("twice"), "compact-set-twice").await;
             let floor = twice.inactivity_floor_loc();
             let batch = twice
                 .new_batch()
@@ -109,8 +108,7 @@ mod tests {
             let (twice, range) = twice.apply_batch(batch).await.unwrap();
             assert_eq!(range, Location::new(1)..Location::new(3));
 
-            let once =
-                open_db::<TestVariantMarker>(context.child("once"), "compact-set-once").await;
+            let once = open_db::<TestOperation>(context.child("once"), "compact-set-once").await;
             let batch = once
                 .new_batch()
                 .set(key, last)
@@ -129,7 +127,7 @@ mod tests {
             let (v1, v2) = (Sha256::fill(1), Sha256::fill(2));
 
             let forward =
-                open_db::<TestVariantMarker>(context.child("forward"), "compact-set-forward").await;
+                open_db::<TestOperation>(context.child("forward"), "compact-set-forward").await;
             let floor = forward.inactivity_floor_loc();
             let batch = forward
                 .new_batch()
@@ -140,7 +138,7 @@ mod tests {
             let (forward, _) = forward.apply_batch(batch).await.unwrap();
 
             let reverse =
-                open_db::<TestVariantMarker>(context.child("reverse"), "compact-set-reverse").await;
+                open_db::<TestOperation>(context.child("reverse"), "compact-set-reverse").await;
             let batch = reverse
                 .new_batch()
                 .set(k2, v2)
