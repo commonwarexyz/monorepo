@@ -46,7 +46,7 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
     ) -> impl Future<Output = Result<Arc<Self::MerkleizedBatch>, Error<Self::Family>>> + Send;
 
     /// Apply a merkleized batch.
-    fn apply(
+    fn apply_batch(
         self,
         batch: Arc<Self::MerkleizedBatch>,
     ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
@@ -213,7 +213,7 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
     }
 
     async fn apply(self, batch: Merkleized<D>) -> Result<Self, Error<D::Family>> {
-        Qmdb::apply(self, batch.inner).await
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<D::Family>> {

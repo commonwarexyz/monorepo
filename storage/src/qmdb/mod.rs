@@ -109,8 +109,10 @@ pub const fn hasher<H: Hasher>() -> StandardHasher<H> {
     StandardHasher::new(ROOT_BAGGING)
 }
 
-/// Return the root of an operation log containing only `operation`, which is how
-/// [`sync::Database::initial_target`] derives a fresh database's root without opening one.
+/// Return the root of an operation log containing only `operation`.
+///
+/// This lets database variants derive their initial root from the bootstrap commit without
+/// opening a database.
 fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Digest {
     let hasher = hasher::<H>();
     let leaf = MerkleHasher::<F>::leaf_digest(
@@ -124,8 +126,7 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 
 /// Look up the inactivity floor declared by the commit at `size - 1`.
 ///
-/// `size` must be a non-zero commit-boundary size: the operation at `size - 1` must be a commit
-/// (one for which [`Committable::floor`] returns `Some`).
+/// `size` must be a non-zero commit-boundary size: the operation at `size - 1` must be a commit.
 ///
 /// # Errors
 ///
@@ -154,22 +155,12 @@ where
 
     let op = reader.read(last_op).await?;
     let floor = op.floor().ok_or(Error::HistoricalFloorPruned(size))?;
-    validate_inactivity_floor(floor, Location::new(last_op))?;
-    Ok(floor)
-}
-
-/// Reject an inactivity floor declared past the commit that declares it, which indicates disk
-/// corruption.
-pub(crate) fn validate_inactivity_floor<F: Family>(
-    floor: Location<F>,
-    commit: Location<F>,
-) -> Result<(), Error<F>> {
-    if floor > commit {
+    if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
         ));
     }
-    Ok(())
+    Ok(floor)
 }
 
 /// Compute the inactive peak count for a historical `size`.
@@ -243,8 +234,9 @@ pub enum Error<F: Family> {
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
 
-    /// The operation at `size - 1` is not a retained commit, so no inactivity floor governs
-    /// `size`. Either the caller passed a non-commit-boundary size or pruning removed the commit.
+    /// The operation at `size - 1` is not a retained commit, so the inactivity floor at `size`
+    /// cannot be read. Either the caller passed a non-commit-boundary size or pruning removed
+    /// the commit.
     #[error("historical floor pruned for size: {0}")]
     HistoricalFloorPruned(Location<F>),
 }

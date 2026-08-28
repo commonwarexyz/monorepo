@@ -267,7 +267,7 @@ where
         batch.merkleize(self, metadata).await
     }
 
-    async fn apply(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+    async fn apply_batch(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch).await?;
         Ok(db)
     }

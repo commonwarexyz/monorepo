@@ -345,7 +345,11 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
-        qmdb::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+        if inactivity_floor_loc > last_commit_loc {
+            return Err(Error::DataCorrupted(
+                "inactivity floor exceeds commit location",
+            ));
+        }
 
         let op_bytes = Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc);
         let merkle =

@@ -52,10 +52,6 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 }
 
 /// A QMDB the sync engine can build.
-///
-/// [`Self::init`] and [`Self::initial_target`] are not used by the engine. They let callers
-/// open and describe databases generically. The engine verifies [`Self::target`]`.root` of the
-/// rebuilt database against the requested target.
 pub trait Database: Sized + Send {
     type Family: Family;
     type Op: Committable<Self::Family> + Encode + Send + Sync;
@@ -102,8 +98,7 @@ pub trait Database: Sized + Send {
         journal: &Self::Journal,
     ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, Error<Self::Family>>> + Send;
 
-    /// Sync target of a freshly initialized database. [`Self::init`] must bootstrap a fresh
-    /// database with exactly [`Committable::initial_commit`] at location 0 for this to hold.
+    /// Sync target of a freshly initialized database.
     fn initial_target() -> Target<Self::Family, Self::Digest> {
         Target {
             root: single_operation_root::<Self::Family, Self::Hasher>(&Self::Op::initial_commit()),
@@ -111,8 +106,7 @@ pub trait Database: Sized + Send {
         }
     }
 
-    /// Sync target of the applied state: [`Self::initial_target`] for a freshly initialized
-    /// database, [`MerkleizedBatch::target`] of the last applied batch otherwise.
+    /// Sync target to get to this database's state.
     fn target(&self) -> Target<Self::Family, Self::Digest>;
 
     /// Reject a target this database cannot sync to. The engine checks the initial target and
@@ -124,11 +118,7 @@ pub trait Database: Sized + Send {
     }
 }
 
-/// A merkleized batch's canonical root, the sync target reached once it is applied, and the
-/// batches that can be rooted at it.
-///
-/// `target().root` is the root the sync engine verifies, which may differ from the canonical
-/// `root()`.
+/// A merkleized batch atop this database.
 pub trait MerkleizedBatch {
     type Family: Family;
     type Digest: Digest;
@@ -141,9 +131,7 @@ pub trait MerkleizedBatch {
     /// Create a batch rooted at this one.
     fn new_batch<H: Hasher<Digest = Self::Digest>>(self: &Arc<Self>) -> Self::Unmerkleized<H>;
 
-    /// Sync target reached once the batch is applied. Fails with the
-    /// [`Error::FloorBeyondSize`] that `apply_batch` would return
-    /// for a batch whose declared inactivity floor is not below its commit.
+    /// Sync target reached once the batch is applied.
     #[allow(clippy::type_complexity)]
     fn target(&self) -> Result<Target<Self::Family, Self::Digest>, Error<Self::Family>>;
 }

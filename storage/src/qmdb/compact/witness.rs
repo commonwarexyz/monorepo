@@ -658,7 +658,11 @@ where
     let inactivity_floor_loc = last_commit_op
         .floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-    qmdb::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+    if inactivity_floor_loc > last_commit_loc {
+        return Err(Error::DataCorrupted(
+            "inactivity floor exceeds commit location",
+        ));
+    }
 
     let hasher = qmdb::hasher::<H>();
     merkle

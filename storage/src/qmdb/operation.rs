@@ -25,7 +25,7 @@ pub trait Committable<F: Family> {
     /// The inactivity floor if this operation is a commit.
     fn floor(&self) -> Option<Location<F>>;
 
-    /// The commit a freshly initialized database holds: no metadata, inactivity floor 0.
+    /// The commit a freshly initialized database holds.
     fn initial_commit() -> Self;
 
     /// If this operation is a commit.

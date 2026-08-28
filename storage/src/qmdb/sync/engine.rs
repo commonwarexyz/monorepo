@@ -121,8 +121,7 @@ where
     /// Channel for receiving sync target updates.
     ///
     /// The caller selects targets before sending updates. The engine adopts only strictly
-    /// advancing targets and discards the rest. An update that advances without changing the
-    /// root is a caller bug and fails the sync with [`EngineError::SyncTargetRootUnchanged`].
+    /// advancing targets and discards the rest.
     pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     ///
@@ -664,7 +663,7 @@ where
     }
 
     /// Adopt `new_target` and reschedule fetches.
-    async fn retarget(
+    async fn update_target(
         self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
@@ -682,15 +681,13 @@ where
     ) -> Result<NextStep<Self, DB>, Error<DB, S>> {
         match event {
             Event::TargetUpdate(new_target) => {
-                let engine = if new_target
+                if !new_target
                     .supersedes(&self.target)
                     .map_err(SyncError::Engine)?
                 {
-                    self.retarget(new_target).await?
-                } else {
-                    self
-                };
-                Ok(NextStep::Continue(engine))
+                    return Ok(NextStep::Continue(self));
+                }
+                Ok(NextStep::Continue(self.update_target(new_target).await?))
             }
             Event::UpdateChannelClosed => {
                 self.update_rx = None;
@@ -742,7 +739,9 @@ where
                                 .supersedes(&self.target)
                                 .map_err(SyncError::Engine)?
                             {
-                                return Ok(NextStep::Continue(self.retarget(new_target).await?));
+                                return Ok(NextStep::Continue(
+                                    self.update_target(new_target).await?,
+                                ));
                             }
                         }
                         Err(TryRecvError::Empty) => break,
