@@ -85,13 +85,7 @@ pub(super) fn stability_scope(
     if items.disposition() != Disposition::Formatted
         && (items.text().contains('\n') || items.text().contains('\r'))
     {
-        if items.text() != items_source {
-            let mut output = source.to_owned();
-            output.replace_range(items_range, items.text());
-            syn::parse_str::<StabilityScopeInput>(&output).map_err(Error::Output)?;
-            return Ok(ProtectedFragment::preserved_with_nested_formatting(output));
-        }
-        return Ok(ProtectedFragment::preserved(source));
+        return preserve_scope_items(source, items_range, items_source, &items);
     }
 
     let predicate = if let Some(cfg) = &input.cfg {
@@ -100,7 +94,7 @@ pub(super) fn stability_scope(
         if predicate.disposition() != Disposition::Formatted
             && (predicate.text().contains('\n') || predicate.text().contains('\r'))
         {
-            return Ok(ProtectedFragment::preserved(source));
+            return preserve_scope_items(source, items_range, items_source, &items);
         }
         Some(predicate.into_string())
     } else {
@@ -115,6 +109,21 @@ pub(super) fn stability_scope(
     );
     syn::parse_str::<StabilityScopeInput>(&output).map_err(Error::Output)?;
     Ok(ProtectedFragment::formatted(output))
+}
+
+fn preserve_scope_items(
+    source: &str,
+    items_range: Range<usize>,
+    items_source: &str,
+    items: &ProtectedFragment,
+) -> Result<ProtectedFragment, Error> {
+    if items.text() == items_source {
+        return Ok(ProtectedFragment::preserved(source));
+    }
+    let mut output = source.to_owned();
+    output.replace_range(items_range, items.text());
+    syn::parse_str::<StabilityScopeInput>(&output).map_err(Error::Output)?;
+    Ok(ProtectedFragment::preserved_with_nested_formatting(output))
 }
 
 fn render_scope(level: &str, predicate: Option<&str>, items: &str, options: Options) -> String {
@@ -279,5 +288,19 @@ mod tests {
 
         assert!(formatted.contains("pub struct First;\n\n    fn run()"));
         assert!(formatted.contains("value = receive() => value"));
+    }
+
+    #[test]
+    fn preserves_multiline_predicate_while_formatting_nested_macro() {
+        let source = "BETA, cfg(all(\n    test,\n    /* keep */ feature = \"std\"\n)) { fn run() { select! {value=receive()=>value} } }";
+        let formatted = stability_scope(source, OPTIONS, 0)
+            .expect("stability scope should format nested macro");
+
+        assert_eq!(
+            formatted.disposition(),
+            Disposition::PreservedWithNestedFormatting
+        );
+        assert!(formatted.text().contains("/* keep */ feature"));
+        assert!(formatted.text().contains("value = receive() => value,"));
     }
 }

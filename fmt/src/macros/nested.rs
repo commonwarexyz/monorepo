@@ -58,6 +58,66 @@ struct Shield<'a> {
     error: Option<Error>,
 }
 
+#[derive(Default)]
+struct ShieldPreflight {
+    has_macro: bool,
+    had_skip: bool,
+}
+
+impl<'ast> Visit<'ast> for ShieldPreflight {
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        if skip::expression(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit::visit_expr(self, node);
+    }
+
+    fn visit_item(&mut self, node: &'ast Item) {
+        if skip::item(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit::visit_item(self, node);
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        if skip::impl_item(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit::visit_impl_item(self, node);
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
+        if skip::trait_item(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit::visit_trait_item(self, node);
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
+        if skip::foreign_item(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit::visit_foreign_item(self, node);
+    }
+
+    fn visit_stmt(&mut self, node: &'ast Stmt) {
+        if skip::statement(node) {
+            self.had_skip = true;
+            return;
+        }
+        visit::visit_stmt(self, node);
+    }
+
+    fn visit_macro(&mut self, _node: &'ast Macro) {
+        self.has_macro = true;
+    }
+}
+
 impl Shield<'_> {
     fn shield(&mut self, node: &mut Macro, kind: NestedKind) -> Result<(), Error> {
         let delimiter = node.delimiter.span();
@@ -422,7 +482,7 @@ pub(super) fn items(
     source_map: &SourceMap<'_>,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
-    let marker_prefix = marker_prefix(fragment_source)?;
+    let marker_prefix = crate::marker::unique_prefix(fragment_source, "nested");
     let mut shield = Shield {
         source_map,
         marker_prefix: marker_prefix.clone(),
@@ -519,7 +579,7 @@ pub(super) fn statements(
     source_map: &SourceMap<'_>,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
-    let marker_prefix = marker_prefix(fragment_source)?;
+    let marker_prefix = crate::marker::unique_prefix(fragment_source, "nested");
     let mut shield = Shield {
         source_map,
         marker_prefix: marker_prefix.clone(),
@@ -617,7 +677,21 @@ fn format_expression(
     depth: usize,
     style: Style,
 ) -> Result<ProtectedFragment, Error> {
-    let marker_prefix = marker_prefix(source)?;
+    let mut preflight = ShieldPreflight::default();
+    preflight.visit_expr(expression);
+    if !preflight.has_macro {
+        if preflight.had_skip {
+            return Ok(ProtectedFragment::preserved(fragment_source));
+        }
+        return match style {
+            Style::Expression => pretty::expression(expression, fragment_source),
+            Style::BlockExpression => pretty::block_expression(expression, fragment_source),
+            Style::ValueBlock => pretty::value_block(expression, fragment_source),
+        }
+        .map_err(Error::from);
+    }
+
+    let marker_prefix = crate::marker::unique_prefix(source, "nested");
     let mut shield = Shield {
         source_map,
         marker_prefix: marker_prefix.clone(),
@@ -763,16 +837,6 @@ fn shield_source(
         output.replace_range(range, &replacement);
     }
     Ok(output)
-}
-
-fn marker_prefix(source: &str) -> Result<String, Error> {
-    for nonce in 0..1_000 {
-        let prefix = format!("__commonware_fmt_nested_{nonce}_");
-        if !source.contains(&prefix) {
-            return Ok(prefix);
-        }
-    }
-    Err(Error::MarkerMismatch)
 }
 
 fn restore(

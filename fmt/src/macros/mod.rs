@@ -6,7 +6,7 @@ mod select;
 mod stability;
 
 pub use select::{select, select_loop};
-use syn::{MacroDelimiter, Path};
+use syn::{MacroDelimiter, Path, ext::IdentExt as _};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,7 +25,7 @@ pub(crate) fn macro_kind(path: &Path, delimiter: &MacroDelimiter) -> Option<Macr
     let segments = path
         .segments
         .iter()
-        .map(|segment| segment.ident.to_string())
+        .map(|segment| segment.ident.unraw().to_string())
         .collect::<Vec<_>>();
     match segments.as_slice() {
         [name] if name == "cfg_if" && matches!(delimiter, MacroDelimiter::Brace(_)) => {
@@ -102,7 +102,10 @@ pub(crate) fn format_at_depth(
         && let Some(literals) = crate::pretty::MultilineLiterals::prepare(source)
     {
         let formatted = format_shielded_at_depth(kind, literals.text(), options, depth)?;
-        return literals.restore(formatted).ok_or(Error::LiteralMarker);
+        if let Some(restored) = literals.restore(formatted) {
+            return Ok(restored);
+        }
+        return format_shielded_at_depth(kind, source, options, depth);
     }
     format_shielded_at_depth(kind, source, options, depth)
 }
@@ -177,7 +180,29 @@ pub enum Error {
     /// A supported nested macro did not retain brace delimiters.
     #[error("nested supported macro did not have valid brace delimiters")]
     MarkerDelimiter,
-    /// A multiline literal marker could not be restored exactly once.
-    #[error("multiline literal marker mismatch")]
-    LiteralMarker,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_raw_supported_macro_names() {
+        let invocation: syn::Macro = syn::parse_str("r#select! { value = future() => value }")
+            .expect("raw macro invocation should parse");
+
+        assert_eq!(
+            macro_kind(&invocation.path, &invocation.delimiter),
+            Some(MacroKind::Select)
+        );
+    }
+
+    #[test]
+    fn preserves_multiline_explicit_doc_literals() {
+        let source = "ALPHA { #[doc = r#\"first\nsecond\"#] pub struct Example; }";
+        let formatted = format_at_depth(MacroKind::StabilityScope, source, Options::default(), 0)
+            .expect("multiline doc literal should be accepted");
+
+        assert!(formatted.text().contains("r#\"first\nsecond\"#"));
+    }
 }

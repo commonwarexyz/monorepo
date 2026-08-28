@@ -54,54 +54,86 @@ pub enum Error {
 /// A checked line and column index over a UTF-8 source string.
 pub struct SourceMap<'a> {
     source: &'a str,
-    line_starts: Vec<usize>,
+    lines: Vec<Line>,
+}
+
+struct Line {
+    start: usize,
+    end: usize,
+    non_ascii_columns: Option<Vec<usize>>,
+}
+
+impl Line {
+    fn column_count(&self) -> usize {
+        self.non_ascii_columns
+            .as_ref()
+            .map_or(self.end - self.start, |columns| columns.len() - 1)
+    }
+
+    fn byte_offset(&self, column: usize) -> usize {
+        self.start
+            + self
+                .non_ascii_columns
+                .as_ref()
+                .map_or(column, |columns| columns[column])
+    }
 }
 
 impl<'a> SourceMap<'a> {
     /// Builds an index over `source`.
     pub fn new(source: &'a str) -> Self {
-        let mut line_starts = Vec::with_capacity(source.lines().count().saturating_add(1));
-        line_starts.push(0);
+        let mut line_starts = Vec::new();
+        line_starts.push(if source.starts_with('\u{feff}') { 3 } else { 0 });
         line_starts.extend(
             source
                 .bytes()
                 .enumerate()
                 .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
         );
-        Self {
-            source,
-            line_starts,
+        let lines = line_starts
+            .iter()
+            .enumerate()
+            .map(|(index, &start)| {
+                let mut end = line_starts.get(index + 1).copied().unwrap_or(source.len());
+                if end > start && source.as_bytes().get(end - 1) == Some(&b'\n') {
+                    end -= 1;
+                    if end > start && source.as_bytes().get(end - 1) == Some(&b'\r') {
+                        end -= 1;
+                    }
+                }
+                let text = &source[start..end];
+                let non_ascii_columns = (!text.is_ascii()).then(|| {
+                    text.char_indices()
+                        .map(|(offset, _)| offset)
+                        .chain(std::iter::once(text.len()))
+                        .collect()
+                });
+                Line {
+                    start,
+                    end,
+                    non_ascii_columns,
+                }
+            })
+            .collect();
+        Self { source, lines }
+    }
+
+    const fn invalid_line(&self, line: usize) -> Error {
+        Error::InvalidLine {
+            line,
+            line_count: self.lines.len(),
         }
     }
 
     /// Converts a one-based line and character column to a byte offset.
     pub fn byte_offset(&self, location: LineColumn) -> Result<usize, Error> {
         let Some(index) = location.line.checked_sub(1) else {
-            return Err(Error::InvalidLine {
-                line: location.line,
-                line_count: self.line_starts.len(),
-            });
+            return Err(self.invalid_line(location.line));
         };
-        let Some(&line_start) = self.line_starts.get(index) else {
-            return Err(Error::InvalidLine {
-                line: location.line,
-                line_count: self.line_starts.len(),
-            });
+        let Some(line) = self.lines.get(index) else {
+            return Err(self.invalid_line(location.line));
         };
-        let mut line_end = self
-            .line_starts
-            .get(index + 1)
-            .copied()
-            .unwrap_or(self.source.len());
-        if line_end > line_start && self.source.as_bytes().get(line_end - 1) == Some(&b'\n') {
-            line_end -= 1;
-            if line_end > line_start && self.source.as_bytes().get(line_end - 1) == Some(&b'\r') {
-                line_end -= 1;
-            }
-        }
-
-        let line = &self.source[line_start..line_end];
-        let column_count = line.chars().count();
+        let column_count = line.column_count();
         if location.column > column_count {
             return Err(Error::InvalidColumn {
                 line: location.line,
@@ -109,19 +141,7 @@ impl<'a> SourceMap<'a> {
                 column_count,
             });
         }
-        if location.column == column_count {
-            return Ok(line_end);
-        }
-        let byte = line
-            .char_indices()
-            .nth(location.column)
-            .map(|(byte, _)| byte)
-            .ok_or(Error::InvalidColumn {
-                line: location.line,
-                column: location.column,
-                column_count,
-            })?;
-        Ok(line_start + byte)
+        Ok(line.byte_offset(location.column))
     }
 
     /// Converts a span to a checked byte range in this source.
@@ -211,6 +231,30 @@ mod tests {
                 .byte_offset(LineColumn { line: 1, column: 3 })
                 .expect("coordinate should map"),
             6
+        );
+    }
+
+    #[test]
+    fn maps_first_line_after_a_byte_order_mark() {
+        let source = SourceMap::new("\u{feff}abc\ndef");
+
+        assert_eq!(
+            source
+                .byte_offset(LineColumn { line: 1, column: 0 })
+                .expect("coordinate should map"),
+            3
+        );
+        assert_eq!(
+            source
+                .byte_offset(LineColumn { line: 1, column: 3 })
+                .expect("coordinate should map"),
+            6
+        );
+        assert_eq!(
+            source
+                .byte_offset(LineColumn { line: 2, column: 0 })
+                .expect("coordinate should map"),
+            7
         );
     }
 

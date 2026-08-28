@@ -6,6 +6,7 @@ use crate::{
     skip,
     source::SourceMap,
 };
+use proc_macro2::{TokenStream, TokenTree};
 use std::ops::Range;
 use syn::{
     Expr, ForeignItem, ImplItem, Item, Macro, Stmt, TraitItem, spanned::Spanned, visit::Visit,
@@ -44,6 +45,9 @@ impl Output {
 /// An error produced while formatting a complete Rust source file.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// The input exceeded the nesting accepted by the syntax parser.
+    #[error("Rust source exceeded the supported delimiter nesting limit")]
+    NestingLimit,
     /// The input or candidate output was not valid Rust syntax.
     #[error("failed to parse Rust source: {0}")]
     Parse(#[source] syn::Error),
@@ -146,6 +150,7 @@ pub fn format(source: &str) -> Result<Output, Error> {
 }
 
 fn format_once(source: &str) -> Result<Pass, Error> {
+    ensure_nesting_limit(source)?;
     let file = syn::parse_file(source).map_err(Error::Parse)?;
     let mut collector = Collector { macros: Vec::new() };
     collector.visit_file(&file);
@@ -210,6 +215,30 @@ fn format_once(source: &str) -> Result<Pass, Error> {
     })
 }
 
+const MAX_DELIMITER_DEPTH: usize = 256;
+
+fn ensure_nesting_limit(source: &str) -> Result<(), Error> {
+    let Ok(stream) = source.parse::<TokenStream>() else {
+        return Ok(());
+    };
+    let mut iterators = vec![stream.into_iter()];
+    while let Some(iterator) = iterators.last_mut() {
+        match iterator.next() {
+            Some(TokenTree::Group(group)) => {
+                if iterators.len() > MAX_DELIMITER_DEPTH {
+                    return Err(Error::NestingLimit);
+                }
+                iterators.push(group.stream().into_iter());
+            }
+            Some(_) => {}
+            None => {
+                iterators.pop();
+            }
+        }
+    }
+    Ok(())
+}
+
 fn dominant_line_ending(source: &str) -> LineEnding {
     let crlf = source.match_indices("\r\n").count();
     let lf = source.bytes().filter(|byte| *byte == b'\n').count();
@@ -225,9 +254,13 @@ fn line_indentation(source: &str, offset: usize) -> usize {
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
     source[line_start..offset]
-        .chars()
-        .take_while(|character| *character == ' ')
-        .count()
+        .bytes()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .fold(0, |column, byte| match byte {
+            b' ' => column + 1,
+            b'\t' => (column / 4 + 1) * 4,
+            _ => unreachable!("indentation contains only spaces and tabs"),
+        })
 }
 
 #[cfg(test)]
@@ -251,6 +284,38 @@ mod tests {
         assert!(formatted.text().contains(
             "commonware_macros::select_loop! {\n        context,\n        on_stopped => shutdown(),\n    }"
         ));
+    }
+
+    #[test]
+    fn formats_a_first_line_macro_after_a_byte_order_mark() {
+        let source = "\u{feff}select! {value=receive()=>value}\n";
+        let formatted = format(source).expect("file with byte order mark should format");
+
+        assert!(formatted.text().starts_with("\u{feff}select! {\n"));
+        assert!(formatted.text().contains("value = receive() => value,"));
+    }
+
+    #[test]
+    fn aligns_a_tab_indented_macro_shell() {
+        let source = "fn run() {\n\tselect! {value=receive()=>value}\n}\n";
+        let formatted = format(source).expect("tab-indented macro should format");
+
+        assert!(
+            formatted
+                .text()
+                .contains("\tselect! {\n        value = receive() => value,\n    }")
+        );
+    }
+
+    #[test]
+    fn rejects_excessive_delimiter_nesting_without_recursing() {
+        let source = format!(
+            "fn run() {{ let _ = {}0{}; }}",
+            "(".repeat(10_000),
+            ")".repeat(10_000)
+        );
+
+        assert!(matches!(format(&source), Err(Error::NestingLimit)));
     }
 
     #[test]

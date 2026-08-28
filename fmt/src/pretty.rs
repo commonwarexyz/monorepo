@@ -76,9 +76,7 @@ impl MultilineLiterals {
             return None;
         }
 
-        let marker_prefix = (0..1_000)
-            .map(|nonce| format!("__commonware_fmt_literal_{nonce}_"))
-            .find(|prefix| !source.contains(prefix))?;
+        let marker_prefix = crate::marker::unique_prefix(source, "literal");
         let mut literals = Vec::with_capacity(ranges.len());
         for (index, range) in ranges.into_iter().enumerate() {
             let literal = source.get(range.clone())?;
@@ -370,29 +368,29 @@ fn format_or_preserve(
     source: &str,
     format: impl FnOnce() -> Result<String, Error>,
 ) -> Result<ProtectedFragment, Error> {
-    format_or_preserve_with_policy(source, true, format)
+    format_or_preserve_with_policy(source, false, format)
 }
 
 fn format_or_preserve_with_docs(
     source: &str,
     format: impl FnOnce() -> Result<String, Error>,
 ) -> Result<ProtectedFragment, Error> {
-    format_or_preserve_with_policy(source, false, format)
+    format_or_preserve_with_policy(source, true, format)
 }
 
 fn format_or_preserve_with_policy(
     source: &str,
-    preserve_source_docs: bool,
+    recover_source_docs: bool,
     format: impl FnOnce() -> Result<String, Error>,
 ) -> Result<ProtectedFragment, Error> {
     if source_has_internal_blank_line(source) {
         return Ok(ProtectedFragment::preserved(source));
     }
-    if source_requires_preservation_with_policy(source, preserve_source_docs) {
-        let comments = if preserve_source_docs {
-            crate::trivia::LineComments::prepare(source)
-        } else {
+    if source_requires_preservation(source) {
+        let comments = if recover_source_docs {
             crate::trivia::LineComments::prepare_allowing_docs(source)
+        } else {
+            crate::trivia::LineComments::prepare(source)
         };
         if let Some(comments) = comments {
             let formatted = format()?;
@@ -471,7 +469,39 @@ fn dedent_wrapper(source: &str) -> Result<String, Error> {
 }
 
 pub(crate) fn source_requires_preservation(source: &str) -> bool {
-    source_requires_preservation_with_policy(source, true)
+    let Ok(stream) = source.parse::<TokenStream>() else {
+        return true;
+    };
+    let source_map = SourceMap::new(source);
+    let mut ranges = Vec::new();
+    let mut literal_ranges = Vec::new();
+    let mut has_multiline_literal = false;
+    if collect_token_ranges(
+        stream,
+        &source_map,
+        &mut ranges,
+        &mut literal_ranges,
+        &mut has_multiline_literal,
+    )
+    .is_err()
+    {
+        return true;
+    }
+    if has_multiline_literal || has_source_spelled_doc_comment(source, &literal_ranges) {
+        return true;
+    }
+
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    let mut cursor = 0;
+    for range in ranges {
+        if range.start > cursor && !source[cursor..range.start].chars().all(char::is_whitespace) {
+            return true;
+        }
+        cursor = cursor.max(range.end);
+    }
+    source[cursor..]
+        .chars()
+        .any(|character| !character.is_whitespace())
 }
 
 pub(crate) fn source_has_multiline_literal(source: &str) -> bool {
@@ -507,44 +537,6 @@ pub(crate) fn source_has_internal_blank_line(source: &str) -> bool {
         }
     }
     false
-}
-
-fn source_requires_preservation_with_policy(source: &str, preserve_source_docs: bool) -> bool {
-    let Ok(stream) = source.parse::<TokenStream>() else {
-        return true;
-    };
-    let source_map = SourceMap::new(source);
-    let mut ranges = Vec::new();
-    let mut literal_ranges = Vec::new();
-    let mut has_multiline_literal = false;
-    if collect_token_ranges(
-        stream,
-        &source_map,
-        &mut ranges,
-        &mut literal_ranges,
-        &mut has_multiline_literal,
-    )
-    .is_err()
-    {
-        return true;
-    }
-    if has_multiline_literal
-        || (preserve_source_docs && has_source_spelled_doc_comment(source, &literal_ranges))
-    {
-        return true;
-    }
-
-    ranges.sort_unstable_by_key(|range| (range.start, range.end));
-    let mut cursor = 0;
-    for range in ranges {
-        if range.start > cursor && !source[cursor..range.start].chars().all(char::is_whitespace) {
-            return true;
-        }
-        cursor = cursor.max(range.end);
-    }
-    source[cursor..]
-        .chars()
-        .any(|character| !character.is_whitespace())
 }
 
 fn collect_token_ranges(
@@ -766,13 +758,37 @@ mod tests {
     fn restores_multiline_literal_crlf_and_avoids_marker_collision() {
         let source = "call(\"__commonware_fmt_literal_0_\", r#\"first\r\n    second\"#)";
         let literals = MultilineLiterals::prepare(source).expect("literal should be shielded");
+        assert_ne!(literals.marker_prefix, "__commonware_fmt_literal_0_");
         let shielded = literals.text().to_owned();
 
-        assert!(shielded.contains("__commonware_fmt_literal_1_0"));
         let restored = literals
             .restore(ProtectedFragment::formatted(shielded))
             .expect("literal should restore");
         assert_eq!(restored.text(), source);
+    }
+
+    #[test]
+    fn preserves_exact_source_doc_trailing_spaces() {
+        let source = "/// Keep this Markdown break.  \npub struct Example { pub value: usize }";
+        let file = syn::parse_file(source).expect("items should parse");
+        let formatted = items(&file.items, source).expect("items should format");
+
+        assert!(
+            formatted
+                .text()
+                .contains("/// Keep this Markdown break.  \n")
+        );
+        assert!(formatted.text().contains("pub struct Example {"));
+    }
+
+    #[test]
+    fn preserves_short_vertical_call_with_trailing_comment() {
+        let source = "call(\n    first,\n    second, // keep argument context\n)";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression(&input, source).expect("expression should be protected");
+
+        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
+        assert_eq!(formatted.text(), source);
     }
 
     #[test]

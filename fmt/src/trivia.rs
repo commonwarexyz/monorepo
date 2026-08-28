@@ -13,7 +13,7 @@ enum TokenKey {
     Ident(String),
     Punct(char),
     Literal(String),
-    Doc(String),
+    Doc,
 }
 
 #[derive(Clone)]
@@ -21,6 +21,7 @@ struct Token {
     key: TokenKey,
     range: Range<usize>,
     line_leading: bool,
+    exact_source: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,15 +80,10 @@ impl LineComments {
         )?;
         let doc_ranges = source_doc_ranges(source, &literal_ranges);
         if allow_source_docs {
-            tokens.retain(|token| {
-                matches!(token.key, TokenKey::Doc(_))
-                    || !doc_ranges
-                        .iter()
-                        .any(|doc| token.range.start < doc.end && doc.start < token.range.end)
-            });
+            retain_doc_tokens(&mut tokens, &doc_ranges);
         }
         if literal_ranges.iter().any(|range| {
-            if allow_source_docs && doc_ranges.contains(range) {
+            if allow_source_docs && contains_range(&doc_ranges, range) {
                 return false;
             }
             source_map
@@ -125,7 +121,12 @@ impl LineComments {
             allow_source_docs,
             &mut comments,
         )?;
-        if comments.is_empty() {
+        if comments.is_empty()
+            && !(allow_source_docs
+                && tokens
+                    .iter()
+                    .any(|token| matches!(token.key, TokenKey::Doc)))
+        {
             return None;
         }
         Some(Self {
@@ -173,6 +174,13 @@ impl LineComments {
             let range = insertion_left.map_or(0, |left| formatted_plan[left].range.end)
                 ..mapped_right.map_or(formatted.len(), |right| formatted_plan[right].range.start);
             let comments = &self.comments[start..index];
+            if comments.first().is_some_and(|comment| comment.trailing)
+                && left.is_some_and(|left| matches!(self.tokens[left].key, TokenKey::Punct(',')))
+                && !insertion_left
+                    .is_some_and(|left| matches!(formatted_plan[left].key, TokenKey::Punct(',')))
+            {
+                return None;
+            }
             let replacement = render_gap(
                 formatted,
                 &formatted_plan,
@@ -188,6 +196,14 @@ impl LineComments {
                 right: mapped_right,
             }));
         }
+        for (index, token) in self.tokens.iter().enumerate() {
+            let Some(exact_source) = &token.exact_source else {
+                continue;
+            };
+            let mapped = mapping[index]?;
+            replacements.push((formatted_plan[mapped].range.clone(), exact_source.clone()));
+        }
+        replacements.sort_unstable_by_key(|(range, _)| (range.start, range.end));
         if replacements
             .windows(2)
             .any(|pair| pair[0].0.end > pair[1].0.start)
@@ -210,12 +226,20 @@ impl LineComments {
         )?;
         restored = Self::prepare_with_policy(&output, self.allow_source_docs)?;
         let restored_mapping = token_mapping(&self.tokens, &restored.tokens)?;
+        let exact_source_matches = self.tokens.iter().enumerate().all(|(index, token)| {
+            token.exact_source.as_ref().is_none_or(|exact_source| {
+                restored_mapping[index].is_some_and(|mapped| {
+                    restored.tokens[mapped].exact_source.as_ref() == Some(exact_source)
+                })
+            })
+        });
         if restored.comments != expected_comments
             || restored
                 .tokens
                 .iter()
                 .map(|token| &token.key)
                 .ne(formatted_plan.iter().map(|token| &token.key))
+            || !exact_source_matches
             || !preserves_line_leading_closing_delimiters(
                 &restored.tokens,
                 &restored_mapping,
@@ -242,12 +266,7 @@ fn token_plan(source: &str, allow_source_docs: bool) -> Option<Vec<Token>> {
     )?;
     if allow_source_docs {
         let doc_ranges = source_doc_ranges(source, &literal_ranges);
-        tokens.retain(|token| {
-            matches!(token.key, TokenKey::Doc(_))
-                || !doc_ranges
-                    .iter()
-                    .any(|doc| token.range.start < doc.end && doc.start < token.range.end)
-        });
+        retain_doc_tokens(&mut tokens, &doc_ranges);
     }
     Some(tokens)
 }
@@ -272,6 +291,7 @@ fn flatten(
                     key: TokenKey::Open(open),
                     line_leading: line_leading_whitespace(source_text, open_range.start).is_some(),
                     range: open_range,
+                    exact_source: None,
                 });
                 flatten(group.stream(), source_text, source, tokens, literal_ranges)?;
                 let close_range = source.span_range(group.span_close()).ok()?;
@@ -279,6 +299,7 @@ fn flatten(
                     key: TokenKey::Close(close),
                     line_leading: line_leading_whitespace(source_text, close_range.start).is_some(),
                     range: close_range,
+                    exact_source: None,
                 });
             }
             TokenTree::Ident(ident) => {
@@ -287,6 +308,7 @@ fn flatten(
                     key: TokenKey::Ident(ident.to_string()),
                     line_leading: line_leading_whitespace(source_text, range.start).is_some(),
                     range,
+                    exact_source: None,
                 });
             }
             TokenTree::Punct(punct) => {
@@ -295,29 +317,53 @@ fn flatten(
                     key: TokenKey::Punct(punct.as_char()),
                     line_leading: line_leading_whitespace(source_text, range.start).is_some(),
                     range,
+                    exact_source: None,
                 });
             }
             TokenTree::Literal(literal) => {
                 let range = source.span_range(literal.span()).ok()?;
                 let text = source.slice(range.clone()).ok()?;
+                let source_doc = text.starts_with("///")
+                    || text.starts_with("//!")
+                    || text.starts_with("/**")
+                    || text.starts_with("/*!");
                 tokens.push(Token {
-                    key: if text.starts_with("///")
-                        || text.starts_with("//!")
-                        || text.starts_with("/**")
-                        || text.starts_with("/*!")
-                    {
-                        TokenKey::Doc(literal.to_string())
+                    key: if source_doc {
+                        TokenKey::Doc
                     } else {
                         TokenKey::Literal(text.to_owned())
                     },
                     line_leading: line_leading_whitespace(source_text, range.start).is_some(),
                     range: range.clone(),
+                    exact_source: source_doc.then(|| text.to_owned()),
                 });
                 literal_ranges.push(range);
             }
         }
     }
     Some(())
+}
+
+fn retain_doc_tokens(tokens: &mut Vec<Token>, doc_ranges: &[Range<usize>]) {
+    let mut doc_index = 0;
+    tokens.retain(|token| {
+        while doc_ranges
+            .get(doc_index)
+            .is_some_and(|doc| doc.end <= token.range.start)
+        {
+            doc_index += 1;
+        }
+        matches!(token.key, TokenKey::Doc)
+            || !doc_ranges
+                .get(doc_index)
+                .is_some_and(|doc| token.range.start < doc.end && doc.start < token.range.end)
+    });
+}
+
+fn contains_range(ranges: &[Range<usize>], target: &Range<usize>) -> bool {
+    ranges
+        .binary_search_by_key(&target.start, |range| range.start)
+        .is_ok_and(|index| ranges[index].end == target.end)
 }
 
 fn preserves_line_leading_closing_delimiters(
@@ -369,7 +415,7 @@ fn line_leading_comment_closes(tokens: &[Token], comments: &[Comment]) -> Option
                     return None;
                 }
             }
-            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc(_) => {}
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc => {}
         }
     }
     while comment_positions.get(comment_index) == Some(&tokens.len()) {
@@ -431,7 +477,7 @@ fn matching_opening_indices(tokens: &[Token]) -> Option<Vec<Option<usize>>> {
                 opening.resize(index + 1, None);
                 opening[index] = Some(open_index);
             }
-            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc(_) => {}
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc => {}
         }
     }
     if !stack.is_empty() {
@@ -718,7 +764,7 @@ fn enclosing_indentation(source: &str, tokens: &[Token], position: usize) -> Str
                     delimiters.pop();
                 }
             }
-            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc(_) => {}
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc => {}
         }
     }
     delimiters.last().map_or_else(String::new, |(_, offset)| {
@@ -739,7 +785,7 @@ fn has_enclosing_delimiter(tokens: &[Token], position: usize) -> bool {
                     delimiters.pop();
                 }
             }
-            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc(_) => {}
+            TokenKey::Ident(_) | TokenKey::Punct(_) | TokenKey::Literal(_) | TokenKey::Doc => {}
         }
     }
     !delimiters.is_empty()

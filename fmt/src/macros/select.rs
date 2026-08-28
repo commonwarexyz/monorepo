@@ -1227,6 +1227,17 @@ mod tests {
     }
 
     #[test]
+    fn accepts_every_legacy_marker_prefix_without_nested_macros() {
+        let arguments = (0..1_000)
+            .map(|nonce| format!("\"__commonware_fmt_nested_{nonce}_\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("outer=receive_outer()=>consume({arguments})");
+
+        select(&source, OPTIONS).expect("legacy marker text should not block formatting");
+    }
+
+    #[test]
     fn bounds_nested_select_recursion() {
         let mut body = "value".to_owned();
         for depth in 0..34 {

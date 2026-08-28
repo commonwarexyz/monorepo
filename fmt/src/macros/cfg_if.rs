@@ -6,6 +6,7 @@ use crate::{
     source::SourceMap,
     writer::Writer,
 };
+use proc_macro2::TokenStream;
 use std::ops::Range;
 use syn::{
     Block, Ident, Item, Meta, Stmt, Token, braced, bracketed, parenthesized,
@@ -26,7 +27,7 @@ struct ConditionalBranch {
     bracket_token: token::Bracket,
     cfg_ident: Ident,
     paren_token: token::Paren,
-    predicate: Meta,
+    predicate: TokenStream,
     brace_token: token::Brace,
     body: Body,
 }
@@ -157,16 +158,16 @@ pub(super) fn cfg_if(
         return Ok(ProtectedFragment::preserved(source));
     };
     if !has_only_whitespace_gaps(source, ranges) {
-        return Ok(ProtectedFragment::preserved(source));
+        return preserve_cfg_if(source, &source_map, &input, options, depth);
     }
 
     let mut branches = Vec::with_capacity(input.branches.len());
     for branch in &input.branches {
         let Some(predicate) = format_predicate(&source_map, &branch.predicate)? else {
-            return Ok(ProtectedFragment::preserved(source));
+            return preserve_cfg_if(source, &source_map, &input, options, depth);
         };
         let Some(body) = format_body(&source_map, &branch.brace_token, &branch.body, depth)? else {
-            return Ok(ProtectedFragment::preserved(source));
+            return preserve_cfg_if(source, &source_map, &input, options, depth);
         };
         branches.push(ConditionalLayout { predicate, body });
     }
@@ -174,7 +175,7 @@ pub(super) fn cfg_if(
         Some(branch) => {
             let Some(body) = format_body(&source_map, &branch.brace_token, &branch.body, depth)?
             else {
-                return Ok(ProtectedFragment::preserved(source));
+                return preserve_cfg_if(source, &source_map, &input, options, depth);
             };
             Some(body)
         }
@@ -277,10 +278,16 @@ fn body_ranges(
     Ok(Some(BodyRanges { open, body, close }))
 }
 
-fn format_predicate(source_map: &SourceMap<'_>, predicate: &Meta) -> Result<Option<String>, Error> {
+fn format_predicate(
+    source_map: &SourceMap<'_>,
+    predicate: &TokenStream,
+) -> Result<Option<String>, Error> {
     let range = source_map.span_range(predicate.span())?;
     let predicate_source = source_map.slice(range)?;
-    let predicate = pretty::meta(predicate, predicate_source)?;
+    let predicate = match syn::parse2::<Meta>(predicate.clone()) {
+        Ok(predicate) => pretty::meta(&predicate, predicate_source)?,
+        Err(_) => ProtectedFragment::preserved(predicate_source),
+    };
     Ok(movable(predicate))
 }
 
@@ -430,6 +437,41 @@ mod tests {
         assert!(output.contains("if #[cfg(all(target_arch = \"aarch64\", feature = \"std\"))] {"));
         assert!(output.contains("} else if #[cfg(any(test, miri))] {"));
         assert!(output.contains("} else {"));
+    }
+
+    #[test]
+    fn accepts_boolean_cfg_predicates() {
+        let source = "if #[cfg(true)] { first() } else if #[cfg(false)] { second() }";
+        let output = fixed_point(source);
+
+        assert!(output.contains("if #[cfg(true)] {"));
+        assert!(output.contains("} else if #[cfg(false)] {"));
+    }
+
+    #[test]
+    fn preserves_outer_predicate_while_formatting_nested_macro() {
+        let source = "if #[cfg(all(\n    test,\n    /* keep */ feature = \"std\"\n))] { fn run() { select! {value=receive()=>value} } }";
+        let formatted = cfg_if(source, OPTIONS, 0).expect("cfg_if should format nested macro");
+
+        assert_eq!(
+            formatted.disposition(),
+            Disposition::PreservedWithNestedFormatting
+        );
+        assert!(formatted.text().contains("/* keep */ feature"));
+        assert!(formatted.text().contains("value = receive() => value,"));
+    }
+
+    #[test]
+    fn preserves_skipped_sibling_while_formatting_nested_macro() {
+        let source = "if #[cfg(test)] { #[rustfmt::skip] fn skipped() { call( ) } fn run() { select! {value=receive()=>value} } }";
+        let formatted = cfg_if(source, OPTIONS, 0).expect("cfg_if should format nested macro");
+
+        assert!(
+            formatted
+                .text()
+                .contains("#[rustfmt::skip] fn skipped() { call( ) }")
+        );
+        assert!(formatted.text().contains("value = receive() => value,"));
     }
 
     #[test]
