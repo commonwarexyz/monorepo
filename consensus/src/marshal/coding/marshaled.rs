@@ -129,10 +129,10 @@ use tracing::{Instrument as _, debug, info_span, warn};
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
-    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -160,10 +160,10 @@ pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -174,7 +174,7 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    gates: Gates<Commitment, CodedBlock<B, C, H>>,
+    gates: Gates<Commitment<B, C, H>, CodedBlock<B, C, H>>,
 
     build_duration: Timed,
     verify_duration: Timed,
@@ -187,10 +187,10 @@ impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -220,13 +220,13 @@ where
             E,
             Block = B,
             SigningScheme = Z::Scheme,
-            Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+            Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -317,8 +317,8 @@ where
     /// extract its embedded context.
     async fn deferred_verify(
         &mut self,
-        consensus_context: Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
-        commitment: Commitment,
+        consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
     ) -> oneshot::Receiver<GateOutcome> {
@@ -409,7 +409,7 @@ where
                         },
                     };
 
-                    if let Err(err) = validate_block::<H, _, _>(
+                    if let Err(err) = validate_block(
                         &epocher,
                         block.as_ref(),
                         parent.as_ref(),
@@ -486,7 +486,7 @@ where
     async fn certify_from_embedded_context(
         &mut self,
         round: Round,
-        payload: Commitment,
+        payload: Commitment<B, C, H>,
     ) -> oneshot::Receiver<bool> {
         // Certify may be reached without an earlier `verify`, so the shard
         // engine may not know the leader yet. A notarized commitment is still
@@ -605,7 +605,7 @@ where
     async fn certify_from_existing_task(
         &mut self,
         round: Round,
-        payload: Commitment,
+        payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
     ) -> oneshot::Receiver<bool> {
         // `verify()` intentionally waits only for local candidate data. Once
@@ -649,17 +649,17 @@ where
             E,
             Block = B,
             SigningScheme = Z::Scheme,
-            Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+            Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
-    type Digest = Commitment;
+    type Digest = Commitment<B, C, H>;
     type Context = Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>;
 
     /// Proposes a new block or re-proposes the epoch boundary block.
@@ -679,7 +679,7 @@ where
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
         &mut self,
-        consensus_context: Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+        consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -915,7 +915,7 @@ where
         // - coding config must match active participant set
         // - context digest must match unless this is a re-proposal
         let proposal_context = (!is_reproposal).then_some(&consensus_context);
-        if let Err(err) = validate_proposal::<H, _>(payload, coding_config, proposal_context) {
+        if let Err(err) = validate_proposal(payload, coding_config, proposal_context) {
             match err {
                 ProposalError::CodingConfig => {
                     warn!(
@@ -927,7 +927,7 @@ where
                 }
                 ProposalError::ContextDigest => {
                     let expected = hash_context::<H, _>(&consensus_context);
-                    let got = payload.context::<H::Digest>();
+                    let got = payload.context();
                     warn!(
                         round = %consensus_context.round,
                         expected = ?expected,
@@ -1114,13 +1114,13 @@ where
             E,
             Block = B,
             SigningScheme = Z::Scheme,
-            Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+            Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -1142,15 +1142,19 @@ where
 impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: Application<E, Block = B, Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
-    type Digest = Commitment;
+    type Digest = Commitment<B, C, H>;
     type PublicKey = <Z::Scheme as Verifier>::PublicKey;
     type Plan = Plan<Self::PublicKey>;
 
@@ -1174,12 +1178,15 @@ where
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: Application<E, Block = B, Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>>
-        + Reporter<Activity = Update<B>>,
+    A: Application<
+            E,
+            Block = B,
+            Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        > + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {

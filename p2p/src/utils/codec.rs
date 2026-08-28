@@ -259,7 +259,7 @@ where
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let handle = self.strategy.spawn(move |_| {
+                let handle = self.strategy.spawn(bytes.len(), move |_| {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
                     (peer, result)
                 });
@@ -299,12 +299,12 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
-    use commonware_parallel::{Manual, Sequential, Strategy};
+    use commonware_parallel::{Sequential, mocks};
     use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::mpsc, ordered::Set, probability};
     use std::{
         io,
-        num::{NonZeroU32, NonZeroUsize},
+        num::NonZeroU32,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -398,124 +398,6 @@ mod tests {
 
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct TestStrategy {
-        parallelism: NonZeroUsize,
-        pending: bool,
-    }
-
-    impl TestStrategy {
-        const fn complete(parallelism: NonZeroUsize) -> Self {
-            Self {
-                parallelism,
-                pending: false,
-            }
-        }
-
-        const fn pending(parallelism: NonZeroUsize) -> Self {
-            Self {
-                parallelism,
-                pending: true,
-            }
-        }
-    }
-
-    impl Strategy for TestStrategy {
-        fn manual(&self) -> Manual<Self> {
-            Manual::new(self.clone(), self.parallelism)
-        }
-
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
-        where
-            F: FnOnce(Self) -> T + Send + 'static,
-            T: Send + 'static,
-        {
-            let pending = self.pending;
-            let s = self.clone();
-            async move {
-                if pending {
-                    futures::future::pending::<()>().await;
-                }
-                f(s)
-            }
-        }
-
-        fn fold_init<I, INIT, T, R, ID, F, RD>(
-            &self,
-            iter: I,
-            init: INIT,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> R
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            INIT: Fn() -> T + Send + Sync,
-            T: Send,
-            R: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            Sequential.fold_init(iter, init, identity, fold_op, reduce_op)
-        }
-
-        fn try_fold<I, R, E, ID, F, RD>(
-            &self,
-            iter: I,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> Result<R, E>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            R: Send,
-            E: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            Sequential.try_fold(iter, identity, fold_op, reduce_op)
-        }
-
-        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
-        where
-            R: Send,
-            SEQ: FnOnce() -> R + Send,
-            PAR: FnOnce() -> R + Send,
-        {
-            Sequential.run(len, serial, parallel)
-        }
-
-        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
-        where
-            R: Send,
-            E: Send,
-            SEQ: FnOnce() -> Result<R, E> + Send,
-            PAR: FnOnce() -> Result<R, E> + Send,
-        {
-            Sequential.try_run(len, serial, parallel)
-        }
-
-        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-        where
-            A: FnOnce() -> RA + Send,
-            B: FnOnce() -> RB + Send,
-            RA: Send,
-            RB: Send,
-        {
-            Sequential.join(a, b)
-        }
-
-        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
-        where
-            T: Send,
-            C: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
-        {
-            Sequential.sort_by(items, compare);
         }
     }
 
@@ -678,7 +560,7 @@ mod tests {
                 (),
                 control2.clone(),
                 NZUsize!(50),
-                TestStrategy::complete(NZUsize!(4)),
+                mocks::inline(NZUsize!(4)),
             );
             let _handle = bg.start();
 
@@ -812,7 +694,7 @@ mod tests {
                 (),
                 NoopBlocker,
                 NZUsize!(16),
-                TestStrategy::pending(NZUsize!(2)),
+                mocks::pending(NZUsize!(2)),
             );
             let handle = bg.start();
 
