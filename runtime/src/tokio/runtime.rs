@@ -1036,7 +1036,7 @@ mod tests {
         let runner = std::thread::spawn(move || {
             let strategy = Runner::new(cfg).start(move |context| async move {
                 let strategy = context.strategy(NZUsize!(2));
-                strategy.spawn(|_| ()).await;
+                strategy.spawn(1, |_| ()).await;
                 retain.then_some(strategy)
             });
             strategy_tx.send(strategy).unwrap();
@@ -1155,7 +1155,7 @@ mod tests {
         assert!(run_with_returned_strategy(false).is_none());
 
         let strategy = run_with_returned_strategy(true).unwrap();
-        assert_eq!(futures::executor::block_on(strategy.spawn(|_| 42)), 42);
+        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
     }
 
     #[test]
@@ -1168,7 +1168,7 @@ mod tests {
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
                     Runner::new(cfg).start(move |context| async move {
                         let strategy = context.strategy(NZUsize!(2));
-                        strategy.spawn(|_| ()).await;
+                        strategy.spawn(1, |_| ()).await;
                         std::panic::panic_any(strategy);
                     });
                 }));
@@ -1184,7 +1184,7 @@ mod tests {
             .expect("Runner::start did not resume the strategy panic payload");
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
-        assert_eq!(futures::executor::block_on(strategy.spawn(|_| 42)), 42);
+        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{NZUsize, TestRng, test_rng};
+use commonware_utils::{NZUsize, TestRng, non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 
@@ -37,7 +37,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                                 ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut verify_rng,
                                     &public,
-                                    &entries,
+                                    non_empty![@entries],
                                     &strategy,
                                 )
                                 .unwrap();
@@ -45,7 +45,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                                 ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut verify_rng,
                                     &public,
-                                    &entries,
+                                    non_empty![@entries],
                                     &Sequential,
                                 )
                                 .unwrap();

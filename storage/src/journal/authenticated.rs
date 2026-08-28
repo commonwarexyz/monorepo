@@ -412,14 +412,13 @@ where
         }
     }
 
-    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound
-    /// job submitted through [`Strategy::spawn`].
+    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound job
+    /// submitted through [`Strategy::spawn`].
     ///
-    /// The job hashes against an immutable snapshot of the committed Merkle state, so a
-    /// parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
-    /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
-    /// completion against its snapshot and the result is discarded (a panic inside the job is
-    /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
+    /// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
+    /// calling task. If the job's caller is cancelled, the job still runs to completion
+    /// against its snapshot and the result is discarded.
     pub(crate) async fn merkleize(
         &self,
         batch: UnmerkleizedBatch<F, H, C::Item, S>,
@@ -434,7 +433,7 @@ where
         let hasher = self.hasher.clone();
         let strategy = self.strategy().clone();
         strategy
-            .spawn(move |_| {
+            .spawn(items.len(), move |_| {
                 let merkleized = batch.add_many(items).merkleize(&mem);
                 let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
                 drop(ancestors);

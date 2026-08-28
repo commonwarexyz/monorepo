@@ -599,8 +599,8 @@ where
         mut self: Box<Self>,
         message: Message<P::Scheme, V>,
         resolver: &mut R,
-        waiters: &mut AbortablePool<Result<Arc<V::Block>, SubscriptionKeyFor<V>>>,
-        syncs: &mut Pool<PooledSync>,
+        waiters: &mut AbortablePool<'_, Result<Arc<V::Block>, SubscriptionKeyFor<V>>>,
+        syncs: &mut Pool<'_, PooledSync>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
@@ -942,7 +942,7 @@ where
         message: handler::Message<V::Commitment>,
         resolver_rx: &mut handler::Receiver<V::Commitment>,
         resolver: &mut R,
-        syncs: &mut Pool<PooledSync>,
+        syncs: &mut Pool<'_, PooledSync>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
@@ -1083,7 +1083,7 @@ where
         key: SubscriptionKeyFor<V>,
         response: oneshot::Sender<Arc<V::Block>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-        waiters: &mut AbortablePool<Result<Arc<V::Block>, SubscriptionKeyFor<V>>>,
+        waiters: &mut AbortablePool<'_, Result<Arc<V::Block>, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
         let digest = match key {
@@ -1484,10 +1484,12 @@ where
                             application,
                         )
                         .await;
-                } else if annotations
-                    .iter()
-                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
-                    && height > self.floor.processed_height()
+                } else if annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation,
+                        Annotation::Certified { height: bound } if height <= *bound
+                    )
+                }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
                 {
                     self.cache = self
@@ -1938,7 +1940,7 @@ where
     async fn start_finalized_sync(
         mut self: Box<Self>,
         round: Round,
-        syncs: &mut Pool<PooledSync>,
+        syncs: &mut Pool<'_, PooledSync>,
     ) -> Box<Self> {
         // If no write needs syncing, every accepted write is already covered
         // by a blocking or in-flight sync.

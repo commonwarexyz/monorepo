@@ -37,7 +37,7 @@ where
 /// Owns independently-polled verification jobs.
 pub(super) struct Handler<S: Scheme, V: Variant> {
     marshal: MarshalMailbox<S, V>,
-    jobs: Pool<(Verification, VerificationResult)>,
+    jobs: Pool<'static, (Verification, VerificationResult)>,
 }
 
 impl<S, V> Handler<S, V>

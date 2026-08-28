@@ -14,7 +14,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256,
     bls12381::{
-        dkg::feldman_desmedt::DealerPrivMsg,
+        dkg::feldman_desmedt::{DealerPrivMsg, Reveal},
         primitives::{
             group::Share,
             sharing::{Mode, ModeVersion},
@@ -72,6 +72,8 @@ pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(64);
 pub const MAX_PARTICIPANTS: NonZeroU32 = commonware_utils::NZU32!(64);
 /// Share derivation mode used by DKG and reshare ceremonies.
 pub const SHARING_MODE: Mode = Mode::NonZeroCounter;
+/// Revealed-share calculation used by DKG and reshare ceremonies.
+pub const REVEAL: Reveal = Reveal::V1;
 /// Newest sharing mode version this binary accepts.
 pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
 /// Page size for storage page caches.
@@ -629,8 +631,7 @@ mod tests {
 
         let participants = Set::from_iter_dedup(keys(2));
         let (output, _shares) =
-            deal::<MinSig, _, N3f1>(TestRng::new(2), Default::default(), participants.clone())
-                .unwrap();
+            deal::<MinSig, _, N3f1>(TestRng::new(2), SHARING_MODE, participants.clone()).unwrap();
         let mut info = dkg::types::EpochInfo {
             outcome: dkg::types::EpochOutcome::Success,
             epoch: Epoch::zero(),
@@ -659,8 +660,7 @@ mod tests {
 
         let participants = Set::from_iter_dedup(keys(2));
         let (output, _shares) =
-            deal::<MinSig, _, N3f1>(TestRng::new(2), Default::default(), participants.clone())
-                .unwrap();
+            deal::<MinSig, _, N3f1>(TestRng::new(2), SHARING_MODE, participants.clone()).unwrap();
         let info = dkg::types::EpochInfo {
             outcome: dkg::types::EpochOutcome::Success,
             epoch: Epoch::zero(),
@@ -686,7 +686,7 @@ mod tests {
         let player = keys(1).pop().unwrap();
         let players = Set::from_iter_dedup([player.clone()]);
         let (_output, shares) =
-            deal::<MinSig, _, N3f1>(TestRng::new(1), Default::default(), players).unwrap();
+            deal::<MinSig, _, N3f1>(TestRng::new(1), SHARING_MODE, players).unwrap();
         let share = shares.get_value(&player).unwrap().clone();
 
         commonware_runtime::deterministic::Runner::default().start(|_| {
