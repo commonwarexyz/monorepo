@@ -7,7 +7,7 @@
 //! entries harmless after slot reuse. Waker callbacks are deferred until the
 //! surrounding driver-state borrow is released.
 
-use super::callbacks::{WakerActionSink, WakerAction};
+use super::callbacks::{WakerAction, WakerActionSink};
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,

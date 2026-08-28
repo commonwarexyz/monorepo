@@ -19,8 +19,8 @@ use timeout::Tick;
 mod waiter;
 use waiter::WaiterId;
 mod waker;
-pub(crate) use waker::RingWaker;
 use event_loop::UserData;
+pub(crate) use waker::RingWaker;
 
 #[cfg(test)]
 pub(crate) mod testing;

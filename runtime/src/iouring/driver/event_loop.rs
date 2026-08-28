@@ -29,8 +29,8 @@ use super::{
     request,
     spinner::Spinner,
     timeout::{self, Tick, TimeoutWheel},
-    waiter::{TicketId, CqeOutcome, StageOutcome, WaiterId},
-    waker::{WAKE_USER_DATA, RingWaker},
+    waiter::{CqeOutcome, StageOutcome, TicketId, WaiterId},
+    waker::{RingWaker, WAKE_USER_DATA},
 };
 use crate::{
     iouring::RingConfig,
@@ -610,9 +610,7 @@ impl DriverState {
     ) {
         // Publish Ready while the ticket entry still links to this waiter. The
         // ticket can then observe its output independently of waiter reuse.
-        let waker = ops
-            .tickets
-            .publish_ready(ticket_id, waiter_id, output);
+        let waker = ops.tickets.publish_ready(ticket_id, waiter_id, output);
 
         // Remove active timeout accounting after publication, while the
         // generation-stamped waiter identity is still current.

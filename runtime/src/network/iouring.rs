@@ -186,8 +186,16 @@ impl Network {
     /// Each admitted send, recv, accept, or connect consumes one waiter slot.
     /// When no unreserved slot remains, later operations wait in FIFO admission
     /// order rather than entering the ring immediately.
-    pub(crate) const fn new(cfg: Config, driver_handle: iouring::DriverHandle, pool: BufferPool) -> Self {
-        Self { cfg, driver_handle, pool }
+    pub(crate) const fn new(
+        cfg: Config,
+        driver_handle: iouring::DriverHandle,
+        pool: BufferPool,
+    ) -> Self {
+        Self {
+            cfg,
+            driver_handle,
+            pool,
+        }
     }
 }
 
@@ -238,10 +246,16 @@ impl crate::Network for Network {
         configure_socket(&fd, &self.cfg);
 
         let deadline = Instant::now() + self.cfg.connect_timeout;
-        self.driver_handle.connect(fd.clone(), socket, deadline).await?;
+        self.driver_handle
+            .connect(fd.clone(), socket, deadline)
+            .await?;
 
         Ok((
-            Sink::new(fd.clone(), self.driver_handle.clone(), self.cfg.read_write_timeout),
+            Sink::new(
+                fd.clone(),
+                self.driver_handle.clone(),
+                self.cfg.read_write_timeout,
+            ),
             Stream::new(
                 fd,
                 self.driver_handle.clone(),
@@ -282,8 +296,11 @@ impl crate::Listener for Listener {
         loop {
             if self.pending_accept.is_none() {
                 let deadline = Instant::now() + self.cfg.read_write_timeout;
-                self.pending_accept =
-                    Some(self.driver_handle.start_accept(self.fd.clone(), deadline).await);
+                self.pending_accept = Some(
+                    self.driver_handle
+                        .start_accept(self.fd.clone(), deadline)
+                        .await,
+                );
             }
 
             // Wait on the in-flight accept. If this future is dropped, the
@@ -300,7 +317,11 @@ impl crate::Listener for Listener {
                     configure_socket(&fd, &self.cfg);
                     return Ok((
                         remote_addr,
-                        Sink::new(fd.clone(), self.driver_handle.clone(), self.cfg.read_write_timeout),
+                        Sink::new(
+                            fd.clone(),
+                            self.driver_handle.clone(),
+                            self.cfg.read_write_timeout,
+                        ),
                         Stream::new(
                             fd,
                             self.driver_handle.clone(),
@@ -354,7 +375,11 @@ enum SinkState {
 
 impl Sink {
     /// Construct an open sink for one shared socket descriptor.
-    const fn new(fd: Arc<OwnedFd>, driver_handle: iouring::DriverHandle, timeout: Duration) -> Self {
+    const fn new(
+        fd: Arc<OwnedFd>,
+        driver_handle: iouring::DriverHandle,
+        timeout: Duration,
+    ) -> Self {
         Self {
             fd,
             driver_handle,

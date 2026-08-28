@@ -113,8 +113,7 @@ fn insert_ticket(
 fn test_ticket_output_survives_waiter_reuse() {
     let mut waiters = Waiters::new(1);
     let mut tickets = TicketArena::new();
-    let (ticket_id, waiter_id) =
-        insert_ticket(&mut tickets, &mut waiters, make_sync_request());
+    let (ticket_id, waiter_id) = insert_ticket(&mut tickets, &mut waiters, make_sync_request());
     assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
     let CqeOutcome::Ticket {
         waiter_id: completed_waiter,
@@ -161,8 +160,7 @@ fn test_ticket_slot_reuses_after_ticket_drop() {
     ));
     let _ = remove_waiter(&mut waiters, first_waiter);
 
-    let (reused, reused_waiter) =
-        insert_ticket(&mut tickets, &mut waiters, make_sync_request());
+    let (reused, reused_waiter) = insert_ticket(&mut tickets, &mut waiters, make_sync_request());
     assert_eq!(reused, first);
     assert_eq!(tickets.arena_len(), 1);
 
@@ -177,8 +175,7 @@ fn test_ticket_slot_reuses_after_ticket_drop() {
 fn test_ticket_local_timeout_publishes_then_recycles_waiter() {
     let mut waiters = Waiters::new(1);
     let mut tickets = TicketArena::new();
-    let (ticket_id, waiter_id) =
-        insert_ticket(&mut tickets, &mut waiters, make_recv_request());
+    let (ticket_id, waiter_id) = insert_ticket(&mut tickets, &mut waiters, make_recv_request());
     assert!(waiters.expire(waiter_id));
     let StageOutcome::Ticket {
         waiter_id: completed_waiter,
@@ -205,8 +202,7 @@ fn test_ticket_local_timeout_publishes_then_recycles_waiter() {
 fn test_pending_sync_ticket_drop_detaches_through_ticket_id() {
     let mut waiters = Waiters::new(1);
     let mut tickets = TicketArena::new();
-    let (ticket_id, waiter_id) =
-        insert_ticket(&mut tickets, &mut waiters, make_sync_request());
+    let (ticket_id, waiter_id) = insert_ticket(&mut tickets, &mut waiters, make_sync_request());
     assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
     assert!(matches!(
         tickets.mark_orphaned(ticket_id),

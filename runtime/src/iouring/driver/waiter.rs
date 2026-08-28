@@ -53,7 +53,7 @@
 
 use super::{
     Tick, UserData,
-    request::{RequestOutput, Request},
+    request::{Request, RequestOutput},
 };
 use crate::Error;
 use io_uring::squeue::Entry as SqueueEntry;
@@ -495,11 +495,7 @@ impl TicketArena {
         let waiter_id = insert_waiter(id);
         let entry = TicketEntryState::Pending {
             waiter_id,
-            waker: Some(
-                incoming_waker
-                    .take()
-                    .expect("ticket waker consumed twice"),
-            ),
+            waker: Some(incoming_waker.take().expect("ticket waker consumed twice")),
         };
         if index == self.entries.len() {
             self.entries.push(Some(entry));
@@ -1029,10 +1025,7 @@ impl Waiters {
                     let output = request.interrupt(reason.into_error());
                     match self.finish_output_at(waiter_id, output) {
                         FinishedOutput::Op { waker } => StageOutcome::Ready { waker },
-                        FinishedOutput::Ticket {
-                            ticket_id,
-                            output,
-                        } => StageOutcome::Ticket {
+                        FinishedOutput::Ticket { ticket_id, output } => StageOutcome::Ticket {
                             waiter_id,
                             ticket_id,
                             output,
@@ -1140,10 +1133,7 @@ impl Waiters {
             let output = output.expect("non-orphaned completion is terminal");
             match self.finish_output_at(waiter_id, output) {
                 FinishedOutput::Op { waker } => CqeOutcome::Ready { waker, target_tick },
-                FinishedOutput::Ticket {
-                    ticket_id,
-                    output,
-                } => CqeOutcome::Ticket {
+                FinishedOutput::Ticket { ticket_id, output } => CqeOutcome::Ticket {
                     waiter_id,
                     ticket_id,
                     output,
@@ -1172,10 +1162,7 @@ impl Waiters {
                 let ticket_id = *ticket_id;
                 slot.lifecycle = Lifecycle::TicketComplete;
                 self.pending -= 1;
-                FinishedOutput::Ticket {
-                    ticket_id,
-                    output,
-                }
+                FinishedOutput::Ticket { ticket_id, output }
             }
             Observer::Orphaned => panic!("orphaned output reached observer publication"),
         }

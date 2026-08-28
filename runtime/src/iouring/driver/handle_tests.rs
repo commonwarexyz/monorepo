@@ -194,10 +194,7 @@ fn test_op_waker_reentrant_drop_runs_after_ops_borrow() {
     assert!(matches!(result, Ok(Poll::Pending)));
     assert!(state.waiter.get().is_none());
     handle.with(|ops| {
-        assert!(matches!(
-            ops.waiters.stage(target),
-            StageOutcome::Freed
-        ));
+        assert!(matches!(ops.waiters.stage(target), StageOutcome::Freed));
     });
 
     let op_id = match op.state {
@@ -206,10 +203,7 @@ fn test_op_waker_reentrant_drop_runs_after_ops_borrow() {
     };
     drop(op);
     handle.with(|ops| {
-        assert!(matches!(
-            ops.waiters.stage(op_id),
-            StageOutcome::Freed
-        ));
+        assert!(matches!(ops.waiters.stage(op_id), StageOutcome::Freed));
         assert!(ops.waiters.is_empty());
     });
 }
@@ -244,10 +238,7 @@ fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
     assert!(matches!(result, Ok(Poll::Pending)));
     assert!(state.waiter.get().is_none());
     handle.with(|ops| {
-        assert!(matches!(
-            ops.waiters.stage(target),
-            StageOutcome::Freed
-        ));
+        assert!(matches!(ops.waiters.stage(target), StageOutcome::Freed));
     });
 
     drop(Ticket {
@@ -286,10 +277,7 @@ fn test_pending_op_clone_panic_preserves_observer() {
     };
     drop(op);
     handle.with(|ops| {
-        assert!(matches!(
-            ops.waiters.stage(waiter_id),
-            StageOutcome::Freed
-        ));
+        assert!(matches!(ops.waiters.stage(waiter_id), StageOutcome::Freed));
     });
 }
 
@@ -319,10 +307,7 @@ fn test_pending_ticket_clone_panic_preserves_observer() {
         state: TicketState::Waiting(ticket_id),
     });
     handle.with(|ops| {
-        assert!(matches!(
-            ops.waiters.stage(waiter_id),
-            StageOutcome::Freed
-        ));
+        assert!(matches!(ops.waiters.stage(waiter_id), StageOutcome::Freed));
         assert!(ops.tickets.is_empty());
     });
 }
@@ -354,10 +339,7 @@ fn test_granted_admission_clone_panic_preserves_reservation_for_retry() {
             }
         ));
         let _ = ops.waiters.mark_orphaned(blocker, &outcome);
-        assert!(matches!(
-            ops.waiters.stage(blocker),
-            StageOutcome::Freed
-        ));
+        assert!(matches!(ops.waiters.stage(blocker), StageOutcome::Freed));
         let mut actions = Vec::new();
         ops.capacity.reconcile(ops.waiters.free_len(), &mut actions);
         actions
@@ -396,10 +378,7 @@ fn test_granted_admission_clone_panic_preserves_reservation_for_retry() {
     });
     drop(op);
     handle.with(|ops| {
-        assert!(matches!(
-            ops.waiters.stage(waiter_id),
-            StageOutcome::Freed
-        ));
+        assert!(matches!(ops.waiters.stage(waiter_id), StageOutcome::Freed));
         assert_eq!(ops.waiters.len(), 0);
     });
 }
