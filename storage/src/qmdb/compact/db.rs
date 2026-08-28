@@ -646,7 +646,7 @@ where
         );
 
         let commit = O::commit(metadata, inactivity_floor);
-        let mutations = O::into_ops(self.mutations);
+        let mutations = self.mutations.into_iter().map(O::mutation);
         let mut ops = Vec::with_capacity(mutations.len() + 1);
         ops.extend(mutations);
         ops.push(commit.clone());
@@ -2185,9 +2185,14 @@ pub(crate) mod tests {
                 .await;
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
-            let non_commit = O::into_ops(db.new_batch().mutate(7).mutations)
-                .next()
-                .unwrap();
+            let non_commit = O::mutation(
+                db.new_batch()
+                    .mutate(7)
+                    .mutations
+                    .into_iter()
+                    .next()
+                    .unwrap(),
+            );
             drop(db);
 
             // Overwrite the persisted commit op with a mutation.

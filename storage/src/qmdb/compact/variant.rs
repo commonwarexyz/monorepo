@@ -15,8 +15,8 @@ pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + CodecShared + Clone 
     /// The commit metadata type.
     type Metadata: Clone + Send + Sync + 'static;
 
-    /// The mutations a batch accumulates before merkleization.
-    type Mutations: Default + Send;
+    /// The mutations a batch accumulates before merkleization, in application order.
+    type Mutations: Default + Send + IntoIterator<IntoIter: ExactSizeIterator + Send>;
 
     /// The variant's name, recorded on tracing spans.
     const NAME: &'static str;
@@ -24,9 +24,9 @@ pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + CodecShared + Clone 
     /// Build a commit operation.
     fn commit(metadata: Option<Self::Metadata>, inactivity_floor_loc: Location<F>) -> Self;
 
+    /// Build the operation for one of a batch's mutations.
+    fn mutation(mutation: <Self::Mutations as IntoIterator>::Item) -> Self;
+
     /// The metadata carried by a commit operation; `None` for any other operation.
     fn metadata(&self) -> Option<&Self::Metadata>;
-
-    /// Turn a batch's mutations into operations, in application order.
-    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self> + Send;
 }

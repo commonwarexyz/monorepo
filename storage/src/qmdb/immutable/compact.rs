@@ -27,17 +27,15 @@ where
         Self::Commit(metadata, inactivity_floor_loc)
     }
 
+    fn mutation((key, value): (K, V::Value)) -> Self {
+        Self::Set(key, value)
+    }
+
     fn metadata(&self) -> Option<&V::Value> {
         match self {
             Self::Commit(metadata, _) => metadata.as_ref(),
             Self::Set(..) => None,
         }
-    }
-
-    fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self> {
-        mutations
-            .into_iter()
-            .map(|(key, value)| Self::Set(key, value))
     }
 }
 
