@@ -28,10 +28,10 @@
 //! [CacheRef::new] logs a warning when configured with one.
 //!
 //! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
-//! for its previously committed contents. Each rewrite covers the whole physical page: the new
-//! checksum lands in the alternate slot, while the committed prefix and its protected checksum
-//! are resubmitted byte-identically, leaving their durable bytes unchanged even if the write
-//! tears. A checksum over a page is computed over the first [0,len) bytes in the page, with all
+//! for its last durable contents. Each rewrite covers the whole physical page: the new checksum
+//! lands in the slot not protecting the durable contents, while the durable prefix and its
+//! protected checksum are resubmitted byte-identically, leaving their durable bytes unchanged
+//! even if the write tears. A checksum over a page is computed over the first [0,len) bytes in the page, with all
 //! other bytes in the page ignored. Ordinary partial-page payload writes 0-pad the range
 //! [len, page_size), but recovery does not depend on bytes outside [0,len). A checksum with
 //! length 0 is never considered valid. If both checksums are valid for the page, the one with the
@@ -40,7 +40,7 @@
 //!
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
-//! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
+//! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
 use crate::{Blob, Buf, BufMut, Error, IoBuf, ReadOptions};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
