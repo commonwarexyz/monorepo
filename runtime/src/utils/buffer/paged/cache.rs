@@ -176,8 +176,7 @@ impl CacheRef {
         {
             debug!(
                 page_size = page_size.get(),
-                physical_page_size,
-                "physical pages do not align with storage pages"
+                physical_page_size, "physical pages do not align with storage pages"
             );
         }
 
