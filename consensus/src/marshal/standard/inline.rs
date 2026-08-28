@@ -426,19 +426,22 @@ where
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let round = context.round;
-        let block_request = self
-            .marshal
-            .subscribe_by_digest(digest, DigestFallback::Wait);
 
-        // Publish the certification gate only after enqueueing the block subscription. Marshal
-        // processes ordinary messages in FIFO order, so a certification hint cannot consume a
-        // transient buffer hit before this request either receives the block or installs a waiter.
+        // Publish the certification gate only after enqueueing the block subscription. A
+        // certification path that observes this gate therefore enqueues its hint later. Marshal
+        // retains these causally sequenced ordinary messages in receive order, so the hint cannot
+        // consume a transient buffer hit before this request receives the block or installs a
+        // waiter.
+        //
         // Inline verification verdicts are scoped to the proposal context, while certification
         // receives only a notarized `(round, digest)`, so this gate records durability rather than
         // validity. Unlike deferred, inline blocks do not embed their context, so no local check
         // can rule out an honest notarization forming under a different header for this key. A
         // notarization also implies f+1 honest validators already ran application verification,
         // so durability is the only local fact certification still needs.
+        let block_request = self
+            .marshal
+            .subscribe_by_digest(digest, DigestFallback::Wait);
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
 

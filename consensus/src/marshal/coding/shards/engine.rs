@@ -1919,7 +1919,7 @@ mod tests {
     use std::{
         future::Future,
         marker::PhantomData,
-        num::NonZeroU32,
+        num::{NonZeroU32, NonZeroUsize},
         sync::{
             Arc,
             atomic::{AtomicIsize, Ordering},
@@ -2085,6 +2085,8 @@ mod tests {
         additional_scheme_epochs: Vec<Epoch>,
         /// Network link configuration.
         link: Link,
+        /// Per-peer capacity for shards received before leader discovery.
+        peer_buffer_size: NonZeroUsize,
         /// Marker for the coding scheme type parameter.
         _marker: PhantomData<S>,
     }
@@ -2097,6 +2099,7 @@ mod tests {
                 num_future_peers: 0,
                 additional_scheme_epochs: Vec::new(),
                 link: DEFAULT_LINK,
+                peer_buffer_size: NZUsize!(64),
                 _marker: PhantomData,
             }
         }
@@ -2209,7 +2212,7 @@ mod tests {
                         block_codec_cfg: (),
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
-                        peer_buffer_size: NZUsize!(64),
+                        peer_buffer_size: self.peer_buffer_size,
                         background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
                     };
@@ -2254,7 +2257,7 @@ mod tests {
                         block_codec_cfg: (),
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
-                        peer_buffer_size: NZUsize!(64),
+                        peer_buffer_size: self.peer_buffer_size,
                         background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
                     };
@@ -4092,6 +4095,7 @@ mod tests {
     fn test_late_subscription_uses_notarized_cache_after_peer_buffer_pressure() {
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
+            peer_buffer_size: NZUsize!(1),
             ..Default::default()
         };
 
@@ -4135,8 +4139,9 @@ mod tests {
                     },
                 }
 
-                // A later certification observation owns the cached block independently of
-                // bounded pre-leader shard buffers.
+                // A later certification observation refreshes the cached record's retention
+                // round. The record owns the block independently of bounded pre-leader shard
+                // buffers.
                 peers[receiver_idx]
                     .mailbox
                     .notarized(target_commitment, refreshed_round);
@@ -4149,17 +4154,15 @@ mod tests {
                     "target should be cached after its notarization is refreshed"
                 );
 
-                // The fixture retains 64 pre-leader shards per peer. One authenticated peer
-                // sends 65 distinct codec-valid shards to exercise its eviction path.
-                let pressure_blocks = (2u64..=66)
-                    .map(|id| {
-                        CodedBlock::<B, C, H>::new(
-                            B::new(Sha256Digest::EMPTY, Height::new(id), id),
-                            coding_config,
-                            &STRATEGY,
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                // The fixture retains one pre-leader shard per peer. One authenticated peer
+                // sends two distinct codec-valid shards to exercise the same eviction boundary.
+                let pressure_blocks = [2u64, 3].map(|id| {
+                    CodedBlock::<B, C, H>::new(
+                        B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                        coding_config,
+                        &STRATEGY,
+                    )
+                });
                 for block in &pressure_blocks {
                     let shard = block
                         .shard(peers[1].index.get() as u16)
@@ -4197,7 +4200,6 @@ mod tests {
                     peers[receiver_idx]
                         .mailbox
                         .notarized(commitment, initial_round);
-                    context.sleep(config.link.latency * 2).await;
                     if should_reconstruct {
                         let block_sub = peers[receiver_idx].mailbox.subscribe(commitment);
                         select! {

@@ -698,13 +698,15 @@ where
         let mut marshaled = self.clone();
         let round = context.round;
 
-        let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
-
-        // Publish the certification gate only after enqueueing the block subscription. Marshal
-        // processes ordinary messages in FIFO order, so a certification hint cannot consume a
-        // transient buffer hit before this request either receives the block or installs a waiter.
+        // Publish the certification gate only after enqueueing the block subscription. A
+        // certification path that observes this gate therefore enqueues its hint later. Marshal
+        // retains these causally sequenced ordinary messages in receive order, so the hint cannot
+        // consume a transient buffer hit before this request receives the block or installs a
+        // waiter.
+        //
         // The gate remains visible while the optimistic verification and durable store are in
         // flight, allowing certification to activate round-bound recovery through `hint_notarized`.
+        let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
         let (task_tx, task_rx) = oneshot::channel();
         self.gates.insert(round, digest, task_rx);
 
