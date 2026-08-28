@@ -357,8 +357,8 @@ fn format_branch(
     let pattern = formatter
         .pattern(pattern_source, options.indentation + 4)
         .map_err(Error::from)?;
-    let future_probe =
-        nested::relocate_expression(formatter, future_source, options.indentation + 4)?;
+    let inline_indentation = options.indentation + if future_opens_block(future) { 4 } else { 8 };
+    let future_probe = nested::relocate_expression(formatter, future_source, inline_indentation)?;
     let body_is_block = matches!(body_expression, Expr::Block(_));
     let body = if body_is_block {
         format_nested_block_expression(
@@ -412,7 +412,11 @@ fn format_branch(
         body_is_block,
     };
     let future_is_continued = future_is_continued(options, &layout, following_comments);
-    let destination_indentation = options.indentation + if future_is_continued { 8 } else { 4 };
+    let destination_indentation = if future_is_continued {
+        options.indentation + 8
+    } else {
+        inline_indentation
+    };
     if future_probe.had_supported {
         if future_is_continued {
             return Ok(None);
@@ -441,6 +445,25 @@ fn format_branch(
     }
     layout.future_is_continued = future_is_continued;
     Ok(Some(layout))
+}
+
+fn future_opens_block(expression: &Expr) -> bool {
+    match expression {
+        Expr::Async(_)
+        | Expr::Block(_)
+        | Expr::Const(_)
+        | Expr::ForLoop(_)
+        | Expr::If(_)
+        | Expr::Loop(_)
+        | Expr::Match(_)
+        | Expr::TryBlock(_)
+        | Expr::Unsafe(_)
+        | Expr::While(_) => true,
+        Expr::Closure(closure) => future_opens_block(&closure.body),
+        Expr::Group(group) => future_opens_block(&group.expr),
+        Expr::Paren(paren) => future_opens_block(&paren.expr),
+        _ => false,
+    }
 }
 
 fn internal_blank_lines_are_within(source: &str, ranges: &[Range<usize>]) -> bool {
@@ -1210,6 +1233,25 @@ mod tests {
             formatted.text().contains(
                 "if matches!(vote, Vote::Nullify(ref nullify) if nullify.round == round) {"
             )
+        );
+    }
+
+    #[test]
+    fn keeps_contextual_turbofish_future_inline() {
+        let options = Options {
+            indentation: 12,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "resolved = resolve_state_sync_floor::<deterministic::Context, WedgeApp, TestScheme, TestVariant>(&marshal, floor, &selected_finalization) => resolved";
+        let formatted = select(source, options).expect("select should format");
+
+        assert!(
+            formatted
+                .text()
+                .contains("resolved = resolve_state_sync_floor::<\n"),
+            "{}",
+            formatted.text()
         );
     }
 
