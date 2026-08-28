@@ -31,6 +31,7 @@ struct ExpressionOptions {
     indentation: usize,
     depth: usize,
     style: Style,
+    format_supported: bool,
 }
 
 impl Style {
@@ -95,6 +96,7 @@ struct Shield<'a> {
     marker_prefix: String,
     nested: Vec<NestedMacro>,
     had_skip: bool,
+    format_supported: bool,
     error: Option<Error>,
 }
 
@@ -255,8 +257,12 @@ impl VisitMut for Shield<'_> {
         if rustfmt_formats_macro(node) {
             return;
         }
-        let kind = macro_kind(&node.path, &node.delimiter)
-            .map_or(NestedKind::Opaque, NestedKind::Supported);
+        let kind = if self.format_supported {
+            macro_kind(&node.path, &node.delimiter)
+                .map_or(NestedKind::Opaque, NestedKind::Supported)
+        } else {
+            NestedKind::Opaque
+        };
         if let Err(error) = self.shield(node, kind) {
             self.error = Some(error);
         }
@@ -507,6 +513,7 @@ pub(super) fn expression(
             indentation,
             depth,
             style: Style::Expression,
+            format_supported: true,
         },
     )
 }
@@ -530,6 +537,7 @@ pub(super) fn match_arm_body(
             indentation,
             depth,
             style: Style::MatchArmBody,
+            format_supported: true,
         },
     )
 }
@@ -553,8 +561,42 @@ pub(super) fn block_expression(
             indentation,
             depth,
             style: Style::BlockExpression,
+            format_supported: true,
         },
     )
+}
+
+pub(super) struct RelocatedExpression {
+    pub(super) fragment: ProtectedFragment,
+    pub(super) had_supported: bool,
+}
+
+pub(super) fn relocate_expression(
+    formatter: &crate::rustfmt::Formatter,
+    source: &str,
+    indentation: usize,
+) -> Result<RelocatedExpression, Error> {
+    let expression = syn::parse_str::<Expr>(source).map_err(Error::Parse)?;
+    let mut collector = ChildCollector::default();
+    collector.visit_expr(&expression);
+    let source_map = SourceMap::new(source);
+    let fragment = format_expression(
+        formatter,
+        &expression,
+        source,
+        source,
+        &source_map,
+        ExpressionOptions {
+            indentation,
+            depth: 0,
+            style: Style::Expression,
+            format_supported: false,
+        },
+    )?;
+    Ok(RelocatedExpression {
+        fragment,
+        had_supported: !collector.macros.is_empty(),
+    })
 }
 
 pub(super) fn items(
@@ -572,6 +614,7 @@ pub(super) fn items(
         marker_prefix: marker_prefix.clone(),
         nested: Vec::new(),
         had_skip: false,
+        format_supported: true,
         error: None,
     };
     let mut shielded = items.to_vec();
@@ -629,6 +672,7 @@ pub(super) fn statements(
         marker_prefix: marker_prefix.clone(),
         nested: Vec::new(),
         had_skip: false,
+        format_supported: true,
         error: None,
     };
     let mut shielded = statements.to_vec();
@@ -724,6 +768,7 @@ fn format_expression(
         indentation,
         depth,
         style,
+        format_supported,
     } = options;
     let mut preflight = ShieldPreflight::default();
     preflight.visit_expr(expression);
@@ -740,6 +785,7 @@ fn format_expression(
         marker_prefix: marker_prefix.clone(),
         nested: Vec::new(),
         had_skip: false,
+        format_supported,
         error: None,
     };
     let mut shielded = expression.clone();

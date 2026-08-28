@@ -17,6 +17,7 @@ use syn::{Expr, spanned::Spanned};
 struct BranchLayout {
     pattern: String,
     future: String,
+    future_is_continued: bool,
     divergence: Option<String>,
     body: String,
     body_is_block: bool,
@@ -85,8 +86,9 @@ pub(super) fn select_at_depth(
         depth,
     };
     let mut branches = Vec::with_capacity(input.branches.len());
-    for branch in &input.branches {
-        let Some(branch) = format_select_branch(context, branch)? else {
+    for (index, branch) in input.branches.iter().enumerate() {
+        let following_comments = &shell_trivia.boundaries[index + 1];
+        let Some(branch) = format_select_branch(context, branch, following_comments)? else {
             return preserve_select(formatter, source, &source_map, &input, options, depth);
         };
         branches.push(branch);
@@ -225,8 +227,10 @@ fn render_select_loop(
         return preserve_select_loop(formatter, source, source_map, input, options, depth);
     };
     let mut branches = Vec::with_capacity(input.branches.len());
-    for branch in &input.branches {
-        let Some(branch) = format_select_loop_branch(context, branch)? else {
+    let first_following_boundary = 3 + usize::from(input.on_start.is_some());
+    for (index, branch) in input.branches.iter().enumerate() {
+        let following_comments = &prefix.shell_trivia.boundaries[first_following_boundary + index];
+        let Some(branch) = format_select_loop_branch(context, branch, following_comments)? else {
             return preserve_select_loop(formatter, source, source_map, input, options, depth);
         };
         branches.push(branch);
@@ -302,13 +306,22 @@ fn render_select_loop(
 fn format_select_branch(
     context: FormatContext<'_, '_, '_>,
     branch: &SelectBranch,
+    following_comments: &[ShellComment],
 ) -> Result<Option<BranchLayout>, Error> {
-    format_branch(context, &branch.pattern, &branch.future, None, &branch.body)
+    format_branch(
+        context,
+        &branch.pattern,
+        &branch.future,
+        None,
+        &branch.body,
+        following_comments,
+    )
 }
 
 fn format_select_loop_branch(
     context: FormatContext<'_, '_, '_>,
     branch: &SelectLoopBranch,
+    following_comments: &[ShellComment],
 ) -> Result<Option<BranchLayout>, Error> {
     format_branch(
         context,
@@ -319,6 +332,7 @@ fn format_select_loop_branch(
             .as_ref()
             .map(|else_clause| &else_clause.expression),
         &branch.body,
+        following_comments,
     )
 }
 
@@ -328,6 +342,7 @@ fn format_branch(
     future: &Expr,
     divergence: Option<&Expr>,
     body_expression: &Expr,
+    following_comments: &[ShellComment],
 ) -> Result<Option<BranchLayout>, Error> {
     let FormatContext {
         formatter,
@@ -342,15 +357,8 @@ fn format_branch(
     let pattern = formatter
         .pattern(pattern_source, options.indentation + 4)
         .map_err(Error::from)?;
-    let future = format_nested_expression(
-        formatter,
-        future,
-        future_source,
-        source,
-        source_map,
-        options.indentation + 8,
-        depth,
-    )?;
+    let future_probe =
+        nested::relocate_expression(formatter, future_source, options.indentation + 4)?;
     let body_is_block = matches!(body_expression, Expr::Block(_));
     let body = if body_is_block {
         format_nested_block_expression(
@@ -387,19 +395,52 @@ fn format_branch(
             )
         })
         .transpose()?;
-    if [&pattern, &future, &body].into_iter().any(is_immovable)
+    if [&pattern, &future_probe.fragment, &body]
+        .into_iter()
+        .any(is_immovable)
         || divergence.as_ref().is_some_and(is_immovable)
     {
         return Ok(None);
     }
 
-    Ok(Some(BranchLayout {
+    let mut layout = BranchLayout {
         pattern: pattern.into_string(),
-        future: future.into_string(),
+        future: future_probe.fragment.into_string(),
+        future_is_continued: false,
         divergence: divergence.map(ProtectedFragment::into_string),
         body: body.into_string(),
         body_is_block,
-    }))
+    };
+    let future_is_continued = future_is_continued(options, &layout, following_comments);
+    let destination_indentation = options.indentation + if future_is_continued { 8 } else { 4 };
+    if future_probe.had_supported {
+        if future_is_continued {
+            return Ok(None);
+        }
+        let future = format_nested_expression(
+            formatter,
+            future,
+            future_source,
+            source,
+            source_map,
+            destination_indentation,
+            depth,
+        )?;
+        if is_immovable(&future) {
+            return Ok(None);
+        }
+        layout.future = future.into_string();
+    } else if future_is_continued {
+        let future =
+            nested::relocate_expression(formatter, future_source, destination_indentation)?
+                .fragment;
+        if is_immovable(&future) {
+            return Ok(None);
+        }
+        layout.future = future.into_string();
+    }
+    layout.future_is_continued = future_is_continued;
+    Ok(Some(layout))
 }
 
 fn internal_blank_lines_are_within(source: &str, ranges: &[Range<usize>]) -> bool {
@@ -452,7 +493,7 @@ fn format_lifecycle(
             expression_source,
             source,
             source_map,
-            indentation,
+            indentation - 4,
             depth,
         )?
     } else {
@@ -798,17 +839,17 @@ fn write_branch(
     branch: &BranchLayout,
     following_comments: &[ShellComment],
 ) {
-    let trailing_comment = following_comments
-        .first()
-        .filter(|comment| comment.trailing)
-        .map(|comment| comment.text.as_str());
+    let trailing_comment = trailing_comment(following_comments);
     let inline = inline_branch(branch);
-    if !inline.contains('\n') && fits_with_trailing_comment(writer, &inline, trailing_comment) {
+    if !branch.future_is_continued
+        && !inline.contains('\n')
+        && fits_with_trailing_comment_overflow(writer, &inline, trailing_comment)
+    {
         writer.push(&inline);
         return;
     }
 
-    write_branch_head(writer, branch, trailing_comment);
+    write_branch_head(writer, branch);
     if branch.body_is_block {
         write_block_body(writer, &branch.body, trailing_comment);
         return;
@@ -837,18 +878,16 @@ fn inline_branch(branch: &BranchLayout) -> String {
     output
 }
 
-fn write_branch_head(
-    writer: &mut Writer<'_>,
-    branch: &BranchLayout,
-    trailing_comment: Option<&str>,
-) {
+fn write_branch_head(writer: &mut Writer<'_>, branch: &BranchLayout) {
     writer.push(&branch.pattern);
     writer.push(" =");
-    write_continuation(
-        writer,
-        &branch.future,
-        &branch_head_reserve(writer, branch, trailing_comment),
-    );
+    if branch.future_is_continued {
+        writer.newline();
+        writer.indented(|writer| writer.push(&branch.future));
+    } else {
+        writer.push(" ");
+        writer.push(&branch.future);
+    }
 
     if let Some(divergence) = &branch.divergence {
         let first_line = divergence.lines().next().unwrap_or(divergence);
@@ -919,15 +958,42 @@ fn branch_head_reserve(
     reserve
 }
 
-fn write_continuation(writer: &mut Writer<'_>, fragment: &str, reserve: &str) {
-    let first_line = fragment.lines().next().unwrap_or(fragment);
-    if writer.fits(&format!(" {first_line}{reserve}")) {
-        writer.push(" ");
-        writer.push(fragment);
-    } else {
-        writer.newline();
-        writer.indented(|writer| writer.push(fragment));
-    }
+fn future_is_continued(
+    options: Options,
+    branch: &BranchLayout,
+    following_comments: &[ShellComment],
+) -> bool {
+    let trailing_comment = trailing_comment(following_comments);
+    let mut writer = Writer::new(options.indentation, options.line_ending.as_str());
+    writer.newline();
+    let mut continued = false;
+    writer.indented(|writer| {
+        let inline = inline_branch(branch);
+        if !inline.contains('\n')
+            && fits_with_trailing_comment_overflow(writer, &inline, trailing_comment)
+        {
+            return;
+        }
+
+        writer.push(&branch.pattern);
+        writer.push(" =");
+        let reserve = branch_head_reserve(writer, branch, trailing_comment);
+        let first_line = branch.future.lines().next().unwrap_or(&branch.future);
+        let inline = format!(" {first_line}{reserve}");
+        continued = if branch.body_is_block {
+            !writer.fits_with_overflow(&inline)
+        } else {
+            !writer.fits(&inline)
+        };
+    });
+    continued
+}
+
+fn trailing_comment(comments: &[ShellComment]) -> Option<&str> {
+    comments
+        .first()
+        .filter(|comment| comment.trailing)
+        .map(|comment| comment.text.as_str())
 }
 
 fn write_block_body(writer: &mut Writer<'_>, body: &str, trailing_comment: Option<&str>) {
@@ -1108,6 +1174,43 @@ mod tests {
             "available_width =\n                another_descriptive_future_name().await"
         ));
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn keeps_a_rustfmt_width_branch_head_inline() {
+        let options = Options {
+            indentation: 12,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source =
+            "delivery = started.recv() => delivery.expect(\"second delivery did not start\")";
+        let formatted = select(source, options).expect("select should format");
+
+        assert!(
+            formatted.text().contains(
+                "delivery = started.recv() => delivery.expect(\"second delivery did not start\")"
+            ),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn formats_inline_async_future_at_its_emitted_indentation() {
+        let options = Options {
+            indentation: 12,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "result = async { loop { let vote = receive().await; if matches!(vote, Vote::Nullify(ref nullify) if nullify.round == round) { break; } } } => result";
+        let formatted = select(source, options).expect("select should format");
+
+        assert!(
+            formatted.text().contains(
+                "if matches!(vote, Vote::Nullify(ref nullify) if nullify.round == round) {"
+            )
+        );
     }
 
     #[test]
@@ -1313,6 +1416,25 @@ mod tests {
         assert!(once.contains("on_start => {\n"), "{once}");
         assert!(once.contains("start_sync::<E, A, S, V>("), "{once}");
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_lifecycle_block_at_its_emitted_indentation() {
+        let options = Options {
+            indentation: 8,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "context, on_start => { let retry = if self.sample.floor().is_none() && !self.floor_subscribers.is_empty() { Either::Left(self.context.sleep_until(deadline)) } else { Either::Right(future::pending()) }; }, on_stopped => {},";
+        let formatted = select_loop(source, options).expect("select loop should format");
+
+        assert!(
+            formatted.text().contains(
+                "let retry = if self.sample.floor().is_none() && !self.floor_subscribers.is_empty() {"
+            ),
+            "{}",
+            formatted.text()
+        );
     }
 
     #[test]
@@ -1727,6 +1849,63 @@ mod tests {
             "{once}"
         );
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_nested_select_in_future_at_inline_placement() {
+        let source = "outer = async { select! {inner=receive_inner()=>inner} } => outer";
+        let once = select(source, OPTIONS)
+            .expect("nested future select should format")
+            .into_string();
+        let twice = select(&once, OPTIONS)
+            .expect("nested future select should reach a fixed point")
+            .into_string();
+
+        assert!(once.contains("inner = receive_inner() => inner,"));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn preserves_opaque_macro_tokens_in_continued_future() {
+        let options = Options {
+            indentation: 20,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source =
+            "an_extremely_descriptive_pattern_name = async { opaque!(left   +   right) } => value";
+        let formatted = select(source, options).expect("continued future should format");
+
+        assert!(formatted.text().contains(" =\n"), "{}", formatted.text());
+        assert!(
+            formatted.text().contains("opaque!(left   +   right)"),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn preserves_supported_macro_in_continued_future() {
+        let options = Options {
+            indentation: 20,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "an_extremely_descriptive_pattern_name_with_more_context = async { select! { inner = receive_inner() => consume_xxxxxxxxxxxxxxxxxxxxxx(inner) } } => value";
+        let once = select(source, options).expect("continued nested future should be preserved");
+        let twice = select(once.text(), options)
+            .expect("continued nested future should reach a fixed point");
+
+        assert_eq!(
+            once.disposition(),
+            Disposition::PreservedWithNestedFormatting
+        );
+        assert!(
+            once.text().contains("consume_xxxxxxxxxxxxxxxxxxxxxx"),
+            "{}",
+            once.text()
+        );
+        assert_eq!(once.text(), twice.text());
     }
 
     #[test]
