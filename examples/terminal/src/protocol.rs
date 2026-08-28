@@ -579,7 +579,13 @@ impl Protocol {
         )
         .context("prepare close")?;
         prepared
-            .validate::<Sha256>(&context, &registration.deposits, &registration.withdrawals)
+            .validate::<Sha256, PaymentBatchVerifier, _>(
+                &context,
+                &registration.deposits,
+                &registration.withdrawals,
+                &mut rand::rng(),
+                &self.strategy,
+            )
             .context("validate prepared close")?;
         ensure!(
             prepared.close().roots.successor == successor_root,

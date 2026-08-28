@@ -504,6 +504,7 @@ pub mod boundary;
 pub mod challenge;
 pub mod commitment;
 pub mod credit;
+mod parallel;
 pub mod payment;
 pub mod settlement;
 pub mod state;

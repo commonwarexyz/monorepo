@@ -21,6 +21,7 @@ commonware-clearing = { workspace = true, features = ["std"] }
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["bls12381", "std"] }
 commonware-cryptography-curve25519 = { workspace = true, features = ["std"] }
+commonware-macros.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-stream.workspace = true
@@ -29,7 +30,7 @@ crossterm.workspace = true
 rand = { workspace = true, features = ["thread_rng"] }
 rand_core.workspace = true
 ratatui.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["cache"] }
 thiserror.workspace = true
 
 [[bin]]

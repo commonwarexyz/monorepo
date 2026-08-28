@@ -445,11 +445,6 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         self.value.core.outgoing_digest == Self::derive_outgoing_digest::<H>(Some(send))
     }
 
-    /// Returns whether this leaf commits no outgoing payment.
-    pub fn has_no_outgoing<H: Hasher<Digest = D>>(&self) -> bool {
-        self.value.core.outgoing_digest == Self::derive_outgoing_digest::<H>(None)
-    }
-
     fn derive_outgoing_digest<H: Hasher<Digest = D>>(send: Option<&SendBody<P, D>>) -> D {
         send.map_or_else(
             || H::hash(&[CHANGE_OUTGOING_NONE_HASH_NAMESPACE]),

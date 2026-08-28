@@ -10,7 +10,7 @@ use crate::bajillion::{
     },
     commitment::{self, Tree, VectorKind, VectorRoot},
     credit::{self, ShardHead, ShardSet},
-    payment::{PaymentContext, PaymentError},
+    payment::{PaymentContext, PaymentError, verify_payment_signatures},
     state::{
         AccountChange, AccountRow, AccountState, ChangeGuard, Prefix, SettlementOutput, StateLeaf,
     },
@@ -20,8 +20,9 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_cryptography::{BatchVerifier, Digest, Hasher, PublicKey};
 use commonware_parallel::{Sequential, Strategy};
+use rand_core::CryptoRng;
 use thiserror::Error;
 
 mod slice;
@@ -1040,16 +1041,30 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
     }
 
     /// Validates the complete close relation without reconstructing any retained root.
-    pub fn validate<H>(
+    ///
+    /// Every distinct payment send and receipt signature is verified in one randomized
+    /// aggregate batch, so `rng` must supply fresh cryptographic randomness.
+    pub fn validate<H, B, R>(
         &self,
         context: &CloseContext<P, D>,
         deposits: &DepositBatch<P>,
         withdrawals: &WithdrawalBatch<P, D>,
+        rng: &mut R,
+        strategy: &impl Strategy,
     ) -> Result<(), TransitionError>
     where
         H: Hasher<Digest = D>,
+        B: BatchVerifier<PublicKey = P>,
+        R: CryptoRng,
     {
-        validate_prepared_close::<H, P, D>(context, deposits, withdrawals, self)
+        validate_prepared_close::<H, P, D, B, R>(
+            context,
+            deposits,
+            withdrawals,
+            self,
+            rng,
+            strategy,
+        )
     }
 
     /// Deals every deterministic proof slice from the retained Merkle state.
@@ -1059,18 +1074,6 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         strategy: &impl Strategy,
     ) -> Result<Vec<ProofSlice<P, D>>, TransitionError> {
         slice::assemble_prepared_slices(cache, self, strategy)
-    }
-
-    /// Opens one account-relative compact value from the retained change tree.
-    pub fn change_opening(&self, position: u32) -> Result<ChangeOpening<D>, TransitionError> {
-        let leaf = self
-            .change_leaves
-            .get(position as usize)
-            .ok_or(TransitionError::SliceRange)?;
-        Ok(ChangeOpening {
-            value: leaf.value(),
-            proof: self.changes.opening(position)?,
-        })
     }
 
     /// Opens the terminal counts and aggregate flows needed for settlement admission.
@@ -1488,11 +1491,18 @@ fn validate_row_state_sides<P: PublicKey, D: Digest>(
 
 type StateVectors<P> = (Vec<StateLeaf<P>>, Vec<StateLeaf<P>>);
 
-fn derive_state_vectors<P: PublicKey, D: Digest>(
+/// Merges the unchanged leaves and changed rows into the successor state vector.
+///
+/// The derived predecessor vector is streamed element by element into `predecessor` instead of
+/// being materialized, so callers holding the exact expected vector can compare in place. The
+/// state-count bounds are checked before the merge, so a [`TransitionError::TooManyStates`]
+/// reject cannot be masked by a sink error.
+fn merge_state_vectors<P: PublicKey, D: Digest>(
     unchanged: &[StateLeaf<P>],
     rows: &[AccountRow<P, D>],
     max_states: u64,
-) -> Result<StateVectors<P>, TransitionError> {
+    mut predecessor: impl FnMut(&P, &AccountState) -> Result<(), TransitionError>,
+) -> Result<Vec<StateLeaf<P>>, TransitionError> {
     if unchanged
         .windows(2)
         .any(|pair| pair[0].account >= pair[1].account)
@@ -1506,49 +1516,55 @@ fn derive_state_vectors<P: PublicKey, D: Digest>(
     {
         return Err(TransitionError::NonCanonicalRows);
     }
+    let mut predecessor_len = unchanged.len();
+    let mut successor_len = unchanged.len();
     for row in rows {
         validate_row_state_sides(row)?;
+        if row.predecessor.active {
+            predecessor_len = predecessor_len
+                .checked_add(1)
+                .ok_or(TransitionError::TooManyStates)?;
+        }
+        if row.successor.active {
+            successor_len = successor_len
+                .checked_add(1)
+                .ok_or(TransitionError::TooManyStates)?;
+        }
     }
 
-    let capacity = unchanged.len().saturating_add(rows.len());
-    let mut predecessor = Vec::with_capacity(capacity);
-    let mut successor = Vec::with_capacity(capacity);
+    let protocol_max = u64::from(commitment::MAX_VECTOR_LENGTH);
+    let predecessor_len =
+        u64::try_from(predecessor_len).map_err(|_| TransitionError::TooManyStates)?;
+    let successor_len = u64::try_from(successor_len).map_err(|_| TransitionError::TooManyStates)?;
+    if predecessor_len > max_states
+        || successor_len > max_states
+        || predecessor_len > protocol_max
+        || successor_len > protocol_max
+    {
+        return Err(TransitionError::TooManyStates);
+    }
+
+    let mut successor = Vec::with_capacity(successor_len as usize);
     let mut unchanged_index = 0_usize;
     let mut row_index = 0_usize;
     while unchanged_index < unchanged.len() || row_index < rows.len() {
         match (unchanged.get(unchanged_index), rows.get(row_index)) {
+            (Some(leaf), Some(row)) if leaf.account == row.account => {
+                return Err(TransitionError::StateRowOverlap);
+            }
             (Some(leaf), Some(row)) if leaf.account < row.account => {
-                predecessor.push(leaf.clone());
+                predecessor(&leaf.account, &leaf.state)?;
                 successor.push(leaf.clone());
                 unchanged_index += 1;
             }
-            (Some(leaf), Some(row)) if row.account < leaf.account => {
-                if row.predecessor.active {
-                    predecessor.push(StateLeaf {
-                        account: row.account.clone(),
-                        state: row.predecessor,
-                    });
-                }
-                if row.successor.active {
-                    successor.push(StateLeaf {
-                        account: row.account.clone(),
-                        state: row.successor,
-                    });
-                }
-                row_index += 1;
-            }
-            (Some(_), Some(_)) => return Err(TransitionError::StateRowOverlap),
             (Some(leaf), None) => {
-                predecessor.push(leaf.clone());
+                predecessor(&leaf.account, &leaf.state)?;
                 successor.push(leaf.clone());
                 unchanged_index += 1;
             }
-            (None, Some(row)) => {
+            (_, Some(row)) => {
                 if row.predecessor.active {
-                    predecessor.push(StateLeaf {
-                        account: row.account.clone(),
-                        state: row.predecessor,
-                    });
+                    predecessor(&row.account, &row.predecessor)?;
                 }
                 if row.successor.active {
                     successor.push(StateLeaf {
@@ -1561,20 +1577,50 @@ fn derive_state_vectors<P: PublicKey, D: Digest>(
             (None, None) => break,
         }
     }
+    Ok(successor)
+}
 
-    let protocol_max = u64::from(commitment::MAX_VECTOR_LENGTH);
-    let predecessor_len =
-        u64::try_from(predecessor.len()).map_err(|_| TransitionError::TooManyStates)?;
-    let successor_len =
-        u64::try_from(successor.len()).map_err(|_| TransitionError::TooManyStates)?;
-    if predecessor_len > max_states
-        || successor_len > max_states
-        || predecessor_len > protocol_max
-        || successor_len > protocol_max
-    {
-        return Err(TransitionError::TooManyStates);
-    }
+fn derive_state_vectors<P: PublicKey, D: Digest>(
+    unchanged: &[StateLeaf<P>],
+    rows: &[AccountRow<P, D>],
+    max_states: u64,
+) -> Result<StateVectors<P>, TransitionError> {
+    let mut predecessor = Vec::with_capacity(unchanged.len().saturating_add(rows.len()));
+    let successor = merge_state_vectors(unchanged, rows, max_states, |account, state| {
+        predecessor.push(StateLeaf {
+            account: account.clone(),
+            state: *state,
+        });
+        Ok(())
+    })?;
     Ok((predecessor, successor))
+}
+
+/// Derives the successor vector while requiring the derived predecessor to equal `expected`.
+///
+/// This is the allocation-free counterpart of [`derive_state_vectors`] for callers that already
+/// hold the exact predecessor vector, such as a validated [`StateCache`].
+fn derive_successor<P: PublicKey, D: Digest>(
+    unchanged: &[StateLeaf<P>],
+    rows: &[AccountRow<P, D>],
+    expected: &[StateLeaf<P>],
+    max_states: u64,
+) -> Result<Vec<StateLeaf<P>>, TransitionError> {
+    let mut position = 0_usize;
+    let successor = merge_state_vectors(unchanged, rows, max_states, |account, state| {
+        let leaf = expected
+            .get(position)
+            .ok_or(TransitionError::PredecessorLinkage)?;
+        if leaf.account != *account || leaf.state != *state {
+            return Err(TransitionError::PredecessorLinkage);
+        }
+        position += 1;
+        Ok(())
+    })?;
+    if position != expected.len() {
+        return Err(TransitionError::PredecessorLinkage);
+    }
+    Ok(successor)
 }
 
 fn boundary_accounts<'a, P: PublicKey, D: Digest>(
@@ -1927,44 +1973,55 @@ fn state_liability<P: PublicKey>(leaves: &[StateLeaf<P>]) -> Result<u64, Transit
 }
 
 /// Builds one close from the complete live predecessor state, then validates it fully.
-pub fn build_close<H, P, D>(
+///
+/// Every distinct payment send and receipt signature is verified in one randomized aggregate
+/// batch, so `rng` must supply fresh cryptographic randomness.
+pub fn build_close<H, P, D, B, R>(
     cache: &StateCache<P, D>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     rows: Vec<AccountRow<P, D>>,
     shard_sets: Vec<ShardSet<P, D>>,
+    rng: &mut R,
 ) -> Result<Close<P, D>, TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
     D: Digest,
+    B: BatchVerifier<PublicKey = P>,
+    R: CryptoRng,
 {
-    build_close_with_strategy::<H, P, D>(
+    build_close_with_strategy::<H, P, D, B, R>(
         cache,
         context,
         deposits,
         withdrawals,
         rows,
         shard_sets,
+        rng,
         &Sequential,
     )
 }
 
 /// Builds one close with the supplied execution strategy, then validates it fully.
-pub fn build_close_with_strategy<H, P, D>(
+#[allow(clippy::too_many_arguments)]
+pub fn build_close_with_strategy<H, P, D, B, R>(
     cache: &StateCache<P, D>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     rows: Vec<AccountRow<P, D>>,
     shard_sets: Vec<ShardSet<P, D>>,
+    rng: &mut R,
     strategy: &impl Strategy,
 ) -> Result<Close<P, D>, TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
     D: Digest,
+    B: BatchVerifier<PublicKey = P>,
+    R: CryptoRng,
 {
     let prepared = prepare_close_with_strategy::<H, P, D>(
         cache,
@@ -1975,7 +2032,7 @@ where
         shard_sets,
         strategy,
     )?;
-    prepared.validate::<H>(context, deposits, withdrawals)?;
+    prepared.validate::<H, B, R>(context, deposits, withdrawals, rng, strategy)?;
     Ok(prepared.into_close())
 }
 
@@ -2014,12 +2071,16 @@ where
     validate_corpus_limits(context, &rows, &shard_sets, totals)?;
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
 
+    // The unchanged suffix is derived against the exact cached predecessor accounts, so the
+    // streamed predecessor compare inside the merge cannot fire here. It runs anyway because
+    // the shared derivation also authenticates adversarial unchanged vectors when dealing.
     let unchanged = derive_unchanged(cache.leaves(), &rows)?;
-    let (predecessor_leaves, successor_leaves) =
-        derive_state_vectors(&unchanged, &rows, context.limits().max_states())?;
-    if predecessor_leaves != cache.leaves {
-        return Err(TransitionError::PredecessorLinkage);
-    }
+    let successor_leaves = derive_successor(
+        &unchanged,
+        &rows,
+        cache.leaves(),
+        context.limits().max_states(),
+    )?;
 
     let successor = state_tree_with_strategy::<H, P, D>(&successor_leaves, strategy)?;
     let (change_leaves, change_guards, changes) =
@@ -2028,7 +2089,7 @@ where
         withdrawal_output_material_with_strategy::<H, P, D>(&rows, withdrawals, strategy)?;
     let coverage_boundaries = slice::derive_coverage(
         &rows,
-        &predecessor_leaves,
+        cache.leaves(),
         &successor_leaves,
         context.assignment().slice_bits(),
     )?;
@@ -2477,78 +2538,154 @@ where
     validate_boundaries(deposits, withdrawals, close)
 }
 
-fn validate_close_rows<H, P, D>(
+fn validate_close_rows<H, P, D, B, R>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     close: &Close<P, D>,
-) -> Result<(), TransitionError>
-where
-    H: Hasher<Digest = D>,
-    P: PublicKey,
-    D: Digest,
-{
-    let mut prefix = Prefix::default();
-    for (row, shards) in close.rows.iter().zip(&close.shard_sets) {
-        let delta = validate_row::<H, P, D>(context, deposits, withdrawals, row, shards)?;
-        prefix = prefix
-            .checked_extend(delta)
-            .ok_or(TransitionError::PrefixOverflow)?;
-        if prefix != row.prefix {
-            return Err(TransitionError::Prefix);
-        }
-    }
-    let row_count = u32::try_from(close.rows.len()).map_err(|_| TransitionError::TooManyRows)?;
-    validate_terminal_prefix(context, deposits, withdrawals, row_count, prefix)?;
-    Ok(())
-}
-
-fn validate_prepared_close<H, P, D>(
-    context: &CloseContext<P, D>,
-    deposits: &DepositBatch<P>,
-    withdrawals: &WithdrawalBatch<P, D>,
-    prepared: &PreparedClose<P, D>,
-) -> Result<(), TransitionError>
-where
-    H: Hasher<Digest = D>,
-    P: PublicKey,
-    D: Digest,
-{
-    // Every retained tree and derived vector was fixed at the single
-    // construction site from these same inputs, and the header pins the
-    // context, so only the public close relation needs validation.
-    let close = prepared.close();
-    validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
-    validate_close_rows::<H, P, D>(context, deposits, withdrawals, close)
-}
-
-/// Verifies the complete public close relation.
-pub fn validate_close<H, P, D>(
-    context: &CloseContext<P, D>,
-    deposits: &DepositBatch<P>,
-    withdrawals: &WithdrawalBatch<P, D>,
-    close: &Close<P, D>,
-) -> Result<(), TransitionError>
-where
-    H: Hasher<Digest = D>,
-    P: PublicKey,
-    D: Digest,
-{
-    validate_close_with_strategy::<H, P, D>(context, deposits, withdrawals, close, &Sequential)
-}
-
-/// Verifies the complete public close relation using the supplied execution strategy.
-pub fn validate_close_with_strategy<H, P, D>(
-    context: &CloseContext<P, D>,
-    deposits: &DepositBatch<P>,
-    withdrawals: &WithdrawalBatch<P, D>,
-    close: &Close<P, D>,
+    rng: &mut R,
     strategy: &impl Strategy,
 ) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
     D: Digest,
+    B: BatchVerifier<PublicKey = P>,
+    R: CryptoRng,
+{
+    // Rows validate independently and each carries its running prefix, so structure and
+    // prefix continuity check in parallel against the preceding row's disclosed prefix.
+    // Signature checks are deferred to one randomized aggregate batch below.
+    strategy.try_map_collect_vec(
+        close.rows.iter().zip(&close.shard_sets).enumerate(),
+        |(index, (row, shards))| {
+            let delta =
+                validate_row_structure::<H, P, D>(context, deposits, withdrawals, row, shards)?;
+            let previous = index
+                .checked_sub(1)
+                .map_or_else(Prefix::default, |previous| close.rows[previous].prefix);
+            let prefix = previous
+                .checked_extend(delta)
+                .ok_or(TransitionError::PrefixOverflow)?;
+            if prefix != row.prefix {
+                return Err(TransitionError::Prefix);
+            }
+            Ok(())
+        },
+    )?;
+    let row_count = u32::try_from(close.rows.len()).map_err(|_| TransitionError::TooManyRows)?;
+    let totals = close
+        .rows
+        .last()
+        .map_or_else(Prefix::default, |row| row.prefix);
+    validate_terminal_prefix(context, deposits, withdrawals, row_count, totals)?;
+
+    // Structural validation makes every payment reference safe to collect. Every distinct
+    // outgoing and shard-head signature then joins one randomized aggregate batch, which
+    // deliberately reports failure without attributing it to one envelope.
+    let outgoing = close
+        .rows
+        .iter()
+        .filter(|row| row.outgoing.is_some())
+        .count();
+    let incoming = close
+        .shard_sets
+        .iter()
+        .map(|shards| shards.heads().len())
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or(TransitionError::CloseLimit)?;
+    let payment_count = outgoing
+        .checked_add(incoming)
+        .ok_or(TransitionError::CloseLimit)?;
+    if !verify_payment_signatures::<P, D, B, R, _>(
+        context.payment(),
+        close
+            .rows
+            .iter()
+            .filter_map(|row| row.outgoing.as_ref())
+            .chain(
+                close
+                    .shard_sets
+                    .iter()
+                    .flat_map(|shards| shards.heads().iter().map(|head| &head.payment)),
+            ),
+        payment_count,
+        rng,
+        strategy,
+    ) {
+        return Err(TransitionError::Payment(
+            PaymentError::InvalidSignatureBatch,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prepared_close<H, P, D, B, R>(
+    context: &CloseContext<P, D>,
+    deposits: &DepositBatch<P>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    prepared: &PreparedClose<P, D>,
+    rng: &mut R,
+    strategy: &impl Strategy,
+) -> Result<(), TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+    B: BatchVerifier<PublicKey = P>,
+    R: CryptoRng,
+{
+    // Every retained tree and derived vector was fixed at the single
+    // construction site from these same inputs, and the header pins the
+    // context, so only the public close relation needs validation.
+    let close = prepared.close();
+    validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
+    validate_close_rows::<H, P, D, B, R>(context, deposits, withdrawals, close, rng, strategy)
+}
+
+/// Verifies the complete public close relation.
+///
+/// Every distinct payment send and receipt signature is verified in one randomized aggregate
+/// batch, so `rng` must supply fresh cryptographic randomness.
+pub fn validate_close<H, P, D, B, R>(
+    context: &CloseContext<P, D>,
+    deposits: &DepositBatch<P>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    close: &Close<P, D>,
+    rng: &mut R,
+) -> Result<(), TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+    B: BatchVerifier<PublicKey = P>,
+    R: CryptoRng,
+{
+    validate_close_with_strategy::<H, P, D, B, R>(
+        context,
+        deposits,
+        withdrawals,
+        close,
+        rng,
+        &Sequential,
+    )
+}
+
+/// Verifies the complete public close relation using the supplied execution strategy.
+pub fn validate_close_with_strategy<H, P, D, B, R>(
+    context: &CloseContext<P, D>,
+    deposits: &DepositBatch<P>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    close: &Close<P, D>,
+    rng: &mut R,
+    strategy: &impl Strategy,
+) -> Result<(), TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+    B: BatchVerifier<PublicKey = P>,
+    R: CryptoRng,
 {
     validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
     if change_tree_with_strategy::<H, P, D>(&close.rows, &close.shard_sets, strategy)?.root()
@@ -2597,7 +2734,7 @@ where
     if state_liability(&successor)? != expected_liability {
         return Err(TransitionError::LiabilityEquation);
     }
-    validate_close_rows::<H, P, D>(context, deposits, withdrawals, close)
+    validate_close_rows::<H, P, D, B, R>(context, deposits, withdrawals, close, rng, strategy)
 }
 
 /// Close construction or public validation failure.
@@ -2772,9 +2909,11 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as ShaDigest};
     use commonware_cryptography_curve25519::signing::{
-        Signature, SigningKey, StrictVerifyingKey as VerifyingKey,
+        BatchVerifier as PaymentBatchVerifier, Signature, SigningKey,
+        StrictVerifyingKey as VerifyingKey,
     };
     use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::test_rng;
     use core::{
         fmt,
         num::NonZeroU64,
@@ -3139,13 +3278,14 @@ mod tests {
         pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
         assign_prefixes(&mut pairs, &deposits, &withdrawals);
         let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             rows,
             shard_sets,
+            &mut test_rng(),
         )
         .unwrap();
         PaymentFixture {
@@ -3308,16 +3448,24 @@ mod tests {
         pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
         assign_prefixes(&mut pairs, &deposits, &withdrawals);
         let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             rows,
             shard_sets,
+            &mut test_rng(),
         )
         .unwrap();
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .unwrap();
 
         // A terminal batch whose total exceeds the epoch debit advance is rejected even though
         // its endpoint matches the successor debit.
@@ -3373,13 +3521,14 @@ mod tests {
             assignment(0),
         )
         .unwrap();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             Vec::new(),
             Vec::new(),
+            &mut test_rng(),
         )
         .unwrap();
         (context, deposits, withdrawals, close)
@@ -3448,21 +3597,23 @@ mod tests {
     #[test]
     fn payment_close_is_valid_and_codec_is_bounded() {
         let fixture = payment_fixture();
-        validate_close::<Sha256, _, _>(
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &fixture.context,
             &fixture.deposits,
             &fixture.withdrawals,
             &fixture.close,
+            &mut test_rng(),
         )
         .unwrap();
         let encoded = fixture.close.encode();
         assert!(TestClose::decode_cfg(encoded.clone(), &limits(1, 1, 1)).is_err());
         let decoded = TestClose::decode_cfg(encoded, &limits(2, 1, 1)).unwrap();
-        validate_close::<Sha256, _, _>(
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &fixture.context,
             &fixture.deposits,
             &fixture.withdrawals,
             &decoded,
+            &mut test_rng(),
         )
         .unwrap();
     }
@@ -3723,11 +3874,12 @@ mod tests {
     #[test]
     fn proof_slices_authenticate_every_exhaustive_interval() {
         let fixture = payment_fixture_with_slice_bits(4);
-        validate_close::<Sha256, _, _>(
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &fixture.context,
             &fixture.deposits,
             &fixture.withdrawals,
             &fixture.close,
+            &mut test_rng(),
         )
         .unwrap();
         let slices = assemble_slices::<Sha256, _, _>(
@@ -3796,13 +3948,14 @@ mod tests {
             assignment(MAX_SLICE_BITS),
         )
         .unwrap();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             Vec::new(),
             Vec::new(),
+            &mut test_rng(),
         )
         .unwrap();
         let slices = assemble_slices::<Sha256, _, _>(
@@ -3988,7 +4141,13 @@ mod tests {
         )
         .unwrap();
         prepared
-            .validate::<Sha256>(&context, &deposits, &withdrawals)
+            .validate::<Sha256, PaymentBatchVerifier, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &mut test_rng(),
+                &Sequential,
+            )
             .unwrap();
         let terminal = prepared.terminal_proof().unwrap();
         assert_eq!(terminal.encode_size(), empty_terminal_size);
@@ -4061,7 +4220,14 @@ mod tests {
         assert_eq!(successor.len(), 1);
         assert_eq!(successor[0].account, payer.public_key());
         assert_eq!(successor[0].state.balance, 80);
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            close,
+            &mut test_rng(),
+        )
+        .unwrap();
     }
 
     fn amount_withdrawal_close(
@@ -4200,7 +4366,14 @@ mod tests {
                 .unwrap(),
             withdrawal_output(b"destination", released)
         );
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            close,
+            &mut test_rng(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -4450,11 +4623,12 @@ mod tests {
     #[test]
     fn proof_slice_assembly_is_strategy_independent() {
         let fixture = payment_fixture_with_slice_bits(4);
-        validate_close::<Sha256, _, _>(
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &fixture.context,
             &fixture.deposits,
             &fixture.withdrawals,
             &fixture.close,
+            &mut test_rng(),
         )
         .unwrap();
         let sequential = assemble_slices::<Sha256, _, _>(
@@ -4504,7 +4678,13 @@ mod tests {
         )
         .unwrap();
         prepared
-            .validate::<Sha256>(&fixture.context, &fixture.deposits, &fixture.withdrawals)
+            .validate::<Sha256, PaymentBatchVerifier, _>(
+                &fixture.context,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                &mut test_rng(),
+                &Sequential,
+            )
             .unwrap();
         assert_eq!(prepared.close(), &fixture.close);
         assert_eq!(
@@ -4544,11 +4724,12 @@ mod tests {
     #[test]
     fn proof_slice_rejects_omission_shifted_bounds_and_wrong_index() {
         let fixture = payment_fixture_with_slice_bits(4);
-        validate_close::<Sha256, _, _>(
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &fixture.context,
             &fixture.deposits,
             &fixture.withdrawals,
             &fixture.close,
+            &mut test_rng(),
         )
         .unwrap();
         let slices = assemble_slices::<Sha256, _, _>(
@@ -4628,16 +4809,24 @@ mod tests {
             assignment(3),
         )
         .unwrap();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             Vec::new(),
             Vec::new(),
+            &mut test_rng(),
         )
         .unwrap();
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .unwrap();
         let slices = assemble_slices::<Sha256, _, _>(
             &cache,
             &context,
@@ -4682,13 +4871,14 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            build_close::<Sha256, _, _>(
+            build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &fixture.cache,
                 &restricted,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 fixture.close.rows.clone(),
                 fixture.close.shard_sets.clone(),
+                &mut test_rng(),
             ),
             Err(TransitionError::CloseLimit)
         ));
@@ -4971,13 +5161,14 @@ mod tests {
         assign_prefixes(&mut pairs, &deposits, &withdrawals);
         let (rows, shard_sets) = pairs.into_iter().unzip();
         assert!(matches!(
-            build_close::<Sha256, _, _>(
+            build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &cache,
                 &context,
                 &deposits,
                 &withdrawals,
                 rows,
                 shard_sets,
+                &mut test_rng(),
             ),
             Err(TransitionError::BoundaryRoot)
         ));
@@ -5193,13 +5384,14 @@ mod tests {
             assignment(0),
         )
         .unwrap();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             Vec::new(),
             Vec::new(),
+            &mut test_rng(),
         )
         .unwrap();
         let index = ChallengeIndex::new::<Sha256>(&context, &close).unwrap();
@@ -5231,7 +5423,14 @@ mod tests {
         assert_eq!(close.unchanged.len(), 1);
         assert_eq!(*context.predecessor_root(), close.roots.successor);
         assert_eq!(close.rows.last().map(|row| row.prefix), None);
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -5242,7 +5441,13 @@ mod tests {
         close.roots.successor.digest = Sha256::hash(&[b"hidden-empty-change"]);
         close.header = Header::new::<Sha256, _>(&context, &close.roots);
         assert!(matches!(
-            validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close),
+            validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &close,
+                &mut test_rng()
+            ),
             Err(TransitionError::SuccessorRoot)
         ));
     }
@@ -5266,13 +5471,14 @@ mod tests {
             assignment(0),
         )
         .unwrap();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             Vec::new(),
             Vec::new(),
+            &mut test_rng(),
         )
         .unwrap();
         assert_eq!(
@@ -5284,7 +5490,14 @@ mod tests {
             close.roots.change,
             commitment::empty_root::<Sha256>(VectorKind::Change)
         );
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -5338,17 +5551,25 @@ mod tests {
             },
         };
         HASH_CALLS.store(0, Ordering::Relaxed);
-        let close = build_close::<CountingHasher, _, _>(
+        let close = build_close::<CountingHasher, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             vec![row],
             vec![shards],
+            &mut test_rng(),
         )
         .unwrap();
         let close_hashes = HASH_CALLS.load(Ordering::Relaxed);
-        validate_close::<CountingHasher, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        validate_close::<CountingHasher, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .unwrap();
         HASH_CALLS.store(0, Ordering::Relaxed);
         let slices = assemble_slices::<CountingHasher, _, _>(
             &cache,
@@ -5464,7 +5685,13 @@ mod tests {
         )
         .unwrap();
         prepared
-            .validate::<Sha256>(&context, &deposits, &withdrawals)
+            .validate::<Sha256, PaymentBatchVerifier, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &mut test_rng(),
+                &Sequential,
+            )
             .unwrap();
 
         assert_eq!(prepared.successor_leaves.len(), 1);
@@ -5531,13 +5758,14 @@ mod tests {
         )];
         assign_prefixes(&mut pairs, &deposits, &withdrawals);
         let (rows, shard_sets) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             rows,
             shard_sets,
+            &mut test_rng(),
         )
         .unwrap();
 
@@ -5557,13 +5785,14 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            build_close::<Sha256, _, _>(
+            build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &cache,
                 &restricted_context,
                 &deposits,
                 &withdrawals,
                 close.rows.clone(),
                 close.shard_sets.clone(),
+                &mut test_rng(),
             ),
             Err(TransitionError::CloseLimit)
         ));
@@ -5574,7 +5803,14 @@ mod tests {
             checked_successor_liability(context.predecessor_liability(), 0, 10, 0).unwrap(),
             0
         );
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .unwrap();
         let claim = assemble_withdrawal_claim::<Sha256, _, _>(
             &close,
             &withdrawals,
@@ -5706,13 +5942,14 @@ mod tests {
             .collect::<Vec<_>>();
         assign_prefixes(&mut pairs, &deposits, &withdrawals);
         let (rows, shard_sets) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             rows,
             shard_sets,
+            &mut test_rng(),
         )
         .unwrap();
 
@@ -5873,7 +6110,7 @@ mod tests {
         )
         .unwrap();
         let shards = ShardSet::empty(context.payment().epoch(), account.public_key());
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
@@ -5892,6 +6129,7 @@ mod tests {
                 },
             }],
             vec![shards],
+            &mut test_rng(),
         )
         .unwrap();
         let claim = assemble_withdrawal_claim::<Sha256, _, _>(
@@ -5955,13 +6193,14 @@ mod tests {
                 ..Prefix::default()
             },
         };
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             vec![row],
             vec![shards],
+            &mut test_rng(),
         )
         .unwrap();
         assert!(close.rows[0].successor.active);
@@ -6015,13 +6254,14 @@ mod tests {
                 ..Prefix::default()
             },
         };
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             vec![row],
             vec![shards],
+            &mut test_rng(),
         )
         .unwrap();
         assert!(!close.rows[0].successor.active);
@@ -6105,13 +6345,14 @@ mod tests {
         assign_prefixes(&mut pairs, &fixture.deposits, &withdrawals);
         let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
 
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &fixture.cache,
             &context,
             &fixture.deposits,
             &withdrawals,
             rows,
             shard_sets,
+            &mut test_rng(),
         )
         .unwrap();
         assert_eq!(close.rows.last().unwrap().prefix.withdrawal, 140);
@@ -6220,13 +6461,14 @@ mod tests {
             .collect::<Vec<_>>();
         assign_prefixes(&mut pairs, &fixture.deposits, &withdrawals);
         let (rows, shard_sets) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &fixture.cache,
             &context,
             &fixture.deposits,
             &withdrawals,
             rows,
             shard_sets,
+            &mut test_rng(),
         )
         .unwrap();
 
@@ -6253,7 +6495,13 @@ mod tests {
         close.roots.successor.digest = Sha256::hash(&[b"hidden"]);
         close.header = Header::new::<Sha256, _>(&context, &close.roots);
         assert!(matches!(
-            validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close),
+            validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &close,
+                &mut test_rng()
+            ),
             Err(TransitionError::SuccessorRoot)
         ));
     }
@@ -6265,11 +6513,12 @@ mod tests {
             fixture.close.rows[0].prefix.debit.checked_add(1).unwrap();
         rebind_state(&fixture.context, &mut fixture.close);
         assert!(matches!(
-            validate_close::<Sha256, _, _>(
+            validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &fixture.context,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 &fixture.close,
+                &mut test_rng(),
             ),
             Err(TransitionError::Prefix)
         ));
@@ -6288,11 +6537,12 @@ mod tests {
         ));
         rebind_state(&fixture.context, &mut fixture.close);
         assert!(
-            validate_close::<Sha256, _, _>(
+            validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &fixture.context,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 &fixture.close,
+                &mut test_rng(),
             )
             .is_err()
         );
@@ -6315,7 +6565,13 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            prepared.validate::<Sha256>(&fixture.context, &fixture.deposits, &fixture.withdrawals,),
+            prepared.validate::<Sha256, PaymentBatchVerifier, _>(
+                &fixture.context,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                &mut test_rng(),
+                &Sequential,
+            ),
             Err(TransitionError::SettlementOutput)
         ));
     }
@@ -6340,14 +6596,15 @@ mod tests {
         ));
         rebind_state(&fixture.context, &mut fixture.close);
         assert!(matches!(
-            validate_close::<Sha256, _, _>(
+            validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &fixture.context,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 &fixture.close,
+                &mut test_rng(),
             ),
             Err(TransitionError::Payment(
-                PaymentError::InvalidPayerSignature
+                PaymentError::InvalidSignatureBatch
             ))
         ));
 
@@ -6355,11 +6612,12 @@ mod tests {
         fixture.close.rows.swap(0, 1);
         fixture.close.shard_sets.swap(0, 1);
         assert!(matches!(
-            validate_close::<Sha256, _, _>(
+            validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &fixture.context,
                 &fixture.deposits,
                 &fixture.withdrawals,
                 &fixture.close,
+                &mut test_rng(),
             ),
             Err(TransitionError::NonCanonicalRows)
         ));

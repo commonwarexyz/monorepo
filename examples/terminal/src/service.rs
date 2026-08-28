@@ -4,7 +4,7 @@ use crate::{
     agent::Agent, operator::Operator, operator_rpc, rpc, settlement::Settlement, settlement_rpc, ui,
 };
 use anyhow::{Context, Result, ensure};
-use commonware_runtime::{Listener, Network, Runner as _, tokio};
+use commonware_runtime::{Clock, Listener, Network, Runner as _, tokio};
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf, time::Duration};
 
 fn runtime() -> tokio::Runner {
@@ -39,8 +39,16 @@ pub(crate) fn run_operator(
         let mut listener = context.bind(bind).await.context("bind operator RPC")?;
 
         loop {
-            let (_, mut sink, mut stream) =
-                listener.accept().await.context("accept operator RPC")?;
+            // The runtime folds every accept failure into one error class, so treat a failed
+            // accept as transient instead of tearing down the operator.
+            let (_, mut sink, mut stream) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    eprintln!("accept operator RPC failed; retrying: {error}");
+                    context.sleep(rpc::ACCEPT_RETRY_DELAY).await;
+                    continue;
+                }
+            };
             let Ok(request) = rpc::recv_request(&mut stream).await else {
                 continue;
             };

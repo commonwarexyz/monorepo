@@ -137,7 +137,7 @@ impl<H: Hasher> StreamingBuilder<H> {
 
         if self.expected == 0 {
             let tree_root = H::hash(&[]);
-            return Ok(H::hash(&[&self.expected.to_be_bytes(), tree_root.as_ref()]));
+            return Ok(super::finalize::<H>(0, &tree_root));
         }
 
         if !self.buffer.is_empty() {
@@ -165,10 +165,7 @@ impl<H: Hasher> StreamingBuilder<H> {
             accumulator_height += 1;
         }
 
-        Ok(H::hash(&[
-            &self.expected.to_be_bytes(),
-            accumulator.as_ref(),
-        ]))
+        Ok(super::finalize::<H>(self.expected, &accumulator))
     }
 
     /// Reduces the buffered full subtree, or the final ragged suffix, into the frontier.

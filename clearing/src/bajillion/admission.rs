@@ -6,106 +6,24 @@ mod certificate;
 use crate::bajillion::transition::EpochContext;
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
-    payment::{
-        Payment, PaymentContext, RECEIPT_SIGNATURE_NAMESPACE, SEND_SIGNATURE_NAMESPACE,
-        SignedReceipt, SignedSend,
-    },
+    payment::verify_payment_signatures,
     transition::{
         Assignment, CloseContext, Header, ProofSlice, RootBundle, validate_slice_header,
         validate_slice_structure_after_header,
     },
 };
-use ahash::RandomState;
 use alloc::vec::Vec;
 pub use certificate::{
     COMMITTEE_HASH_NAMESPACE, Committee, Error as AdmissionError, HEADER_NAMESPACE,
     MAX_COMMITTEE_SIZE, bls12381,
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{BatchVerifier, Digest, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use commonware_utils::Participant;
-use hashbrown::HashSet;
 use rand_core::CryptoRng;
 
 /// One validator attestation over a clearing header.
 pub type Vote = bls12381::Vote;
-
-fn verify_payment_signatures<'a, P, D, B, R, I>(
-    context: &PaymentContext<P, D>,
-    payments: I,
-    capacity: usize,
-    rng: &mut R,
-    strategy: &impl Strategy,
-) -> bool
-where
-    P: PublicKey + 'a,
-    D: Digest + 'a,
-    B: BatchVerifier<PublicKey = P>,
-    R: CryptoRng,
-    I: IntoIterator<Item = &'a Payment<P, D>>,
-{
-    let mut payments = payments.into_iter().peekable();
-    if payments.peek().is_none() {
-        return true;
-    }
-
-    // Randomized hashing bounds collision-amplification from adversarial envelopes. Deduplication
-    // still uses exact envelope equality, including the signature, and keeps send and receipt
-    // domains separate.
-    let hasher = RandomState::with_seeds(
-        rng.next_u64(),
-        rng.next_u64(),
-        rng.next_u64(),
-        rng.next_u64(),
-    );
-    let mut unique_sends = HashSet::with_capacity_and_hasher(capacity, hasher.clone());
-    let mut unique_receipts = HashSet::with_capacity_and_hasher(capacity, hasher);
-    let mut sends = Vec::<&SignedSend<P, D>>::with_capacity(capacity);
-    let mut receipts = Vec::<&SignedReceipt<P, D>>::with_capacity(capacity);
-    for payment in payments {
-        if unique_sends.insert(payment.send()) {
-            sends.push(payment.send());
-        }
-        if unique_receipts.insert(payment.receipt()) {
-            receipts.push(payment.receipt());
-        }
-    }
-
-    let Some(signature_count) = sends.len().checked_add(receipts.len()) else {
-        return false;
-    };
-    drop(unique_sends);
-    drop(unique_receipts);
-
-    // Encode independent message bodies through the supplied strategy, then queue every distinct
-    // signature into one randomized aggregate verification.
-    let mut batch = B::new(signature_count);
-    let send_messages =
-        strategy.map_collect_vec(sends.iter().copied(), |send| send.body().encode());
-    let mut queued = true;
-    for (send, message) in sends.into_iter().zip(send_messages) {
-        queued &= B::add(
-            &mut batch,
-            SEND_SIGNATURE_NAMESPACE,
-            &message,
-            send.body().payer(),
-            send.signature(),
-        );
-    }
-    let receipt_messages =
-        strategy.map_collect_vec(receipts.iter().copied(), |receipt| receipt.body().encode());
-    for (receipt, message) in receipts.into_iter().zip(receipt_messages) {
-        queued &= B::add(
-            &mut batch,
-            RECEIPT_SIGNATURE_NAMESPACE,
-            &message,
-            context.operator(),
-            receipt.signature(),
-        );
-    }
-    queued && batch.verify(rng, strategy)
-}
 
 /// Deterministically derives the exact quorum retaining one proof slice.
 pub fn slice_holders<H, D>(
@@ -560,16 +478,24 @@ mod tests {
         )
         .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
         .unwrap();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             Vec::new(),
             Vec::new(),
+            &mut test_rng(),
         )
         .unwrap();
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .unwrap();
         let all = assemble_slices::<Sha256, _, _>(
             &cache,
             &context,
@@ -869,10 +795,24 @@ mod tests {
             row.prefix = prefix;
         }
         let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-        let close =
-            build_close::<Sha256, _, _>(&cache, &context, &deposits, &withdrawals, rows, shards)
-                .unwrap();
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close).unwrap();
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            rows,
+            shards,
+            &mut test_rng(),
+        )
+        .unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .unwrap();
         let all = assemble_slices::<Sha256, _, _>(
             &cache,
             &context,

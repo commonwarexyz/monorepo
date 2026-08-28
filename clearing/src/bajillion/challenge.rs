@@ -5,9 +5,9 @@ use crate::bajillion::transition::EpochContext;
 use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     credit::{self, CreditTipLookup},
+    parallel::try_join,
     payment::{
-        Entry, Payment, PaymentError, PaymentWitness, PaymentWitnessParts, read_entries,
-        receipt_range_is_feasible,
+        Entry, Payment, PaymentError, PaymentWitness, read_entries, receipt_range_is_feasible,
     },
     state::{AccountChange, AccountState, ChangeGuard, ChangeValue, ChangeValueCore, StateLeaf},
     transition::{self, CloseContext, Header, RootBundle},
@@ -767,20 +767,19 @@ impl<P: PublicKey> ScopedPaymentWitness<P> {
     }
 
     fn from_witness(payment: &PaymentWitness<P>) -> Self {
-        let parts = payment.parts();
         Self {
-            payer: parts.payer,
-            entries: parts.entries,
-            cumulative_debit: parts.cumulative_debit,
-            payer_signature: parts.payer_signature,
-            cumulative_shard_credit: parts.cumulative_shard_credit,
-            index: parts.index,
-            operator_signature: parts.operator_signature,
+            payer: payment.payer.clone(),
+            entries: payment.entries.clone(),
+            cumulative_debit: payment.cumulative_debit,
+            payer_signature: payment.payer_signature.clone(),
+            cumulative_shard_credit: payment.cumulative_shard_credit,
+            index: payment.index,
+            operator_signature: payment.operator_signature.clone(),
         }
     }
 
     fn with_scope(&self, recipient: P, shard: u64) -> PaymentWitness<P> {
-        PaymentWitness::from_parts(PaymentWitnessParts {
+        PaymentWitness {
             payer: self.payer.clone(),
             entries: self.entries.clone(),
             cumulative_debit: self.cumulative_debit,
@@ -790,7 +789,7 @@ impl<P: PublicKey> ScopedPaymentWitness<P> {
             cumulative_shard_credit: self.cumulative_shard_credit,
             index: self.index,
             operator_signature: self.operator_signature.clone(),
-        })
+        }
     }
 }
 
@@ -864,22 +863,21 @@ impl<P: PublicKey> ReceiptWitness<P> {
     }
 
     fn from_witness(payment: &PaymentWitness<P>) -> Self {
-        let parts = payment.parts();
         Self {
-            shard: parts.shard,
-            cumulative_shard_credit: parts.cumulative_shard_credit,
-            index: parts.index,
-            operator_signature: parts.operator_signature,
+            shard: payment.shard,
+            cumulative_shard_credit: payment.cumulative_shard_credit,
+            index: payment.index,
+            operator_signature: payment.operator_signature.clone(),
         }
     }
 
     fn with_send(&self, send: &PaymentWitness<P>) -> PaymentWitness<P> {
-        let mut parts = send.parts();
-        parts.shard = self.shard;
-        parts.cumulative_shard_credit = self.cumulative_shard_credit;
-        parts.index = self.index;
-        parts.operator_signature = self.operator_signature.clone();
-        PaymentWitness::from_parts(parts)
+        let mut witness = send.clone();
+        witness.shard = self.shard;
+        witness.cumulative_shard_credit = self.cumulative_shard_credit;
+        witness.index = self.index;
+        witness.operator_signature = self.operator_signature.clone();
+        witness
     }
 }
 
@@ -944,19 +942,18 @@ impl<P: PublicKey> SameIndexPaymentWitness<P> {
     }
 
     fn from_witness(payment: &PaymentWitness<P>) -> Self {
-        let parts = payment.parts();
         Self {
-            payer: parts.payer,
-            entries: parts.entries,
-            cumulative_debit: parts.cumulative_debit,
-            payer_signature: parts.payer_signature,
-            cumulative_shard_credit: parts.cumulative_shard_credit,
-            operator_signature: parts.operator_signature,
+            payer: payment.payer.clone(),
+            entries: payment.entries.clone(),
+            cumulative_debit: payment.cumulative_debit,
+            payer_signature: payment.payer_signature.clone(),
+            cumulative_shard_credit: payment.cumulative_shard_credit,
+            operator_signature: payment.operator_signature.clone(),
         }
     }
 
     fn with_index_scope(&self, recipient: P, shard: u64, index: u64) -> PaymentWitness<P> {
-        PaymentWitness::from_parts(PaymentWitnessParts {
+        PaymentWitness {
             payer: self.payer.clone(),
             entries: self.entries.clone(),
             cumulative_debit: self.cumulative_debit,
@@ -966,7 +963,7 @@ impl<P: PublicKey> SameIndexPaymentWitness<P> {
             cumulative_shard_credit: self.cumulative_shard_credit,
             index,
             operator_signature: self.operator_signature.clone(),
-        })
+        }
     }
 }
 
@@ -1123,8 +1120,6 @@ impl<P: PublicKey> ReceiptForkWitness<P> {
     }
 
     fn same_send(left: &PaymentWitness<P>, right: &PaymentWitness<P>) -> bool {
-        let left = left.parts();
-        let right = right.parts();
         left.payer == right.payer
             && left.entries == right.entries
             && left.cumulative_debit == right.cumulative_debit
@@ -1133,9 +1128,7 @@ impl<P: PublicKey> ReceiptForkWitness<P> {
     }
 
     fn same_index(left: &PaymentWitness<P>, right: &PaymentWitness<P>) -> bool {
-        left.recipient() == right.recipient()
-            && left.shard() == right.shard()
-            && left.parts().index == right.parts().index
+        left.recipient == right.recipient && left.shard == right.shard && left.index == right.index
     }
 
     fn from_witnesses(mut left: PaymentWitness<P>, mut right: PaymentWitness<P>) -> Self {
@@ -1378,23 +1371,14 @@ where
     let change_root = &roots.change;
     match challenge {
         Challenge::LatestAcknowledgedSend { payment, payer } => {
-            let (payment, resolved) = strategy.try_run(
-                2,
-                || -> Result<_, ChallengeError> {
-                    let reconstructed =
-                        payment.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?;
-                    Ok((
-                        reconstructed,
-                        payer.resolve::<H>(predecessor_root, change_root, payment.payer())?,
-                    ))
-                },
+            let (payment, resolved) = try_join(
+                strategy,
                 || {
-                    let (payment, payer) = strategy.join(
-                        || payment.reconstruct_with_strategy::<H, H::Digest>(context, strategy),
-                        || payer.resolve::<H>(predecessor_root, change_root, payment.payer()),
-                    );
-                    Ok((payment?, payer?))
+                    payment
+                        .reconstruct_with_strategy::<H, H::Digest>(context, strategy)
+                        .map_err(ChallengeError::from)
                 },
+                || payer.resolve::<H>(predecessor_root, change_root, payment.payer()),
             )?;
             let disclosed = payment.send().body().cumulative_debit();
             let committed = resolved.terminal_debit;
@@ -1415,33 +1399,14 @@ where
             )
         }
         Challenge::HigherShardTip { payment, recipient } => {
-            let (payment, resolved) = strategy.try_run(
-                2,
-                || -> Result<_, ChallengeError> {
-                    let reconstructed =
-                        payment.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?;
-                    Ok((
-                        reconstructed,
-                        recipient.resolve::<H>(
-                            change_root,
-                            payment.recipient(),
-                            payment.shard(),
-                        )?,
-                    ))
-                },
+            let (payment, resolved) = try_join(
+                strategy,
                 || {
-                    let (payment, recipient) = strategy.join(
-                        || payment.reconstruct_with_strategy::<H, H::Digest>(context, strategy),
-                        || {
-                            recipient.resolve::<H>(
-                                change_root,
-                                payment.recipient(),
-                                payment.shard(),
-                            )
-                        },
-                    );
-                    Ok((payment?, recipient?))
+                    payment
+                        .reconstruct_with_strategy::<H, H::Digest>(context, strategy)
+                        .map_err(ChallengeError::from)
                 },
+                || recipient.resolve::<H>(change_root, payment.recipient(), payment.shard()),
             )?;
             let receipt = payment.receipt().body();
             let (credit, index) = resolved.map_or((0, 0), |tip| (tip.cumulative_credit, tip.index));
@@ -1462,31 +1427,10 @@ where
                 }
                 RangeLower::Payment(lower) => {
                     let lower = lower.with_scope(upper.recipient().clone(), upper.shard());
-                    let (upper, lower) = strategy.try_run(
-                        2,
-                        || -> Result<_, ChallengeError> {
-                            Ok((
-                                upper
-                                    .reconstruct_with_strategy::<H, H::Digest>(context, strategy)?,
-                                lower
-                                    .reconstruct_with_strategy::<H, H::Digest>(context, strategy)?,
-                            ))
-                        },
-                        || -> Result<_, ChallengeError> {
-                            let (upper, lower) = strategy.join(
-                                || {
-                                    upper.reconstruct_with_strategy::<H, H::Digest>(
-                                        context, strategy,
-                                    )
-                                },
-                                || {
-                                    lower.reconstruct_with_strategy::<H, H::Digest>(
-                                        context, strategy,
-                                    )
-                                },
-                            );
-                            Ok((upper?, lower?))
-                        },
+                    let (upper, lower) = try_join::<_, _, ChallengeError>(
+                        strategy,
+                        || Ok(upper.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?),
+                        || Ok(lower.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?),
                     )?;
                     let upper_receipt = upper.receipt().body();
                     let lower_receipt = lower.receipt().body();
@@ -1519,30 +1463,16 @@ where
                 ReceiptForkWitness::SameSend { left, right } => {
                     (left.as_ref(), right.with_send(left))
                 }
-                ReceiptForkWitness::SameIndex { left, right } => {
-                    let parts = left.parts();
-                    (
-                        left.as_ref(),
-                        right.with_index_scope(parts.recipient, parts.shard, parts.index),
-                    )
-                }
+                ReceiptForkWitness::SameIndex { left, right } => (
+                    left.as_ref(),
+                    right.with_index_scope(left.recipient.clone(), left.shard, left.index),
+                ),
                 ReceiptForkWitness::Full { left, right } => (left.as_ref(), right.as_ref().clone()),
             };
-            let (left_payment, right_payment) = strategy.try_run(
-                2,
-                || -> Result<_, ChallengeError> {
-                    Ok((
-                        left.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?,
-                        right.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?,
-                    ))
-                },
-                || -> Result<_, ChallengeError> {
-                    let (left, right) = strategy.join(
-                        || left.reconstruct_with_strategy::<H, H::Digest>(context, strategy),
-                        || right.reconstruct_with_strategy::<H, H::Digest>(context, strategy),
-                    );
-                    Ok((left?, right?))
-                },
+            let (left_payment, right_payment) = try_join::<_, _, ChallengeError>(
+                strategy,
+                || Ok(left.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?),
+                || Ok(right.reconstruct_with_strategy::<H, H::Digest>(context, strategy)?),
             )?;
             if left.encode() > right.encode() {
                 return Err(ChallengeError::NonCanonicalFork);

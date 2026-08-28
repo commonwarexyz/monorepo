@@ -731,9 +731,16 @@ fn fuzz_challenge(case: ChallengeCase) {
         .into_iter()
         .map(|(row, shards, _)| (row, shards))
         .unzip();
-    let close =
-        build_close::<Sha256, _, _>(&cache, &context, &deposits, &withdrawals, rows, shard_sets)
-            .expect("recipient deposit must form a valid close");
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        &cache,
+        &context,
+        &deposits,
+        &withdrawals,
+        rows,
+        shard_sets,
+        &mut test_rng(),
+    )
+    .expect("recipient deposit must form a valid close");
     let index = ChallengeIndex::new::<Sha256>(&context, &close)
         .expect("validated close has a canonical challenge index");
     let header = close.header;
@@ -1354,7 +1361,13 @@ fn fuzz_transition(mut case: TransitionCase) {
         rows: case.rows,
         shard_sets,
     };
-    let _ = validate_close::<Sha256, _, _>(&context, &empty_deposits, &empty_withdrawals, &close);
+    let _ = validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        &context,
+        &empty_deposits,
+        &empty_withdrawals,
+        &close,
+        &mut test_rng(),
+    );
 
     let cache = StateCache::<VerifyingKey, Digest>::new::<Sha256>(Vec::new())
         .expect("empty state cache must be valid");
@@ -1373,17 +1386,24 @@ fn fuzz_transition(mut case: TransitionCase) {
         assignment(case.seed),
     )
     .expect("empty close context must be valid");
-    let close = build_close::<Sha256, _, _>(
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         &cache,
         &context,
         &deposits,
         &withdrawals,
         Vec::new(),
         Vec::new(),
+        &mut test_rng(),
     )
     .expect("empty close must satisfy construction invariants");
-    validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
-        .expect("constructed empty close must validate");
+    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        &context,
+        &deposits,
+        &withdrawals,
+        &close,
+        &mut test_rng(),
+    )
+    .expect("constructed empty close must validate");
     let slices = assemble_slices::<Sha256, _, _>(
         &cache,
         &context,
@@ -1443,13 +1463,14 @@ fn fuzz_transition(mut case: TransitionCase) {
             ..Prefix::default()
         },
     };
-    let close = build_close::<Sha256, _, _>(
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         &cache,
         &context,
         &deposits,
         &withdrawals,
         vec![row],
         vec![shards],
+        &mut test_rng(),
     )
     .expect("constructed deposit creation must validate");
     assert_eq!(
@@ -1460,8 +1481,14 @@ fn fuzz_transition(mut case: TransitionCase) {
         close.roots.successor,
         empty_root::<Sha256>(VectorKind::State)
     );
-    validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
-        .expect("constructed deposit creation must validate");
+    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        &context,
+        &deposits,
+        &withdrawals,
+        &close,
+        &mut test_rng(),
+    )
+    .expect("constructed deposit creation must validate");
     let slices = assemble_slices::<Sha256, _, _>(
         &cache,
         &context,
@@ -1542,21 +1569,28 @@ fn fuzz_transition(mut case: TransitionCase) {
             ..Prefix::default()
         },
     };
-    let close = build_close::<Sha256, _, _>(
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         &cache,
         &context,
         &deposits,
         &withdrawals,
         vec![row],
         vec![shards],
+        &mut test_rng(),
     )
     .expect("constructed close withdrawal must validate");
     assert_eq!(
         close.roots.successor,
         empty_root::<Sha256>(VectorKind::State)
     );
-    validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
-        .expect("constructed close withdrawal must validate again");
+    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        &context,
+        &deposits,
+        &withdrawals,
+        &close,
+        &mut test_rng(),
+    )
+    .expect("constructed close withdrawal must validate again");
     let claim = assemble_withdrawal_claim::<Sha256, _, _>(
         &close,
         &withdrawals,
@@ -1708,7 +1742,13 @@ fn fuzz_transition(mut case: TransitionCase) {
     )
     .expect("constructed external payout must prepare");
     prepared
-        .validate::<Sha256>(&context, &deposits, &withdrawals)
+        .validate::<Sha256, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &mut test_rng(),
+            &Sequential,
+        )
         .expect("constructed external payout must validate");
     let terminal_proof = prepared
         .terminal_proof()
@@ -1751,8 +1791,14 @@ fn fuzz_transition(mut case: TransitionCase) {
     assert_eq!(payout_row.successor.balance, 0);
     assert!(payout_row.outgoing.is_none());
     assert_eq!(payout_row.checked_deltas(), Some((0, payout, 1)));
-    validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close)
-        .expect("constructed external payout must validate again");
+    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        &context,
+        &deposits,
+        &withdrawals,
+        close,
+        &mut test_rng(),
+    )
+    .expect("constructed external payout must validate again");
     let slices = prepared
         .assemble_slices(&cache, &Sequential)
         .expect("external payout close must split into slices");
@@ -1850,17 +1896,24 @@ fn fuzz_admission(case: AdmissionCase) {
             ..Prefix::default()
         },
     };
-    let close = build_close::<Sha256, _, _>(
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         &cache,
         &context,
         &deposits,
         &withdrawals,
         vec![row],
         vec![shards],
+        &mut test_rng(),
     )
     .expect("nonempty admission close must be valid");
-    validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
-        .expect("nonempty admission close must validate");
+    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        &context,
+        &deposits,
+        &withdrawals,
+        &close,
+        &mut test_rng(),
+    )
+    .expect("nonempty admission close must validate");
     let all = assemble_slices::<Sha256, _, _>(
         &cache,
         &context,

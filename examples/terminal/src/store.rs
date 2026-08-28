@@ -9,12 +9,12 @@ use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction},
     commitment::VectorRoot,
-    payment::{PaymentContext, SignedReceipt, SignedSend},
+    payment::{PaymentContext, SignedReceipt, SignedSend, TxId},
     settlement::SettlementChain,
     state::AccountState,
     transition::{BatchId, EpochContext, ExternalPayoutClaim, Header, RootBundle, WithdrawalClaim},
 };
-use commonware_codec::{Decode, DecodeExt, Encode, FixedSize, RangeCfg};
+use commonware_codec::{Decode, DecodeExt, Encode, FixedSize, RangeCfg, Write};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_cryptography_curve25519::signing::SigningKey;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -571,6 +571,10 @@ impl Store {
             max_claim_bytes = MAX_CLAIM_BYTES,
         );
         connection.execute_batch(&schema)?;
+
+        // The accept path alone reuses more distinct statements than rusqlite's default
+        // cache of 16 holds, so give prepared statements headroom against eviction.
+        connection.set_prepared_statement_cache_capacity(32);
         let journal_mode: String =
             connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         ensure!(
@@ -878,7 +882,6 @@ impl Store {
         Self::load_epoch(&self.connection, self.epoch()?)
     }
 
-    #[cfg(test)]
     pub(crate) fn current_account(&self, account: &Key) -> Result<Option<StoredAccount>> {
         effective_account(&self.connection, self.epoch()?, account)
     }
@@ -1060,13 +1063,13 @@ impl Store {
         #[cfg(test)]
         let fail_write = std::mem::take(&mut self.fail_payment_write);
         let accepted = mutate(&mut self.connection, "payment", |transaction| {
-            if let Some(accepted) = find_accepted_batch(transaction, &send)? {
+            let tx_id = send.tx_id::<Sha256>();
+            if let Some(accepted) = find_accepted_batch(transaction, &send, &tx_id)? {
                 return Ok(accepted);
             }
             let plan = validate_new_payment(transaction, context, &send, shard)?;
             let epoch = plan.epoch;
             let epoch_sql = sql_u64(epoch, "epoch")?;
-            let tx_id = send.tx_id::<Sha256>();
             let shard_sql = sql_u64(shard, "receive shard")?;
 
             upsert_account_state(transaction, epoch, &plan.payer)?;
@@ -1092,54 +1095,57 @@ impl Store {
 
             // Every entry lands in this one transaction: the payer debit, each recipient credit,
             // each shard advance, and each linked payment row commit or roll back together.
-            let mut sequence = None;
-            let mut receipts = Vec::with_capacity(plan.entries.len());
-            for (entry, receipt) in plan.entries.iter().zip(issued) {
-                // The operator issued this receipt for this exact send, so the pair links
-                // by construction.
-                let payment = Payment::from_parts_unchecked(send.clone(), receipt);
-                if let Some(recipient) = entry.recipient.as_ref() {
-                    upsert_account_state(transaction, epoch, recipient)?;
-                }
-                transaction.execute(
-                    "INSERT INTO receive_shards(
+            //
+            // A stored row is one linked [Payment], which encodes as the shared send followed
+            // by that entry's receipt. The send is encoded once and each row appends its
+            // receipt, so no per-entry send clone or re-encoding is needed.
+            let encoded_send = send.encode();
+            let mut advance_shard = transaction.prepare_cached(
+                "INSERT INTO receive_shards(
                      epoch, recipient, shard, cumulative_credit, receipt_index
                  ) VALUES(?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(epoch, recipient, shard) DO UPDATE SET
                      cumulative_credit = excluded.cumulative_credit,
                      receipt_index = excluded.receipt_index",
-                    params![
-                        epoch_sql,
-                        entry.recipient_key.as_ref(),
-                        shard_sql,
-                        sql_u64(
-                            payment.receipt().body().cumulative_shard_credit(),
-                            "shard credit",
-                        )?,
-                        sql_u64(payment.receipt().body().index(), "receipt index")?,
-                    ],
-                )?;
-                transaction.execute(
-                    "INSERT INTO payments(
+            )?;
+            let mut insert_payment = transaction.prepare_cached(
+                "INSERT INTO payments(
                      epoch, payer_name, recipient, recipient_name, external, tx_id, encoded
                  ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        epoch_sql,
-                        plan.payer.name,
-                        entry.recipient_key.as_ref(),
-                        entry.recipient_name,
-                        i64::from(entry.external),
-                        tx_id.digest().as_ref(),
-                        payment.encode().as_ref(),
-                    ],
-                )?;
+            )?;
+            let mut sequence = None;
+            let mut receipts = Vec::with_capacity(plan.entries.len());
+            for (entry, receipt) in plan.entries.iter().zip(issued) {
+                if let Some(recipient) = entry.recipient.as_ref() {
+                    upsert_account_state(transaction, epoch, recipient)?;
+                }
+                advance_shard.execute(params![
+                    epoch_sql,
+                    entry.recipient_key.as_ref(),
+                    shard_sql,
+                    sql_u64(receipt.body().cumulative_shard_credit(), "shard credit")?,
+                    sql_u64(receipt.body().index(), "receipt index")?,
+                ])?;
+                let mut encoded =
+                    Vec::with_capacity(encoded_send.len() + SignedReceipt::<Key, Digest>::SIZE);
+                encoded.extend_from_slice(&encoded_send);
+                receipt.write(&mut encoded);
+                insert_payment.execute(params![
+                    epoch_sql,
+                    plan.payer.name,
+                    entry.recipient_key.as_ref(),
+                    entry.recipient_name,
+                    i64::from(entry.external),
+                    tx_id.digest().as_ref(),
+                    encoded.as_slice(),
+                ])?;
                 if sequence.is_none() {
                     sequence = Some(from_sql_u64(
                         transaction.last_insert_rowid(),
                         "payment sequence",
                     )?);
                 }
-                receipts.push(payment.into_parts().1);
+                receipts.push(receipt);
             }
             #[cfg(test)]
             if fail_write {
@@ -1167,7 +1173,7 @@ impl Store {
         send: &SignedSend<Key, Digest>,
         shard: u64,
     ) -> Result<bool> {
-        if find_accepted_batch(&self.connection, send)?.is_some() {
+        if find_accepted_batch(&self.connection, send, &send.tx_id::<Sha256>())?.is_some() {
             return Ok(false);
         }
         validate_new_payment(&self.connection, context, send, shard)?;
@@ -1184,7 +1190,7 @@ impl Store {
         &self,
         send: &SignedSend<Key, Digest>,
     ) -> Result<Option<AcceptedBatch>> {
-        find_accepted_batch(&self.connection, send)
+        find_accepted_batch(&self.connection, send, &send.tx_id::<Sha256>())
     }
 
     pub(crate) fn stage_deposit(
@@ -1609,20 +1615,20 @@ impl Store {
                 "successor context has the wrong predecessor liability"
             );
 
+            let mut apply_close = transaction.prepare_cached(
+                "UPDATE withdrawals SET applied_amount = ?1
+                 WHERE epoch = ?2 AND account = ?3 AND applied_amount IS NULL",
+            )?;
             for (request, mut account) in closing_accounts {
                 let tail = account.current.balance;
                 account.current.balance = 0;
                 account.current.active = false;
                 upsert_account_state(transaction, epoch, &account)?;
-                let updated = transaction.execute(
-                    "UPDATE withdrawals SET applied_amount = ?1
-                 WHERE epoch = ?2 AND account = ?3 AND applied_amount IS NULL",
-                    params![
-                        sql_u64(tail, "Close tail")?,
-                        epoch_sql,
-                        request.account().as_ref(),
-                    ],
-                )?;
+                let updated = apply_close.execute(params![
+                    sql_u64(tail, "Close tail")?,
+                    epoch_sql,
+                    request.account().as_ref(),
+                ])?;
                 ensure!(updated == 1, "pending Close disappeared during cutover");
             }
 
@@ -1662,11 +1668,11 @@ impl Store {
                         account
                     }
                     None => {
-                        let name: String = transaction.query_row(
-                            "SELECT name FROM account_identities WHERE public_key = ?1",
-                            [key.as_ref()],
-                            |row| row.get(0),
-                        )?;
+                        let name: String = transaction
+                            .prepare_cached(
+                                "SELECT name FROM account_identities WHERE public_key = ?1",
+                            )?
+                            .query_row([key.as_ref()], |row| row.get(0))?;
                         StoredAccount {
                             name,
                             key: key.clone(),
@@ -1885,33 +1891,33 @@ impl Store {
                     sql_u128(result.seal_micros, "seal duration")?,
                 ],
             )?;
+            let mut insert_withdrawal_claim = transaction.prepare_cached(
+                "INSERT INTO withdrawal_claims(batch_id, position, account, proof)
+                 VALUES(?1, ?2, ?3, ?4)",
+            )?;
             for (account, position, output, proof) in withdrawal_claims {
                 if output.amount() == 0 {
                     continue;
                 }
-                transaction.execute(
-                    "INSERT INTO withdrawal_claims(batch_id, position, account, proof)
-                 VALUES(?1, ?2, ?3, ?4)",
-                    params![
-                        result.finalized.batch_id.digest().as_ref(),
-                        i64::from(position),
-                        account.as_ref(),
-                        proof.as_ref(),
-                    ],
-                )?;
+                insert_withdrawal_claim.execute(params![
+                    result.finalized.batch_id.digest().as_ref(),
+                    i64::from(position),
+                    account.as_ref(),
+                    proof.as_ref(),
+                ])?;
             }
-            for (position, payout, proof) in external_claims {
-                transaction.execute(
-                    "INSERT INTO payout_claims(epoch, position, recipient, amount, proof)
+            let mut insert_payout_claim = transaction.prepare_cached(
+                "INSERT INTO payout_claims(epoch, position, recipient, amount, proof)
                  VALUES(?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        epoch,
-                        i64::from(position),
-                        payout.recipient.as_ref(),
-                        sql_u64(payout.amount, "payout amount")?,
-                        proof.as_ref(),
-                    ],
-                )?;
+            )?;
+            for (position, payout, proof) in external_claims {
+                insert_payout_claim.execute(params![
+                    epoch,
+                    i64::from(position),
+                    payout.recipient.as_ref(),
+                    sql_u64(payout.amount, "payout amount")?,
+                    proof.as_ref(),
+                ])?;
             }
             transaction.execute(
                 "UPDATE close_jobs
@@ -2474,6 +2480,10 @@ fn validate_new_payment(
     payer.current.balance -= total;
 
     let shard_sql = sql_u64(shard, "receive shard")?;
+    let mut read_endpoint = connection.prepare_cached(
+        "SELECT cumulative_credit, receipt_index FROM receive_shards
+         WHERE epoch = ?1 AND recipient = ?2 AND shard = ?3",
+    )?;
     let mut external_total = 0_u64;
     let mut entries = Vec::with_capacity(send.body().entries().len());
     for entry in send.body().entries() {
@@ -2508,10 +2518,8 @@ fn validate_new_payment(
         } else {
             external_total = checked_sql_add(external_total, amount, "external payment total")?;
         }
-        let endpoint = connection
+        let endpoint = read_endpoint
             .query_row(
-                "SELECT cumulative_credit, receipt_index FROM receive_shards
-                 WHERE epoch = ?1 AND recipient = ?2 AND shard = ?3",
                 params![epoch_sql, recipient_key.as_ref(), shard_sql],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
@@ -2549,9 +2557,9 @@ fn validate_new_payment(
 fn find_accepted_batch(
     connection: &Connection,
     send: &SignedSend<Key, Digest>,
+    tx_id: &TxId<Digest>,
 ) -> Result<Option<AcceptedBatch>> {
-    let tx_id = send.tx_id::<Sha256>();
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT epoch, sequence, length(encoded), encoded
          FROM payments WHERE tx_id = ?1 ORDER BY sequence",
     )?;
@@ -2631,46 +2639,42 @@ fn effective_account(
 ) -> Result<Option<StoredAccount>> {
     let epoch_sql = sql_u64(epoch, "epoch")?;
     let version = connection
-        .query_row(
-            EFFECTIVE_ACCOUNT_SQL,
-            params![account.as_ref(), epoch_sql],
-            |row| {
-                let key = read_fixed_blob(row, 2, 3, Key::SIZE, "account key")?;
-                let predecessor = AccountState {
-                    balance: from_sql_u64(row.get(4)?, "predecessor balance")
-                        .map_err(to_sqlite_error)?,
-                    cumulative_debit: from_sql_u64(row.get(5)?, "predecessor debit")
-                        .map_err(to_sqlite_error)?,
-                    cumulative_credit: from_sql_u64(row.get(6)?, "predecessor credit")
-                        .map_err(to_sqlite_error)?,
-                    receipt_count: from_sql_u64(row.get(7)?, "predecessor receipts")
-                        .map_err(to_sqlite_error)?,
-                    active: row.get::<_, i64>(8)? != 0,
-                };
-                let balance =
-                    from_sql_u64(row.get(9)?, "current balance").map_err(to_sqlite_error)?;
-                Ok((
-                    from_sql_u64(row.get(0)?, "account state epoch").map_err(to_sqlite_error)?,
-                    StoredAccount {
-                        name: row.get(1)?,
-                        key: Key::decode(key.as_slice()).map_err(|error| {
-                            to_sqlite_error(anyhow::anyhow!("decode account key: {error}"))
-                        })?,
-                        predecessor,
-                        current: AccountState {
-                            balance,
-                            cumulative_debit: from_sql_u64(row.get(10)?, "current debit")
-                                .map_err(to_sqlite_error)?,
-                            cumulative_credit: from_sql_u64(row.get(11)?, "current credit")
-                                .map_err(to_sqlite_error)?,
-                            receipt_count: from_sql_u64(row.get(12)?, "current receipts")
-                                .map_err(to_sqlite_error)?,
-                            active: balance > 0,
-                        },
+        .prepare_cached(EFFECTIVE_ACCOUNT_SQL)?
+        .query_row(params![account.as_ref(), epoch_sql], |row| {
+            let key = read_fixed_blob(row, 2, 3, Key::SIZE, "account key")?;
+            let predecessor = AccountState {
+                balance: from_sql_u64(row.get(4)?, "predecessor balance")
+                    .map_err(to_sqlite_error)?,
+                cumulative_debit: from_sql_u64(row.get(5)?, "predecessor debit")
+                    .map_err(to_sqlite_error)?,
+                cumulative_credit: from_sql_u64(row.get(6)?, "predecessor credit")
+                    .map_err(to_sqlite_error)?,
+                receipt_count: from_sql_u64(row.get(7)?, "predecessor receipts")
+                    .map_err(to_sqlite_error)?,
+                active: row.get::<_, i64>(8)? != 0,
+            };
+            let balance = from_sql_u64(row.get(9)?, "current balance").map_err(to_sqlite_error)?;
+            Ok((
+                from_sql_u64(row.get(0)?, "account state epoch").map_err(to_sqlite_error)?,
+                StoredAccount {
+                    name: row.get(1)?,
+                    key: Key::decode(key.as_slice()).map_err(|error| {
+                        to_sqlite_error(anyhow::anyhow!("decode account key: {error}"))
+                    })?,
+                    predecessor,
+                    current: AccountState {
+                        balance,
+                        cumulative_debit: from_sql_u64(row.get(10)?, "current debit")
+                            .map_err(to_sqlite_error)?,
+                        cumulative_credit: from_sql_u64(row.get(11)?, "current credit")
+                            .map_err(to_sqlite_error)?,
+                        receipt_count: from_sql_u64(row.get(12)?, "current receipts")
+                            .map_err(to_sqlite_error)?,
+                        active: balance > 0,
                     },
-                ))
-            },
-        )
+                },
+            ))
+        })
         .optional()?;
     let Some((version_epoch, mut account)) = version else {
         return Ok(None);
@@ -2691,19 +2695,19 @@ fn upsert_account_state(
     epoch: u64,
     account: &StoredAccount,
 ) -> Result<()> {
-    transaction.execute(
-        "INSERT INTO account_identities(public_key, name) VALUES(?1, ?2)
+    transaction
+        .prepare_cached(
+            "INSERT INTO account_identities(public_key, name) VALUES(?1, ?2)
          ON CONFLICT(public_key) DO NOTHING",
-        params![account.key.as_ref(), account.name],
-    )?;
-    let name: String = transaction.query_row(
-        "SELECT name FROM account_identities WHERE public_key = ?1",
-        [account.key.as_ref()],
-        |row| row.get(0),
-    )?;
+        )?
+        .execute(params![account.key.as_ref(), account.name])?;
+    let name: String = transaction
+        .prepare_cached("SELECT name FROM account_identities WHERE public_key = ?1")?
+        .query_row([account.key.as_ref()], |row| row.get(0))?;
     ensure!(name == account.name, "account label does not match its key");
-    transaction.execute(
-        "INSERT INTO account_states(
+    transaction
+        .prepare_cached(
+            "INSERT INTO account_states(
              epoch, public_key,
              predecessor_balance, predecessor_debit, predecessor_credit,
              predecessor_receipts, predecessor_active,
@@ -2714,7 +2718,8 @@ fn upsert_account_state(
              current_debit = excluded.current_debit,
              current_credit = excluded.current_credit,
              current_receipts = excluded.current_receipts",
-        params![
+        )?
+        .execute(params![
             sql_u64(epoch, "epoch")?,
             account.key.as_ref(),
             sql_u64(account.predecessor.balance, "predecessor balance")?,
@@ -2726,8 +2731,7 @@ fn upsert_account_state(
             sql_u64(account.current.cumulative_debit, "current debit")?,
             sql_u64(account.current.cumulative_credit, "current credit")?,
             sql_u64(account.current.receipt_count, "current receipts")?,
-        ],
-    )?;
+        ])?;
     Ok(())
 }
 
@@ -2884,39 +2888,33 @@ fn validate_applied_withdrawal(
 }
 
 fn metadata_epoch(connection: &Connection) -> Result<u64> {
-    let value = connection.query_row(
-        "SELECT epoch FROM operator_meta WHERE singleton = 1",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let value = connection
+        .prepare_cached("SELECT epoch FROM operator_meta WHERE singleton = 1")?
+        .query_row([], |row| row.get::<_, i64>(0))?;
     from_sql_u64(value, "epoch")
 }
 
 fn metadata_live_liability(connection: &Connection) -> Result<u64> {
-    let encoded: Vec<u8> = connection.query_row(
-        "SELECT length(live_liability), live_liability
+    let encoded: Vec<u8> = connection
+        .prepare_cached(
+            "SELECT length(live_liability), live_liability
          FROM operator_meta WHERE singleton = 1",
-        [],
-        |row| read_fixed_blob(row, 0, 1, 8, "live liability"),
-    )?;
+        )?
+        .query_row([], |row| read_fixed_blob(row, 0, 1, 8, "live liability"))?;
     decode_live_liability(&encoded)
 }
 
 fn metadata_deposit_events(connection: &Connection) -> Result<usize> {
-    let count = connection.query_row(
-        "SELECT deposit_events FROM operator_meta WHERE singleton = 1",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let count = connection
+        .prepare_cached("SELECT deposit_events FROM operator_meta WHERE singleton = 1")?
+        .query_row([], |row| row.get::<_, i64>(0))?;
     usize::try_from(count).context("deposit event count does not fit usize")
 }
 
 fn epoch_payment_count(connection: &Connection, epoch: i64) -> Result<usize> {
-    let count = connection.query_row(
-        "SELECT count(*) FROM payments WHERE epoch = ?1",
-        [epoch],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let count = connection
+        .prepare_cached("SELECT count(*) FROM payments WHERE epoch = ?1")?
+        .query_row([epoch], |row| row.get::<_, i64>(0))?;
     usize::try_from(count).context("payment count does not fit usize")
 }
 
@@ -2964,17 +2962,17 @@ fn decode_live_liability(encoded: &[u8]) -> Result<u64> {
 }
 
 fn metadata_payment_context(connection: &Connection) -> Result<Option<EpochPaymentContext>> {
-    let encoded = connection.query_row(
-        "SELECT length(payment_context), payment_context
+    let encoded = connection
+        .prepare_cached(
+            "SELECT length(payment_context), payment_context
          FROM operator_meta WHERE singleton = 1",
-        [],
-        |row| {
+        )?
+        .query_row([], |row| {
             if row.get::<_, Option<i64>>(0)?.is_none() {
                 return Ok(None);
             }
             read_fixed_blob(row, 0, 1, EpochPaymentContext::SIZE, "payment context").map(Some)
-        },
-    )?;
+        })?;
     let Some(encoded) = encoded else {
         return Ok(None);
     };
@@ -3031,8 +3029,9 @@ mod tests {
     use super::*;
     use crate::protocol::{deployment, epoch_context, identities};
     use bytes::Bytes;
-    use commonware_clearing::bajillion::boundary::{
-        DepositBatch, DepositRecord, WithdrawalAction, WithdrawalBatch,
+    use commonware_clearing::bajillion::{
+        boundary::{DepositBatch, DepositRecord, WithdrawalAction, WithdrawalBatch},
+        payment::Entry,
     };
     use commonware_cryptography::{Hasher as _, Signer as _};
 
@@ -3250,6 +3249,45 @@ mod tests {
             fixture.store.load_current().unwrap().payments.len(),
             MAX_ACCEPTED_PAYMENTS
         );
+    }
+
+    #[test]
+    fn stored_batch_rows_match_the_linked_payment_encoding() {
+        let mut fixture = PaymentFixture::new();
+        let entries = vec![
+            Entry::new(fixture.recipient.public_key(), 1).unwrap(),
+            Entry::new(SigningKey::from_seed(103).public_key(), 2).unwrap(),
+        ];
+        let send =
+            SignedSend::sign_next_batch(&fixture.context, &fixture.payer, entries, 0).unwrap();
+        let accepted = fixture
+            .store
+            .accept_send(&fixture.context, &fixture.operator, send, 0)
+            .unwrap();
+        assert_eq!(accepted.acceptance.receipts.len(), 2);
+
+        // Every stored row must stay byte-identical to one linked payment, the shared
+        // send followed by that entry's receipt, because decode paths read rows back as
+        // [Payment].
+        let mut statement = fixture
+            .store
+            .connection
+            .prepare("SELECT encoded FROM payments ORDER BY sequence")
+            .unwrap();
+        let stored = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(stored.len(), 2);
+        for (encoded, expected) in stored.iter().zip(accepted.acceptance.payments()) {
+            assert_eq!(encoded.as_slice(), expected.encode().as_ref());
+            assert_eq!(
+                Payment::decode(encoded.as_slice()).unwrap(),
+                expected,
+                "stored row does not decode back to its linked payment"
+            );
+        }
     }
 
     #[test]

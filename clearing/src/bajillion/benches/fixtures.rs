@@ -10,8 +10,11 @@ use commonware_clearing::bajillion::{
     },
 };
 use commonware_cryptography::{Hasher, Sha256, Signer as _, sha256::Digest};
-use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
+use commonware_cryptography_curve25519::signing::{
+    BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
+};
 use commonware_parallel::Rayon;
+use commonware_utils::TestRng;
 use std::{num::NonZeroUsize, ops::Deref, sync::OnceLock};
 
 pub(crate) const WORKERS: usize = 8;
@@ -389,7 +392,13 @@ where
     )
     .expect("benchmark close is valid");
     prepared
-        .validate::<Sha256>(&context, &deposits, &withdrawals)
+        .validate::<Sha256, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &mut TestRng::new(0),
+            strategy(),
+        )
         .expect("benchmark close is valid");
     (
         CloseFixture {

@@ -16,8 +16,10 @@ use commonware_cryptography::{
     },
     sha256::Digest,
 };
-use commonware_cryptography_curve25519::signing::StrictVerifyingKey as VerifyingKey;
-use commonware_utils::Participant;
+use commonware_cryptography_curve25519::signing::{
+    BatchVerifier as PaymentBatchVerifier, StrictVerifyingKey as VerifyingKey,
+};
+use commonware_utils::{Participant, TestRng};
 
 pub(crate) const VALIDATORS: usize = 100;
 pub(crate) const FAULTS: usize = 33;
@@ -147,11 +149,12 @@ pub(crate) fn validator_fixture(profile: ActiveProfile) -> ValidatorFixture {
     let validators = Validators::new();
     let assignment = validators.assignment();
     let close = active_close_fixture_with_assignment(profile, assignment);
-    validate_close::<Sha256, _, _>(
+    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         &close.context,
         &close.deposits,
         &close.withdrawals,
         close.prepared.close(),
+        &mut TestRng::new(0),
     )
     .expect("benchmark close is publicly valid");
     let all_slices = close

@@ -3,9 +3,9 @@
 use super::{
     Assignment, Close, CloseContext, CloseLimits, Header, PreparedClose, RootBundle, StateCache,
     TransitionError, WithdrawalOutput, account_slice, change_material_with_strategy,
-    derive_state_vectors, is_live_state, read_shard_sets, state_tree_with_strategy,
-    validate_boundary_roots, validate_header, validate_row, validate_row_structure,
-    validate_terminal_prefix, withdrawal_output_material_with_strategy,
+    derive_state_vectors, derive_successor, is_live_state, read_shard_sets,
+    state_tree_with_strategy, validate_boundary_roots, validate_header, validate_row,
+    validate_row_structure, validate_terminal_prefix, withdrawal_output_material_with_strategy,
 };
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
@@ -1044,18 +1044,19 @@ where
     if withdrawal_output_tree.root() != close.roots.withdrawal_outputs {
         return Err(TransitionError::WithdrawalOutputRoot);
     }
-    let (predecessor_leaves, successor_leaves) =
-        derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
-    if predecessor_leaves != cache.leaves {
-        return Err(TransitionError::PredecessorLinkage);
-    }
+    let successor_leaves = derive_successor(
+        &close.unchanged,
+        &close.rows,
+        cache.leaves(),
+        context.limits().max_states(),
+    )?;
     let successor = state_tree_with_strategy::<H, P, D>(&successor_leaves, strategy)?;
     if successor.root() != close.roots.successor {
         return Err(TransitionError::SuccessorRoot);
     }
     let coverage_boundaries = derive_coverage(
         &close.rows,
-        &predecessor_leaves,
+        cache.leaves(),
         &successor_leaves,
         context.assignment().slice_bits(),
     )?;
@@ -1173,12 +1174,12 @@ where
             .map_err(|_| TransitionError::SliceRange)?;
         let withdrawal_end = u32::try_from(end_boundary.prefix.withdrawal_count)
             .map_err(|_| TransitionError::SliceRange)?;
+        let withdrawal_count = withdrawal_end
+            .checked_sub(withdrawal_start)
+            .ok_or(TransitionError::SliceRange)?;
         let withdrawal_outputs = WithdrawalOutputRange {
-            opening: (withdrawal_start != withdrawal_end)
-                .then(|| {
-                    withdrawal_output_tree
-                        .range_opening(withdrawal_start, withdrawal_end - withdrawal_start)
-                })
+            opening: (withdrawal_count != 0)
+                .then(|| withdrawal_output_tree.range_opening(withdrawal_start, withdrawal_count))
                 .transpose()?,
         };
         Ok(ProofSlice {

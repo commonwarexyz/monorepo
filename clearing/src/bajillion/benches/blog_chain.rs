@@ -112,11 +112,12 @@ impl BlogChainFixture {
         assert!(close.deposits.is_empty());
         assert!(close.withdrawals.is_empty());
 
-        validate_close::<Sha256, _, _>(
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &close.context,
             &close.deposits,
             &close.withdrawals,
             close.prepared.close(),
+            &mut TestRng::new(0),
         )
         .expect("benchmark close is publicly valid");
         let all_slices = close

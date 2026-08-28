@@ -118,6 +118,14 @@ fn hash_positioned_leaves<H: Hasher>(
         });
 }
 
+/// Finalizes a tree root by binding it to the exact leaf count.
+///
+/// The preimage `H(leaf_count || tree_root)` is the single length-binding rule shared by the
+/// builder, proof verification, and the streaming builder, preventing malleability across
+/// different tree sizes.
+pub(super) fn finalize<H: Hasher>(leaf_count: u32, tree_root: &H::Digest) -> H::Digest {
+    H::hash(&[&leaf_count.to_be_bytes(), tree_root.as_ref()])
+}
 /// Hashes one complete parent level into a pre-sized output slice.
 fn hash_parent_level<H: Hasher>(
     current: &[H::Digest],
@@ -239,10 +247,8 @@ impl<D: Digest> Tree<D> {
             current_level = levels.last();
         }
 
-        // Compute the finalized root: H(leaf_count || tree_root)
-        // This binds the root to the tree size, preventing malleability attacks.
         let tree_root = levels.last().first();
-        let root = H::hash(&[&leaf_count.to_be_bytes(), tree_root.as_ref()]);
+        let root = finalize::<H>(leaf_count, tree_root);
 
         Self {
             empty,
@@ -623,9 +629,7 @@ impl<D: Digest> Proof<D> {
             return Err(Error::UnalignedProof);
         }
 
-        // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
-        // This binds the proof to the specific tree size, preventing malleability attacks.
-        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), computed.as_ref()]);
+        let finalized = finalize::<H>(self.leaf_count, &computed);
 
         if finalized == *root {
             Ok(())
@@ -651,10 +655,8 @@ impl<D: Digest> Proof<D> {
         // Handle empty case
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
-                // Compute finalized empty root: H(0 || empty_tree_root)
                 let empty_tree_root = H::hash(&[]);
-                let finalized = H::hash(&[&0u32.to_be_bytes(), empty_tree_root.as_ref()]);
-                return Ok(finalized);
+                return Ok(finalize::<H>(0, &empty_tree_root));
             }
             return Err(Error::NoLeaves);
         }
@@ -779,12 +781,9 @@ impl<D: Digest> Proof<D> {
             return Err(Error::UnalignedProof);
         }
 
-        // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
-        // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), tree_root.as_ref()]);
 
-        Ok(finalized)
+        Ok(finalize::<H>(self.leaf_count, &tree_root))
     }
 
     /// Verifies that the given `elements` at their respective positions are included

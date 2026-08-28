@@ -1171,9 +1171,16 @@ impl Harness {
             row.prefix = prefix;
         }
         let (rows, shard_sets) = pairs.into_iter().unzip();
-        let close =
-            build_close::<Sha256, _, _>(cache, &context, &deposits, &withdrawals, rows, shard_sets)
-                .expect("sanitized external payout close must build");
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            rows,
+            shard_sets,
+            &mut test_rng(),
+        )
+        .expect("sanitized external payout close must build");
         let successor = successor_cache(cache, &close);
         Some(self.finish_prepared(cache, context, deposits, withdrawals, close, successor))
     }
@@ -1187,8 +1194,14 @@ impl Harness {
         close: TestClose,
         successor: TestCache,
     ) -> Prepared {
-        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, &close)
-            .expect("sanitized close must validate before deriving settlement outputs");
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &mut test_rng(),
+        )
+        .expect("sanitized close must validate before deriving settlement outputs");
         let withdrawal_claims = withdrawals
             .requests()
             .iter()
@@ -1302,11 +1315,12 @@ impl Harness {
     }
 
     fn certificate(&self, prepared: &Prepared) -> Certificate {
-        validate_close::<Sha256, _, _>(
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &prepared.context,
             &prepared.deposits,
             &prepared.withdrawals,
             &prepared.close,
+            &mut test_rng(),
         )
         .expect("sanitized close must validate");
         let slices = assemble_slices::<Sha256, _, _>(
@@ -3190,9 +3204,16 @@ fn boundary_close(
         });
         shard_sets.push(shards);
     }
-    let close =
-        build_close::<Sha256, _, _>(cache, context, deposits, withdrawals, rows, shard_sets)
-            .expect("sanitized boundary close must build");
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        cache,
+        context,
+        deposits,
+        withdrawals,
+        rows,
+        shard_sets,
+        &mut test_rng(),
+    )
+    .expect("sanitized boundary close must build");
     let successor = successor_cache(cache, &close);
     (close, successor)
 }

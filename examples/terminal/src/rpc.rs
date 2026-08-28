@@ -5,14 +5,18 @@ use bytes::Bytes;
 use commonware_codec::{
     BufsMut, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_runtime::{Buf, BufMut, Listener, Network, Sink, Stream};
+use commonware_runtime::{Buf, BufMut, Clock, Listener, Network, Sink, Stream};
 use commonware_stream::{
     encrypted::Error,
     utils::codec::{recv_frame, send_frame},
 };
+use std::time::Duration;
 
 /// Maximum encoded payload accepted in one RPC frame.
 pub(crate) const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
+
+/// Pause before retrying a failed accept so a persistently failing listener cannot spin hot.
+pub(crate) const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Maximum request body or response body/error accepted by the codec.
 ///
@@ -219,23 +223,42 @@ pub(crate) async fn invoke<E: Network>(
     }
 }
 
-/// Serves one bounded request at a time.
+/// Serves one bounded request at a time until the process exits.
 ///
 /// Sequential ownership keeps mutable role state single-threaded and establishes a hard
 /// one-connection admission bound for this local terminal. Runtime read/write deadlines
-/// bound a peer that stops mid-frame.
+/// bound a peer that stops mid-frame. The runtime folds every accept failure into one
+/// error class, so a failed accept is logged and retried after a short pause: exiting
+/// instead would destroy the in-memory role state behind this listener.
 pub(crate) async fn serve<E, F>(
     network: &E,
     address: std::net::SocketAddr,
-    mut handle: F,
+    handle: F,
 ) -> anyhow::Result<()>
 where
-    E: Network,
+    E: Clock + Network,
     F: FnMut(Request) -> Response,
 {
-    let mut listener = network.bind(address).await?;
+    let listener = network.bind(address).await?;
+    listen(network, listener, handle).await
+}
+
+/// Serves an established listener, retrying failed accepts.
+async fn listen<C, L, F>(clock: &C, mut listener: L, mut handle: F) -> anyhow::Result<()>
+where
+    C: Clock,
+    L: Listener,
+    F: FnMut(Request) -> Response,
+{
     loop {
-        let (_, mut sink, mut stream) = listener.accept().await?;
+        let (_, mut sink, mut stream) = match listener.accept().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                eprintln!("accept failed; retrying: {error}");
+                clock.sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
+            }
+        };
         let Ok(request) = recv_request(&mut stream).await else {
             continue;
         };
@@ -249,7 +272,76 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use commonware_codec::varint::UInt;
-    use commonware_runtime::{Runner, Sink as RuntimeSink, deterministic, mocks};
+    use commonware_runtime::{
+        Error as RuntimeError, Runner, Sink as RuntimeSink, Spawner as _, Supervisor as _,
+        deterministic, mocks,
+    };
+    use std::net::SocketAddr;
+
+    /// Yields queued accept outcomes newest-last, then pends forever.
+    struct QueuedListener {
+        outcomes: Vec<Option<(SocketAddr, mocks::Sink, mocks::Stream)>>,
+    }
+
+    impl Listener for QueuedListener {
+        type Sink = mocks::Sink;
+        type Stream = mocks::Stream;
+
+        async fn accept(
+            &mut self,
+        ) -> Result<(SocketAddr, mocks::Sink, mocks::Stream), RuntimeError> {
+            match self.outcomes.pop() {
+                Some(Some(connection)) => Ok(connection),
+                Some(None) => Err(RuntimeError::Closed),
+                None => std::future::pending().await,
+            }
+        }
+
+        fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 1)))
+        }
+    }
+
+    #[test]
+    fn accept_failure_is_retried_without_dropping_the_listener() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut client_sink, server_stream) = mocks::Channel::init();
+            let (server_sink, mut client_stream) = mocks::Channel::init();
+
+            // Outcomes pop newest-last: one transient accept failure precedes the connection.
+            let listener = QueuedListener {
+                outcomes: vec![
+                    Some((
+                        SocketAddr::from(([127, 0, 0, 1], 2)),
+                        server_sink,
+                        server_stream,
+                    )),
+                    None,
+                ],
+            };
+            let _server = context
+                .child("serve")
+                .spawn(move |server_context| async move {
+                    listen(&server_context, listener, |request| Response::Success {
+                        body: request.body,
+                    })
+                    .await
+                });
+
+            let request = Request {
+                method: 1,
+                body: Bytes::from_static(b"ping"),
+            };
+            send_request(&mut client_sink, &request).await.unwrap();
+            let response = recv_response(&mut client_stream).await.unwrap();
+            assert_eq!(
+                response,
+                Response::Success {
+                    body: Bytes::from_static(b"ping"),
+                }
+            );
+        });
+    }
 
     #[test]
     fn round_trip() {

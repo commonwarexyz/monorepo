@@ -8,7 +8,8 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use commonware_clearing::bajillion::boundary::WithdrawalAction;
-use commonware_runtime::Network;
+use commonware_macros::select;
+use commonware_runtime::{Clock, Network};
 use crossterm::{
     cursor::Show,
     event::{self, Event, KeyCode, KeyEventKind},
@@ -28,6 +29,13 @@ use std::{
 };
 
 const MAX_ACTIVITY: usize = 100;
+
+/// Budget for one background refresh pass.
+///
+/// Refresh dials run inline in the event loop, and connect timeouts alone can hold one
+/// pass for many seconds. The budget keeps quit keys responsive when a role is
+/// unreachable.
+const REFRESH_BUDGET: Duration = Duration::from_millis(100);
 
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -111,7 +119,7 @@ impl UiState {
     }
 }
 
-pub(crate) async fn run<E: Network>(
+pub(crate) async fn run<E: Clock + Network>(
     network: &E,
     operator: SocketAddr,
     settlement: SocketAddr,
@@ -121,7 +129,7 @@ pub(crate) async fn run<E: Network>(
     let mut state = UiState::new();
     state.recipient = agent.default_recipient();
     loop {
-        refresh(network, operator, settlement, &mut agent, &mut state).await?;
+        refresh_bounded(network, operator, settlement, &mut agent, &mut state).await?;
         terminal
             .terminal
             .draw(|frame| render(frame, &agent, &state))
@@ -337,6 +345,32 @@ async fn handle_pending_deposit_recovery<E: Network>(
             refund.amount
         )),
         Err(error) => state.log(format!("deposit refund rejected: {error:#}")),
+    }
+}
+
+/// Refreshes displayed state under [REFRESH_BUDGET] so a hung dial never wedges input.
+///
+/// On timeout the refresh future is dropped and every polled status degrades to its
+/// unavailable display. At most one refresh is ever in flight.
+async fn refresh_bounded<E: Clock + Network>(
+    network: &E,
+    operator: SocketAddr,
+    settlement: SocketAddr,
+    agent: &mut Agent,
+    state: &mut UiState,
+) -> Result<()> {
+    let refreshed = select! {
+        result = refresh(network, operator, settlement, agent, state) => Some(result),
+        _ = network.sleep(REFRESH_BUDGET) => None,
+    };
+    match refreshed {
+        Some(result) => result,
+        None => {
+            state.operator = None;
+            state.settlement = None;
+            state.balance = None;
+            Ok(())
+        }
     }
 }
 
@@ -619,14 +653,66 @@ pub(crate) async fn scripted<E: Network>(
 
 #[cfg(test)]
 mod tests {
-    use super::{UiState, handle_hard_fault_recovery, handle_pending_deposit_recovery, refresh};
-    use crate::{agent::Agent, rpc, settlement::Settlement, settlement_rpc};
+    use super::{
+        REFRESH_BUDGET, UiState, handle_hard_fault_recovery, handle_pending_deposit_recovery,
+        refresh, refresh_bounded,
+    };
+    use crate::{agent::Agent, operator_rpc, rpc, settlement::Settlement, settlement_rpc};
     use bytes::Bytes;
     use commonware_codec::Encode as _;
     use commonware_runtime::{
-        Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
+        Clock as _, Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _,
+        deterministic,
     };
     use std::net::SocketAddr;
+
+    #[test]
+    fn hung_operator_refresh_degrades_within_its_budget() {
+        deterministic::Runner::default().start(|context| async move {
+            // Bound but never accepted: dials succeed and the RPC then hangs forever, the
+            // same stall shape as a SYN-dropping operator behind a connect timeout.
+            let operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let settlement_address = SocketAddr::from(([127, 0, 0, 1], 2));
+
+            let mut agent = Agent::new(0).unwrap();
+            let mut state = UiState::new();
+            state.operator = Some(operator_rpc::StatusResponse {
+                epoch: 0,
+                accounts: 4,
+                present_accounts: 4,
+                recent_payments: 0,
+                reserved_payout_value: 0,
+                close_in_progress: false,
+                faulted: false,
+            });
+            state.settlement = Some(settlement_rpc::StatusResponse::from(
+                Settlement::new().unwrap().status().unwrap(),
+            ));
+            state.balance = Some(7);
+
+            let started = context.current();
+            refresh_bounded(
+                &context,
+                operator_address,
+                settlement_address,
+                &mut agent,
+                &mut state,
+            )
+            .await
+            .unwrap();
+            let elapsed = context.current().duration_since(started).unwrap();
+            assert!(elapsed >= REFRESH_BUDGET, "{elapsed:?}");
+            assert!(elapsed < 2 * REFRESH_BUDGET, "{elapsed:?}");
+            assert!(state.operator.is_none());
+            assert!(state.settlement.is_none());
+            assert!(state.balance.is_none());
+            drop(operator_listener);
+        });
+    }
 
     #[test]
     fn unavailable_operator_keeps_settlement_visible_and_recovery_reachable() {

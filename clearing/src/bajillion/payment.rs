@@ -1,12 +1,17 @@
 //! Payer-authorized debits and individually signed operator receipts.
 
+use crate::bajillion::parallel::try_join;
+use ahash::RandomState;
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
+use commonware_cryptography::{BatchVerifier, Digest, Hasher, PublicKey, Signer};
 use commonware_parallel::{Sequential, Strategy};
+use commonware_utils::iter::zip_eq;
+use hashbrown::HashSet;
+use rand_core::CryptoRng;
 use thiserror::Error;
 
 /// Signature namespace for payer-authorized sends.
@@ -735,20 +740,12 @@ impl<P: PublicKey, D: Digest> SignedReceipt<P, D> {
         starts: &[(Shard, Amount, ReceiptIndex)],
         operator: &S,
     ) -> Result<Vec<Self>, PaymentError> {
-        assert_eq!(
-            starts.len(),
-            send.body.entries().len(),
-            "one shard endpoint per batch entry"
-        );
         if operator.public_key() != *context.operator() {
             return Err(PaymentError::WrongOperator);
         }
         send.verify(context)?;
         let tx_id = send.tx_id::<H>();
-        send.body
-            .entries()
-            .iter()
-            .zip(starts)
+        zip_eq(send.body.entries(), starts)
             .map(|(entry, (shard, previous_credit, previous_index))| {
                 Self::issue_entry(
                     context,
@@ -1010,22 +1007,10 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
         context: &PaymentContext<P, D>,
         strategy: &impl Strategy,
     ) -> Result<Amount, PaymentError> {
-        let total = strategy.try_run(
-            2,
-            || {
-                let total = self.send.verify_total(context)?;
-                self.receipt.verify(context)?;
-                Ok(total)
-            },
-            || {
-                let (total, receipt) = strategy.join(
-                    || self.send.verify_total(context),
-                    || self.receipt.verify(context),
-                );
-                let total = total?;
-                receipt?;
-                Ok(total)
-            },
+        let (total, ()) = try_join(
+            strategy,
+            || self.send.verify_total(context),
+            || self.receipt.verify(context),
         )?;
         self.validate_linkage::<H>()?;
         Ok(total)
@@ -1075,20 +1060,6 @@ impl<P: PublicKey, D: Digest> Read for Payment<P, D> {
     }
 }
 
-/// Lossless fields used to compose relation-specific challenge evidence.
-#[derive(Clone)]
-pub(crate) struct PaymentWitnessParts<P: PublicKey> {
-    pub payer: P,
-    pub entries: Vec<Entry<P>>,
-    pub cumulative_debit: Amount,
-    pub payer_signature: P::Signature,
-    pub recipient: P,
-    pub shard: Shard,
-    pub cumulative_shard_credit: Amount,
-    pub index: ReceiptIndex,
-    pub operator_signature: P::Signature,
-}
-
 /// Context-relative linked payment evidence used by settlement challenges.
 ///
 /// The payment anchor, epoch, operator key, receipt transaction identifier, and receipt amount
@@ -1097,15 +1068,15 @@ pub(crate) struct PaymentWitnessParts<P: PublicKey> {
 /// linked-payment verifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentWitness<P: PublicKey> {
-    payer: P,
-    entries: Vec<Entry<P>>,
-    cumulative_debit: Amount,
-    payer_signature: P::Signature,
-    recipient: P,
-    shard: Shard,
-    cumulative_shard_credit: Amount,
-    index: ReceiptIndex,
-    operator_signature: P::Signature,
+    pub(crate) payer: P,
+    pub(crate) entries: Vec<Entry<P>>,
+    pub(crate) cumulative_debit: Amount,
+    pub(crate) payer_signature: P::Signature,
+    pub(crate) recipient: P,
+    pub(crate) shard: Shard,
+    pub(crate) cumulative_shard_credit: Amount,
+    pub(crate) index: ReceiptIndex,
+    pub(crate) operator_signature: P::Signature,
 }
 
 impl<P: PublicKey> PaymentWitness<P> {
@@ -1122,34 +1093,6 @@ impl<P: PublicKey> PaymentWitness<P> {
             cumulative_shard_credit: payment.receipt().body().cumulative_shard_credit(),
             index: payment.receipt().body().index(),
             operator_signature: payment.receipt().signature().clone(),
-        }
-    }
-
-    pub(crate) fn parts(&self) -> PaymentWitnessParts<P> {
-        PaymentWitnessParts {
-            payer: self.payer.clone(),
-            entries: self.entries.clone(),
-            cumulative_debit: self.cumulative_debit,
-            payer_signature: self.payer_signature.clone(),
-            recipient: self.recipient.clone(),
-            shard: self.shard,
-            cumulative_shard_credit: self.cumulative_shard_credit,
-            index: self.index,
-            operator_signature: self.operator_signature.clone(),
-        }
-    }
-
-    pub(crate) fn from_parts(parts: PaymentWitnessParts<P>) -> Self {
-        Self {
-            payer: parts.payer,
-            entries: parts.entries,
-            cumulative_debit: parts.cumulative_debit,
-            payer_signature: parts.payer_signature,
-            recipient: parts.recipient,
-            shard: parts.shard,
-            cumulative_shard_credit: parts.cumulative_shard_credit,
-            index: parts.index,
-            operator_signature: parts.operator_signature,
         }
     }
 
@@ -1399,6 +1342,86 @@ pub fn verify_acceptance<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     Ok(())
 }
 
+/// Verifies every distinct signed send and receipt in one randomized aggregate batch.
+///
+/// Callers must validate payment structure separately and treat a `false` return as one or more
+/// invalid signatures without attribution.
+pub(crate) fn verify_payment_signatures<'a, P, D, B, R, I>(
+    context: &PaymentContext<P, D>,
+    payments: I,
+    capacity: usize,
+    rng: &mut R,
+    strategy: &impl Strategy,
+) -> bool
+where
+    P: PublicKey + 'a,
+    D: Digest + 'a,
+    B: BatchVerifier<PublicKey = P>,
+    R: CryptoRng,
+    I: IntoIterator<Item = &'a Payment<P, D>>,
+{
+    let mut payments = payments.into_iter().peekable();
+    if payments.peek().is_none() {
+        return true;
+    }
+
+    // Randomized hashing bounds collision-amplification from adversarial envelopes. Deduplication
+    // still uses exact envelope equality, including the signature, and keeps send and receipt
+    // domains separate.
+    let hasher = RandomState::with_seeds(
+        rng.next_u64(),
+        rng.next_u64(),
+        rng.next_u64(),
+        rng.next_u64(),
+    );
+    let mut unique_sends = HashSet::with_capacity_and_hasher(capacity, hasher.clone());
+    let mut unique_receipts = HashSet::with_capacity_and_hasher(capacity, hasher);
+    let mut sends = Vec::<&SignedSend<P, D>>::with_capacity(capacity);
+    let mut receipts = Vec::<&SignedReceipt<P, D>>::with_capacity(capacity);
+    for payment in payments {
+        if unique_sends.insert(payment.send()) {
+            sends.push(payment.send());
+        }
+        if unique_receipts.insert(payment.receipt()) {
+            receipts.push(payment.receipt());
+        }
+    }
+
+    let Some(signature_count) = sends.len().checked_add(receipts.len()) else {
+        return false;
+    };
+    drop(unique_sends);
+    drop(unique_receipts);
+
+    // Encode independent message bodies through the supplied strategy, then queue every distinct
+    // signature into one randomized aggregate verification.
+    let mut batch = B::new(signature_count);
+    let send_messages =
+        strategy.map_collect_vec(sends.iter().copied(), |send| send.body().encode());
+    let mut queued = true;
+    for (send, message) in sends.into_iter().zip(send_messages) {
+        queued &= B::add(
+            &mut batch,
+            SEND_SIGNATURE_NAMESPACE,
+            &message,
+            send.body().payer(),
+            send.signature(),
+        );
+    }
+    let receipt_messages =
+        strategy.map_collect_vec(receipts.iter().copied(), |receipt| receipt.body().encode());
+    for (receipt, message) in receipts.into_iter().zip(receipt_messages) {
+        queued &= B::add(
+            &mut batch,
+            RECEIPT_SIGNATURE_NAMESPACE,
+            &message,
+            context.operator(),
+            receipt.signature(),
+        );
+    }
+    queued && batch.verify(rng, strategy)
+}
+
 /// Verifies two linked receipts as one exact consecutive shard step.
 pub fn verify_consecutive_receipts<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     context: &PaymentContext<P, D>,
@@ -1454,6 +1477,11 @@ pub enum PaymentError {
     /// The context operator signature does not authenticate the receipt body.
     #[error("operator signature is invalid")]
     InvalidOperatorSignature,
+    /// A randomized aggregate batch contains at least one invalid send or receipt signature.
+    ///
+    /// Aggregate verification deliberately does not attribute the failure to one envelope.
+    #[error("a send or receipt signature in the aggregate batch is invalid")]
+    InvalidSignatureBatch,
     /// The requested recipient is not an entry of the send.
     #[error("send does not name the requested recipient")]
     UnknownRecipient,

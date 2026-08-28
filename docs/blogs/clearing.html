@@ -105,11 +105,9 @@ O’Grady</a></div>
         signature and one cumulative endpoint pay many recipients,
         acknowledged atomically with one receipt per entry. Withdrawals
         now settle all or nothing and can ride the close directly, so an
-        uncensored exit costs one onchain transaction: the
-        claim.</em></p>
-        <p><em>Updated (8/26/26): Bajillion now strengthens admission
-        and close coverage while making finalized claims and paired
-        challenge evidence more compact.</em></p>
+        uncensored exit costs one onchain transaction: the claim.
+        Admission and close coverage are stronger, and finalized claims
+        and paired challenge evidence are more compact.</em></p>
         <p><em>Update (8/20/26): Bajillion now uses a 32-byte commitment
         and BLS12-381 multisignatures for the commitment
         certificate.</em></p>
@@ -911,9 +909,10 @@ O’Grady</a></div>
         cache; deal derives all proof slices from the prepared close;
         seal checks and retains the busiest validator’s dealing,
         verifies every distinct send and receipt signature in one
-        randomized batch, and signs the commitment. The two
-        withdrawal-claim proof checks reuse separately constructed
-        fixtures between samples.</p>
+        randomized batch, and signs the commitment. Withdrawal claims
+        are measured from separately constructed fixtures, and the
+        claims table after the matrix scales their own variable, the
+        close’s withdrawal count, on its own axis.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -988,34 +987,6 @@ O’Grady</a></div>
               <td style="text-align:right;"><strong>0.667 ms</strong></td>
               <td style="text-align:right;"><strong>0.666 ms</strong></td>
             </tr>
-            <tr>
-              <td style="padding-left:20px;">Amount claim proof</td>
-              <td style="text-align:right;"><strong>39 B</strong></td>
-              <td style="text-align:right;"><strong>39 B</strong></td>
-              <td style="text-align:right;"><strong>39 B</strong></td>
-              <td style="text-align:right;"><strong>39 B</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">check Amount claim proof</td>
-              <td style="text-align:right;"><strong>0.311 µs</strong></td>
-              <td style="text-align:right;"><strong>0.311 µs</strong></td>
-              <td style="text-align:right;"><strong>0.311 µs</strong></td>
-              <td style="text-align:right;"><strong>0.311 µs</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">Close claim proof</td>
-              <td style="text-align:right;"><strong>39 B</strong></td>
-              <td style="text-align:right;"><strong>39 B</strong></td>
-              <td style="text-align:right;"><strong>39 B</strong></td>
-              <td style="text-align:right;"><strong>39 B</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">check Close claim proof</td>
-              <td style="text-align:right;"><strong>0.311 µs</strong></td>
-              <td style="text-align:right;"><strong>0.311 µs</strong></td>
-              <td style="text-align:right;"><strong>0.311 µs</strong></td>
-              <td style="text-align:right;"><strong>0.311 µs</strong></td>
-            </tr>
             <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
             <tr>
               <td style="padding-left:20px;">HigherShardTip challenge</td>
@@ -1030,6 +1001,45 @@ O’Grady</a></div>
               <td style="text-align:right;"><strong>0.298 ms</strong></td>
               <td style="text-align:right;"><strong>0.302 ms</strong></td>
               <td style="text-align:right;"><strong>0.293 ms</strong></td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+        <p>Withdrawal and external-payout claims scale with a different
+        variable: the claimed close’s own withdrawal count <span
+        class="math inline">W</span>, never <span
+        class="math inline">N</span>, because each claim opens only that
+        close’s withdrawal-output tree. Sizes are deterministic, 39
+        bytes plus one 32-byte sibling per doubling of <span
+        class="math inline">W</span>, and both the <span
+        class="math inline">\mathsf{Amount}</span> and <span
+        class="math inline">\mathsf{Close}</span> claims share the
+        shape. Verification recomputes that one path, 0.311 µs at a
+        single output on the same c8a.4xlarge, adding one hash per
+        doubling of <span class="math inline">W</span>.</p>
+        <div class="clearing-benchmark-table">
+        <table>
+          <thead>
+            <tr>
+              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
+              <th colspan="5" style="text-align:center;">Withdrawal outputs in the close (<em>W</em>)</th>
+            </tr>
+            <tr>
+              <th style="text-align:right;">1</th>
+              <th style="text-align:right;">1,024</th>
+              <th style="text-align:right;">10,000</th>
+              <th style="text-align:right;">100,000</th>
+              <th style="text-align:right;">1,000,000</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding-left:20px;">claim proof</td>
+              <td style="text-align:right;"><strong>39 B</strong></td>
+              <td style="text-align:right;"><strong>359 B</strong></td>
+              <td style="text-align:right;"><strong>487 B</strong></td>
+              <td style="text-align:right;"><strong>583 B</strong></td>
+              <td style="text-align:right;"><strong>679 B</strong></td>
             </tr>
           </tbody>
         </table>

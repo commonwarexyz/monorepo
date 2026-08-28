@@ -157,13 +157,14 @@ fn transfer_with_deposit_close(
         row.prefix = prefix;
     }
     let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-    let close = build_close::<Sha256, _, _>(
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         cache,
         context,
         deposits,
         &WithdrawalBatch::empty(),
         rows,
         shards,
+        &mut test_rng(),
     )
     .unwrap();
     let successor = successor_cache(cache, &close);
@@ -261,13 +262,14 @@ fn external_payout_refinement_close(
         row.prefix = prefix;
     }
     let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-    let close = build_close::<Sha256, _, _>(
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         cache,
         context,
         &DepositBatch::empty(),
         &WithdrawalBatch::empty(),
         rows,
         shards,
+        &mut test_rng(),
     )
     .unwrap();
     let successor = successor_cache(cache, &close);
@@ -399,13 +401,14 @@ fn payment_withdrawal_close(
         row.prefix = prefix;
     }
     let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-    let close = build_close::<Sha256, _, _>(
+    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         cache,
         context,
         &DepositBatch::empty(),
         withdrawals,
         rows,
         shards,
+        &mut test_rng(),
     )
     .unwrap();
     let successor = successor_cache(cache, &close);

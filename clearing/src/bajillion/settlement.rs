@@ -2160,7 +2160,8 @@ mod tests {
         sha256::Digest as ShaDigest,
     };
     use commonware_cryptography_curve25519::signing::{
-        Signature, SigningKey, StrictVerifyingKey as VerifyingKey,
+        BatchVerifier as PaymentBatchVerifier, Signature, SigningKey,
+        StrictVerifyingKey as VerifyingKey,
     };
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{Array, Span, test_rng};
@@ -2919,13 +2920,14 @@ mod tests {
     }
 
     fn empty_close(cache: &TestCache, context: &TestContext) -> TestClose {
-        build_close::<Sha256, _, _>(
+        build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             cache,
             context,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
             Vec::new(),
             Vec::new(),
+            &mut test_rng(),
         )
         .unwrap()
     }
@@ -2994,9 +2996,16 @@ mod tests {
             });
             shard_sets.push(shards);
         }
-        let close =
-            build_close::<Sha256, _, _>(cache, context, deposits, withdrawals, rows, shard_sets)
-                .unwrap();
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            cache,
+            context,
+            deposits,
+            withdrawals,
+            rows,
+            shard_sets,
+            &mut test_rng(),
+        )
+        .unwrap();
         let changed = close
             .rows
             .iter()
@@ -3031,7 +3040,14 @@ mod tests {
         withdrawals: &TestWithdrawals,
         close: &TestClose,
     ) -> bls12381::Certificate {
-        validate_close::<Sha256, _, _>(context, deposits, withdrawals, close).unwrap();
+        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+            context,
+            deposits,
+            withdrawals,
+            close,
+            &mut test_rng(),
+        )
+        .unwrap();
         let vote = signer.sign(&close.header).unwrap();
         signer.assemble_exact([vote]).unwrap()
     }
@@ -3344,13 +3360,14 @@ mod tests {
             row.prefix = prefix;
         }
         let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             cache,
             context,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
             rows,
             shard_sets,
+            &mut test_rng(),
         )
         .unwrap();
         let changed = close
@@ -3463,13 +3480,14 @@ mod tests {
             row.prefix = prefix;
         }
         let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _>(
+        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             cache,
             context,
             &DepositBatch::empty(),
             withdrawals,
             rows,
             shard_sets,
+            &mut test_rng(),
         )
         .unwrap();
         let changed = close

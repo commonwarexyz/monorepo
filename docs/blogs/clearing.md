@@ -11,9 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (8/27/26): Bajillion sends now batch entries. One signature and one cumulative endpoint pay many recipients, acknowledged atomically with one receipt per entry. Withdrawals now settle all or nothing and can ride the close directly, so an uncensored exit costs one onchain transaction: the claim.*
-
-*Updated (8/26/26): Bajillion now strengthens admission and close coverage while making finalized claims and paired challenge evidence more compact.*
+*Update (8/27/26): Bajillion sends now batch entries. One signature and one cumulative endpoint pay many recipients, acknowledged atomically with one receipt per entry. Withdrawals now settle all or nothing and can ride the close directly, so an uncensored exit costs one onchain transaction: the claim. Admission and close coverage are stronger, and finalized claims and paired challenge evidence are more compact.*
 
 *Update (8/20/26): Bajillion now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -353,7 +351,7 @@ Rollover changes only live serving state, without changing the evidence required
 
 Every profile below uses a 100-validator committee and divides the evidence into 256 slices. Strategy-enabled prepare, deal, seal, and challenge checks share one adaptive eight-worker pool (AWS c8a.4xlarge). Certificate and withdrawal-claim checks are scalar calling-thread measurements. The matrix varies $N$, the number of live accounts. Every account sends, the same 512 accounts receive, and each recipient uses one receive shard. The fixture therefore holds $A=N$, $B=512$, and $h=1$ while $N$ grows from 1,024 to one million.
 
-No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. Every fixture send is a batch of one entry. A terminal batch with more entries adds 40 bytes per extra entry to its row and to each shard head that carries it, still independent of $T$. Each stage is measured independently. The fixture constructs the predecessor-state proof cache before measurement. Prepare builds the compact change, withdrawal-output, successor-state, and coverage roots from the owned close inputs while reusing that cache; deal derives all proof slices from the prepared close; seal checks and retains the busiest validator's dealing, verifies every distinct send and receipt signature in one randomized batch, and signs the commitment. The two withdrawal-claim proof checks reuse separately constructed fixtures between samples.
+No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. Every fixture send is a batch of one entry. A terminal batch with more entries adds 40 bytes per extra entry to its row and to each shard head that carries it, still independent of $T$. Each stage is measured independently. The fixture constructs the predecessor-state proof cache before measurement. Prepare builds the compact change, withdrawal-output, successor-state, and coverage roots from the owned close inputs while reusing that cache; deal derives all proof slices from the prepared close; seal checks and retains the busiest validator's dealing, verifies every distinct send and receipt signature in one randomized batch, and signs the commitment. Withdrawal claims are measured from separately constructed fixtures, and the claims table after the matrix scales their own variable, the close's withdrawal count, on its own axis.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -430,34 +428,6 @@ No payment count appears because none is needed: rows and shard tips carry fixed
       <td style="text-align:right;"><strong>0.667 ms</strong></td>
       <td style="text-align:right;"><strong>0.666 ms</strong></td>
     </tr>
-    <tr>
-      <td style="padding-left:20px;">Amount claim proof</td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">check Amount claim proof</td>
-      <td style="text-align:right;"><strong>0.311 µs</strong></td>
-      <td style="text-align:right;"><strong>0.311 µs</strong></td>
-      <td style="text-align:right;"><strong>0.311 µs</strong></td>
-      <td style="text-align:right;"><strong>0.311 µs</strong></td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">Close claim proof</td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">check Close claim proof</td>
-      <td style="text-align:right;"><strong>0.311 µs</strong></td>
-      <td style="text-align:right;"><strong>0.311 µs</strong></td>
-      <td style="text-align:right;"><strong>0.311 µs</strong></td>
-      <td style="text-align:right;"><strong>0.311 µs</strong></td>
-    </tr>
     <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
     <tr>
       <td style="padding-left:20px;">HigherShardTip challenge</td>
@@ -472,6 +442,38 @@ No payment count appears because none is needed: rows and shard tips carry fixed
       <td style="text-align:right;"><strong>0.298 ms</strong></td>
       <td style="text-align:right;"><strong>0.302 ms</strong></td>
       <td style="text-align:right;"><strong>0.293 ms</strong></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+```
+
+Withdrawal and external-payout claims scale with a different variable: the claimed close's own withdrawal count $W$, never $N$, because each claim opens only that close's withdrawal-output tree. Sizes are deterministic, 39 bytes plus one 32-byte sibling per doubling of $W$, and both the $\mathsf{Amount}$ and $\mathsf{Close}$ claims share the shape. Verification recomputes that one path, 0.311 µs at a single output on the same c8a.4xlarge, adding one hash per doubling of $W$.
+
+```{=html}
+<div class="clearing-benchmark-table">
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
+      <th colspan="5" style="text-align:center;">Withdrawal outputs in the close (<em>W</em>)</th>
+    </tr>
+    <tr>
+      <th style="text-align:right;">1</th>
+      <th style="text-align:right;">1,024</th>
+      <th style="text-align:right;">10,000</th>
+      <th style="text-align:right;">100,000</th>
+      <th style="text-align:right;">1,000,000</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="padding-left:20px;">claim proof</td>
+      <td style="text-align:right;"><strong>39 B</strong></td>
+      <td style="text-align:right;"><strong>359 B</strong></td>
+      <td style="text-align:right;"><strong>487 B</strong></td>
+      <td style="text-align:right;"><strong>583 B</strong></td>
+      <td style="text-align:right;"><strong>679 B</strong></td>
     </tr>
   </tbody>
 </table>

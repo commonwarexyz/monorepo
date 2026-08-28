@@ -21,7 +21,10 @@ use commonware_cryptography::{
     },
     sha256::Digest,
 };
-use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
+use commonware_cryptography_curve25519::signing::{
+    BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
+};
+use commonware_utils::TestRng;
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::{
     hint::black_box,
@@ -327,7 +330,13 @@ fn withdrawal_close(
     )
     .expect("benchmark close is valid");
     prepared
-        .validate::<Sha256>(context, deposits, withdrawals)
+        .validate::<Sha256, PaymentBatchVerifier, _>(
+            context,
+            deposits,
+            withdrawals,
+            &mut TestRng::new(0),
+            strategy(),
+        )
         .expect("benchmark close is valid");
     let terminal_proof = prepared
         .terminal_proof()

@@ -134,6 +134,12 @@ pub(crate) struct Operator {
     settlement_address: Option<SocketAddr>,
     genesis_root: VectorRoot<Digest>,
     registration: EpochRegistration,
+    /// Predecessor state commitment retained for the current epoch.
+    ///
+    /// Payments, deposits, and withdrawals mutate only `current_*` account state, so the
+    /// predecessor set is immutable between rotations. Quotes, openings, and registration
+    /// openings serve this cache instead of replaying the epoch from SQLite.
+    predecessor: AccountCache,
     active_close: Option<ActiveClose>,
     recovery_predecessor_root: Option<VectorRoot<Digest>>,
     store_fault: Option<String>,
@@ -182,8 +188,9 @@ impl Operator {
         let current = store.load_current()?;
         let registration = registration_for(&protocol, &current)?;
         store.ensure_current_context(registration.context.payment())?;
-        let current_predecessor_root = validate_epoch_data(&protocol, &current, &registration)
+        let predecessor = validate_epoch_data(&protocol, &current, &registration)
             .context("validate current SQLite epoch")?;
+        let current_predecessor_root = predecessor.root();
         ensure!(
             projected_liability(&current)? == store.current_liability()?,
             "stored live liability differs from the projected account state"
@@ -231,6 +238,7 @@ impl Operator {
             settlement_address,
             genesis_root: configured_genesis_root,
             registration,
+            predecessor,
             active_close: None,
             recovery_predecessor_root,
             store_fault: None,
@@ -288,29 +296,22 @@ impl Operator {
     pub(crate) fn payment_quote(&self, account: &Key) -> Result<PaymentQuote> {
         self.ensure_operating()?;
         self.ensure_balance_intake_horizon()?;
-        let current = self.store.load_current()?;
-        let assembled = assemble_epoch(&self.protocol, &current, &self.registration)?;
-        let predecessor = AccountCache::new_with_strategy::<Sha256>(
-            assembled.predecessor,
-            self.protocol.strategy(),
-        )
-        .context("commit payment recovery state")?;
-        let state = current
-            .accounts
-            .iter()
-            .find(|stored| &stored.key == account)
+        let state = self
+            .store
+            .current_account(account)?
             .context("payer is not in the current live state")?;
         ensure!(
             state.current.active,
             "payer is not in the current live state"
         );
-        let payer_opening = predecessor
+        let payer_opening = self
+            .predecessor
             .opening(account)
             .context("open payer recovery state")?;
         Ok(PaymentQuote {
             context: self.registration.context.payment().clone(),
             state: state.current,
-            root: predecessor.root(),
+            root: self.predecessor.root(),
             opening: payer_opening,
         })
     }
@@ -335,13 +336,14 @@ impl Operator {
     pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedBatch> {
         self.ensure_operating()?;
         self.validate_recipients(&send)?;
-        if self.store.payment_requires_epoch_registration(
-            self.registration.context.payment(),
-            &send,
-            0,
-        )? {
-            self.ensure_balance_intake_horizon()?;
+
+        // A replay lookup is the only pre-mutation probe: the store transaction fully
+        // validates a new send before any mutation, so validating here too would repeat
+        // the same signature checks on every accepted payment.
+        if let Some(accepted) = self.store.accepted_batch(&send)? {
+            return Ok(accepted);
         }
+        self.ensure_balance_intake_horizon()?;
         let result = self.store.accept_send(
             self.registration.context.payment(),
             self.protocol.operator(),
@@ -351,6 +353,10 @@ impl Operator {
         self.guard_store(result)
     }
 
+    /// Reports whether accepting this send must first register the epoch with settlement.
+    ///
+    /// This probe keeps the full validation of a new send: registering an epoch starts
+    /// settlement's liveness clock, so only a payer-authorized send may trigger it.
     pub(crate) fn send_requires_epoch_registration(
         &self,
         send: &SignedSend<Key, Digest>,
@@ -441,13 +447,6 @@ impl Operator {
     ) -> Result<StagedWithdrawal> {
         self.ensure_operating()?;
         let wallet = &self.wallets[wallet % self.wallets.len()];
-        let current = self.store.load_current()?;
-        let assembled = assemble_epoch(&self.protocol, &current, &self.registration)?;
-        let predecessor = AccountCache::new_with_strategy::<Sha256>(
-            assembled.predecessor,
-            self.protocol.strategy(),
-        )
-        .context("commit withdrawal safety state")?;
         let deadline = crate::protocol::epoch_start(self.registration.context.payment().epoch())?
             .checked_add(50)
             .context("withdrawal deadline overflow")?;
@@ -458,7 +457,7 @@ impl Operator {
         );
         let request = SignedWithdrawal::sign(
             self.protocol.deployment(),
-            predecessor.root().digest,
+            self.predecessor.root().digest,
             destination,
             action,
             deadline,
@@ -470,16 +469,10 @@ impl Operator {
     pub(crate) fn withdrawal_opening(&self, account: &Key) -> Result<WithdrawalOpening> {
         self.ensure_operating()?;
         self.ensure_close_horizon()?;
-        let current = self.store.load_current()?;
-        let assembled = assemble_epoch(&self.protocol, &current, &self.registration)?;
-        let predecessor = AccountCache::new_with_strategy::<Sha256>(
-            assembled.predecessor,
-            self.protocol.strategy(),
-        )
-        .context("commit withdrawal safety state")?;
         Ok(WithdrawalOpening {
-            root: predecessor.root(),
-            opening: predecessor
+            root: self.predecessor.root(),
+            opening: self
+                .predecessor
                 .opening(account)
                 .context("open withdrawing account")?,
         })
@@ -592,6 +585,7 @@ impl Operator {
         // that exact context with settlement before it releases the successor's first receipt.
         let scheduling: Result<bool> = (|| {
             self.registration = successor;
+            self.reload_predecessor()?;
             let queued = self.active_close.is_some();
             if !queued {
                 self.spawn_close(payment_context)?;
@@ -768,26 +762,15 @@ impl Operator {
         let epoch = self.registration.context.payment().epoch();
         let predecessor_liability = self.registration.context.predecessor_liability();
         let withdrawals = self.registration.withdrawals.clone();
-        let openings = if withdrawals.requests().is_empty() {
-            Vec::new()
-        } else {
-            let current = self.store.load_current()?;
-            let assembled = assemble_epoch(&self.protocol, &current, &self.registration)?;
-            let predecessor = AccountCache::new_with_strategy::<Sha256>(
-                assembled.predecessor,
-                self.protocol.strategy(),
-            )
-            .context("commit registration predecessor state")?;
-            withdrawals
-                .requests()
-                .iter()
-                .map(|request| {
-                    predecessor
-                        .opening(request.account())
-                        .context("open carried withdrawal account")
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
+        let openings = withdrawals
+            .requests()
+            .iter()
+            .map(|request| {
+                self.predecessor
+                    .opening(request.account())
+                    .context("open carried withdrawal account")
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         // The committed boundary is derived through the chain's own deferral rule, so the
         // roots agree by construction whenever the deposit sets agree. The staged root
@@ -817,6 +800,14 @@ impl Operator {
             openings,
             signature,
         })
+    }
+
+    /// Rebuilds the retained predecessor commitment after the durable epoch advanced.
+    fn reload_predecessor(&mut self) -> Result<()> {
+        let current = self.store.load_current()?;
+        self.predecessor = validate_epoch_data(&self.protocol, &current, &self.registration)
+            .context("validate rotated SQLite epoch")?;
+        Ok(())
     }
 
     fn next_openable_epoch(&self) -> Result<u64> {
@@ -1322,17 +1313,15 @@ fn prepare_epoch(
     )
 }
 
+/// Replays and validates one stored epoch, returning its committed predecessor state.
 fn validate_epoch_data(
     protocol: &Protocol,
     data: &EpochData,
     registration: &EpochRegistration,
-) -> Result<VectorRoot<Digest>> {
+) -> Result<AccountCache> {
     let assembled = assemble_epoch(protocol, data, registration)?;
-    Ok(
-        AccountCache::new_with_strategy::<Sha256>(assembled.predecessor, protocol.strategy())
-            .context("commit recovered predecessor state")?
-            .root(),
-    )
+    AccountCache::new_with_strategy::<Sha256>(assembled.predecessor, protocol.strategy())
+        .context("commit recovered predecessor state")
 }
 
 fn assemble_epoch(
@@ -1794,6 +1783,7 @@ mod tests {
             )
             .unwrap();
         operator.registration = successor;
+        operator.reload_predecessor().unwrap();
     }
 
     #[test]
@@ -1903,6 +1893,59 @@ mod tests {
         assert_eq!(status.accounts, 4);
         assert_eq!(status.present_accounts, 4);
         assert_eq!(status.recent_payments, 1);
+    }
+
+    #[test]
+    fn payment_quote_serves_the_retained_predecessor_cache() {
+        let database = TempDatabase::new();
+        let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+        let payer = operator.wallets[0].public_key();
+        let before = operator.payment_quote(&payer).unwrap();
+        for amount in [3, 4, 5] {
+            operator.pay(0, 1, amount).unwrap();
+        }
+
+        // The predecessor commitment is constant across the epoch. Only the live account
+        // state moves with accepted payments.
+        let after = operator.payment_quote(&payer).unwrap();
+        assert_eq!(after.root, before.root);
+        assert_eq!(after.opening, before.opening);
+        assert_eq!(after.state.balance, before.state.balance - 12);
+        assert_eq!(
+            after.state.cumulative_debit,
+            before.state.cumulative_debit + 12
+        );
+
+        // Quotes serve the retained cache and never replay the payment log: tampering
+        // with a stored row is invisible here. Startup replays and verifies every row,
+        // so the reopened operator must reject the same database loudly.
+        let connection = rusqlite::Connection::open(database.path()).unwrap();
+        let mut tampered: Vec<u8> = connection
+            .query_row(
+                "SELECT encoded FROM payments WHERE sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        *tampered.last_mut().unwrap() ^= 1;
+        connection
+            .execute(
+                "UPDATE payments SET encoded = ?1 WHERE sequence = 1",
+                [tampered.as_slice()],
+            )
+            .unwrap();
+        let quoted = operator.payment_quote(&payer).unwrap();
+        assert_eq!(quoted.root, after.root);
+        assert_eq!(quoted.state, after.state);
+        assert_eq!(quoted.opening, after.opening);
+        drop(operator);
+        drop(connection);
+
+        let error = match Operator::open(database.path(), NonZeroUsize::new(2).unwrap()) {
+            Ok(_) => panic!("tampered payment log reopened cleanly"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("verify stored payment"));
     }
 
     #[test]
