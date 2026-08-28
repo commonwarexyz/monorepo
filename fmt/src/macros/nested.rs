@@ -2,7 +2,7 @@
 
 use super::{Error, LineEnding, MacroKind, Options, delimiter_text, format_at_depth, macro_kind};
 use crate::{
-    pretty::{self, Disposition, ProtectedFragment},
+    fragment::{self, Disposition, ProtectedFragment},
     skip,
     source::SourceMap,
 };
@@ -10,6 +10,7 @@ use proc_macro2::{Ident, Span};
 use std::ops::Range;
 use syn::{
     Block, Expr, ForeignItem, ImplItem, Item, Macro, Stmt, TraitItem,
+    ext::IdentExt as _,
     parse::Parser,
     spanned::Spanned,
     visit::{self, Visit},
@@ -21,22 +22,31 @@ const RECURSION_LIMIT: usize = 32;
 #[derive(Clone, Copy)]
 enum Style {
     Expression,
-    ExpressionPreservingBlankLines,
+    MatchArmBody,
     BlockExpression,
-    BlockExpressionPreservingBlankLines,
+}
+
+#[derive(Clone, Copy)]
+struct ExpressionOptions {
+    indentation: usize,
+    depth: usize,
+    style: Style,
 }
 
 impl Style {
-    fn format(self, expression: &Expr, source: &str) -> Result<ProtectedFragment, pretty::Error> {
+    fn format(
+        self,
+        formatter: &crate::rustfmt::Formatter,
+        source: &str,
+        indentation: usize,
+    ) -> Result<ProtectedFragment, Error> {
         match self {
-            Self::Expression => pretty::expression(expression, source),
-            Self::ExpressionPreservingBlankLines => {
-                pretty::expression_preserving_blank_lines(expression, source)
-            }
-            Self::BlockExpression => pretty::block_expression(expression, source),
-            Self::BlockExpressionPreservingBlankLines => {
-                pretty::block_expression_preserving_blank_lines(expression, source)
-            }
+            Self::Expression | Self::BlockExpression => formatter
+                .expression(source, indentation)
+                .map_err(Error::from),
+            Self::MatchArmBody => formatter
+                .match_arm_body(source, indentation)
+                .map_err(Error::from),
         }
     }
 }
@@ -239,12 +249,27 @@ impl VisitMut for Shield<'_> {
         if self.error.is_some() {
             return;
         }
+        if rustfmt_formats_macro(node) {
+            return;
+        }
         let kind = macro_kind(&node.path, &node.delimiter)
             .map_or(NestedKind::Opaque, NestedKind::Supported);
         if let Err(error) = self.shield(node, kind) {
             self.error = Some(error);
         }
     }
+}
+
+fn rustfmt_formats_macro(node: &Macro) -> bool {
+    let Some(name) = node
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.unraw().to_string())
+    else {
+        return false;
+    };
+    fragment::rustfmt_formats_macro_name(&name)
 }
 
 struct Marker {
@@ -373,9 +398,7 @@ pub(super) fn preserve_with_nested(
     for expression in expressions {
         collector.visit_expr(expression);
     }
-    preserve_collected(
-        formatter, source, 0, source, source_map, collector, options, depth,
-    )
+    preserve_collected(formatter, source, source_map, collector, options, depth)
 }
 
 pub(super) fn preserve_bodies_with_nested(
@@ -398,16 +421,12 @@ pub(super) fn preserve_bodies_with_nested(
             collector.visit_stmt(statement);
         }
     }
-    preserve_collected(
-        formatter, source, 0, source, source_map, collector, options, depth,
-    )
+    preserve_collected(formatter, source, source_map, collector, options, depth)
 }
 
 fn preserve_collected(
     formatter: &crate::rustfmt::Formatter,
     fragment_source: &str,
-    fragment_start: usize,
-    context_source: &str,
     source_map: &SourceMap<'_>,
     collector: ChildCollector,
     options: Options,
@@ -434,19 +453,14 @@ fn preserve_collected(
         let body_range = open.end..close.start;
         let body_source = source_map.slice(body_range.clone())?;
         let child_options = Options {
-            indentation: line_indentation(context_source, path_start, options.indentation),
+            indentation: line_indentation(fragment_source, path_start, options.indentation),
+            body_column: line_column(fragment_source, open.end, options.body_column),
             line_ending: options.line_ending,
         };
         let body = format_at_depth(formatter, child.kind, body_source, child_options, depth + 1)?;
         if body.text() != body_source {
-            let start = body_range
-                .start
-                .checked_sub(fragment_start)
-                .ok_or(Error::MarkerMismatch)?;
-            let end = body_range
-                .end
-                .checked_sub(fragment_start)
-                .ok_or(Error::MarkerMismatch)?;
+            let start = body_range.start;
+            let end = body_range.end;
             if start > end || end > fragment_source.len() {
                 return Err(Error::MarkerMismatch);
             }
@@ -471,36 +485,13 @@ fn preserve_collected(
     Ok(ProtectedFragment::preserved_with_nested_formatting(output))
 }
 
-pub(super) fn preserve_expression(
-    formatter: &crate::rustfmt::Formatter,
-    expression: &Expr,
-    fragment_source: &str,
-    fragment_start: usize,
-    context_source: &str,
-    source_map: &SourceMap<'_>,
-    options: Options,
-    depth: usize,
-) -> Result<ProtectedFragment, Error> {
-    let mut collector = ChildCollector::default();
-    collector.visit_expr(expression);
-    preserve_collected(
-        formatter,
-        fragment_source,
-        fragment_start,
-        context_source,
-        source_map,
-        collector,
-        options,
-        depth,
-    )
-}
-
 pub(super) fn expression(
     formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
     source_map: &SourceMap<'_>,
+    indentation: usize,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     format_expression(
@@ -509,17 +500,21 @@ pub(super) fn expression(
         fragment_source,
         source,
         source_map,
-        depth,
-        Style::Expression,
+        ExpressionOptions {
+            indentation,
+            depth,
+            style: Style::Expression,
+        },
     )
 }
 
-pub(super) fn expression_preserving_blank_lines(
+pub(super) fn match_arm_body(
     formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
     source_map: &SourceMap<'_>,
+    indentation: usize,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     format_expression(
@@ -528,8 +523,11 @@ pub(super) fn expression_preserving_blank_lines(
         fragment_source,
         source,
         source_map,
-        depth,
-        Style::ExpressionPreservingBlankLines,
+        ExpressionOptions {
+            indentation,
+            depth,
+            style: Style::MatchArmBody,
+        },
     )
 }
 
@@ -539,6 +537,7 @@ pub(super) fn block_expression(
     fragment_source: &str,
     source: &str,
     source_map: &SourceMap<'_>,
+    indentation: usize,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     format_expression(
@@ -547,27 +546,11 @@ pub(super) fn block_expression(
         fragment_source,
         source,
         source_map,
-        depth,
-        Style::BlockExpression,
-    )
-}
-
-pub(super) fn block_expression_preserving_blank_lines(
-    formatter: &crate::rustfmt::Formatter,
-    expression: &Expr,
-    fragment_source: &str,
-    source: &str,
-    source_map: &SourceMap<'_>,
-    depth: usize,
-) -> Result<ProtectedFragment, Error> {
-    format_expression(
-        formatter,
-        expression,
-        fragment_source,
-        source,
-        source_map,
-        depth,
-        Style::BlockExpressionPreservingBlankLines,
+        ExpressionOptions {
+            indentation,
+            depth,
+            style: Style::BlockExpression,
+        },
     )
 }
 
@@ -732,18 +715,20 @@ fn format_expression(
     fragment_source: &str,
     source: &str,
     source_map: &SourceMap<'_>,
-    depth: usize,
-    style: Style,
+    options: ExpressionOptions,
 ) -> Result<ProtectedFragment, Error> {
+    let ExpressionOptions {
+        indentation,
+        depth,
+        style,
+    } = options;
     let mut preflight = ShieldPreflight::default();
     preflight.visit_expr(expression);
     if !preflight.has_macro {
         if preflight.had_skip {
             return Ok(ProtectedFragment::preserved(fragment_source));
         }
-        return style
-            .format(expression, fragment_source)
-            .map_err(Error::from);
+        return style.format(formatter, fragment_source, indentation);
     }
 
     let marker_prefix = crate::marker::unique_prefix(source, "nested");
@@ -763,9 +748,7 @@ fn format_expression(
         if shield.had_skip {
             return Ok(ProtectedFragment::preserved(fragment_source));
         }
-        return style
-            .format(expression, fragment_source)
-            .map_err(Error::from);
+        return style.format(formatter, fragment_source, indentation);
     }
     if depth >= RECURSION_LIMIT && has_supported(&shield.nested) {
         return Err(Error::RecursionLimit);
@@ -796,7 +779,7 @@ fn format_expression(
         ));
     }
 
-    let formatted = style.format(&shielded, &shielded_source)?;
+    let formatted = style.format(formatter, &shielded_source, indentation)?;
     if formatted.disposition() == Disposition::PreservedForTrivia {
         let Some(restored) = restore(
             &shielded_source,
@@ -939,6 +922,10 @@ fn restore(
             NestedKind::Supported(kind) => {
                 let options = Options {
                     indentation,
+                    body_column: restored_body_column(
+                        &nested.prefix,
+                        marker.path_span.start().column,
+                    ),
                     line_ending,
                 };
                 let body = format_at_depth(formatter, kind, &nested.body, options, depth + 1)?;
@@ -1001,7 +988,7 @@ fn reindent_opaque(source: &str, original_column: usize, target_column: usize) -
     if !source.contains('\n') || original_column == target_column {
         return Some(source.to_owned());
     }
-    if pretty::source_has_multiline_literal(source) || source.contains("/*") {
+    if fragment::source_has_multiline_literal(source) || source.contains("/*") {
         return None;
     }
 
@@ -1064,4 +1051,22 @@ fn line_indentation(source: &str, offset: usize, initial_indentation: usize) -> 
         .chars()
         .take_while(|character| *character == ' ')
         .count()
+}
+
+fn line_column(source: &str, offset: usize, initial_column: usize) -> usize {
+    let (prefix, column) = source[..offset]
+        .rsplit_once('\n')
+        .map_or((&source[..offset], initial_column), |(_, prefix)| {
+            (prefix, 0)
+        });
+    prefix
+        .chars()
+        .fold(column, |column, character| match character {
+            '\t' => (column / 4 + 1) * 4,
+            _ => column + 1,
+        })
+}
+
+fn restored_body_column(prefix: &str, initial_column: usize) -> usize {
+    line_column(prefix, prefix.len(), initial_column)
 }

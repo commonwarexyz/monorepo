@@ -7,8 +7,8 @@
 )]
 
 pub mod file;
+pub mod fragment;
 pub mod macros;
-pub mod pretty;
 pub mod rustfmt;
 pub mod source;
 

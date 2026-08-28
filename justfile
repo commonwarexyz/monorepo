@@ -33,12 +33,24 @@ fix-fmt *args='':
     if [ "${#source_files[@]}" -eq 0 ]; then
         exit 0
     fi
-    {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }} "${source_files[@]}"
     commonware_fmt_args=(--rustfmt "{{ rustfmt }}" --rustfmt-config-path .)
     if [[ -n "{{ nightly_version }}" ]]; then
         commonware_fmt_args+=(--rustfmt-toolchain "{{ nightly_version }}")
     fi
-    cargo run --quiet -p commonware-fmt -- "${commonware_fmt_args[@]}" "${source_files[@]}"
+    for _ in 1 2 3 4; do
+        {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }} "${source_files[@]}"
+        cargo run --quiet -p commonware-fmt -- "${commonware_fmt_args[@]}" "${source_files[@]}"
+        if {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }} --check \
+            "${source_files[@]}" \
+            >/dev/null 2>&1 \
+            && cargo run --quiet -p commonware-fmt -- --check \
+                "${commonware_fmt_args[@]}" "${source_files[@]}" >/dev/null 2>&1
+        then
+            exit 0
+        fi
+    done
+    echo "formatters did not reach a fixed point after four passes" >&2
+    exit 1
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:

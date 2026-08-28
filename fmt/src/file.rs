@@ -1,13 +1,13 @@
 //! Complete-file collection and replacement of supported macro bodies.
 
 use crate::{
-    macros::{self, LineEnding, Options, delimiter_text, format_at_depth, macro_kind},
-    pretty::Disposition,
+    fragment::{Disposition, ProtectedFragment},
+    macros::{self, LineEnding, MacroKind, Options, delimiter_text, format_at_depth, macro_kind},
     skip,
     source::SourceMap,
 };
 use proc_macro2::{TokenStream, TokenTree};
-use std::ops::Range;
+use std::{ops::Range, thread};
 use syn::{
     Expr, ForeignItem, ImplItem, Item, Macro, Stmt, TraitItem, spanned::Spanned, visit::Visit,
 };
@@ -170,6 +170,13 @@ struct Pass {
     preserved_macros: usize,
 }
 
+struct FormatTask<'a> {
+    kind: MacroKind,
+    body_range: Range<usize>,
+    body_source: &'a str,
+    options: Options,
+}
+
 /// Formats every supported Commonware macro invocation in `source`.
 pub fn format(source: &str) -> Result<Output, Error> {
     Formatter::default().format(source)
@@ -183,9 +190,7 @@ fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pa
 
     let source_map = SourceMap::new(source);
     let line_ending = dominant_line_ending(source);
-    let mut replacements = Vec::new();
-    let mut formatted_macros = 0;
-    let mut preserved_macros = 0;
+    let mut tasks = Vec::with_capacity(collector.macros.len());
     for invocation in collector.macros {
         let kind = macro_kind(&invocation.path, &invocation.delimiter)
             .expect("collector only retains supported macros");
@@ -205,17 +210,30 @@ fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pa
         let path_start = source_map.byte_offset(invocation.path.span().start())?;
         let options = Options {
             indentation: line_indentation(source, path_start),
+            body_column: line_column(source, open.end),
             line_ending,
         };
-        let body = format_at_depth(formatter, kind, body_source, options, 0)?;
+        tasks.push(FormatTask {
+            kind,
+            body_range,
+            body_source,
+            options,
+        });
+    }
+
+    let mut replacements = Vec::new();
+    let mut formatted_macros = 0;
+    let mut preserved_macros = 0;
+    for (task, body) in tasks.iter().zip(format_tasks(formatter, &tasks)) {
+        let body = body?;
         if body.disposition() == Disposition::Formatted {
             formatted_macros += 1;
         } else {
             preserved_macros += 1;
         }
-        if body.text() != body_source {
+        if body.text() != task.body_source {
             replacements.push(Replacement {
-                range: body_range,
+                range: task.body_range.clone(),
                 text: body.into_string(),
             });
         }
@@ -239,6 +257,52 @@ fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pa
         formatted_macros,
         preserved_macros,
     })
+}
+
+fn format_tasks(
+    formatter: &crate::rustfmt::Formatter,
+    tasks: &[FormatTask<'_>],
+) -> Vec<Result<ProtectedFragment, macros::Error>> {
+    let workers = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(tasks.len());
+    if workers <= 1 {
+        return tasks
+            .iter()
+            .map(|task| format_at_depth(formatter, task.kind, task.body_source, task.options, 0))
+            .collect();
+    }
+
+    let mut indexed = thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|worker| {
+                scope.spawn(move || {
+                    (worker..tasks.len())
+                        .step_by(workers)
+                        .map(|index| {
+                            let task = &tasks[index];
+                            (
+                                index,
+                                format_at_depth(
+                                    formatter,
+                                    task.kind,
+                                    task.body_source,
+                                    task.options,
+                                    0,
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("formatter worker should not panic"))
+            .collect::<Vec<_>>()
+    });
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+    indexed.into_iter().map(|(_, result)| result).collect()
 }
 
 const MAX_DELIMITER_DEPTH: usize = 256;
@@ -286,6 +350,18 @@ fn line_indentation(source: &str, offset: usize) -> usize {
             b' ' => column + 1,
             b'\t' => (column / 4 + 1) * 4,
             _ => unreachable!("indentation contains only spaces and tabs"),
+        })
+}
+
+fn line_column(source: &str, offset: usize) -> usize {
+    let line_start = source[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    source[line_start..offset]
+        .chars()
+        .fold(0, |column, character| match character {
+            '\t' => (column / 4 + 1) * 4,
+            _ => column + 1,
         })
 }
 
@@ -360,6 +436,40 @@ mod tests {
         assert_eq!(once.text().matches("// keep item comment").count(), 1);
         assert_eq!(once.text().matches("/// Run one selection.").count(), 1);
         assert!(once.text().contains("value = receive() => value,"));
+        assert_eq!(once.text(), twice.text());
+    }
+
+    #[test]
+    fn formats_stability_predicate_at_qualified_invocation_column() {
+        let source = "commonware_macros::stability_scope!(ALPHA,cfg(all(feature=\"an_extremely_descriptive_first_feature\",feature=\"an_extremely_descriptive_second_feature\",feature=\"an_extremely_descriptive_third_feature\")){pub struct Example;});\n";
+        let once = format(source).expect("qualified stability scope should format");
+        let twice = format(once.text()).expect("qualified stability scope should remain stable");
+
+        assert!(
+            once.text()
+                .lines()
+                .all(|line| line.chars().count() <= crate::writer::MAX_OVERFLOW_WIDTH),
+            "{}",
+            once.text()
+        );
+        assert!(once.text().contains("cfg(all(\n"), "{}", once.text());
+        assert_eq!(once.text(), twice.text());
+    }
+
+    #[test]
+    fn formats_nested_stability_predicate_at_qualified_invocation_column() {
+        let source = "cfg_if! { if #[cfg(test)] { commonware_macros::stability_scope!(ALPHA,cfg(all(feature=\"an_extremely_descriptive_first_feature\",feature=\"an_extremely_descriptive_second_feature\",feature=\"an_extremely_descriptive_third_feature\")){pub struct Example;}); } }\n";
+        let once = format(source).expect("nested qualified stability scope should format");
+        let twice = format(once.text()).expect("nested qualified stability scope should be stable");
+
+        assert!(
+            once.text()
+                .lines()
+                .all(|line| line.chars().count() <= crate::writer::MAX_OVERFLOW_WIDTH),
+            "{}",
+            once.text()
+        );
+        assert!(once.text().contains("cfg(all(\n"), "{}", once.text());
         assert_eq!(once.text(), twice.text());
     }
 
@@ -499,14 +609,95 @@ mod tests {
 
     #[test]
     fn formats_escaped_newline_literal_without_changing_token() {
-        let literal = "\"voter should recover after failure, \\\n+                             even when certification remains pending\"";
-        let source = format!("fn run() {{\n    select! {{ _=wait()=>panic!({literal}) }}\n}}\n");
+        let literal = "\"voter should emit nullify for view {target_view} after certification failure, \\\n                             even though it already voted notarize\"";
+        let source = format!(
+            "fn run() {{\n    select! {{\n        _ = wait() => {{\n            panic!({literal});\n        }}\n    }}\n}}\n"
+        );
         let formatted = format(&source).expect("file should format");
 
-        assert_eq!(formatted.formatted_macros(), 1);
-        assert_eq!(formatted.preserved_macros(), 0);
+        assert_eq!(formatted.formatted_macros(), 1, "{}", formatted.text());
+        assert_eq!(formatted.preserved_macros(), 0, "{}", formatted.text());
         assert_eq!(formatted.text().matches(literal).count(), 1);
-        assert!(formatted.text().contains("_ = wait() => panic!("));
+        assert!(
+            formatted.text().contains("_ = wait() => {\n"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            formatted.text().contains("panic!(\n"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            formatted
+                .text()
+                .lines()
+                .all(|line| line.chars().count() <= crate::writer::MAX_OVERFLOW_WIDTH),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn preserves_deep_multiline_call_around_escaped_newline_literal() {
+        let literal = "\"voter should emit nullify for view {target_view} after certification failure, \\\n                             even though it already voted notarize\"";
+        let source = format!(
+            "fn run() {{\n    if true {{\n        if true {{\n            if true {{\n                select! {{\n                    _ = wait() => {{\n                        panic!(\n                            {literal}\n                        );\n                    }}\n                }}\n            }}\n        }}\n    }}\n}}\n"
+        );
+        let formatted = format(&source).expect("file should format");
+
+        assert_eq!(formatted.formatted_macros(), 1, "{}", formatted.text());
+        assert_eq!(formatted.preserved_macros(), 0, "{}", formatted.text());
+        assert_eq!(formatted.text().matches(literal).count(), 1);
+        assert!(
+            formatted.text().contains("panic!(\n"),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn formats_raw_rustfmt_macro_around_escaped_newline_literal() {
+        let literal = "\"voter XXshould emit nullify for view {target_view} after certification failure, \\\n                         even though it already voted notarize\"";
+        let source = format!(
+            "fn run() {{\n    select! {{\n        _ = wait() => {{\n            r#panic!({literal});\n        }}\n    }}\n}}\n"
+        );
+        let formatted = format(&source).expect("file should format");
+
+        assert_eq!(formatted.formatted_macros(), 1, "{}", formatted.text());
+        assert_eq!(formatted.preserved_macros(), 0, "{}", formatted.text());
+        assert_eq!(formatted.text().matches(literal).count(), 1);
+        assert!(
+            formatted.text().contains("r#panic!(\n"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            formatted
+                .text()
+                .lines()
+                .all(|line| line.chars().count() <= crate::writer::MAX_OVERFLOW_WIDTH),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn formats_shell_around_qualified_opaque_select_with_multiline_literal() {
+        let literal = "r#\"first\n    second\"#";
+        let source = format!(
+            "fn run() {{\n    select! {{ value=receive()=>other::select!({literal}) }}\n}}\n"
+        );
+        let formatted = format(&source).expect("file should format");
+
+        assert_eq!(formatted.formatted_macros(), 1, "{}", formatted.text());
+        assert_eq!(formatted.preserved_macros(), 0, "{}", formatted.text());
+        assert_eq!(formatted.text().matches(literal).count(), 1);
+        assert!(
+            formatted.text().contains("receive() => other::select!("),
+            "{}",
+            formatted.text()
+        );
     }
 
     #[test]
@@ -539,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn reattaches_exact_line_comments_in_crlf_file() {
+    fn preserves_line_comments_in_crlf_file() {
         let source = "fn example() {\r\n    select! {\r\n        // na\u{ef}ve leading  \r\n        value=receive()=>{\r\n            // duplicate  \r\n            value // duplicate  \r\n        },\r\n        // trailing body  \r\n    }\r\n}\r\n";
         let formatted = format(source).expect("comments should format safely");
 
@@ -547,7 +738,9 @@ mod tests {
         assert_eq!(formatted.preserved_macros(), 0);
         assert!(!formatted.text().replace("\r\n", "").contains('\n'));
         assert!(formatted.text().contains("// na\u{ef}ve leading  \r\n"));
-        assert_eq!(formatted.text().matches("// duplicate  \r\n").count(), 2);
+        assert_eq!(formatted.text().matches("// duplicate").count(), 2);
+        assert!(formatted.text().contains("            // duplicate\r\n"));
+        assert!(formatted.text().contains("value // duplicate  \r\n"));
         assert!(formatted.text().contains("// trailing body  \r\n"));
     }
 

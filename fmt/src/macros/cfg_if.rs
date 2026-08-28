@@ -2,7 +2,7 @@
 
 use super::{Error, Options, nested};
 use crate::{
-    pretty::{self, Disposition, ProtectedFragment},
+    fragment::{self, Disposition, ProtectedFragment},
     source::SourceMap,
     writer::Writer,
 };
@@ -174,10 +174,8 @@ pub(super) fn cfg_if_with(
     }
 
     let mut branches = Vec::with_capacity(input.branches.len());
+    let mut predicate_column = options.indentation + 13;
     for branch in &input.branches {
-        let Some(predicate) = format_predicate(&source_map, &branch.predicate)? else {
-            return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
-        };
         let Some(body) = format_body(
             &source_map,
             &branch.brace_token,
@@ -188,6 +186,16 @@ pub(super) fn cfg_if_with(
         )?
         else {
             return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
+        };
+        let Some(predicate) =
+            format_predicate(formatter, &source_map, &branch.predicate, predicate_column)?
+        else {
+            return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
+        };
+        predicate_column = if body.is_empty() {
+            rendered_end_column(&predicate, predicate_column, options.indentation + 4) + 20
+        } else {
+            options.indentation + 20
         };
         branches.push(ConditionalLayout { predicate, body });
     }
@@ -218,6 +226,13 @@ pub(super) fn cfg_if_with(
     );
     syn::parse_str::<CfgIfInput>(&output).map_err(Error::Output)?;
     Ok(ProtectedFragment::formatted(output))
+}
+
+fn rendered_end_column(source: &str, first_column: usize, indentation: usize) -> usize {
+    source.rsplit_once('\n').map_or_else(
+        || first_column + source.chars().count(),
+        |(_, line)| indentation + line.chars().count(),
+    )
 }
 
 fn preserve_cfg_if(
@@ -308,13 +323,20 @@ fn body_ranges(
 }
 
 fn format_predicate(
+    formatter: &crate::rustfmt::Formatter,
     source_map: &SourceMap<'_>,
     predicate: &TokenStream,
+    column: usize,
 ) -> Result<Option<String>, Error> {
     let range = source_map.span_range(predicate.span())?;
     let predicate_source = source_map.slice(range)?;
     let predicate = match syn::parse2::<Meta>(predicate.clone()) {
-        Ok(predicate) => pretty::meta(&predicate, predicate_source)?,
+        Ok(_) if fragment::source_requires_preservation(predicate_source) => {
+            ProtectedFragment::preserved(predicate_source)
+        }
+        Ok(_) => formatter
+            .meta(predicate_source, column)
+            .map_err(Error::from)?,
         Err(_) => ProtectedFragment::preserved(predicate_source),
     };
     Ok(movable(predicate))
@@ -429,6 +451,7 @@ mod tests {
 
     const OPTIONS: Options = Options {
         indentation: 0,
+        body_column: 0,
         line_ending: LineEnding::Lf,
     };
 
@@ -482,6 +505,34 @@ mod tests {
         assert!(output.contains("if #[cfg(all(target_arch = \"aarch64\", feature = \"std\"))] {"));
         assert!(output.contains("} else if #[cfg(any(test, miri))] {"));
         assert!(output.contains("} else {"));
+    }
+
+    #[test]
+    fn formats_else_if_predicate_at_its_wider_column() {
+        let source = "if #[cfg(test)] { first() } else if #[cfg(all(feature=\"an_extremely_descriptive_first_feature\",feature=\"an_extremely_descriptive_second_feature\",feature=\"an_extremely_descriptive_third_feature\"))] { second() }";
+        let output = fixed_point(source);
+
+        assert!(
+            output
+                .lines()
+                .all(|line| line.chars().count() <= crate::writer::MAX_OVERFLOW_WIDTH),
+            "{output}"
+        );
+        assert!(output.contains("} else if #[cfg(all(\n"), "{output}");
+    }
+
+    #[test]
+    fn formats_else_if_predicate_after_inline_empty_branch() {
+        let source = "if #[cfg(test)] {} else if #[cfg(all(feature=\"an_extremely_descriptive_first_feature\",feature=\"an_extremely_descriptive_second_feature\",feature=\"an_extremely_descriptive_third_feature\"))] { second() }";
+        let output = fixed_point(source);
+
+        assert!(
+            output
+                .lines()
+                .all(|line| line.chars().count() <= crate::writer::MAX_OVERFLOW_WIDTH),
+            "{output}"
+        );
+        assert!(output.contains("{} else if #[cfg(all(\n"), "{output}");
     }
 
     #[test]

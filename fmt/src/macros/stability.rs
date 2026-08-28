@@ -2,7 +2,7 @@
 
 use super::{Error, Options, nested};
 use crate::{
-    pretty::{Disposition, ProtectedFragment},
+    fragment::{Disposition, ProtectedFragment},
     source::SourceMap,
     writer::Writer,
 };
@@ -30,7 +30,7 @@ pub(super) fn stability_mod(source: &str) -> Result<ProtectedFragment, Error> {
 
     let level = level_text(&input.level);
     let visibility = if let Some(range) = visibility_range {
-        if crate::pretty::source_requires_preservation(source_map.slice(range)?) {
+        if crate::fragment::source_requires_preservation(source_map.slice(range)?) {
             return Ok(ProtectedFragment::preserved(source));
         }
         visibility_text(&input.visibility)
@@ -105,9 +105,19 @@ pub(super) fn stability_scope_with(
         return preserve_scope_items(source, items_range, items_source, &items);
     }
 
+    let level = level_text(&input.level);
     let predicate = if let Some(cfg) = &input.cfg {
         let predicate_source = source_map.slice(source_map.span_range(cfg.predicate.span())?)?;
-        let predicate = crate::pretty::meta(&cfg.predicate, predicate_source)?;
+        let predicate = if crate::fragment::source_requires_preservation(predicate_source) {
+            ProtectedFragment::preserved(predicate_source)
+        } else {
+            formatter
+                .meta(
+                    predicate_source,
+                    options.body_column + level.chars().count() + 6,
+                )
+                .map_err(Error::from)?
+        };
         if predicate.disposition() != Disposition::Formatted
             && (predicate.text().contains('\n') || predicate.text().contains('\r'))
         {
@@ -118,12 +128,7 @@ pub(super) fn stability_scope_with(
         None
     };
 
-    let output = render_scope(
-        &level_text(&input.level),
-        predicate.as_deref(),
-        items.text(),
-        options,
-    );
+    let output = render_scope(&level, predicate.as_deref(), items.text(), options);
     syn::parse_str::<StabilityScopeInput>(&output).map_err(Error::Output)?;
     Ok(ProtectedFragment::formatted(output))
 }
@@ -240,6 +245,7 @@ mod tests {
 
     const OPTIONS: Options = Options {
         indentation: 0,
+        body_column: 0,
         line_ending: LineEnding::Lf,
     };
 

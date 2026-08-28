@@ -98,9 +98,9 @@ pub(crate) fn format_at_depth(
     source: &str,
     options: Options,
     depth: usize,
-) -> Result<crate::pretty::ProtectedFragment, Error> {
+) -> Result<crate::fragment::ProtectedFragment, Error> {
     if depth == 0
-        && let Some(literals) = crate::pretty::MultilineLiterals::prepare(source)
+        && let Some(literals) = crate::fragment::MultilineLiterals::prepare(source)
     {
         let formatted = format_shielded_at_depth(formatter, kind, literals.text(), options, depth)?;
         if let Some(restored) = literals.restore(formatted) {
@@ -117,7 +117,7 @@ fn format_shielded_at_depth(
     source: &str,
     options: Options,
     depth: usize,
-) -> Result<crate::pretty::ProtectedFragment, Error> {
+) -> Result<crate::fragment::ProtectedFragment, Error> {
     match kind {
         MacroKind::CfgIf => cfg_if::cfg_if_with(formatter, source, options, depth),
         MacroKind::Select => select::select_at_depth(formatter, source, options, depth),
@@ -153,6 +153,8 @@ impl LineEnding {
 pub struct Options {
     /// Number of spaces before the containing macro invocation.
     pub indentation: usize,
+    /// Absolute column immediately after the macro's opening delimiter.
+    pub body_column: usize,
     /// Line ending to emit.
     pub line_ending: LineEnding,
 }
@@ -166,9 +168,6 @@ pub enum Error {
     /// The parsed macro body violated a shared semantic constraint.
     #[error("invalid macro body: {0}")]
     Validate(#[source] syn::Error),
-    /// An embedded Rust fragment could not be formatted safely.
-    #[error("failed to format embedded Rust: {0}")]
-    Pretty(#[from] crate::pretty::Error),
     /// An embedded Rust fragment could not be formatted by rustfmt.
     #[error("failed to format embedded Rust with rustfmt: {0}")]
     Rustfmt(#[from] crate::rustfmt::Error),

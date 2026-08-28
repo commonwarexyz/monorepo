@@ -1647,7 +1647,6 @@ version = "2026.7.0"
 dependencies = [
  "clap",
  "commonware-macros-grammar",
- "prettyplease",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

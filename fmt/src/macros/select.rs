@@ -2,10 +2,10 @@
 
 use super::{Error, MacroKind, Options, nested};
 use crate::{
-    pretty::{self, Disposition, ProtectedFragment},
+    fragment::{self, Disposition, ProtectedFragment},
     source::SourceMap,
     trivia::{self, ShellComment},
-    writer::{MAX_OVERFLOW_WIDTH, Writer},
+    writer::Writer,
 };
 use commonware_macros_grammar::{
     SelectBranch, SelectInput, SelectLoopBranch, SelectLoopInput, SelectLoopLifecycle,
@@ -14,15 +14,12 @@ use proc_macro2::Span;
 use std::ops::Range;
 use syn::{Expr, spanned::Spanned};
 
-const MAX_UNWRAPPED_MULTILINE_BODY_LINES: usize = 16;
-
 struct BranchLayout {
     pattern: String,
     future: String,
     divergence: Option<String>,
     body: String,
     body_is_block: bool,
-    wrapped_body: Option<String>,
 }
 
 struct LifecycleLayout {
@@ -149,14 +146,27 @@ pub(super) fn select_loop_at_depth(
     let Some(shell_trivia) = select_loop_shell_trivia(source, &source_map, &input)? else {
         return preserve_select_loop(formatter, source, &source_map, &input, options, depth);
     };
-    let Some(context) = format_expression(formatter, source, &source_map, &input.context, depth)?
+    let Some(context) = format_expression(
+        formatter,
+        source,
+        &source_map,
+        &input.context,
+        options.indentation + 4,
+        depth,
+    )?
     else {
         return preserve_select_loop(formatter, source, &source_map, &input, options, depth);
     };
     let on_start = match &input.on_start {
         Some(lifecycle) => {
-            let Some(lifecycle) =
-                format_lifecycle(formatter, source, &source_map, lifecycle, depth)?
+            let Some(lifecycle) = format_lifecycle(
+                formatter,
+                source,
+                &source_map,
+                lifecycle,
+                options.indentation + 8,
+                depth,
+            )?
             else {
                 return preserve_select_loop(
                     formatter,
@@ -203,8 +213,14 @@ fn render_select_loop(
         options,
         depth,
     };
-    let Some(on_stopped) =
-        format_lifecycle(formatter, source, source_map, &input.on_stopped, depth)?
+    let Some(on_stopped) = format_lifecycle(
+        formatter,
+        source,
+        source_map,
+        &input.on_stopped,
+        options.indentation + 8,
+        depth,
+    )?
     else {
         return preserve_select_loop(formatter, source, source_map, input, options, depth);
     };
@@ -217,8 +233,14 @@ fn render_select_loop(
     }
     let on_end = match &input.on_end {
         Some(lifecycle) => {
-            let Some(lifecycle) =
-                format_lifecycle(formatter, source, source_map, lifecycle, depth)?
+            let Some(lifecycle) = format_lifecycle(
+                formatter,
+                source,
+                source_map,
+                lifecycle,
+                options.indentation + 8,
+                depth,
+            )?
             else {
                 return preserve_select_loop(formatter, source, source_map, input, options, depth);
             };
@@ -314,35 +336,34 @@ fn format_branch(
         options,
         depth,
     } = context;
-    let body_is_block = matches!(body_expression, Expr::Block(_));
     let pattern_source = spanned_source(source_map, pattern)?;
     let future_source = spanned_source(source_map, future)?;
-    let body_range = source_map.span_range(body_expression.span())?;
-    let body_source = source_map.slice(body_range.clone())?;
-    let pattern = pretty::pattern(pattern, pattern_source)?;
-    let future =
-        format_nested_expression(formatter, future, future_source, source, source_map, depth)?;
-    let mut body = format_nested_expression(
+    let body_source = spanned_source(source_map, body_expression)?;
+    let pattern = formatter
+        .pattern(pattern_source, options.indentation + 4)
+        .map_err(Error::from)?;
+    let future = format_nested_expression(
+        formatter,
+        future,
+        future_source,
+        source,
+        source_map,
+        options.indentation + 8,
+        depth,
+    )?;
+    let body = format_nested_match_arm_body(
         formatter,
         body_expression,
         body_source,
         source,
         source_map,
+        options.indentation + 4,
         depth,
     )?;
-    if exceeds_destination_width(body.text(), options.indentation + 4)
-        && let Some(dedented) =
-            source_layout_at_destination(context, body_expression, body_source, body_range.start)?
-    {
-        body = ProtectedFragment::formatted(dedented);
-    }
-    let body_needs_wrapper =
-        !body_is_block && body.text().lines().count() > MAX_UNWRAPPED_MULTILINE_BODY_LINES;
-    let wrapped_body = if !body_needs_wrapper || body.disposition() != Disposition::Formatted {
-        None
-    } else {
-        Some(wrap_value_body(body.text()))
-    };
+    let body_is_block = matches!(
+        syn::parse_str::<Expr>(body.text()).map_err(Error::Output)?,
+        Expr::Block(_)
+    );
     let divergence = divergence
         .map(|expression| {
             let expression_source = spanned_source(source_map, expression)?;
@@ -352,6 +373,7 @@ fn format_branch(
                 expression_source,
                 source,
                 source_map,
+                options.indentation + 8,
                 depth,
             )
         })
@@ -368,81 +390,11 @@ fn format_branch(
         divergence: divergence.map(ProtectedFragment::into_string),
         body: body.into_string(),
         body_is_block,
-        wrapped_body,
     }))
 }
 
-fn source_layout_at_destination(
-    context: FormatContext<'_, '_, '_>,
-    expression: &Expr,
-    fragment_source: &str,
-    fragment_start: usize,
-) -> Result<Option<String>, Error> {
-    let FormatContext {
-        formatter,
-        source,
-        source_map,
-        options,
-        depth,
-    } = context;
-    if fragment_source.contains("/*") || pretty::source_has_multiline_literal(fragment_source) {
-        return Ok(None);
-    }
-    let preserved = nested::preserve_expression(
-        formatter,
-        expression,
-        fragment_source,
-        fragment_start,
-        source,
-        source_map,
-        options,
-        depth,
-    )?;
-    let Some(dedented) = dedent_source_fragment(preserved.text()) else {
-        return Ok(None);
-    };
-    if exceeds_destination_width(&dedented, options.indentation + 4)
-        || syn::parse_str::<Expr>(&dedented).is_err()
-    {
-        return Ok(None);
-    }
-    Ok(Some(dedented))
-}
-
-fn exceeds_destination_width(fragment: &str, indentation: usize) -> bool {
-    fragment
-        .lines()
-        .any(|line| indentation + line.chars().count() > MAX_OVERFLOW_WIDTH)
-}
-
-fn dedent_source_fragment(source: &str) -> Option<String> {
-    let lines = source.split('\n').collect::<Vec<_>>();
-    let indentation = lines
-        .iter()
-        .skip(1)
-        .filter_map(|line| {
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            (!line.trim().is_empty()).then(|| line.bytes().take_while(|byte| *byte == b' ').count())
-        })
-        .min()
-        .unwrap_or(0);
-    let mut output = String::with_capacity(source.len());
-    for (index, line) in lines.into_iter().enumerate() {
-        if index != 0 {
-            output.push('\n');
-        }
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if index == 0 || line.trim().is_empty() {
-            output.push_str(line);
-        } else {
-            output.push_str(line.get(indentation..)?);
-        }
-    }
-    Some(output)
-}
-
 fn internal_blank_lines_are_within(source: &str, ranges: &[Range<usize>]) -> bool {
-    if !pretty::source_has_internal_blank_line(source) {
+    if !fragment::source_has_internal_blank_line(source) {
         return true;
     }
 
@@ -474,24 +426,12 @@ fn internal_blank_lines_are_within(source: &str, ranges: &[Range<usize>]) -> boo
         })
 }
 
-fn wrap_value_body(body: &str) -> String {
-    let mut output = String::from("{\n");
-    for line in body.lines() {
-        if !line.trim().is_empty() {
-            output.push_str("    ");
-            output.push_str(line);
-        }
-        output.push('\n');
-    }
-    output.push('}');
-    output
-}
-
 fn format_lifecycle(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
     source_map: &SourceMap<'_>,
     lifecycle: &SelectLoopLifecycle,
+    indentation: usize,
     depth: usize,
 ) -> Result<Option<LifecycleLayout>, Error> {
     let expression_is_block = matches!(lifecycle.expression, Expr::Block(_));
@@ -503,6 +443,7 @@ fn format_lifecycle(
             expression_source,
             source,
             source_map,
+            indentation,
             depth,
         )?
     } else {
@@ -512,6 +453,7 @@ fn format_lifecycle(
             expression_source,
             source,
             source_map,
+            indentation,
             depth,
         )?
     };
@@ -530,6 +472,7 @@ fn format_expression(
     source: &str,
     source_map: &SourceMap<'_>,
     expression: &Expr,
+    indentation: usize,
     depth: usize,
 ) -> Result<Option<String>, Error> {
     let expression_source = spanned_source(source_map, expression)?;
@@ -539,6 +482,7 @@ fn format_expression(
         expression_source,
         source,
         source_map,
+        indentation,
         depth,
     )?;
     if is_immovable(&expression) {
@@ -558,27 +502,38 @@ fn format_nested_expression(
     fragment_source: &str,
     source: &str,
     source_map: &SourceMap<'_>,
+    indentation: usize,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
-    if pretty::source_has_internal_blank_line(fragment_source) {
-        nested::expression_preserving_blank_lines(
-            formatter,
-            expression,
-            fragment_source,
-            source,
-            source_map,
-            depth,
-        )
-    } else {
-        nested::expression(
-            formatter,
-            expression,
-            fragment_source,
-            source,
-            source_map,
-            depth,
-        )
-    }
+    nested::expression(
+        formatter,
+        expression,
+        fragment_source,
+        source,
+        source_map,
+        indentation,
+        depth,
+    )
+}
+
+fn format_nested_match_arm_body(
+    formatter: &crate::rustfmt::Formatter,
+    expression: &Expr,
+    fragment_source: &str,
+    source: &str,
+    source_map: &SourceMap<'_>,
+    indentation: usize,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    nested::match_arm_body(
+        formatter,
+        expression,
+        fragment_source,
+        source,
+        source_map,
+        indentation,
+        depth,
+    )
 }
 
 fn format_nested_block_expression(
@@ -587,27 +542,18 @@ fn format_nested_block_expression(
     fragment_source: &str,
     source: &str,
     source_map: &SourceMap<'_>,
+    indentation: usize,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
-    if pretty::source_has_internal_blank_line(fragment_source) {
-        nested::block_expression_preserving_blank_lines(
-            formatter,
-            expression,
-            fragment_source,
-            source,
-            source_map,
-            depth,
-        )
-    } else {
-        nested::block_expression(
-            formatter,
-            expression,
-            fragment_source,
-            source,
-            source_map,
-            depth,
-        )
-    }
+    nested::block_expression(
+        formatter,
+        expression,
+        fragment_source,
+        source,
+        source_map,
+        indentation,
+        depth,
+    )
 }
 
 fn is_immovable(fragment: &ProtectedFragment) -> bool {
@@ -867,19 +813,7 @@ fn write_branch(
         return;
     }
 
-    if let Some(wrapped_body) = &branch.wrapped_body {
-        write_block_body(writer, wrapped_body, trailing_comment);
-    } else if !branch.body.contains('\n')
-        || !writer.fits(&format!(
-            " => {}",
-            branch.body.lines().next().unwrap_or(&branch.body)
-        ))
-        || !fits_on_final_line(writer, &branch.body, trailing_comment)
-    {
-        write_block_body(writer, &wrap_value_body(&branch.body), trailing_comment);
-    } else {
-        write_unwrapped_body(writer, &branch.body);
-    }
+    write_unwrapped_body(writer, &branch.body, trailing_comment);
 }
 
 fn inline_branch(branch: &BranchLayout) -> String {
@@ -946,6 +880,7 @@ fn branch_head_reserve(
         reserve.push_str(" else ");
         reserve.push_str(divergence);
     }
+    let body_start = reserve.len();
 
     if branch.body_is_block {
         reserve.push_str(" => {");
@@ -961,11 +896,16 @@ fn branch_head_reserve(
         } else {
             reserve.push_str(" => {");
         }
-    } else if branch.wrapped_body.is_some() {
-        reserve.push_str(" => {");
     } else {
         reserve.push_str(" => ");
         reserve.push_str(branch.body.lines().next().unwrap_or(&branch.body));
+    }
+    if !branch.body_is_block
+        && !branch.future.contains('\n')
+        && !writer.fits_on_new_line(&format!("    {}{reserve}", branch.future))
+    {
+        reserve.truncate(body_start);
+        reserve.push_str(" =>");
     }
     reserve
 }
@@ -987,7 +927,7 @@ fn write_block_body(writer: &mut Writer<'_>, body: &str, trailing_comment: Optio
     let first_line_fits = if body.contains('\n') {
         writer.fits(&prefix)
     } else {
-        fits_with_trailing_comment(writer, &format!(" => {body},"), trailing_comment)
+        fits_with_trailing_comment_overflow(writer, &format!(" => {body},"), trailing_comment)
     };
     if first_line_fits || first_line == "{" && writer.fits_with_overflow(" => {") {
         writer.push(" => ");
@@ -1014,10 +954,23 @@ fn write_block_body(writer: &mut Writer<'_>, body: &str, trailing_comment: Optio
     writer.push(",");
 }
 
-fn write_unwrapped_body(writer: &mut Writer<'_>, body: &str) {
+fn write_unwrapped_body(writer: &mut Writer<'_>, body: &str, trailing_comment: Option<&str>) {
     let first_line = body.lines().next().unwrap_or(body);
-    if writer.fits(&format!(" => {first_line}")) {
+    let body_fits = if body.contains('\n') {
+        writer.fits(&format!(" => {first_line}"))
+    } else {
+        fits_with_trailing_comment(writer, &format!(" => {body},"), trailing_comment)
+    };
+    if body_fits {
         writer.push(" => ");
+    } else if trailing_comment.is_none() && writer.fits(" =>") {
+        writer.push(" =>");
+        writer.newline();
+        writer.indented(|writer| {
+            writer.push(body);
+            writer.push(",");
+        });
+        return;
     } else {
         writer.newline();
         writer.push("=> ");
@@ -1081,22 +1034,14 @@ fn fits_with_trailing_comment_overflow(
     )
 }
 
-fn fits_on_final_line(writer: &Writer<'_>, body: &str, trailing_comment: Option<&str>) -> bool {
-    let mut final_line = format!("{},", body.lines().last().unwrap_or(body));
-    if let Some(comment) = trailing_comment {
-        final_line.push(' ');
-        final_line.push_str(comment);
-    }
-    writer.fits_on_new_line(&final_line)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::macros::LineEnding;
+    use crate::{macros::LineEnding, writer::MAX_OVERFLOW_WIDTH};
 
     const OPTIONS: Options = Options {
         indentation: 0,
+        body_column: 0,
         line_ending: LineEnding::Lf,
     };
 
@@ -1127,7 +1072,7 @@ mod tests {
         let formatted = select(source, OPTIONS).expect("select should format");
 
         assert!(
-            formatted.text().contains("=> value\n"),
+            formatted.text().contains("=> value.map(|value| {"),
             "{}",
             formatted.text()
         );
@@ -1139,6 +1084,7 @@ mod tests {
     fn wraps_over_width_branch_head_after_equals() {
         let options = Options {
             indentation: 8,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "an_extremely_descriptive_pattern_name_that_uses_most_of_the_available_width = another_descriptive_future_name().await => value";
@@ -1174,6 +1120,7 @@ mod tests {
     fn keeps_trivial_body_unwrapped_after_long_branch_head() {
         let options = Options {
             indentation: 20,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "result = receive_an_unexpectedly_descriptive_message_from_the_network().await => request.expect(\"request should remain available\")";
@@ -1193,6 +1140,7 @@ mod tests {
     fn keeps_arrow_attached_to_a_short_multiline_body() {
         let options = Options {
             indentation: 16,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "result = receive_an_unexpectedly_descriptive_message_from_the_network().await => match result { Ok(value) => value, Err(error) => return handle(error) }";
@@ -1203,20 +1151,14 @@ mod tests {
             "{}",
             formatted.text()
         );
-        assert!(
-            !formatted
-                .text()
-                .lines()
-                .any(|line| line.trim_start().starts_with("=>")),
-            "{}",
-            formatted.text()
-        );
+        assert!(!formatted.text().lines().any(|line| line.trim() == "=>"));
     }
 
     #[test]
     fn keeps_divergence_block_attached_to_else() {
         let options = Options {
             indentation: 20,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "Some(value) = receive_an_unexpectedly_descriptive_message_from_the_network().await else { cleanup(); break; } => value";
@@ -1231,6 +1173,7 @@ mod tests {
     fn accounts_for_trailing_shell_comment_width() {
         let options = Options {
             indentation: 20,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "result = receive_a_reasonably_descriptive_message().await => result, // keep this trailing branch context without overflowing the line";
@@ -1244,6 +1187,7 @@ mod tests {
     fn retains_source_breaks_when_destination_indentation_would_overflow() {
         let options = Options {
             indentation: 16,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "result = subscription => {\n                    result.expect(\n                        \"notarized reconstruction state should accept the leader shard\",\n                    );\n                }";
@@ -1276,7 +1220,7 @@ mod tests {
 
     #[test]
     fn preserves_layout_around_multiline_opaque_macro() {
-        let source = "value = receive() => option.unwrap_or_else(|| {\n    panic!(\n        \"missing value: {value:?}\"\n    )\n})";
+        let source = "value = receive() => option.unwrap_or_else(|| {\n    opaque!(\n        \"missing value: {value:?}\"\n    )\n})";
         let formatted = select(source, OPTIONS).expect("select should be preserved");
 
         assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
@@ -1284,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn wraps_over_width_divergence_after_else() {
+    fn breaks_over_width_divergence_after_else() {
         let source = "Some(value) = an_extremely_descriptive_future_name_that_uses_most_of_the_available_width().await else return an_extremely_descriptive_collection_name_that_uses_most_of_the_available_width => value";
         let once = select_loop(&format!("context,on_stopped=>shutdown(),{source}"), OPTIONS)
             .expect("select loop should format")
@@ -1293,10 +1237,10 @@ mod tests {
             .expect("select loop should format twice")
             .into_string();
 
-        assert!(
-            once.contains(".await else\n        return an_extremely_descriptive_collection_name"),
-            "{once}"
-        );
+        assert!(once.contains(
+            "else\n        return an_extremely_descriptive_collection_name_that_uses_most_of_the_available_width"
+        ));
+        assert!(once.contains("=> value,"));
         assert_eq!(once, twice);
     }
 
@@ -1341,19 +1285,46 @@ mod tests {
     }
 
     #[test]
-    fn wraps_large_multiline_match_body() {
+    fn keeps_large_multiline_match_body_braceless() {
         let arms = (0..20)
             .map(|value| format!("{value}=>handle_{value}(),"))
             .collect::<String>();
         let source = format!("value=receive()=>match value {{{arms}_=>fallback()}}");
         let formatted = select(&source, OPTIONS).expect("select should format");
 
-        assert!(formatted.text().contains("=> {\n        match value {"));
+        assert!(formatted.text().contains("=> match value {"));
+        assert!(!formatted.text().contains("=> {\n        match value {"));
         syn::parse_str::<SelectInput>(formatted.text()).expect("formatted select should parse");
     }
 
     #[test]
-    fn wraps_large_match_body_without_losing_internal_blank_line() {
+    fn repairs_nested_match_arm_indentation() {
+        let source = "message = receive() => {\n    match message {\n    Message::One => {\n        let span = info_span!(\n            \"message.one\",\n            value = value\n        );\n\n        handle_one(span);\n    }\n    Message::Two => {\n        handle_two();\n    }\n    }\n}";
+        let formatted = select(source, OPTIONS).expect("select should format nested match");
+
+        assert!(
+            formatted
+                .text()
+                .contains("match message {\n            Message::One => {"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            formatted
+                .text()
+                .contains("\n\n                handle_one(span);"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            formatted.text().contains("\n    },"),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn keeps_large_match_body_blank_line_without_synthetic_block() {
         let arms = (0..20)
             .map(|value| {
                 let separator = if value == 10 { "\n" } else { "" };
@@ -1368,7 +1339,7 @@ mod tests {
 
         assert_eq!(formatted.disposition(), Disposition::Formatted);
         assert!(
-            formatted.text().contains("=> {\n        match step {"),
+            formatted.text().contains("=> match step {"),
             "{}",
             formatted.text()
         );
@@ -1387,6 +1358,7 @@ mod tests {
     fn expands_single_line_block_to_keep_arrow_attached() {
         let options = Options {
             indentation: 24,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "receiver=receiver=>{panic!(\"receiver exited with an unexpectedly descriptive failure: {receiver:?}\")}";
@@ -1400,48 +1372,110 @@ mod tests {
     }
 
     #[test]
-    fn wraps_long_body_to_keep_arrow_attached() {
+    fn keeps_long_panic_body_with_bounded_overflow() {
         let options = Options {
             indentation: 12,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "result=&mut first=>panic!(\"the selected operation returned an unexpectedly descriptive failure\")";
         let formatted = select(source, options).expect("select should format");
 
         assert!(
-            formatted.text().contains("result = &mut first => {\n"),
+            formatted.text().contains("result = &mut first =>\n"),
             "{}",
             formatted.text()
         );
         assert!(
-            !formatted
-                .text()
-                .lines()
-                .any(|line| line.trim_start().starts_with("=>")),
+            formatted.text().contains(
+                "panic!(\"the selected operation returned an unexpectedly descriptive failure\")"
+            ),
             "{}",
             formatted.text()
         );
+        assert!(
+            !formatted.text().lines().any(|line| line.trim() == "=>"),
+            "{}",
+            formatted.text()
+        );
+        assert_bounded_width(formatted.text());
     }
 
     #[test]
     fn keeps_arrow_on_multiline_future_with_bounded_overflow() {
         let options = Options {
             indentation: 8,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source = "artifact=self.syncer.update_targets(Anchor::from(block.as_ref()),A::sync_targets(block.as_ref()))=>artifact";
         let formatted = select(source, options).expect("select should format");
 
         assert!(
-            formatted.text().contains(")) => {\n"),
+            formatted.text().contains(") => artifact,"),
             "{}",
             formatted.text()
         );
         assert!(
-            !formatted
+            !formatted.text().lines().any(|line| line.trim() == "=>"),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn keeps_empty_block_attached_to_multiline_future() {
+        let options = Options {
+            indentation: 8,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "_ = wait_for_reached_progress(context.child(\"storage\"), &an_extremely_descriptive_target_name) => {}";
+        let formatted = select(source, options).expect("select should format");
+
+        assert!(
+            formatted.text().contains(") => {},"),
+            "{}",
+            formatted.text()
+        );
+        assert!(
+            !formatted.text().lines().any(|line| line.trim() == "=> {},"),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn keeps_arrow_with_short_header_before_multiline_body() {
+        let options = Options {
+            indentation: 16,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "result = retry_started => result.expect(\"live waiter should acquire replay ownership\")";
+        let formatted = select(source, options).expect("select should format");
+
+        assert!(
+            formatted.text().contains("result = retry_started =>\n"),
+            "{}",
+            formatted.text()
+        );
+    }
+
+    #[test]
+    fn keeps_arrow_with_diverging_header_before_match_body() {
+        let options = Options {
+            indentation: 8,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source = "context, on_stopped => return, Some(message) = mailbox_message else continue => match self.handle_mailbox_message(message) { MailboxAction::None => {}, MailboxAction::Fetch(request) => resolver_mailbox.fetch(request) }";
+        let formatted = select_loop(source, options).expect("select loop should format");
+
+        assert!(
+            formatted
                 .text()
-                .lines()
-                .any(|line| line.trim_start().starts_with("=>")),
+                .contains("Some(message) = mailbox_message else continue =>\n"),
             "{}",
             formatted.text()
         );
@@ -1545,6 +1579,7 @@ mod tests {
     fn uses_parent_indentation_for_first_line_nested_macro() {
         let options = Options {
             indentation: 8,
+            body_column: 0,
             line_ending: LineEnding::Lf,
         };
         let source =
@@ -1743,6 +1778,7 @@ mod tests {
     fn emits_requested_indentation_and_line_ending() {
         let options = Options {
             indentation: 8,
+            body_column: 0,
             line_ending: LineEnding::Crlf,
         };
         let formatted = select("value=receive()=>value", options).expect("select should format");
