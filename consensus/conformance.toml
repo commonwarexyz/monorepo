@@ -24,11 +24,11 @@ hash = "ec3dc188f84f7b163c59e15d21ec9a7c5c2ea1f3f12c3098de52ee57a9c2b70e"
 
 ["commonware_consensus::marshal::conformance::CodingStorageConformance"]
 n_cases = 32
-hash = "dceff55191c9882d2bf344051ddd8b4c7269df1f2bd6144c3f89e12ee2b2fc42"
+hash = "2ff334d822ff93d08ce5af50daca1478a71389c52973beac7dd3090a1e8659b6"
 
 ["commonware_consensus::marshal::conformance::StandardStorageConformance"]
 n_cases = 32
-hash = "e53378d037fc0cb9dc2219a5b412a4da83f71ac8865560d98708b42bc4738c13"
+hash = "75a29a836c5cb2ff9e1801e75851561e061d0d5d44043608cde7b66e443003df"
 
 ["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Key<D>>"]
 n_cases = 65536
@@ -130,10 +130,6 @@ hash = "b9fbf2cfcbc37c87cb7aa8ede95c4ddf93c8bbd9f1a01e86ed72ba14bed920fa"
 n_cases = 65536
 hash = "01cc3b0d41d0ef29f02de2729d51b1b31bb96f00c6390e56aadd0fb5117cc7b1"
 
-["commonware_consensus::types::tests::conformance::CodecConformance<TestCommitment>"]
-n_cases = 65536
-hash = "2ce8beed4a11c22fcb65c614f250f5758d71229a729a2fef13faf765b2d9a5ea"
-
 ["commonware_consensus::types::tests::conformance::CodecConformance<Epoch>"]
 n_cases = 65536
 hash = "56ab85978136cb50f12ea89c8d25ce24451788172fe9d3d3c063f7ae6342d279"
@@ -145,6 +141,10 @@ hash = "56ab85978136cb50f12ea89c8d25ce24451788172fe9d3d3c063f7ae6342d279"
 ["commonware_consensus::types::tests::conformance::CodecConformance<Round>"]
 n_cases = 65536
 hash = "d8ccba2653a5a2e5e317f0f365edbfc4845e3dc4325daefe0b43ca75920a654c"
+
+["commonware_consensus::types::tests::conformance::CodecConformance<TestCommitment>"]
+n_cases = 65536
+hash = "2ce8beed4a11c22fcb65c614f250f5758d71229a729a2fef13faf765b2d9a5ea"
 
 ["commonware_consensus::types::tests::conformance::CodecConformance<View>"]
 n_cases = 65536
