@@ -12,6 +12,7 @@ use crate::aws::{
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
+use commonware_utils::iter::zip_eq;
 use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
@@ -848,9 +849,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                             count = chunk.len(),
                             "instances running in region"
                         );
-                        let deployments: Vec<Deployment> = chunk
-                            .into_iter()
-                            .zip(ips)
+                        let deployments: Vec<Deployment> = zip_eq(chunk, ips)
                             .map(|((instance_id, instance_config), ip)| Deployment {
                                 instance: instance_config,
                                 id: instance_id,
