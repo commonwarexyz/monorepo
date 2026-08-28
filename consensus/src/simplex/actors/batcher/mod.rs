@@ -5780,7 +5780,7 @@ mod tests {
                             "expected notarization for optimistic future view {} without waiting for view update",
                             future_view
                         );
-                    }
+                    },
                 }
             }
         });

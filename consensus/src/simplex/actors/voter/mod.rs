@@ -10225,7 +10225,9 @@ mod tests {
                     _ = context.sleep_until(deadline) => {
                         panic!("timed out waiting for finalize in view {target_view}");
                     },
-                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                    message = commonware_p2p::Receiver::recv(
+                        &mut observer_vote_receiver,
+                    ) => {
                         let (_, message) = message.unwrap();
                         let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
                         if matches!(
