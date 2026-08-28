@@ -6,7 +6,7 @@ pub(crate) fn unique_prefix(source: &str, kind: &str) -> String {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    let mut prefix = format!("__commonware_fmt_{kind}_{}_{hash:x}_", source.len());
+    let mut prefix = format!("__commonware_fmt_{kind}_{hash:016x}_");
     while source.contains(&prefix) {
         prefix.push('_');
     }

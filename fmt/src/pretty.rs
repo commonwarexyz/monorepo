@@ -245,28 +245,6 @@ pub(crate) fn block_expression(
     })
 }
 
-pub(crate) fn value_block(expression: &Expr, source: &str) -> Result<ProtectedFragment, Error> {
-    format_or_preserve(source, || {
-        let wrapper = parse_wrapper(quote! {
-            fn __commonware_fmt() {
-                let __commonware_fmt_value = { #expression };
-            }
-        })?;
-        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
-        let function = sole_function(&reparsed)?;
-        let [Stmt::Local(local)] = function.block.stmts.as_slice() else {
-            return Err(Error::WrapperShape);
-        };
-        let Some(initializer) = &local.init else {
-            return Err(Error::WrapperShape);
-        };
-        if initializer.diverge.is_some() || !matches!(&*initializer.expr, Expr::Block(_)) {
-            return Err(Error::WrapperShape);
-        }
-        extract_dedented(&formatted, initializer.expr.span())
-    })
-}
-
 /// Formats a pattern through a synthetic `for` loop.
 ///
 /// `source` must be the exact source text from which `pattern` was parsed.

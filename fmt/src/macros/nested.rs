@@ -22,7 +22,6 @@ const RECURSION_LIMIT: usize = 32;
 enum Style {
     Expression,
     BlockExpression,
-    ValueBlock,
 }
 
 #[derive(Clone, Copy)]
@@ -345,7 +344,7 @@ pub(super) fn preserve_with_nested(
     for expression in expressions {
         collector.visit_expr(expression);
     }
-    preserve_collected(source, source_map, collector, options, depth)
+    preserve_collected(source, 0, source, source_map, collector, options, depth)
 }
 
 pub(super) fn preserve_bodies_with_nested(
@@ -367,18 +366,20 @@ pub(super) fn preserve_bodies_with_nested(
             collector.visit_stmt(statement);
         }
     }
-    preserve_collected(source, source_map, collector, options, depth)
+    preserve_collected(source, 0, source, source_map, collector, options, depth)
 }
 
 fn preserve_collected(
-    source: &str,
+    fragment_source: &str,
+    fragment_start: usize,
+    context_source: &str,
     source_map: &SourceMap<'_>,
     collector: ChildCollector,
     options: Options,
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     if collector.macros.is_empty() {
-        return Ok(ProtectedFragment::preserved(source));
+        return Ok(ProtectedFragment::preserved(fragment_source));
     }
     if depth >= RECURSION_LIMIT {
         return Err(Error::RecursionLimit);
@@ -398,17 +399,28 @@ fn preserve_collected(
         let body_range = open.end..close.start;
         let body_source = source_map.slice(body_range.clone())?;
         let child_options = Options {
-            indentation: line_indentation(source, path_start, options.indentation),
+            indentation: line_indentation(context_source, path_start, options.indentation),
             line_ending: options.line_ending,
         };
         let body = format_at_depth(child.kind, body_source, child_options, depth + 1)?;
         if body.text() != body_source {
-            replacements.push((body_range, body.into_string()));
+            let start = body_range
+                .start
+                .checked_sub(fragment_start)
+                .ok_or(Error::MarkerMismatch)?;
+            let end = body_range
+                .end
+                .checked_sub(fragment_start)
+                .ok_or(Error::MarkerMismatch)?;
+            if start > end || end > fragment_source.len() {
+                return Err(Error::MarkerMismatch);
+            }
+            replacements.push((start..end, body.into_string()));
         }
     }
 
     if replacements.is_empty() {
-        return Ok(ProtectedFragment::preserved(source));
+        return Ok(ProtectedFragment::preserved(fragment_source));
     }
     replacements.sort_unstable_by_key(|(range, _)| (range.start, range.end));
     if replacements
@@ -417,11 +429,33 @@ fn preserve_collected(
     {
         return Err(Error::MarkerMismatch);
     }
-    let mut output = source.to_owned();
+    let mut output = fragment_source.to_owned();
     for (range, replacement) in replacements.into_iter().rev() {
         output.replace_range(range, &replacement);
     }
     Ok(ProtectedFragment::preserved_with_nested_formatting(output))
+}
+
+pub(super) fn preserve_expression(
+    expression: &Expr,
+    fragment_source: &str,
+    fragment_start: usize,
+    context_source: &str,
+    source_map: &SourceMap<'_>,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    let mut collector = ChildCollector::default();
+    collector.visit_expr(expression);
+    preserve_collected(
+        fragment_source,
+        fragment_start,
+        context_source,
+        source_map,
+        collector,
+        options,
+        depth,
+    )
 }
 
 pub(super) fn expression(
@@ -455,23 +489,6 @@ pub(super) fn block_expression(
         source_map,
         depth,
         Style::BlockExpression,
-    )
-}
-
-pub(super) fn value_block(
-    expression: &Expr,
-    fragment_source: &str,
-    source: &str,
-    source_map: &SourceMap<'_>,
-    depth: usize,
-) -> Result<ProtectedFragment, Error> {
-    format_expression(
-        expression,
-        fragment_source,
-        source,
-        source_map,
-        depth,
-        Style::ValueBlock,
     )
 }
 
@@ -686,7 +703,6 @@ fn format_expression(
         return match style {
             Style::Expression => pretty::expression(expression, fragment_source),
             Style::BlockExpression => pretty::block_expression(expression, fragment_source),
-            Style::ValueBlock => pretty::value_block(expression, fragment_source),
         }
         .map_err(Error::from);
     }
@@ -711,7 +727,6 @@ fn format_expression(
         return match style {
             Style::Expression => pretty::expression(expression, fragment_source),
             Style::BlockExpression => pretty::block_expression(expression, fragment_source),
-            Style::ValueBlock => pretty::value_block(expression, fragment_source),
         }
         .map_err(Error::from);
     }
@@ -746,7 +761,6 @@ fn format_expression(
     let formatted = match style {
         Style::Expression => pretty::expression(&shielded, &shielded_source)?,
         Style::BlockExpression => pretty::block_expression(&shielded, &shielded_source)?,
-        Style::ValueBlock => pretty::value_block(&shielded, &shielded_source)?,
     };
     if formatted.disposition() == Disposition::PreservedForTrivia {
         let Some(restored) = restore(

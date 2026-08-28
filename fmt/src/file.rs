@@ -13,6 +13,8 @@ use syn::{
 };
 use thiserror::Error;
 
+const MAX_FORMAT_PASSES: usize = 4;
+
 /// The result of formatting one Rust source file.
 pub struct Output {
     text: String,
@@ -63,7 +65,7 @@ pub enum Error {
     /// Selected macro body replacements overlapped.
     #[error("supported macro replacements overlapped")]
     Overlap,
-    /// A second formatter pass changed the candidate output.
+    /// The formatter did not converge within its bounded pass limit.
     #[error("formatter output did not reach a fixed point")]
     NotFixedPoint,
 }
@@ -138,15 +140,21 @@ struct Pass {
 /// Formats every supported Commonware macro invocation in `source`.
 pub fn format(source: &str) -> Result<Output, Error> {
     let first = format_once(source)?;
-    let second = format_once(&first.text)?;
-    if first.text != second.text {
-        return Err(Error::NotFixedPoint);
+    let formatted_macros = first.formatted_macros;
+    let preserved_macros = first.preserved_macros;
+    let mut text = first.text;
+    for _ in 1..MAX_FORMAT_PASSES {
+        let next = format_once(&text)?;
+        if next.text == text {
+            return Ok(Output {
+                text,
+                formatted_macros,
+                preserved_macros,
+            });
+        }
+        text = next.text;
     }
-    Ok(Output {
-        text: first.text,
-        formatted_macros: first.formatted_macros,
-        preserved_macros: first.preserved_macros,
-    })
+    Err(Error::NotFixedPoint)
 }
 
 fn format_once(source: &str) -> Result<Pass, Error> {
@@ -529,5 +537,14 @@ mod tests {
     fn rejects_invalid_supported_macro_body() {
         let source = "fn example() {\n    select! {value}\n}\n";
         assert!(matches!(format(source), Err(Error::Macro(_))));
+    }
+
+    #[test]
+    fn converges_before_returning_destination_sensitive_output() {
+        let source = "fn run() {\n    select! {\n        output = receive() => match output {\n            Some(Message::Verified { certificate: Certificate::Notarization(value), .. }) => consume(value),\n            Some(Message::Verified { certificate: Certificate::Finalization(value), .. }) => consume(value),\n            None => return,\n        },\n    }\n}\n";
+        let formatted = format(source).expect("destination-sensitive source should converge");
+        let repeated = format(formatted.text()).expect("formatted source should remain stable");
+
+        assert_eq!(formatted.text(), repeated.text());
     }
 }

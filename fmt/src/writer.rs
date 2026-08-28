@@ -2,7 +2,7 @@
 
 const INDENT: usize = 4;
 pub(crate) const MAX_WIDTH: usize = 89;
-const MAX_OVERFLOW_WIDTH: usize = 100;
+pub(crate) const MAX_OVERFLOW_WIDTH: usize = 100;
 
 pub(crate) struct Writer<'a> {
     output: String,
@@ -70,10 +70,6 @@ impl<'a> Writer<'a> {
         self.indentation + text.chars().count() <= MAX_WIDTH
     }
 
-    pub(crate) fn fits_on_indented_line(&self, text: &str) -> bool {
-        self.indentation + INDENT + text.chars().count() <= MAX_WIDTH
-    }
-
     pub(crate) fn pad_to_indentation(&mut self) {
         self.ensure_indentation();
     }
@@ -139,8 +135,6 @@ mod tests {
 
         assert!(writer.fits_on_new_line("123456789"));
         assert!(!writer.fits_on_new_line("1234567890"));
-        assert!(writer.fits_on_indented_line("12345"));
-        assert!(!writer.fits_on_indented_line("123456"));
     }
 
     #[test]
