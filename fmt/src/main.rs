@@ -142,13 +142,34 @@ fn run_files(paths: &[PathBuf], check: bool) -> Outcome {
 
 fn replace(path: &Path, source: &str) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let permissions = fs::metadata(path)?.permissions();
+    let metadata = fs::metadata(path)?;
+    if has_multiple_hard_links(&metadata) {
+        let mut file = fs::OpenOptions::new().write(true).open(path)?;
+        file.write_all(source.as_bytes())?;
+        file.set_len(source.len() as u64)?;
+        return file.flush();
+    }
+
     let mut temporary = NamedTempFile::new_in(parent)?;
     temporary.write_all(source.as_bytes())?;
     temporary.flush()?;
-    temporary.as_file().set_permissions(permissions)?;
+    temporary
+        .as_file()
+        .set_permissions(metadata.permissions())?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn has_multiple_hard_links(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    metadata.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn has_multiple_hard_links(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn collect_files(paths: &[PathBuf], errors: &mut Vec<String>) -> Vec<Input> {
@@ -304,6 +325,32 @@ mod tests {
         assert_eq!(outcome.changed, vec![link.clone()]);
         assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
         assert_ne!(fs::read_to_string(target).unwrap(), unformatted());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_hard_link_aliases_when_replacing_files() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let temp = TempDir::new();
+        let target = temp.join("target.rs");
+        let alias = temp.join("alias.rs");
+        fs::write(&target, unformatted()).expect("Rust file should be written");
+        fs::hard_link(&target, &alias).expect("hard link should be created");
+        let original_inode = fs::metadata(&target).unwrap().ino();
+
+        let outcome = run_files(std::slice::from_ref(&target), false);
+
+        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.changed, vec![target.clone()]);
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            fs::read_to_string(&alias).unwrap()
+        );
+        assert_ne!(fs::read_to_string(&target).unwrap(), unformatted());
+        assert_eq!(fs::metadata(&target).unwrap().ino(), original_inode);
+        assert_eq!(fs::metadata(&alias).unwrap().ino(), original_inode);
+        assert_eq!(fs::metadata(&target).unwrap().nlink(), 2);
     }
 
     #[test]
