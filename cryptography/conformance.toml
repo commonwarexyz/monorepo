@@ -50,9 +50,21 @@ hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 n_cases = 65536
 hash = "fca94fb3b0df54a6a34edfbb8aeef28490262daf97870e12f869aee6cf7f7e67"
 
-["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::FeldmanTranscript"]
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::FeldmanTranscript<0,0>"]
 n_cases = 16
 hash = "8777f5418d51ecdf8367797b7925433e51bb0a174cc920ae224c2d9605e487a6"
+
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::FeldmanTranscript<0,1>"]
+n_cases = 16
+hash = "4266cca25bbff433b8d2e0a14a4493cf7135b5290f73c192b5c1928a6114df75"
+
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::FeldmanTranscript<1,0>"]
+n_cases = 16
+hash = "14018760cf847e7ae80218c5d6885b219faab804bf25f05a3faabda0cb353d30"
+
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::FeldmanTranscript<1,1>"]
+n_cases = 16
+hash = "0df6a13f2cf9f9868d18d1c81a99a4a6190c0fea1f4c394a64713b7b26efaea6"
 
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<G1>"]
 n_cases = 65536

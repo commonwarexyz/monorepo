@@ -67,7 +67,7 @@ mod tests {
         },
         simplex::{
             self, Plan,
-            config::ForwardingPolicy,
+            config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
@@ -101,10 +101,12 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        Acknowledgement as _, NZU16, NZU64, NZUsize, Probability,
+        Acknowledgement as _, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
+        non_empty,
         ordered::{Quorum as _, Set},
+        probability,
         sequence::U64,
         sync::Mutex,
         vec::NonEmptyVec,
@@ -2238,9 +2240,12 @@ mod tests {
                     certification_timeout: Duration::from_secs(4),
                     timeout_retry: Duration::from_secs(3),
                     view_retention: ViewDelta::new(10),
-                    skip_timeout: Duration::from_secs(6),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(6),
+                        budget: SkipBudget::Participants,
+                    },
                     fetch_timeout: Duration::from_secs(1),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 },
             );
@@ -2251,7 +2256,7 @@ mod tests {
                 .map(|index| Nullify::sign::<D>(&schemes[index], skipped_round).unwrap())
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&schemes[0], &nullifies, &Sequential).unwrap();
+                Nullification::from_nullifies(&schemes[0], non_empty![@&nullifies], &Sequential).unwrap();
             byzantine_certificate_sender.send(
                 Recipients::One(victim.clone()),
                 Certificate::<S, D>::Nullification(nullification).encode(),
@@ -2298,7 +2303,7 @@ mod tests {
                 .map(|index| Notarize::sign(&schemes[index], good_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&schemes[0], &good_votes, &Sequential).unwrap();
+                Notarization::from_notarizes(&schemes[0], non_empty![@&good_votes], &Sequential).unwrap();
             byzantine_certificate_sender.send(
                 Recipients::One(victim),
                 Certificate::<S, D>::Notarization(notarization).encode(),
@@ -3546,7 +3551,7 @@ mod tests {
 
             // Sync failures are fatal to the local storage state. They must not be
             // converted into a `false` certification/verification verdict.
-            context.storage_fault_config().write().sync_rate = Some(Probability!(1.0));
+            context.storage_fault_config().write().sync_rate = Some(probability!(1.0));
 
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -3600,7 +3605,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
             context.sleep(Duration::from_millis(10)).await;
 
-            context.storage_fault_config().write().sync_rate = Some(Probability!(1.0));
+            context.storage_fault_config().write().sync_rate = Some(probability!(1.0));
 
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -3653,7 +3658,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
             context.sleep(Duration::from_millis(10)).await;
 
-            context.storage_fault_config().write().sync_rate = Some(Probability!(1.0));
+            context.storage_fault_config().write().sync_rate = Some(probability!(1.0));
 
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));

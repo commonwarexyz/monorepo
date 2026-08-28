@@ -10,10 +10,11 @@
 //! - The scalar component `s` must be canonical (`s < L`), ruling out signature malleability.
 //! - The verification equation is cofactored: `[8](s·B - R - H(R || A || M)·A) == identity`.
 //!
-//! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply the same criteria. A batch of at
-//! most `u32::MAX` signatures is always accepted when every signature verifies individually.
-//! Because batch verification checks a randomized linear combination, an invalid batch may be
-//! accepted with probability about `2^-128`. See [this post] for why these criteria matter.
+//! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply the same criteria.
+//! A non-empty batch of at most `u32::MAX` signatures is always accepted when every signature
+//! verifies individually. Because batch verification checks a randomized linear combination, an
+//! invalid batch may be accepted with probability about `2^-128`. See [this post] for why these
+//! criteria matter.
 //! [`StrictVerifyingKey`] additionally requires a canonical, non-identity point in the prime-order
 //! subgroup, making it suitable for identities whose signatures must demonstrate secret-key
 //! knowledge.
@@ -604,11 +605,11 @@ impl BatchVerifier {
 
     /// Checks all the signatures in the batch.
     ///
-    /// Batches containing more than `u32::MAX` signatures are rejected. Within that limit, a
-    /// batch is always accepted when every signature verifies individually under the [module's
-    /// validation criteria](self). Because this checks a randomized linear combination, an
-    /// invalid batch may be accepted when the random weights make the combined equation hold, an
-    /// event of negligible probability (about `2^-128`).
+    /// Empty batches and batches containing more than `u32::MAX` signatures are rejected. Within
+    /// that limit, a non-empty batch is always accepted when every signature verifies individually
+    /// under the [module's validation criteria](self). Because this checks a randomized linear
+    /// combination, an invalid batch may be accepted when the random weights make the combined
+    /// equation hold, an event of negligible probability (about `2^-128`).
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
         let items = self
@@ -675,6 +676,11 @@ mod tests {
             core::mem::size_of::<BatchItem>(),
             core::mem::size_of::<(Vec<u8>, [u8; 32], super::core::Signature)>(),
         );
+    }
+
+    #[test]
+    fn empty_batch_is_invalid() {
+        assert!(!BatchVerifier::new(0).verify(&mut test_rng(), &Sequential));
     }
 
     #[test]

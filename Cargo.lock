@@ -1644,6 +1644,7 @@ dependencies = [
  "clap",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-utils",
  "futures",
  "reqwest",
  "serde",

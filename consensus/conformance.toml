@@ -18,9 +18,9 @@ hash = "55b287b5530fc9ba77c45ec5030ada38f86b2ddf66a1595fde27d4699667b1a3"
 n_cases = 65536
 hash = "51b04637257c54cecdc4e5ded4568efccafbc08f20be3fe0951369cab43ba2b6"
 
-["commonware_consensus::marshal::coding::types::test::conformance::CodecConformance<Shard<ReedSolomon<Sha256>,Sha256>>"]
+["commonware_consensus::marshal::coding::types::test::conformance::CodecConformance<Shard<TestBlock,ReedSolomon<Sha256>,Sha256>>"]
 n_cases = 65536
-hash = "e53b4b684f0344590427aae976d298e3b6fd2b08ef46ff2cad5def04b4f7690b"
+hash = "ec3dc188f84f7b163c59e15d21ec9a7c5c2ea1f3f12c3098de52ee57a9c2b70e"
 
 ["commonware_consensus::marshal::conformance::CodingStorageConformance"]
 n_cases = 32
@@ -34,9 +34,13 @@ hash = "5a263f4dbf20f9ebc64a81bc0dfbf487055b136074809d8c01aa725e28b86f17"
 n_cases = 65536
 hash = "481cd68f2e6452c0dda512c75d74ddd2e19ac6c9fb19c642c1a152a0d830c1b2"
 
-["commonware_consensus::simplex::elector::tests::conformance::RandomSelectLeaderConformance"]
+["commonware_consensus::simplex::elector::tests::conformance::RandomV0SelectLeaderConformance"]
 n_cases = 512
 hash = "b67e7a2a61c54156c0422160a6dbc096b01f518c26784505def8b5849c597b74"
+
+["commonware_consensus::simplex::elector::tests::conformance::RandomV1SelectLeaderConformance"]
+n_cases = 512
+hash = "e203b657e753c8c8d10e5ad0d8c1893a88d9ea4fbda92d960667dc6007215cfe"
 
 ["commonware_consensus::simplex::elector::tests::conformance::RoundRobinShuffleConformance"]
 n_cases = 512
@@ -126,9 +130,9 @@ hash = "b9fbf2cfcbc37c87cb7aa8ede95c4ddf93c8bbd9f1a01e86ed72ba14bed920fa"
 n_cases = 65536
 hash = "01cc3b0d41d0ef29f02de2729d51b1b31bb96f00c6390e56aadd0fb5117cc7b1"
 
-["commonware_consensus::types::tests::conformance::CodecConformance<Commitment>"]
+["commonware_consensus::types::tests::conformance::CodecConformance<TestCommitment>"]
 n_cases = 65536
-hash = "4cc05ec53b515415070f3634ad2b56677c2a938f596ffc99f7909f24e06a8c99"
+hash = "2ce8beed4a11c22fcb65c614f250f5758d71229a729a2fef13faf765b2d9a5ea"
 
 ["commonware_consensus::types::tests::conformance::CodecConformance<Epoch>"]
 n_cases = 65536

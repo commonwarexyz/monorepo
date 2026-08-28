@@ -185,7 +185,7 @@ pub mod bls12381 {
         },
         certificate::Signers,
     };
-    use commonware_utils::Participant;
+    use commonware_utils::{Participant, iter::NonEmpty};
 
     /// One aggregate MinSig signature plus an explicit signer bitmap.
     pub type Certificate = multisig::Certificate<MinSig>;
@@ -333,12 +333,15 @@ pub mod bls12381 {
             }
 
             Ok(Certificate {
-                signers: Signers::from(
-                    self.committee.members().len(),
+                signers: Signers::new(
+                    u32::try_from(self.committee.members().len())
+                        .expect("committee length is bounded by u16::MAX"),
                     entries.iter().map(|(signer, _)| *signer),
-                ),
+                )
+                .expect("assembled signers are unique in-committee indices"),
                 signature: aggregate::combine_signatures::<MinSig, _>(
-                    entries.iter().map(|(_, signature)| signature),
+                    NonEmpty::try_new(entries.iter().map(|(_, signature)| signature))
+                        .expect("an exact quorum holds at least one attestation"),
                 )
                 .into(),
             })
@@ -357,12 +360,15 @@ pub mod bls12381 {
             }
 
             // Participant indices select group-checked public keys retained by the epoch scheme.
-            let public_key = aggregate::combine_public_keys::<MinSig, _>(
+            let Some(keys) = NonEmpty::try_new(
                 certificate
                     .signers
                     .iter()
                     .filter_map(|signer| self.committee.members().get(usize::from(signer))),
-            );
+            ) else {
+                return false;
+            };
+            let public_key = aggregate::combine_public_keys::<MinSig, _>(keys);
             let Some(signature) = certificate.signature.get() else {
                 return false;
             };
@@ -393,7 +399,7 @@ mod tests {
         certificate::Signers,
         sha256::Digest as Sha256Digest,
     };
-    use commonware_utils::Participant;
+    use commonware_utils::{Participant, iter::NonEmpty};
 
     fn fixture(count: u64) -> (Committee, Vec<Private>) {
         let keys = (0..count)
@@ -527,17 +533,20 @@ mod tests {
             .map(|vote| *vote.signature.get().unwrap())
             .collect::<Vec<_>>();
         let super_quorum = bls12381::Certificate {
-            signers: Signers::from(4, votes.iter().map(|vote| vote.signer)),
-            signature: aggregate::combine_signatures::<MinSig, _>(signatures.iter()).into(),
+            signers: Signers::new(4, votes.iter().map(|vote| vote.signer)).unwrap(),
+            signature: aggregate::combine_signatures::<MinSig, _>(
+                NonEmpty::try_new(signatures.iter()).unwrap(),
+            )
+            .into(),
         };
         assert!(!verifier.verify_exact(&header, &super_quorum));
 
         let mut wrong_bitmap = exact.clone();
-        wrong_bitmap.signers = Signers::from(5, votes[..3].iter().map(|vote| vote.signer));
+        wrong_bitmap.signers = Signers::new(5, votes[..3].iter().map(|vote| vote.signer)).unwrap();
         assert!(!verifier.verify_exact(&header, &wrong_bitmap));
 
         let sub_quorum = bls12381::Certificate {
-            signers: Signers::from(4, votes[..2].iter().map(|vote| vote.signer)),
+            signers: Signers::new(4, votes[..2].iter().map(|vote| vote.signer)).unwrap(),
             signature: exact.signature,
         };
         assert!(!verifier.verify_exact(&header, &sub_quorum));

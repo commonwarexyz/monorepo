@@ -191,9 +191,9 @@ commonware_macros::stability_scope!(BETA {
 
         /// Run the batch check over all added items.
         ///
-        /// Valid batches are accepted within the concrete implementation's documented limits.
-        /// Randomized implementations may accept an invalid batch with a negligible,
-        /// implementation-defined probability.
+        /// Returns `false` if no items were added. Valid non-empty batches are accepted within
+        /// the concrete implementation's documented limits. Randomized implementations may accept
+        /// an invalid batch with a negligible, implementation-defined probability.
         ///
         /// # Why Randomness?
         ///

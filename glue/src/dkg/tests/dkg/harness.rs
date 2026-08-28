@@ -20,10 +20,13 @@ use crate::{
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     Signer as _,
-    bls12381::primitives::{
-        group::{Private, Share},
-        sharing::Mode,
-        variant::MinPk,
+    bls12381::{
+        dkg::feldman_desmedt::Reveal,
+        primitives::{
+            group::{Private, Share},
+            sharing::Mode,
+            variant::MinPk,
+        },
     },
     ed25519,
 };
@@ -39,7 +42,7 @@ use commonware_runtime::{
     telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
-    NZU32, NZU64, NZUsize, Participant, Probability, channel::oneshot, ordered::Set,
+    NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, probability,
     sequence::Unit, sync::Mutex, test_rng,
 };
 use futures::future::pending;
@@ -204,6 +207,7 @@ impl EngineDefinition for DkgEngine {
                 strategy: Sequential,
                 namespace: NAMESPACE,
                 sharing_mode: Mode::NonZeroCounter,
+                reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: format!("dkg-{index}"),
                 participants: self.participants_set(),
@@ -342,7 +346,7 @@ pub(super) fn good_link() -> Link {
     Link {
         latency: Duration::from_millis(20),
         jitter: Duration::from_millis(5),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     }
 }
 
@@ -392,6 +396,7 @@ pub(super) fn run_closed_network_receiver() {
                 strategy: Sequential,
                 namespace: NAMESPACE,
                 sharing_mode: Mode::NonZeroCounter,
+                reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-closed-receiver".into(),
                 participants,
@@ -465,6 +470,7 @@ pub(super) fn run_activation_failure_completes_empty() {
                 strategy: Sequential,
                 namespace: NAMESPACE,
                 sharing_mode: Mode::NonZeroCounter,
+                reveal: Reveal::V1,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-activation-failure".into(),
                 participants: engine.participants_set(),

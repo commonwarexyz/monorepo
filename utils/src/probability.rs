@@ -151,24 +151,24 @@ impl fmt::Debug for Probability {
 /// # Examples
 ///
 /// ```
-/// use commonware_utils::Probability;
+/// use commonware_utils::{Probability, probability};
 ///
-/// const HALF: Probability = Probability!(1, 2);
-/// const NINETY_EIGHT_PERCENT: Probability = Probability!(0.98);
+/// const HALF: Probability = probability!(1, 2);
+/// const NINETY_EIGHT_PERCENT: Probability = probability!(0.98);
 /// assert_eq!(HALF.as_f64(), 0.5);
 /// assert_eq!(NINETY_EIGHT_PERCENT.as_f64(), 0.98);
 /// ```
 ///
 /// ```compile_fail
-/// use commonware_utils::Probability;
+/// use commonware_utils::{Probability, probability};
 ///
-/// const INVALID: Probability = Probability!(2, 1);
+/// const INVALID: Probability = probability!(2, 1);
 /// ```
 ///
 /// ```compile_fail
-/// use commonware_utils::Probability;
+/// use commonware_utils::{Probability, probability};
 ///
-/// const REQUIRES_ROUNDING: Probability = Probability!(1e-20);
+/// const REQUIRES_ROUNDING: Probability = probability!(1e-20);
 /// ```
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -177,7 +177,7 @@ impl fmt::Debug for Probability {
     commonware_stability_RESERVED
 )))] // BETA
 #[macro_export]
-macro_rules! Probability {
+macro_rules! probability {
     ($value:literal) => {
         const {
             $crate::Probability::from_f64($value).expect(
@@ -230,30 +230,30 @@ mod tests {
 
     #[test]
     fn construction() {
-        assert_eq!(Probability::new(0, u64::MAX), Some(Probability!(0.0)));
+        assert_eq!(Probability::new(0, u64::MAX), Some(probability!(0.0)));
         assert_eq!(
             Probability::new(u64::MAX, u64::MAX),
-            Some(Probability!(1.0))
+            Some(probability!(1.0))
         );
-        assert_eq!(Probability!(1, 2), Probability!(2, 4));
-        assert_eq!(Probability!(1, 2).as_f64(), 0.5);
+        assert_eq!(probability!(1, 2), probability!(2, 4));
+        assert_eq!(probability!(1, 2).as_f64(), 0.5);
         assert!(Probability::new(1, 0).is_none());
         assert!(Probability::new(2, 1).is_none());
     }
 
     #[test]
     fn f64_construction_preserves_clean_binary_value() {
-        const FROM_LITERAL: Probability = Probability!(0.98);
+        const FROM_LITERAL: Probability = probability!(0.98);
         const MINIMUM_INTERIOR: f64 = f64::from_bits(959u64 << 52);
 
         assert_eq!(FROM_LITERAL.0, 18_077_809_192_235_360_256);
         assert_eq!(FROM_LITERAL.as_f64(), 0.98);
-        assert_ne!(FROM_LITERAL, Probability!(49, 50));
-        assert_eq!(Probability!(0.5), Probability!(1, 2));
-        assert_eq!(Probability::try_from(0.5), Ok(Probability!(0.5)));
-        assert_eq!(Probability::from_f64(0.0), Some(Probability!(0.0)));
-        assert_eq!(Probability::from_f64(-0.0), Some(Probability!(0.0)));
-        assert_eq!(Probability::from_f64(1.0), Some(Probability!(1.0)));
+        assert_ne!(FROM_LITERAL, probability!(49, 50));
+        assert_eq!(probability!(0.5), probability!(1, 2));
+        assert_eq!(Probability::try_from(0.5), Ok(probability!(0.5)));
+        assert_eq!(Probability::from_f64(0.0), Some(probability!(0.0)));
+        assert_eq!(Probability::from_f64(-0.0), Some(probability!(0.0)));
+        assert_eq!(Probability::from_f64(1.0), Some(probability!(1.0)));
         assert_eq!(
             Probability::from_f64(MINIMUM_INTERIOR),
             Some(Probability(1))
@@ -295,8 +295,8 @@ mod tests {
 
     #[test]
     fn ratios_use_platform_independent_thresholds() {
-        assert_eq!(Probability!(1, 3).0 as u128, SCALE / 3);
-        assert_eq!(Probability!(2, 3).0 as u128, (2 * SCALE) / 3);
+        assert_eq!(probability!(1, 3).0 as u128, SCALE / 3);
+        assert_eq!(probability!(2, 3).0 as u128, (2 * SCALE) / 3);
 
         let below_one = Probability::new(u64::MAX - 1, u64::MAX).unwrap();
         assert_eq!(below_one.0, u64::MAX - 1);
@@ -306,16 +306,16 @@ mod tests {
     #[test]
     fn sampling_uses_threshold_and_skips_endpoints() {
         let mut rng = CountingRng { value: 0, calls: 0 };
-        assert!(!Probability!(0.0).sample(&mut rng));
-        assert!(Probability!(1.0).sample(&mut rng));
+        assert!(!probability!(0.0).sample(&mut rng));
+        assert!(probability!(1.0).sample(&mut rng));
         assert_eq!(rng.calls, 0);
 
         rng.value = (1u64 << 63) - 1;
-        assert!(Probability!(1, 2).sample(&mut rng));
+        assert!(probability!(1, 2).sample(&mut rng));
         assert_eq!(rng.calls, 1);
 
         rng.value = 1u64 << 63;
-        assert!(!Probability!(1, 2).sample(&mut rng));
+        assert!(!probability!(1, 2).sample(&mut rng));
         assert_eq!(rng.calls, 2);
     }
 
@@ -326,6 +326,6 @@ mod tests {
     fn expression_macro_rejects_invalid_probability() {
         let numerator = 2;
         let denominator = 1;
-        let _ = Probability!(numerator, denominator);
+        let _ = probability!(numerator, denominator);
     }
 }
