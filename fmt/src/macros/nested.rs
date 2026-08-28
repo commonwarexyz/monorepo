@@ -41,8 +41,11 @@ impl Style {
         indentation: usize,
     ) -> Result<ProtectedFragment, Error> {
         match self {
-            Self::Expression | Self::BlockExpression => formatter
+            Self::Expression => formatter
                 .expression(source, indentation)
+                .map_err(Error::from),
+            Self::BlockExpression => formatter
+                .block_expression(source, indentation)
                 .map_err(Error::from),
             Self::MatchArmBody => formatter
                 .match_arm_body(source, indentation)

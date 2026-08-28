@@ -351,19 +351,28 @@ fn format_branch(
         options.indentation + 8,
         depth,
     )?;
-    let body = format_nested_match_arm_body(
-        formatter,
-        body_expression,
-        body_source,
-        source,
-        source_map,
-        options.indentation + 4,
-        depth,
-    )?;
-    let body_is_block = matches!(
-        syn::parse_str::<Expr>(body.text()).map_err(Error::Output)?,
-        Expr::Block(_)
-    );
+    let body_is_block = matches!(body_expression, Expr::Block(_));
+    let body = if body_is_block {
+        format_nested_block_expression(
+            formatter,
+            body_expression,
+            body_source,
+            source,
+            source_map,
+            options.indentation + 4,
+            depth,
+        )?
+    } else {
+        format_nested_match_arm_body(
+            formatter,
+            body_expression,
+            body_source,
+            source,
+            source_map,
+            options.indentation + 4,
+            depth,
+        )?
+    };
     let divergence = divergence
         .map(|expression| {
             let expression_source = spanned_source(source_map, expression)?;
@@ -1134,6 +1143,27 @@ mod tests {
             formatted.text()
         );
         assert!(!formatted.text().contains("=> {\n"), "{}", formatted.text());
+    }
+
+    #[test]
+    fn preserves_explicit_block_body_and_keeps_short_head_inline() {
+        let options = Options {
+            indentation: 16,
+            body_column: 0,
+            line_ending: LineEnding::Lf,
+        };
+        let source = r#"message = voter_receiver.recv() => {
+                        message.expect("voter receiver closed")
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {
+                        panic!("timed out")
+                    }"#;
+        let formatted = select(source, options).expect("select should format");
+
+        assert_eq!(
+            formatted.text(),
+            "\n                    message = voter_receiver.recv() => {\n                        message.expect(\"voter receiver closed\")\n                    },\n                    _ = context.sleep(Duration::from_millis(100)) => {\n                        panic!(\"timed out\")\n                    },\n                "
+        );
     }
 
     #[test]

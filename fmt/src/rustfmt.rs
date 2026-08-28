@@ -170,6 +170,19 @@ impl Formatter {
         Ok(ProtectedFragment::formatted(text))
     }
 
+    pub(crate) fn block_expression(
+        &self,
+        source: &str,
+        indentation: usize,
+    ) -> Result<ProtectedFragment, Error> {
+        if !source.contains(['\n', '\r']) {
+            return self.expression(source, indentation);
+        }
+        self.format_with_protection(source, |source| {
+            self.format_multiline_block_raw(source, indentation)
+        })
+    }
+
     pub(crate) fn pattern(
         &self,
         source: &str,
@@ -302,6 +315,29 @@ impl Formatter {
             return Err(Error::WrapperShape);
         };
         extract_span(&formatted, arm.body.span(), None, indentation)
+    }
+
+    fn format_multiline_block_raw(
+        &self,
+        source: &str,
+        indentation: usize,
+    ) -> Result<String, Error> {
+        if !indentation.is_multiple_of(INDENT) {
+            return Err(Error::UnsupportedIndentation(indentation));
+        }
+        let prefix = crate::marker::unique_prefix(source, "rustfmt_block");
+        let module_depth = indentation / INDENT;
+        let wrapper = multiline_block_wrapper(source, indentation, module_depth, &prefix);
+        let formatted = self.run(&wrapper)?;
+        let file = syn::parse_file(&formatted).map_err(Error::Reparse)?;
+        let item = nested_item(&file.items, module_depth, &prefix)?;
+        let Item::Fn(item) = item else {
+            return Err(Error::WrapperShape);
+        };
+        if item.sig.ident != format!("{prefix}item") {
+            return Err(Error::WrapperShape);
+        }
+        extract_span(&formatted, item.block.span(), None, indentation)
     }
 
     fn run(&self, source: &str) -> Result<String, Error> {
@@ -438,6 +474,23 @@ fn match_arm_wrapper(
     output.push_str(",\n");
     output.push_str(&" ".repeat(indentation - INDENT));
     output.push_str("};\n");
+    close_modules(&mut output, module_depth);
+    output
+}
+
+fn multiline_block_wrapper(
+    source: &str,
+    indentation: usize,
+    module_depth: usize,
+    prefix: &str,
+) -> String {
+    let mut output = module_prefix(module_depth, prefix);
+    output.push_str(&" ".repeat(indentation));
+    output.push_str("fn ");
+    output.push_str(prefix);
+    output.push_str("item() ");
+    output.push_str(&indent_inline_source(source, indentation));
+    output.push('\n');
     close_modules(&mut output, module_depth);
     output
 }
