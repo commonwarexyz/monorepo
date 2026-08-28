@@ -290,7 +290,7 @@ where
                 return Err(Error::DataCorrupted("witness ahead of in-memory state"));
             }
             // Build before pruning because the commit proof needs the unpruned Merkle.
-            Ordering::Less => Some(witness::build_witness::<F, H, S, O>(
+            Ordering::Less => Some(witness::build_witness::<F, O, H, S>(
                 &self.merkle,
                 batch.commit.clone(),
                 batch.bounds.inactivity_floor,

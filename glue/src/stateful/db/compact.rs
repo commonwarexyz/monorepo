@@ -1,9 +1,4 @@
-//! [`ManagedDb`] for the QMDB compact dbs.
-//!
-//! One implementation serves every compact variant: the adapters are generic over the operation
-//! type, and [`keyless`](super::keyless::compact) and [`immutable`](super::immutable::compact)
-//! add the variant-specific batch mutator. Compact databases retain only the current Merkle
-//! peaks, so the adapters expose merkleization but no historical reads.
+//! [`ManagedDb`] implementations for compact QMDBs.
 
 use crate::stateful::db::{
     BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,

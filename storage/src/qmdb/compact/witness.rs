@@ -117,16 +117,16 @@ pub(super) struct Rebuilt<F: Family, D: Digest, O: Variant<F>, S: Strategy> {
 ///
 /// The tip operation's inclusion proof is only computable before the Merkle is pruned to its
 /// frontier.
-pub(super) fn build_witness<F, H, S, O>(
+pub(super) fn build_witness<F, O, H, S>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     commit: O,
     inactivity_floor_loc: Location<F>,
 ) -> Result<VerifiedWitness<F, H::Digest, O>, Error<F>>
 where
     F: Family,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
-    O: Variant<F>,
 {
     let hasher = qmdb::hasher::<H>();
     let mem = merkle.mem();
@@ -189,7 +189,7 @@ where
     };
     let mut merkle = compact::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
     merkle.append_leaf(&qmdb::hasher::<H>(), &commit.encode())?;
-    let tip = build_witness::<F, H, S, O>(&merkle, commit, inactivity_floor_loc)?;
+    let tip = build_witness::<F, O, H, S>(&merkle, commit, inactivity_floor_loc)?;
     merkle.prune_to_frontier();
     Ok(Rebuilt { merkle, tip })
 }

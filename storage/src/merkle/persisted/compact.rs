@@ -7,8 +7,8 @@
 //! `(leaf_count, pinned_nodes)` snapshot has the same root and the same future append
 //! behavior as the original.
 //!
-//! Nodes created by appends are retained only until the Merkle is pruned to its frontier;
-//! after that they are no longer readable.
+//! Nodes created by appends are retained only until the structure is pruned to its frontier.
+//! After that they are no longer readable.
 
 use crate::merkle::{
     Error, Family, Location, batch,
@@ -86,8 +86,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         }
     }
 
-    /// Create a `Merkle` with no retained nodes from its compact state: a leaf count and the
-    /// pinned nodes.
+    /// Create a `Merkle` with no retained nodes from its compact state.
     pub(crate) fn from_compact_state(
         strategy: S,
         leaves: Location<F>,
