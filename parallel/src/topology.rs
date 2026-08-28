@@ -32,6 +32,10 @@ cfg_if::cfg_if! {
             atomic::{AtomicUsize, Ordering},
         };
 
+        /// Byte size of `cpu_set_t`, as passed to the affinity syscalls. Distinct from
+        /// `libc::CPU_SETSIZE`, which counts representable CPUs.
+        const CPU_SET_BYTES: usize = std::mem::size_of::<libc::cpu_set_t>();
+
         /// The process-wide topology, detected on first use.
         fn topology() -> &'static Topology {
             static TOPOLOGY: OnceLock<Topology> = OnceLock::new();
@@ -64,10 +68,10 @@ cfg_if::cfg_if! {
                 // sequence.
                 // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
                 let mut probe: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-                let size = std::mem::size_of::<libc::cpu_set_t>();
 
-                // SAFETY: pid 0 is the calling thread; `probe` is a valid set of `size`.
-                if unsafe { libc::sched_getaffinity(0, size, &mut probe) } != 0 {
+                // SAFETY: pid 0 is the calling thread; `probe` is a valid set of
+                // `CPU_SET_BYTES`.
+                if unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut probe) } != 0 {
                     return Self::empty();
                 }
                 Self::from_sysfs().unwrap_or_else(Self::empty)
@@ -262,10 +266,10 @@ cfg_if::cfg_if! {
                 // SAFETY: an all-zero cpu_set_t is the valid empty set, filled by sched_getaffinity
                 // below.
                 let mut saved: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-                let size = std::mem::size_of::<libc::cpu_set_t>();
 
-                // SAFETY: pid 0 is the calling thread; `saved` is a valid set of `size`.
-                if unsafe { libc::sched_getaffinity(0, size, &mut saved) } != 0 {
+                // SAFETY: pid 0 is the calling thread; `saved` is a valid set of
+                // `CPU_SET_BYTES`.
+                if unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut saved) } != 0 {
                     return None;
                 }
 
@@ -311,15 +315,13 @@ cfg_if::cfg_if! {
                         Err(current) => live = current,
                     }
                 }
-                let slot = PinSlot { topology, domain };
-
-                // SAFETY: pid 0 is the calling thread; `effective` is a valid set of `size`.
-                if unsafe { libc::sched_setaffinity(0, size, &effective) } != 0 {
+                // SAFETY: pid 0 is the calling thread; `effective` is a valid set of
+                // `CPU_SET_BYTES`.
+                if unsafe { libc::sched_setaffinity(0, CPU_SET_BYTES, &effective) } != 0 {
+                    // The only bail point after the reservation: hand the slot back.
+                    pins.fetch_sub(1, Ordering::AcqRel);
                     return None;
                 }
-
-                // The mask is applied: the guard now owns both the restore and the slot.
-                core::mem::forget(slot);
                 PINNED.set(true);
                 Some(Self {
                     saved,
@@ -330,22 +332,8 @@ cfg_if::cfg_if! {
             }
         }
 
-        /// Releases a reserved pin slot if `pin` bails before the mask is applied.
-        struct PinSlot {
-            topology: &'static Topology,
-            domain: usize,
-        }
-
-        impl Drop for PinSlot {
-            fn drop(&mut self) {
-                self.topology.pins[self.domain].fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-
         impl Drop for AffinityGuard {
             fn drop(&mut self) {
-                let size = std::mem::size_of::<libc::cpu_set_t>();
-
                 // Restore only if the thread's mask is still within the one this pin applied:
                 // equal in the common case, or clamped to a subset by the kernel while a CPU
                 // is offline (sched_getaffinity reports only online CPUs, and an offline CPU
@@ -358,8 +346,10 @@ cfg_if::cfg_if! {
                 // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
                 let mut current: libc::cpu_set_t = unsafe { std::mem::zeroed() };
 
-                // SAFETY: pid 0 is the calling thread; `current` is a valid set of `size`.
-                let mut ours = unsafe { libc::sched_getaffinity(0, size, &mut current) } == 0;
+                // SAFETY: pid 0 is the calling thread; `current` is a valid set of
+                // `CPU_SET_BYTES`.
+                let mut ours =
+                    unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut current) } == 0;
                 if ours {
                     for cpu in 0..(libc::CPU_SETSIZE as usize) {
                         // SAFETY: cpu is within CPU_SETSIZE; both sets are valid.
@@ -378,7 +368,7 @@ cfg_if::cfg_if! {
                     // time. Restoring wide does not migrate the thread, so a worker that
                     // served a caller tends to stay in that caller's domain: repeat spawns
                     // pin without moving anyone.
-                    unsafe { libc::sched_setaffinity(0, size, &self.saved) };
+                    unsafe { libc::sched_setaffinity(0, CPU_SET_BYTES, &self.saved) };
                 }
 
                 // Release the thread's pin and the domain slot unconditionally: cleanup is
@@ -401,10 +391,11 @@ cfg_if::cfg_if! {
             fn current_mask() -> libc::cpu_set_t {
                 // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
                 let mut mask: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-                let size = std::mem::size_of::<libc::cpu_set_t>();
 
-                // SAFETY: pid 0 is the calling thread; `mask` is a valid set of `size`.
-                assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut mask) }, 0);
+                // SAFETY: pid 0 is the calling thread; `mask` is a valid set of
+                // `CPU_SET_BYTES`.
+                let rc = unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut mask) };
+                assert_eq!(rc, 0);
                 mask
             }
 
@@ -590,20 +581,16 @@ cfg_if::cfg_if! {
 
                     // SAFETY: cpu was bounds-checked against CPU_SETSIZE above; valid set.
                     unsafe { libc::CPU_SET(cpu as usize, &mut only) };
-                    let size = std::mem::size_of::<libc::cpu_set_t>();
 
                     // SAFETY: pid 0 = this thread, valid set.
-                    assert_eq!(unsafe { libc::sched_setaffinity(0, size, &only) }, 0);
+                    assert_eq!(unsafe { libc::sched_setaffinity(0, CPU_SET_BYTES, &only) }, 0);
 
                     // A one-CPU allowance leaves no room for the caller plus a job, so the
                     // pin must be skipped outright.
                     let guard = AffinityGuard::pin(spawn_domain());
                     assert!(guard.is_none());
 
-                    // SAFETY: an all-zero cpu_set_t is the valid empty set.
-                    let mut now: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-                    // SAFETY: pid 0 = this thread; `now` is a valid set of `size`.
-                    assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut now) }, 0);
+                    let now = current_mask();
                     for c in 0..(libc::CPU_SETSIZE as usize) {
                         // SAFETY: c < CPU_SETSIZE, valid sets.
                         let (n, o) = unsafe { (libc::CPU_ISSET(c, &now), libc::CPU_ISSET(c, &only)) };
@@ -791,24 +778,14 @@ cfg_if::cfg_if! {
             #[test]
             fn pin_and_restore_roundtrip() {
                 // Pin to the current domain (a no-op move) and verify the mask restores.
-                // SAFETY: an all-zero cpu_set_t is a valid empty set for getaffinity.
-                let mut before: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-                let size = std::mem::size_of::<libc::cpu_set_t>();
-                // SAFETY: pid 0 = calling thread, valid set.
-                assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut before) }, 0);
+                let before = current_mask();
                 {
                     let _guard = AffinityGuard::pin(spawn_domain());
                 }
+                let after = current_mask();
 
-                // SAFETY: an all-zero cpu_set_t is the valid empty set.
-                let mut after: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-                // SAFETY: pid 0 = calling thread; `after` is a valid set of `size`.
-                assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut after) }, 0);
-                for cpu in 0..(libc::CPU_SETSIZE as usize) {
-                    // SAFETY: cpu < CPU_SETSIZE, valid sets.
-                    let (b, a) = unsafe { (libc::CPU_ISSET(cpu, &before), libc::CPU_ISSET(cpu, &after)) };
-                    assert_eq!(b, a, "mask not restored at cpu {cpu}");
-                }
+                // SAFETY: both sets are valid; CPU_EQUAL only compares their bits.
+                assert!(unsafe { libc::CPU_EQUAL(&before, &after) });
             }
         }
     } else {
