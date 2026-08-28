@@ -2457,7 +2457,7 @@ pub(crate) mod test {
                 panic!("expected rewind to a non-commit size to fail");
             };
             assert!(
-                matches!(err, crate::qmdb::Error::HistoricalFloorPruned(loc) if loc == size - 1),
+                matches!(err, crate::qmdb::Error::UnexpectedData(loc) if loc == size - 2),
                 "unexpected rewind error: {err:?}"
             );
         });

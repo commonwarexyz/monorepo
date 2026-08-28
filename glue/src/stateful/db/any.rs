@@ -28,7 +28,7 @@ use commonware_storage::{
 };
 use std::{ops::Range, sync::Arc};
 
-/// Staged batch returned by `stage`. Holds a QMDB [`Staged`] plus the database handle it
+/// Staged batch returned by `stage`. Holds a [`Staged`] QMDB plus the database handle it
 /// reads through.
 ///
 /// Like any speculative batch, this handle is a branch-scoped view of the shared database: it

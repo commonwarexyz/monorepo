@@ -662,18 +662,6 @@ where
         }
     }
 
-    /// Adopt `new_target` and reschedule fetches.
-    async fn update_target(
-        self,
-        new_target: Target<DB::Family, DB::Digest>,
-    ) -> Result<Self, Error<DB, S>> {
-        DB::validate_target(&new_target).map_err(SyncError::Engine)?;
-        let mut engine = self.reset_for_target_update(new_target).await?;
-        engine.record_progress();
-        engine.schedule_requests()?;
-        Ok(engine)
-    }
-
     /// Handle a sync event and return the next engine state.
     async fn handle_event(
         mut self,
@@ -681,13 +669,21 @@ where
     ) -> Result<NextStep<Self, DB>, Error<DB, S>> {
         match event {
             Event::TargetUpdate(new_target) => {
-                if !new_target
-                    .supersedes(&self.target)
-                    .map_err(SyncError::Engine)?
-                {
+                // A non-advancing update is discarded.
+                if !new_target.advances(&self.target) {
                     return Ok(NextStep::Continue(self));
                 }
-                Ok(NextStep::Continue(self.update_target(new_target).await?))
+                // A same-root update that advances is impossible for an append-only log and
+                // indicates a caller bug.
+                if new_target.root == self.target.root {
+                    return Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged));
+                }
+                DB::validate_target(&new_target).map_err(SyncError::Engine)?;
+
+                let mut updated_self = self.reset_for_target_update(new_target).await?;
+                updated_self.record_progress();
+                updated_self.schedule_requests()?;
+                Ok(NextStep::Continue(updated_self))
             }
             Event::UpdateChannelClosed => {
                 self.update_rx = None;
@@ -735,13 +731,8 @@ where
                 while let Some(update_rx) = self.update_rx.as_mut() {
                     match update_rx.try_recv() {
                         Ok(new_target) => {
-                            if new_target
-                                .supersedes(&self.target)
-                                .map_err(SyncError::Engine)?
-                            {
-                                return Ok(NextStep::Continue(
-                                    self.update_target(new_target).await?,
-                                ));
+                            if new_target.advances(&self.target) {
+                                return self.handle_event(Event::TargetUpdate(new_target)).await;
                             }
                         }
                         Err(TryRecvError::Empty) => break,

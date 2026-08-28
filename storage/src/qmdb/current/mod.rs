@@ -2995,7 +2995,7 @@ pub mod tests {
                 panic!("expected rewind to a non-commit size to fail");
             };
             assert!(
-                matches!(err, Error::HistoricalFloorPruned(loc) if loc == size - 1),
+                matches!(err, Error::UnexpectedData(loc) if loc == size - 2),
                 "unexpected rewind error: {err:?}"
             );
         });

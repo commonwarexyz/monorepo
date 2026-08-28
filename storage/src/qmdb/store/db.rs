@@ -394,7 +394,9 @@ where
         let log = log.sync().await?;
 
         let size = Location::new(log.size());
-        let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at(&log, size).await?;
+        let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at(&log, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
         let last_commit_loc = size - 1;
 
         // Build the snapshot.

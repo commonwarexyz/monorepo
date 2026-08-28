@@ -124,22 +124,18 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
         .expect("a single-leaf Merkle root is always valid")
 }
 
-/// Look up the inactivity floor declared by the commit at `size - 1`.
-///
-/// `size` must be a non-zero commit-boundary size: the operation at `size - 1` must be a commit.
+/// Look up the inactivity floor declared by the commit at `size - 1`, or `None` if that
+/// operation is not a commit.
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `size` is zero (no preceding commit exists), or if
-///   `size - 1` is retained but is not a commit (either because the caller passed a
-///   non-commit-boundary size, or because pruning removed the commit that would have governed this
-///   size).
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero (no preceding commit exists).
 /// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
 /// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
 pub(crate) async fn find_inactivity_floor_at<F, R>(
     reader: &R,
     size: Location<F>,
-) -> Result<Location<F>, Error<F>>
+) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
     R: Contiguous<Item: Committable<F>>,
@@ -154,13 +150,15 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = op.floor().ok_or(Error::HistoricalFloorPruned(size))?;
+    let Some(floor) = op.floor() else {
+        return Ok(None);
+    };
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
         ));
     }
-    Ok(floor)
+    Ok(Some(floor))
 }
 
 /// Compute the inactive peak count for a historical `size`.
@@ -176,7 +174,9 @@ where
         return Ok(0);
     }
 
-    let floor = find_inactivity_floor_at::<F, _>(reader, size).await?;
+    let floor = find_inactivity_floor_at::<F, _>(reader, size)
+        .await?
+        .ok_or(Error::HistoricalFloorPruned(size))?;
     Ok(F::inactive_peaks(size, floor))
 }
 
@@ -234,9 +234,14 @@ pub enum Error<F: Family> {
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
 
-    /// The operation at `size - 1` is not a retained commit, so the inactivity floor at `size`
-    /// cannot be read. Either the caller passed a non-commit-boundary size or pruning removed
-    /// the commit.
+    /// The inactivity floor that governed the requested `historical_size` is not retrievable from
+    /// the journal, so the wrapper cannot derive the `inactive_peaks` count needed to construct a
+    /// proof matching the historical root.
+    ///
+    /// Historical proofs require `historical_size` to be a commit-boundary: the operation at
+    /// `historical_size - 1` must itself be a commit op declaring the governing floor. This error
+    /// fires when the caller passes a non-commit-boundary size, or when pruning has removed the
+    /// commit that would have governed the size.
     #[error("historical floor pruned for size: {0}")]
     HistoricalFloorPruned(Location<F>),
 }

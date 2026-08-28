@@ -88,9 +88,9 @@ where
 mod tests {
     use super::*;
     use crate::stateful::db::{
-        ManagedDb, Shared, StateSyncDb, SyncSession, Unmerkleized as _,
+        ManagedDb, Shared, StateSyncDb, Unmerkleized as _,
         tests::configs::{
-            keyless::{compact_fixed_config, fixed_config},
+            keyless::{compact::fixed_config, fixed_config as full_fixed_config},
             sync_config,
         },
     };
@@ -108,14 +108,13 @@ mod tests {
     use futures::pin_mut;
     use std::time::Duration;
 
-    type CompactFixedDb =
-        fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
-    type FixedDb =
+    type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
+    type FullFixedDb =
         storage_keyless::fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
 
     #[derive(Clone)]
     struct SupersedingCompactSource {
-        source: Arc<CompactFixedDb>,
+        source: Arc<FixedDb>,
         stale_target: sync::Target<mmr::Family, Digest>,
         stale_request_tx: mpsc::Sender<()>,
     }
@@ -124,7 +123,7 @@ mod tests {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
-        type Error = <Arc<CompactFixedDb> as sync::Source>::Error;
+        type Error = <Arc<FixedDb> as sync::Source>::Error;
 
         async fn serve(
             &self,
@@ -145,11 +144,9 @@ mod tests {
         }
     }
 
-    async fn populated_fixed_db(context: deterministic::Context, suffix: &str) -> CompactFixedDb {
-        let config = compact_fixed_config(&context, suffix);
-        let source = CompactFixedDb::init(context.child("db"), config)
-            .await
-            .unwrap();
+    async fn populated_fixed_db(context: deterministic::Context, suffix: &str) -> FixedDb {
+        let config = fixed_config(&context, suffix);
+        let source = FixedDb::init(context.child("db"), config).await.unwrap();
         let floor = source.inactivity_floor_loc();
         let batch = source
             .new_batch()
@@ -163,10 +160,8 @@ mod tests {
     #[test]
     fn managed_db_apply_and_finalize_persists_fixed_keyless_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = compact_fixed_config(&context, "managed-db");
-            let db = CompactFixedDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let config = fixed_config(&context, "managed-db");
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
 
             let batch = db
@@ -184,7 +179,7 @@ mod tests {
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get_metadata(), Some(U64::new(9)));
 
-            let target = <CompactFixedDb as ManagedDb<_>>::sync_target(&guard);
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.range.end(), mmr::Location::new(3));
         });
@@ -197,16 +192,14 @@ mod tests {
 
             let target = source.target();
             let (_update_tx, update_rx) = mpsc::channel(1);
-            let synced = <CompactFixedDb as StateSyncDb<_, Arc<CompactFixedDb>>>::sync_db(
+            let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
                 context.child("target"),
-                compact_fixed_config(&context, "target"),
+                fixed_config(&context, "target"),
                 Arc::new(source),
-                SyncSession {
-                    target: target.clone(),
-                    tip_updates: update_rx,
-                    finish: None,
-                    reached_target: None,
-                },
+                target.clone(),
+                update_rx,
+                None,
+                None,
                 sync_config(),
             )
             .await
@@ -220,9 +213,12 @@ mod tests {
     #[test]
     fn state_sync_drains_queued_target_before_reporting_reached() {
         deterministic::Runner::default().start(|context| async move {
-            let source = FixedDb::init(context.child("source"), fixed_config(&context, "source"))
-                .await
-                .unwrap();
+            let source = FullFixedDb::init(
+                context.child("source"),
+                full_fixed_config(&context, "source"),
+            )
+            .await
+            .unwrap();
 
             let floor = source.inactivity_floor_loc();
             let batch = source
@@ -253,16 +249,14 @@ mod tests {
             let (update_tx, update_rx) = mpsc::channel(1);
             update_tx.send(second_target.clone()).await.unwrap();
             let (reached_tx, mut reached_rx) = mpsc::channel(1);
-            let synced = <CompactFixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
+            let synced = <FixedDb as StateSyncDb<_, Arc<FullFixedDb>>>::sync_db(
                 context.child("target"),
-                compact_fixed_config(&context, "target"),
+                fixed_config(&context, "target"),
                 Arc::new(source),
-                SyncSession {
-                    target: first_target,
-                    tip_updates: update_rx,
-                    finish: None,
-                    reached_target: Some(reached_tx),
-                },
+                first_target,
+                update_rx,
+                None,
+                Some(reached_tx),
                 sync_config(),
             )
             .await
@@ -278,10 +272,8 @@ mod tests {
     fn state_sync_reports_compact_progress() {
         deterministic::Runner::default().start(|context| async move {
             let source_context = context.child("source");
-            let source_config = compact_fixed_config(&source_context, "source");
-            let source = CompactFixedDb::init(source_context, source_config)
-                .await
-                .unwrap();
+            let source_config = fixed_config(&source_context, "source");
+            let source = FixedDb::init(source_context, source_config).await.unwrap();
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
@@ -309,17 +301,15 @@ mod tests {
             let (_finish_tx, finish_rx) = mpsc::channel(1);
             let (reached_tx, mut reached_rx) = mpsc::channel(1);
             let client_context = context.child("client");
-            let client_config = compact_fixed_config(&client_context, "client");
-            let sync = <CompactFixedDb as StateSyncDb<_, _>>::sync_db(
+            let client_config = fixed_config(&client_context, "client");
+            let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
                 client_context,
                 client_config,
                 superseding_source,
-                SyncSession {
-                    target: target.clone(),
-                    tip_updates: update_rx,
-                    finish: Some(finish_rx),
-                    reached_target: Some(reached_tx),
-                },
+                target.clone(),
+                update_rx,
+                Some(finish_rx),
+                Some(reached_tx),
                 sync_config(),
             );
             pin_mut!(sync);
@@ -365,9 +355,9 @@ mod tests {
     #[test]
     fn state_sync_supersedes_in_flight_stale_compact_target() {
         deterministic::Runner::default().start(|context| async move {
-            let source = CompactFixedDb::init(
+            let source = FixedDb::init(
                 context.child("source"),
-                compact_fixed_config(&context, "supersede-source"),
+                fixed_config(&context, "supersede-source"),
             )
             .await
             .unwrap();
@@ -401,16 +391,14 @@ mod tests {
 
             let (update_tx, update_rx) = mpsc::channel(1);
             let sync_handle = context.child("sync").spawn(move |context| async move {
-                <CompactFixedDb as StateSyncDb<_, _>>::sync_db(
+                <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
-                    compact_fixed_config(&context, "supersede-target"),
+                    fixed_config(&context, "supersede-target"),
                     superseding_source,
-                    SyncSession {
-                        target: stale_target,
-                        tip_updates: update_rx,
-                        finish: None,
-                        reached_target: None,
-                    },
+                    stale_target,
+                    update_rx,
+                    None,
+                    None,
                     sync_config(),
                 )
                 .await
@@ -440,11 +428,9 @@ mod tests {
     fn managed_db_prune_bounds_fixed_keyless_unjournaled_rewind_history() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
-            let mut config = compact_fixed_config(&context, "prune");
+            let mut config = fixed_config(&context, "prune");
             config.witness.items_per_section = NZU64!(1);
-            let mut db = CompactFixedDb::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 
             // Commit three ranges, recording each target.
             let mut targets = Vec::new();
@@ -457,23 +443,20 @@ mod tests {
                     .await;
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
-                targets.push(<CompactFixedDb as ManagedDb<_>>::sync_target(&db));
+                targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }
 
             assert_ne!(targets[0], targets[1]);
 
             // Prune to the second target: the first is no longer a rewind target, but the
             // second still is.
-            let db = <CompactFixedDb as ManagedDb<_>>::prune(db, &targets[1])
+            let db = <FixedDb as ManagedDb<_>>::prune(db, &targets[1])
                 .await
                 .unwrap();
-            let db = <CompactFixedDb as ManagedDb<_>>::rewind_to_target(db, targets[1].clone())
+            let db = <FixedDb as ManagedDb<_>>::rewind_to_target(db, targets[1].clone())
                 .await
                 .unwrap();
-            assert_eq!(
-                <CompactFixedDb as ManagedDb<_>>::sync_target(&db),
-                targets[1]
-            );
+            assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), targets[1]);
             assert_eq!(db.get_metadata(), Some(U64::new(22)));
             assert!(matches!(
                 db.rewind(targets[0].range.end()).await,

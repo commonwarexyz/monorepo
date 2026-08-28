@@ -306,7 +306,7 @@ macro_rules! impl_current_sync_database {
                 // The inactivity floor is carried by the last commit operation rather than
                 // being the target range's start.
                 let inactivity_floor =
-                    qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
+                    qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?.ok_or(qmdb::Error::HistoricalFloorPruned(target.range.end()))?;
 
                 qmdb::sync::local_pinned_nodes::<F, _, H, S>(
                     context,

@@ -2,7 +2,7 @@
 
 use super::{
     BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    SyncSession, Unmerkleized as UnmerkleizedTrait,
+    Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_runtime::Handle;
 use commonware_storage::{
@@ -12,6 +12,7 @@ use commonware_storage::{
         sync::{self, MerkleizedBatch as _},
     },
 };
+use commonware_utils::channel::mpsc;
 use std::{future::Future, ops::Deref, sync::Arc};
 
 /// A QMDB database that glue can manage and state-sync.
@@ -248,21 +249,24 @@ where
         context: D::Context,
         config: D::Config,
         source: R,
-        session: SyncSession<Self::SyncTarget>,
-        limits: SyncEngineConfig,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync::sync(sync::engine::Config {
             context,
             source,
-            target: session.target,
-            max_outstanding_requests: limits.max_outstanding_requests,
-            fetch_batch_size: limits.fetch_batch_size,
-            apply_batch_size: limits.apply_batch_size,
+            target,
+            max_outstanding_requests: sync_config.max_outstanding_requests,
+            fetch_batch_size: sync_config.fetch_batch_size,
+            apply_batch_size: sync_config.apply_batch_size,
             db_config: config,
-            update_rx: Some(session.tip_updates),
-            finish_rx: session.finish,
-            reached_target_tx: session.reached_target,
-            max_retained_roots: limits.max_retained_roots,
+            update_rx: Some(tip_updates),
+            finish_rx: finish,
+            reached_target_tx: reached_target,
+            max_retained_roots: sync_config.max_retained_roots,
         })
         .await
     }

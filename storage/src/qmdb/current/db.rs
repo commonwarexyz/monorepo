@@ -646,8 +646,9 @@ where
         // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
         // discarded.
         {
-            let rewind_floor =
-                crate::qmdb::find_inactivity_floor_at::<F, _>(&self.any.log, size).await?;
+            let rewind_floor = crate::qmdb::find_inactivity_floor_at::<F, _>(&self.any.log, size)
+                .await?
+                .ok_or(Error::UnexpectedData(size - 1))?;
             if *rewind_floor < pruned_bits {
                 return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
             }

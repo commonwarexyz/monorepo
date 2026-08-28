@@ -1,7 +1,4 @@
-use crate::{
-    merkle::{Family, Location},
-    qmdb::sync::error::EngineError,
-};
+use crate::merkle::{Family, Location};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
@@ -20,24 +17,12 @@ pub struct Target<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> Target<F, D> {
-    /// Whether adopting `self` in place of `current` advances the sync. A same-root advance is
-    /// impossible for an append-only log and is a caller bug.
-    pub fn supersedes(&self, current: &Self) -> Result<bool, EngineError<F, D>> {
-        if !self.advances(current) {
-            return Ok(false);
-        }
-        if self.root == current.root {
-            return Err(EngineError::SyncTargetRootUnchanged);
-        }
-        Ok(true)
-    }
-
     /// Whether this target advances relative to `from`.
     ///
     /// Both targets are assumed to describe valid states of the same append-only QMDB. Because
     /// the root commits to the database size, valid targets at different sizes have distinct
     /// roots.
-    fn advances(&self, from: &Self) -> bool {
+    pub fn advances(&self, from: &Self) -> bool {
         self.range.end().is_valid()
             && self.range.end() > from.range.end()
             && self.range.start() >= from.range.start()
@@ -194,24 +179,6 @@ mod tests {
         // An end outside the location domain does not advance.
         let beyond = target(advanced_root, 10, *MmrFamily::MAX_LEAVES + 1);
         assert!(!beyond.advances(&current));
-    }
-
-    #[test]
-    fn test_supersedes() {
-        let current = target(sha256::Digest::from([0; 32]), 10, 100);
-        let advanced_root = sha256::Digest::from([1; 32]);
-        assert!(matches!(
-            target(advanced_root, 10, 101).supersedes(&current),
-            Ok(true)
-        ));
-        assert!(matches!(
-            target(advanced_root, 10, 50).supersedes(&current),
-            Ok(false)
-        ));
-        assert!(matches!(
-            target(current.root, 10, 101).supersedes(&current),
-            Err(EngineError::SyncTargetRootUnchanged)
-        ));
     }
 
     #[cfg(feature = "arbitrary")]

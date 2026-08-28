@@ -635,31 +635,22 @@ pub struct SyncEngineConfig {
     pub max_retained_roots: usize,
 }
 
-/// One database's side of a sync session, handed to [`StateSyncDb::sync_db`].
-pub struct SyncSession<T> {
-    /// Target to sync to first.
-    pub target: T,
-    /// Later targets. Only strictly advancing ones are adopted.
-    pub tip_updates: mpsc::Receiver<T>,
-    /// When `Some`, sync keeps following updates after reaching its target until a message
-    /// arrives. When `None`, it completes on reaching the target.
-    pub finish: Option<mpsc::Receiver<()>>,
-    /// Receives each target as it is reached. Sends block progress, so drain it.
-    pub reached_target: Option<mpsc::Sender<T>>,
-}
-
 /// A [`ManagedDb`] with a state-sync entrypoint.
 pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// Error returned by the state-sync engine for this database.
     type SyncError: Debug + Send;
 
     /// Run state-sync for this database and return a fully-initialized instance.
+    #[allow(clippy::too_many_arguments)]
     fn sync_db(
         context: E,
         config: Self::Config,
         source: R,
-        session: SyncSession<Self::SyncTarget>,
-        limits: SyncEngineConfig,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
     ) -> impl Future<Output = Result<Self, Self::SyncError>> + Send;
 }
 
@@ -846,12 +837,10 @@ where
             context,
             config,
             source,
-            SyncSession {
-                target,
-                tip_updates: target_rx,
-                finish: Some(finish_rx),
-                reached_target: Some(reached_tx),
-            },
+            target,
+            target_rx,
+            Some(finish_rx),
+            Some(reached_tx),
             sync_config,
         );
 
@@ -1310,12 +1299,10 @@ macro_rules! impl_state_sync_set {
                                     context,
                                     config,
                                     source,
-                                    SyncSession {
-                                        target,
-                                        tip_updates: target_rx,
-                                        finish: Some(finish_rx),
-                                        reached_target: Some(reached_tx),
-                                    },
+                                    target,
+                                    target_rx,
+                                    Some(finish_rx),
+                                    Some(reached_tx),
                                     sync_config,
                                 );
                                 let forward_reached = async move {
@@ -1890,8 +1877,7 @@ pub(crate) mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
         CoordinatorAction, CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb,
-        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, SyncSession, TipUpdate,
-        drain_single_tip_updates,
+        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -2082,32 +2068,38 @@ pub(crate) mod tests {
                     init_buffer: NZUsize!(1 << 21),
                 }
             }
-            pub(crate) fn compact_fixed_config(
-                context: &impl BufferPooler,
-                suffix: &str,
-            ) -> storage_immutable::fixed::CompactConfig<Sequential> {
-                storage_immutable::CompactConfig {
-                    strategy: Sequential,
-                    witness: variable_journal_config(
-                        context,
-                        &format!("immutable-compact-{suffix}"),
-                        (),
-                    ),
-                    commit_codec_config: (),
+
+            pub(crate) mod compact {
+                use super::*;
+
+                pub(crate) fn fixed_config(
+                    context: &impl BufferPooler,
+                    suffix: &str,
+                ) -> storage_immutable::fixed::CompactConfig<Sequential> {
+                    storage_immutable::CompactConfig {
+                        strategy: Sequential,
+                        witness: variable_journal_config(
+                            context,
+                            &format!("immutable-compact-{suffix}"),
+                            (),
+                        ),
+                        commit_codec_config: (),
+                    }
                 }
-            }
-            pub(crate) fn compact_variable_config(
-                context: &impl BufferPooler,
-                suffix: &str,
-            ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
-                storage_immutable::CompactConfig {
-                    strategy: Sequential,
-                    witness: variable_journal_config(
-                        context,
-                        &format!("immutable-compact-{suffix}"),
-                        (),
-                    ),
-                    commit_codec_config: ((), ()),
+                pub(crate) fn variable_config(
+                    context: &impl BufferPooler,
+                    suffix: &str,
+                ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential>
+                {
+                    storage_immutable::CompactConfig {
+                        strategy: Sequential,
+                        witness: variable_journal_config(
+                            context,
+                            &format!("immutable-compact-{suffix}"),
+                            (),
+                        ),
+                        commit_codec_config: ((), ()),
+                    }
                 }
             }
         }
@@ -2135,32 +2127,37 @@ pub(crate) mod tests {
                     log: variable_journal_config(context, &partition, ()),
                 }
             }
-            pub(crate) fn compact_fixed_config(
-                context: &impl BufferPooler,
-                suffix: &str,
-            ) -> storage_keyless::fixed::CompactConfig<Sequential> {
-                storage_keyless::CompactConfig {
-                    strategy: Sequential,
-                    witness: variable_journal_config(
-                        context,
-                        &format!("keyless-compact-{suffix}"),
-                        (),
-                    ),
-                    commit_codec_config: (),
+
+            pub(crate) mod compact {
+                use super::*;
+
+                pub(crate) fn fixed_config(
+                    context: &impl BufferPooler,
+                    suffix: &str,
+                ) -> storage_keyless::fixed::CompactConfig<Sequential> {
+                    storage_keyless::CompactConfig {
+                        strategy: Sequential,
+                        witness: variable_journal_config(
+                            context,
+                            &format!("keyless-compact-{suffix}"),
+                            (),
+                        ),
+                        commit_codec_config: (),
+                    }
                 }
-            }
-            pub(crate) fn compact_variable_config(
-                context: &impl BufferPooler,
-                suffix: &str,
-            ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
-                storage_keyless::CompactConfig {
-                    strategy: Sequential,
-                    witness: variable_journal_config(
-                        context,
-                        &format!("keyless-compact-{suffix}"),
-                        (),
-                    ),
-                    commit_codec_config: (),
+                pub(crate) fn variable_config(
+                    context: &impl BufferPooler,
+                    suffix: &str,
+                ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
+                    storage_keyless::CompactConfig {
+                        strategy: Sequential,
+                        witness: variable_journal_config(
+                            context,
+                            &format!("keyless-compact-{suffix}"),
+                            (),
+                        ),
+                        commit_codec_config: (),
+                    }
                 }
             }
         }
@@ -2401,21 +2398,21 @@ pub(crate) mod tests {
         )]
         #[case::immutable_compact_fixed(
             PhantomData::<ImmutableCompactFixed>,
-            configs::immutable::compact_fixed_config
+            configs::immutable::compact::fixed_config
         )]
         #[case::immutable_compact_variable(
             PhantomData::<ImmutableCompactVariable>,
-            configs::immutable::compact_variable_config
+            configs::immutable::compact::variable_config
         )]
         #[case::keyless_fixed(PhantomData::<KeylessFixed>, configs::keyless::fixed_config)]
         #[case::keyless_variable(PhantomData::<KeylessVariable>, configs::keyless::variable_config)]
         #[case::keyless_compact_fixed(
             PhantomData::<KeylessCompactFixed>,
-            configs::keyless::compact_fixed_config
+            configs::keyless::compact::fixed_config
         )]
         #[case::keyless_compact_variable(
             PhantomData::<KeylessCompactVariable>,
-            configs::keyless::compact_variable_config
+            configs::keyless::compact::variable_config
         )]
         fn lifecycle_round_trips_from_initial_sync_target<T>(
             #[case] _db: PhantomData<T>,
@@ -3113,15 +3110,12 @@ pub(crate) mod tests {
             context: E,
             _config: Self::Config,
             release: Arc<AtomicBool>,
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-            } = session;
             while !release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -3182,15 +3176,12 @@ pub(crate) mod tests {
             context: E,
             _config: Self::Config,
             release: Arc<AtomicBool>,
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target,
-                mut tip_updates,
-                mut finish,
-                reached_target,
-            } = session;
             let mut final_target = target;
             while !release.load(Ordering::SeqCst) {
                 match tip_updates.try_recv() {
@@ -3262,15 +3253,12 @@ pub(crate) mod tests {
             context: E,
             _config: Self::Config,
             _resolver: (),
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target,
-                mut tip_updates,
-                mut finish,
-                reached_target,
-            } = session;
             let update = tip_updates.recv().await.expect("expected forwarded tip");
             if let Some(reached_target) = reached_target.as_ref() {
                 let _ = reached_target.send(target).await;
@@ -3306,15 +3294,12 @@ pub(crate) mod tests {
             _context: E,
             _config: Self::Config,
             done: Arc<AtomicBool>,
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-            } = session;
             done.store(true, Ordering::SeqCst);
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
@@ -3374,8 +3359,11 @@ pub(crate) mod tests {
             _context: E,
             _config: Self::Config,
             _resolver: (),
-            _session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Err(TestSyncError)
         }
@@ -3388,8 +3376,11 @@ pub(crate) mod tests {
             _context: E,
             _config: Self::Config,
             _resolver: (),
-            _session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
         }
@@ -3402,15 +3393,12 @@ pub(crate) mod tests {
             _context: E,
             _config: Self::Config,
             _resolver: (),
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target,
-                mut finish,
-                reached_target,
-                ..
-            } = session;
             if let Some(reached_target) = reached_target.as_ref() {
                 let _ = reached_target.send(target).await;
             }
@@ -3430,12 +3418,12 @@ pub(crate) mod tests {
             _context: E,
             _config: Self::Config,
             _resolver: (),
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target, mut finish, ..
-            } = session;
             let Some(finish_rx) = finish.as_mut() else {
                 panic!("finish receiver should be provided");
             };
@@ -3458,15 +3446,12 @@ pub(crate) mod tests {
             context: E,
             _config: Self::Config,
             controller: SlowSyncController,
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-            } = session;
             while !controller.release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -3553,15 +3538,12 @@ pub(crate) mod tests {
             _context: E,
             _config: Self::Config,
             observer: FastSyncObserver,
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-            } = session;
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;
@@ -3621,15 +3603,12 @@ pub(crate) mod tests {
             _context: E,
             _config: Self::Config,
             observer: FastSyncObserver,
-            session: SyncSession<Self::SyncTarget>,
-            _limits: SyncEngineConfig,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-            } = session;
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;

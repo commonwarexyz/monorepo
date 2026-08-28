@@ -108,7 +108,8 @@ where
                 &journal.journal,
                 Location::new(bounds.end),
             )
-            .await?;
+            .await?
+            .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?;
 
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
@@ -162,8 +163,9 @@ where
 
         // The inactivity floor is carried by the last commit operation rather than being
         // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
+        let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end())
+            .await?
+            .ok_or(Error::HistoricalFloorPruned(target.range.end()))?;
 
         sync::local_pinned_nodes::<F, _, H, S>(
             context,

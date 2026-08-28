@@ -179,7 +179,9 @@ where
         }
 
         let size = journal.size();
-        let inactivity_floor_loc = find_inactivity_floor_at(&journal, size).await?;
+        let inactivity_floor_loc = find_inactivity_floor_at(&journal, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
         let last_commit_loc = size - 1;
         let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
@@ -412,7 +414,7 @@ where
     ///   or exceeds the current committed size.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if the operation at
     ///   `size - 1` has been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if the operation at `size - 1` is not a commit.
+    /// - Returns [`Error::UnexpectedData`] if the operation at `size - 1` is not a commit.
     ///
     /// Any error from this method is fatal for this handle. Rewind may mutate journal state
     /// before this method finishes updating in-memory rewind state. Callers must drop this
@@ -436,7 +438,9 @@ where
         }
 
         let rewind_last_loc = Location::new(rewind_size - 1);
-        let rewind_floor = find_inactivity_floor_at(&self.journal, size).await?;
+        let rewind_floor = find_inactivity_floor_at(&self.journal, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
 
         // Journal rewind happens before in-memory commit-location updates. If a later step fails,
         // this handle may be internally diverged and must be dropped by the caller.
@@ -2344,12 +2348,12 @@ pub(crate) mod tests {
         let (db, _) = commit_appends(db, (0..2).map(V::Value::make), None).await;
         let size = db.last_commit_loc() + 1;
 
-        // The operation at `size - 2` is an append, so no commit governs `size - 1`.
+        // The operation at `size - 2` is an append, not a commit.
         let Err(err) = db.rewind(size - 1).await else {
             panic!("expected rewind to a non-commit size to fail");
         };
         assert!(
-            matches!(err, Error::HistoricalFloorPruned(loc) if loc == size - 1),
+            matches!(err, Error::UnexpectedData(loc) if loc == size - 2),
             "unexpected rewind error: {err:?}"
         );
     }

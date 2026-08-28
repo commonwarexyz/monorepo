@@ -264,7 +264,9 @@ where
         let mut snapshot = Index::new(context.child("snapshot"), translator);
 
         let size = journal.size();
-        let inactivity_floor_loc = find_inactivity_floor_at(&journal, size).await?;
+        let inactivity_floor_loc = find_inactivity_floor_at(&journal, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
         let last_commit_loc = size - 1;
 
         // Replay the log from the inactivity floor to build the snapshot.
@@ -564,7 +566,9 @@ where
 
         let (rewind_last_loc, rewind_floor, rewound_keys) = {
             let rewind_last_loc = Location::new(rewind_size - 1);
-            let rewind_floor = find_inactivity_floor_at(&self.journal, size).await?;
+            let rewind_floor = find_inactivity_floor_at(&self.journal, size)
+                .await?
+                .ok_or(Error::UnexpectedData(size - 1))?;
             if *rewind_floor < self.journal.bounds().start {
                 return Err(Error::Journal(crate::journal::Error::ItemPruned(
                     *rewind_floor,
@@ -1759,12 +1763,12 @@ pub(super) mod tests {
         .await;
         let size = db.last_commit_loc + 1;
 
-        // The operation at `size - 2` is a set, so no commit governs `size - 1`.
+        // The operation at `size - 2` is a set, not a commit.
         let Err(err) = db.rewind(size - 1).await else {
             panic!("expected rewind to a non-commit size to fail");
         };
         assert!(
-            matches!(err, Error::HistoricalFloorPruned(loc) if loc == size - 1),
+            matches!(err, Error::UnexpectedData(loc) if loc == size - 2),
             "unexpected rewind error: {err:?}"
         );
     }

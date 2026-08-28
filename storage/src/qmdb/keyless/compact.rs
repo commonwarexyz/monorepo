@@ -374,7 +374,7 @@ where
         F: Family,
         Operation<F, V>: Read<Cfg = C>,
     {
-        // Bootstrap: append the initial commit on first open.
+        // Bootstrap: append an initial Commit(None, 0) on first open.
         let journal: witness::Journal<E, F, H::Digest> =
             variable::Journal::init(witness_context, witness_config).await?;
         let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, V>>(
