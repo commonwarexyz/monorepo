@@ -21,7 +21,9 @@ const RECURSION_LIMIT: usize = 32;
 #[derive(Clone, Copy)]
 enum Style {
     Expression,
+    ExpressionPreservingBlankLines,
     BlockExpression,
+    BlockExpressionPreservingBlankLines,
 }
 
 #[derive(Clone, Copy)]
@@ -475,6 +477,23 @@ pub(super) fn expression(
     )
 }
 
+pub(super) fn expression_preserving_blank_lines(
+    expression: &Expr,
+    fragment_source: &str,
+    source: &str,
+    source_map: &SourceMap<'_>,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    format_expression(
+        expression,
+        fragment_source,
+        source,
+        source_map,
+        depth,
+        Style::ExpressionPreservingBlankLines,
+    )
+}
+
 pub(super) fn block_expression(
     expression: &Expr,
     fragment_source: &str,
@@ -489,6 +508,23 @@ pub(super) fn block_expression(
         source_map,
         depth,
         Style::BlockExpression,
+    )
+}
+
+pub(super) fn block_expression_preserving_blank_lines(
+    expression: &Expr,
+    fragment_source: &str,
+    source: &str,
+    source_map: &SourceMap<'_>,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    format_expression(
+        expression,
+        fragment_source,
+        source,
+        source_map,
+        depth,
+        Style::BlockExpressionPreservingBlankLines,
     )
 }
 
@@ -702,7 +738,13 @@ fn format_expression(
         }
         return match style {
             Style::Expression => pretty::expression(expression, fragment_source),
+            Style::ExpressionPreservingBlankLines => {
+                pretty::expression_preserving_blank_lines(expression, fragment_source)
+            }
             Style::BlockExpression => pretty::block_expression(expression, fragment_source),
+            Style::BlockExpressionPreservingBlankLines => {
+                pretty::block_expression_preserving_blank_lines(expression, fragment_source)
+            }
         }
         .map_err(Error::from);
     }
@@ -726,7 +768,13 @@ fn format_expression(
         }
         return match style {
             Style::Expression => pretty::expression(expression, fragment_source),
+            Style::ExpressionPreservingBlankLines => {
+                pretty::expression_preserving_blank_lines(expression, fragment_source)
+            }
             Style::BlockExpression => pretty::block_expression(expression, fragment_source),
+            Style::BlockExpressionPreservingBlankLines => {
+                pretty::block_expression_preserving_blank_lines(expression, fragment_source)
+            }
         }
         .map_err(Error::from);
     }
@@ -760,7 +808,13 @@ fn format_expression(
 
     let formatted = match style {
         Style::Expression => pretty::expression(&shielded, &shielded_source)?,
+        Style::ExpressionPreservingBlankLines => {
+            pretty::expression_preserving_blank_lines(&shielded, &shielded_source)?
+        }
         Style::BlockExpression => pretty::block_expression(&shielded, &shielded_source)?,
+        Style::BlockExpressionPreservingBlankLines => {
+            pretty::block_expression_preserving_blank_lines(&shielded, &shielded_source)?
+        }
     };
     if formatted.disposition() == Disposition::PreservedForTrivia {
         let Some(restored) = restore(

@@ -61,6 +61,89 @@ pub(crate) struct MultilineLiterals {
     literals: Vec<ShieldedLiteral>,
 }
 
+struct BlankLines {
+    comments: crate::trivia::LineComments,
+    marker_prefix: String,
+    count: usize,
+}
+
+impl BlankLines {
+    fn prepare(source: &str) -> Option<Self> {
+        if !source_has_internal_blank_line(source) {
+            return None;
+        }
+        let lines = source.split_inclusive('\n').collect::<Vec<_>>();
+        let first_content = lines.iter().position(|line| !line.trim().is_empty())?;
+        let last_content = lines.iter().rposition(|line| !line.trim().is_empty())?;
+        let marker_prefix = crate::marker::unique_prefix(source, "blank");
+        let mut count = 0;
+        let mut marked = String::with_capacity(source.len());
+        for (index, line) in lines.into_iter().enumerate() {
+            if first_content < index && index < last_content && line.trim().is_empty() {
+                let line_ending = if line.ends_with("\r\n") {
+                    "\r\n"
+                } else if line.ends_with('\n') {
+                    "\n"
+                } else {
+                    ""
+                };
+                marked.push_str("// ");
+                marked.push_str(&marker_prefix);
+                marked.push_str(&count.to_string());
+                marked.push_str(line_ending);
+                count += 1;
+            } else {
+                marked.push_str(line);
+            }
+        }
+        let comments = crate::trivia::LineComments::prepare(&marked)?;
+        Some(Self {
+            comments,
+            marker_prefix,
+            count,
+        })
+    }
+
+    fn restore(self, formatted: &str) -> Option<String> {
+        let restored = self.comments.restore(formatted)?;
+        let marker_start = format!("// {}", self.marker_prefix);
+        let mut seen = vec![false; self.count];
+        let mut output = String::with_capacity(restored.len());
+        for line in restored.split_inclusive('\n') {
+            let line_ending = if line.ends_with("\r\n") {
+                "\r\n"
+            } else if line.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            let content = line.strip_suffix(line_ending).unwrap_or(line);
+            let trimmed = content.trim();
+            if let Some(index) = trimmed
+                .strip_prefix(&marker_start)
+                .and_then(|index| index.parse::<usize>().ok())
+            {
+                if index >= seen.len() || std::mem::replace(&mut seen[index], true) {
+                    return None;
+                }
+                output.push_str(line_ending);
+            } else {
+                if content.contains(&self.marker_prefix) {
+                    return None;
+                }
+                output.push_str(line);
+            }
+        }
+        if !seen.into_iter().all(|marker| marker)
+            || output.contains(&self.marker_prefix)
+            || output.parse::<TokenStream>().is_err()
+        {
+            return None;
+        }
+        Some(output)
+    }
+}
+
 impl MultilineLiterals {
     pub(crate) fn prepare(source: &str) -> Option<Self> {
         let stream = source.parse::<TokenStream>().ok()?;
@@ -198,25 +281,21 @@ impl ProtectedFragment {
 ///
 /// `source` must be the exact source text from which `expression` was parsed.
 pub fn expression(expression: &Expr, source: &str) -> Result<ProtectedFragment, Error> {
-    format_or_preserve(source, || {
-        let wrapper = parse_wrapper(quote! {
-            fn __commonware_fmt() {
-                let __commonware_fmt_value = #expression;
-            }
-        })?;
-        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
-        let function = sole_function(&reparsed)?;
-        let [Stmt::Local(local)] = function.block.stmts.as_slice() else {
-            return Err(Error::WrapperShape);
-        };
-        let Some(initializer) = &local.init else {
-            return Err(Error::WrapperShape);
-        };
-        if initializer.diverge.is_some() {
-            return Err(Error::WrapperShape);
-        }
-        extract_dedented(&formatted, initializer.expr.span())
-    })
+    format_or_preserve(source, || format_expression(expression))
+}
+
+pub(crate) fn expression_preserving_blank_lines(
+    expression: &Expr,
+    source: &str,
+) -> Result<ProtectedFragment, Error> {
+    let Some(blank_lines) = BlankLines::prepare(source) else {
+        return format_or_preserve(source, || format_expression(expression));
+    };
+    let formatted = format_expression(expression)?;
+    let Some(restored) = blank_lines.restore(&formatted) else {
+        return Ok(ProtectedFragment::preserved(source));
+    };
+    Ok(ProtectedFragment::formatted(restored))
 }
 
 /// Formats a block expression as a standalone function-body expression.
@@ -229,20 +308,24 @@ pub(crate) fn block_expression(
     if !matches!(expression, Expr::Block(_)) {
         return Err(Error::WrapperShape);
     }
-    format_or_preserve(source, || {
-        let wrapper = parse_wrapper(quote! {
-            fn __commonware_fmt() {
-                #expression
-            }
-        })?;
-        let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
-        let function = sole_function(&reparsed)?;
-        let [Stmt::Expr(expression @ Expr::Block(_), None)] = function.block.stmts.as_slice()
-        else {
-            return Err(Error::WrapperShape);
-        };
-        extract_dedented(&formatted, expression.span())
-    })
+    format_or_preserve(source, || format_block_expression(expression))
+}
+
+pub(crate) fn block_expression_preserving_blank_lines(
+    expression: &Expr,
+    source: &str,
+) -> Result<ProtectedFragment, Error> {
+    if !matches!(expression, Expr::Block(_)) {
+        return Err(Error::WrapperShape);
+    }
+    let Some(blank_lines) = BlankLines::prepare(source) else {
+        return format_or_preserve(source, || format_block_expression(expression));
+    };
+    let formatted = format_block_expression(expression)?;
+    let Some(restored) = blank_lines.restore(&formatted) else {
+        return Ok(ProtectedFragment::preserved(source));
+    };
+    Ok(ProtectedFragment::formatted(restored))
 }
 
 /// Formats a pattern through a synthetic `for` loop.
@@ -384,6 +467,40 @@ fn format_or_preserve_with_policy(
 
 fn parse_wrapper(tokens: TokenStream) -> Result<File, Error> {
     syn::parse2(tokens).map_err(Error::Construct)
+}
+
+fn format_expression(expression: &Expr) -> Result<String, Error> {
+    let wrapper = parse_wrapper(quote! {
+        fn __commonware_fmt() {
+            let __commonware_fmt_value = #expression;
+        }
+    })?;
+    let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
+    let function = sole_function(&reparsed)?;
+    let [Stmt::Local(local)] = function.block.stmts.as_slice() else {
+        return Err(Error::WrapperShape);
+    };
+    let Some(initializer) = &local.init else {
+        return Err(Error::WrapperShape);
+    };
+    if initializer.diverge.is_some() {
+        return Err(Error::WrapperShape);
+    }
+    extract_dedented(&formatted, initializer.expr.span())
+}
+
+fn format_block_expression(expression: &Expr) -> Result<String, Error> {
+    let wrapper = parse_wrapper(quote! {
+        fn __commonware_fmt() {
+            #expression
+        }
+    })?;
+    let (formatted, reparsed) = unparse_and_reparse(&wrapper)?;
+    let function = sole_function(&reparsed)?;
+    let [Stmt::Expr(expression @ Expr::Block(_), None)] = function.block.stmts.as_slice() else {
+        return Err(Error::WrapperShape);
+    };
+    extract_dedented(&formatted, expression.span())
 }
 
 fn unparse_and_reparse(wrapper: &File) -> Result<(String, File), Error> {
@@ -788,6 +905,36 @@ mod tests {
 
         assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
         assert_eq!(formatted.text(), source);
+    }
+
+    #[test]
+    fn formats_expression_while_preserving_internal_blank_lines() {
+        let source = "match value {\n    Some(value) => {\n        first(value);\n\n        // __commonware_fmt_blank_user_text\n        second(value);\n\n        finish(value)\n    }\n    None => fallback(),\n}";
+        let input: Expr = syn::parse_str(source).expect("expression should parse");
+        let formatted = expression_preserving_blank_lines(&input, source)
+            .expect("expression should format with blank lines");
+        let reparsed: Expr =
+            syn::parse_str(formatted.text()).expect("formatted expression should parse");
+        let repeated = expression_preserving_blank_lines(&reparsed, formatted.text())
+            .expect("formatted expression should remain stable");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(
+            formatted
+                .text()
+                .lines()
+                .filter(|line| line.trim().is_empty())
+                .count(),
+            2
+        );
+        assert_eq!(
+            formatted
+                .text()
+                .matches("// __commonware_fmt_blank_user_text")
+                .count(),
+            1
+        );
+        assert_eq!(formatted.text(), repeated.text());
     }
 
     #[test]

@@ -61,7 +61,12 @@ pub(super) fn select_at_depth(
 ) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<SelectInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
-    if pretty::source_has_internal_blank_line(source) {
+    let mut expression_ranges = Vec::with_capacity(input.branches.len() * 2);
+    for branch in &input.branches {
+        expression_ranges.push(source_map.span_range(branch.future.span())?);
+        expression_ranges.push(source_map.span_range(branch.body.span())?);
+    }
+    if !internal_blank_lines_are_within(source, &expression_ranges) {
         return preserve_select(source, &source_map, &input, options, depth);
     }
     let Some(shell_trivia) = select_shell_trivia(source, &source_map, &input)? else {
@@ -105,7 +110,24 @@ pub(super) fn select_loop_at_depth(
     let input = syn::parse_str::<SelectLoopInput>(source).map_err(Error::Parse)?;
     input.validate().map_err(Error::Validate)?;
     let source_map = SourceMap::new(source);
-    if pretty::source_has_internal_blank_line(source) {
+    let mut expression_ranges = vec![
+        source_map.span_range(input.context.span())?,
+        source_map.span_range(input.on_stopped.expression.span())?,
+    ];
+    if let Some(on_start) = &input.on_start {
+        expression_ranges.push(source_map.span_range(on_start.expression.span())?);
+    }
+    for branch in &input.branches {
+        expression_ranges.push(source_map.span_range(branch.future.span())?);
+        if let Some(else_clause) = &branch.else_clause {
+            expression_ranges.push(source_map.span_range(else_clause.expression.span())?);
+        }
+        expression_ranges.push(source_map.span_range(branch.body.span())?);
+    }
+    if let Some(on_end) = &input.on_end {
+        expression_ranges.push(source_map.span_range(on_end.expression.span())?);
+    }
+    if !internal_blank_lines_are_within(source, &expression_ranges) {
         return preserve_select_loop(source, &source_map, &input, options, depth);
     }
     let Some(shell_trivia) = select_loop_shell_trivia(source, &source_map, &input)? else {
@@ -264,8 +286,9 @@ fn format_branch(
     let body_range = source_map.span_range(body_expression.span())?;
     let body_source = source_map.slice(body_range.clone())?;
     let pattern = pretty::pattern(pattern, pattern_source)?;
-    let future = nested::expression(future, future_source, source, source_map, depth)?;
-    let mut body = nested::expression(body_expression, body_source, source, source_map, depth)?;
+    let future = format_nested_expression(future, future_source, source, source_map, depth)?;
+    let mut body =
+        format_nested_expression(body_expression, body_source, source, source_map, depth)?;
     if exceeds_destination_width(body.text(), options.indentation + 4)
         && let Some(dedented) =
             source_layout_at_destination(context, body_expression, body_source, body_range.start)?
@@ -282,7 +305,7 @@ fn format_branch(
     let divergence = divergence
         .map(|expression| {
             let expression_source = spanned_source(source_map, expression)?;
-            nested::expression(expression, expression_source, source, source_map, depth)
+            format_nested_expression(expression, expression_source, source, source_map, depth)
         })
         .transpose()?;
     if [&pattern, &future, &body].into_iter().any(is_immovable)
@@ -368,11 +391,46 @@ fn dedent_source_fragment(source: &str) -> Option<String> {
     Some(output)
 }
 
+fn internal_blank_lines_are_within(source: &str, ranges: &[Range<usize>]) -> bool {
+    if !pretty::source_has_internal_blank_line(source) {
+        return true;
+    }
+
+    let mut lines = Vec::new();
+    let mut cursor = 0;
+    for line in source.split_inclusive('\n') {
+        let end = cursor + line.len();
+        lines.push((cursor..end, line.trim().is_empty()));
+        cursor = end;
+    }
+    if cursor < source.len() {
+        lines.push((cursor..source.len(), source[cursor..].trim().is_empty()));
+    }
+    let Some(first_content) = lines.iter().position(|(_, blank)| !blank) else {
+        return true;
+    };
+    let last_content = lines
+        .iter()
+        .rposition(|(_, blank)| !blank)
+        .expect("a first content line implies a last content line");
+
+    lines[first_content + 1..last_content]
+        .iter()
+        .filter(|(_, blank)| *blank)
+        .all(|(line, _)| {
+            ranges
+                .iter()
+                .any(|range| range.start <= line.start && line.end <= range.end)
+        })
+}
+
 fn wrap_value_body(body: &str) -> String {
     let mut output = String::from("{\n");
     for line in body.lines() {
-        output.push_str("    ");
-        output.push_str(line);
+        if !line.trim().is_empty() {
+            output.push_str("    ");
+            output.push_str(line);
+        }
         output.push('\n');
     }
     output.push('}');
@@ -388,7 +446,7 @@ fn format_lifecycle(
     let expression_is_block = matches!(lifecycle.expression, Expr::Block(_));
     let expression_source = spanned_source(source_map, &lifecycle.expression)?;
     let expression = if expression_is_block {
-        nested::block_expression(
+        format_nested_block_expression(
             &lifecycle.expression,
             expression_source,
             source,
@@ -396,7 +454,7 @@ fn format_lifecycle(
             depth,
         )?
     } else {
-        nested::expression(
+        format_nested_expression(
             &lifecycle.expression,
             expression_source,
             source,
@@ -421,7 +479,8 @@ fn format_expression(
     depth: usize,
 ) -> Result<Option<String>, Error> {
     let expression_source = spanned_source(source_map, expression)?;
-    let expression = nested::expression(expression, expression_source, source, source_map, depth)?;
+    let expression =
+        format_nested_expression(expression, expression_source, source, source_map, depth)?;
     if is_immovable(&expression) {
         return Ok(None);
     }
@@ -431,6 +490,46 @@ fn format_expression(
 fn spanned_source<'a>(source_map: &SourceMap<'a>, value: &impl Spanned) -> Result<&'a str, Error> {
     let range = source_map.span_range(value.span())?;
     source_map.slice(range).map_err(Error::from)
+}
+
+fn format_nested_expression(
+    expression: &Expr,
+    fragment_source: &str,
+    source: &str,
+    source_map: &SourceMap<'_>,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    if pretty::source_has_internal_blank_line(fragment_source) {
+        nested::expression_preserving_blank_lines(
+            expression,
+            fragment_source,
+            source,
+            source_map,
+            depth,
+        )
+    } else {
+        nested::expression(expression, fragment_source, source, source_map, depth)
+    }
+}
+
+fn format_nested_block_expression(
+    expression: &Expr,
+    fragment_source: &str,
+    source: &str,
+    source_map: &SourceMap<'_>,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    if pretty::source_has_internal_blank_line(fragment_source) {
+        nested::block_expression_preserving_blank_lines(
+            expression,
+            fragment_source,
+            source,
+            source_map,
+            depth,
+        )
+    } else {
+        nested::block_expression(expression, fragment_source, source, source_map, depth)
+    }
 }
 
 fn is_immovable(fragment: &ProtectedFragment) -> bool {
@@ -1171,6 +1270,37 @@ mod tests {
 
         assert!(formatted.text().contains("=> {\n        match value {"));
         syn::parse_str::<SelectInput>(formatted.text()).expect("formatted select should parse");
+    }
+
+    #[test]
+    fn wraps_large_match_body_without_losing_internal_blank_line() {
+        let arms = (0..20)
+            .map(|value| {
+                let separator = if value == 10 { "\n" } else { "" };
+                format!("{separator}{value} => handle_{value}(),\n")
+            })
+            .collect::<String>();
+        let source = format!(
+            "context,\non_stopped => {{}},\nSome(step) = next else {{ break; }} => match step {{\n{arms}_ => fallback(),\n}},"
+        );
+        let formatted = select_loop(&source, OPTIONS).expect("select loop should format");
+        let repeated = select_loop(formatted.text(), OPTIONS).expect("output should remain stable");
+
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert!(
+            formatted.text().contains("=> {\n        match step {"),
+            "{}",
+            formatted.text()
+        );
+        assert_eq!(
+            formatted.text().matches("\n\n").count(),
+            1,
+            "{}",
+            formatted.text()
+        );
+        assert_eq!(formatted.text(), repeated.text());
+        syn::parse_str::<SelectLoopInput>(formatted.text())
+            .expect("formatted select loop should parse");
     }
 
     #[test]
