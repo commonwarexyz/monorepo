@@ -201,16 +201,29 @@ impl EpochDeadlinePolicy {
 /// tightest one. The deployment must leave the honest operator room to discharge
 /// it, or that user can force an unnecessary permanent hard fault:
 ///
-/// - `minimum_withdrawal_notice` must exceed `minimum_challenge_duration` by at
-///   least two. A close finalizes only after its challenge window, and the
-///   inclusive expiry sweep runs on that first finalizing tick, so a withdrawal
-///   signed at the minimum notice needs a strictly later deadline than the
-///   earliest tick its close can finalize.
+/// - `minimum_withdrawal_notice` must exceed the worst-case latency from queueing
+///   a withdrawal to finalizing the close that carries it. A chain-queued
+///   withdrawal is not discharged until its close finalizes, and that close is
+///   appended at the pipeline tail: every close already pending when it is queued
+///   must finalize first under FIFO, and only then does its own challenge window
+///   elapse. The safe notice therefore covers a full pipeline drain plus one more
+///   challenge window, on the order of
+///   `(max_pending_epochs + 1) * (max_admission_delay + maximum_challenge_duration)`,
+///   not merely one challenge window. Sizing it at `minimum_challenge_duration`
+///   plus a small constant is only safe when the pipeline is empty at queue time,
+///   so it is unsafe under ordinary load: a deeper pipeline makes the required
+///   notice larger, not smaller. The operator-carried path is exempt because it
+///   is declined at registration when the deadline cannot clear the close's own
+///   finalize tick (see `register_close`), but a chain-queued request cannot be
+///   declined, so the notice window is the only lever.
 /// - `deposit_inclusion_timeout` must exceed the pipeline turnover time: the
 ///   longest an accepted deposit can wait for a free pipeline slot given
 ///   `max_pending_epochs` and the challenge cadence. A deposit is discharged at
 ///   the admission of its close, so this matters only when every slot is
-///   occupied and the operator must finalize one first.
+///   occupied and the operator must finalize one first. A queued withdrawal that
+///   exactly offsets a staged deposit defers that deposit by one close (keeping
+///   its original deadline), so the budget must also cover one extra close for a
+///   deposit that can be deferred this way.
 ///
 /// These are operator responsibilities, not enforced invariants, because they
 /// couple parameters whose safe margins depend on the deployment's throughput

@@ -1213,3 +1213,41 @@ fn carried_offset_defers_the_deposit() {
     drain_terminal(model, &mut state);
     assert_eq!(state.released, state.total_in);
 }
+
+#[test]
+fn queued_withdrawal_behind_a_pending_prefix_expires_and_recovers() {
+    let model = SettlementModel::default();
+    // Amount rides B2 at the FIFO tail, behind the pending prefix B0 and B1, so
+    // it cannot finalize until that prefix drains. Its deadline is a fault
+    // trigger the whole time it stays outstanding at the tail.
+    let mut state = admit_first_three(model);
+    assert_eq!(state.pipeline, vec![Batch::B0, Batch::B1, Batch::B2]);
+    assert!(state.outstanding_withdrawals[Account::Bob as usize].is_some());
+
+    // Time reaches the withdrawal's deadline while its close is still stuck
+    // behind the prefix: the outstanding withdrawal faults from the tail, and
+    // the whole pipeline is still pending.
+    step(model, &mut state, SettlementAction::Observe(10));
+    assert_eq!(
+        state.fault,
+        Fault::ExpiredWithdrawal {
+            account: Account::Bob,
+            expired_at: 10,
+        }
+    );
+    assert_eq!(state.pipeline, vec![Batch::B0, Batch::B1, Batch::B2]);
+
+    // Recovery loses nothing. The clean prefix and the withdrawal's own close
+    // finalize FIFO, their reserves stay claimable, and terminal settlement
+    // drains the frozen tail state.
+    step(model, &mut state, SettlementAction::Finalize);
+    step(model, &mut state, SettlementAction::Finalize);
+    step(model, &mut state, SettlementAction::Finalize);
+    assert!(state.pipeline.is_empty());
+    assert_eq!(state.withdrawal_reserve[Batch::B2.index()], 2);
+    assert_eq!(state.payout_reserve[Batch::B1.index()], 1);
+    drain_terminal(model, &mut state);
+    step(model, &mut state, withdrawal_claim(Batch::B2));
+    step(model, &mut state, payout_claim(Batch::B1));
+    assert_eq!(state.released, state.total_in);
+}

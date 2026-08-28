@@ -79,7 +79,7 @@ registration.
 | `challenge.rs` | All five settlement targets and every payer-signature, operator-signature, exact-link, and context-authentication bit combination over representative semantic endpoints. It separately checks structural validity, semantic contradiction, `NoContradiction`, and the canonical `SameSend`, `SameIndex`, and lossless `Full` receipt-fork encodings. |
 | `claims.rs` | Eight exact replay identities: two typed namespaces, two batches, and two positions. It explores every claim ordering while checking typed root identity, output value and position, destination routing, atomic mutation, reserve conservation, and independence across kind, batch, and position. |
 | `settlement.rs` | A three-account, eight-candidate, three-pending-slot, bounded-time instance. It explores intake, superset registration with operator-carried requests, deadline ties, certified admission including coverage-degraded and carried-offset closes, strict ancestry and FIFO finalization, challenge suffix cuts, clean-prefix drain, finalized reserve creation, claim routing, replay expiry, custody conservation, and terminal recovery. |
-| `scenarios.rs` | Twenty-five deterministic end-to-end traces using the same settlement transition function. They cover accepted and rejected boundaries, every challenge relation, front/middle/tail operator faults, registration and intake expiry, every sender-value bucket, Amount and Close, exact claim routing, replay, and finalized reserves that survive a later fault. |
+| `scenarios.rs` | Twenty-six deterministic end-to-end traces using the same settlement transition function. They cover accepted and rejected boundaries, every challenge relation, front/middle/tail operator faults, registration and intake expiry, every sender-value bucket, Amount and Close, exact claim routing, replay, and finalized reserves that survive a later fault. |
 | `refinement.rs` | Test-only production adapter for the settlement model. It constructs real deposits, signed withdrawals, payments, closes, proof slices, sealed dealings, certificates, challenges, openings, and claims, then checks action acceptance, returned value, and a behavior-relevant private state projection after every step. |
 
 The models compose through two opaque capabilities. A `CertifiedClose` is emitted for one exact
@@ -103,7 +103,7 @@ The checked state counts are part of the tests so an accidental state-space redu
 - 1,025 claim-ledger states covering every ordering of eight typed batch-position identities;
 - 6,034,482 settlement states from the ordinary initial state, including the operator-carried
   registration branch and the coverage-degraded certification branch; and
-- 25 deterministic end-to-end scenarios using the same settlement transition function.
+- 26 deterministic end-to-end scenarios using the same settlement transition function.
 
 The reachability properties require examples for all four challenge families and all three fork
 relations, every liveness-fault class and exact tie priority, a full three-close pipeline, four

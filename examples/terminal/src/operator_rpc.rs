@@ -975,6 +975,35 @@ pub(crate) async fn accept_send<E: Network>(
     .context("decode accepted payment")
 }
 
+/// Submits a send while separating a transport failure from a definitive operator verdict.
+///
+/// The outer `Err` is a transport outcome: the acceptance is unknown and the caller must retry
+/// later without ever abandoning the staged send. The inner `Ok` is a committed acceptance. The
+/// inner `Err` is a deterministic operator rejection, which proves the send is absent from every
+/// epoch because the operator resolves an accepted batch by transaction id across epochs.
+pub(crate) async fn try_accept_send<E: Network>(
+    network: &E,
+    address: SocketAddr,
+    request: AcceptSendRequest,
+) -> Result<std::result::Result<AcceptedBatchResponse, String>> {
+    let response = rpc::call(
+        network,
+        address,
+        &rpc::Request {
+            method: METHOD_ACCEPT_SEND,
+            body: request.encode(),
+        },
+    )
+    .await
+    .context("call operator")?;
+    match response {
+        rpc::Response::Success { body } => Ok(Ok(
+            AcceptedBatchResponse::decode(body).context("decode accepted payment")?
+        )),
+        rpc::Response::Error { error } => Ok(Err(String::from_utf8_lossy(&error).into_owned())),
+    }
+}
+
 pub(crate) async fn apply_deposit<E: Network>(
     network: &E,
     address: SocketAddr,

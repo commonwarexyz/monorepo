@@ -352,6 +352,20 @@ impl AgentStore {
         self.finish_mutation(result)
     }
 
+    /// Discards a staged send proven never to have committed at the operator.
+    ///
+    /// The caller must hold positive proof of non-commitment: a definitive operator rejection of
+    /// the exact bytes, which the operator resolves by transaction id across every epoch. The
+    /// retained recovery opening is deliberately left in place. It is keyed by full root, can be
+    /// shared with an already committed sibling payment quoted at the same finalized head, and
+    /// stays load-bearing for frozen-root recovery.
+    pub(crate) fn discard_pending_payment(&mut self, send: &SignedSend<Key, Digest>) -> Result<()> {
+        self.ensure_usable()?;
+        let encoded = send.encode();
+        let result = discard_pending_payment_transaction(&mut self.connection, encoded.as_ref());
+        self.finish_mutation(result)
+    }
+
     /// Durably commits one accepted send's receipts and advances the endpoint.
     pub(crate) fn commit_payment(
         &mut self,
@@ -950,6 +964,24 @@ fn stage_payment_transaction(
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new("pending payment stage", source))?;
+    Ok(())
+}
+
+fn discard_pending_payment_transaction(
+    connection: &mut Connection,
+    encoded_send: &[u8],
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin pending payment discard")?;
+    let removed = transaction.execute(
+        "DELETE FROM agent_pending_payment WHERE singleton = 1 AND send = ?1",
+        [encoded_send],
+    )?;
+    ensure!(removed == 1, "no staged payment matched the discard");
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("pending payment discard", source))?;
     Ok(())
 }
 
